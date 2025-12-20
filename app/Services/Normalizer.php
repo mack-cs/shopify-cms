@@ -6,6 +6,8 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Models\Variant;
 use App\Models\Image;
+use App\Models\Category;
+use App\Models\Color;
 use App\Models\ShopifyRow;
 use Illuminate\Support\Facades\DB;
 
@@ -27,6 +29,11 @@ final class Normalizer
                 /** @var ShopifyRow $primary */
                 $primary = $handleRows->firstWhere('row_type', 'product_primary') ?? $handleRows->first();
 
+                $categoryName = $primary->get(HeaderStore::PRODUCT_CATEGORY, null);
+                $googleCategory = $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null);
+                $category = $this->syncCategory($categoryName, $googleCategory);
+                $this->syncColors($primary->get(HeaderStore::COLOR_METAFIELD, null));
+
                 $product = Product::create([
                     'import_id' => $import->id,
                     'handle' => $handle,
@@ -34,8 +41,8 @@ final class Normalizer
                     'body_html' => $primary->get(HeaderStore::BODY_HTML, null),
                     'vendor' => $primary->get(HeaderStore::VENDOR, null),
                     'tags' => $primary->get(HeaderStore::TAGS, null),
-                    'product_category' => $primary->get(HeaderStore::PRODUCT_CATEGORY, null),
-                    'google_product_category' => $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null),
+                    'product_category' => $category?->name,
+                    'google_product_category' => $category?->google_product_category,
                     'status' => $primary->get(HeaderStore::STATUS, null),
                     'seo_title' => $primary->get(HeaderStore::SEO_TITLE, null),
                     'seo_description' => $primary->get(HeaderStore::SEO_DESCRIPTION, null),
@@ -102,5 +109,65 @@ final class Normalizer
         }
 
         return preg_match('/\\b(trio|quad)\\b/i', $haystack) === 1;
+    }
+
+    private function syncCategory(?string $name, ?string $googleCategory): ?Category
+    {
+        $name = $this->normalizeValue($name);
+        if ($name === null) {
+            return null;
+        }
+
+        $lower = strtolower($name);
+        $category = Category::whereRaw('LOWER(name) = ?', [$lower])->first();
+
+        if (!$category) {
+            return Category::create([
+                'name' => $name,
+                'google_product_category' => $this->normalizeValue($googleCategory),
+                'active' => true,
+            ]);
+        }
+
+        if (!$category->google_product_category && $this->normalizeValue($googleCategory)) {
+            $category->update(['google_product_category' => $this->normalizeValue($googleCategory)]);
+        }
+
+        return $category;
+    }
+
+    private function syncColors(?string $colorString): void
+    {
+        $colorString = $this->normalizeValue($colorString);
+        if ($colorString === null) {
+            return;
+        }
+
+        $parts = str_contains($colorString, ';')
+            ? explode(';', $colorString)
+            : explode(',', $colorString);
+
+        foreach ($parts as $part) {
+            $name = $this->normalizeValue($part);
+            if ($name === null) {
+                continue;
+            }
+
+            $lower = strtolower($name);
+            $existing = Color::whereRaw('LOWER(name) = ?', [$lower])->first();
+            if (!$existing) {
+                Color::create(['name' => $name, 'active' => true]);
+            }
+        }
+    }
+
+    private function normalizeValue(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim($value);
+        return $trimmed === '' ? null : $trimmed;
     }
 }

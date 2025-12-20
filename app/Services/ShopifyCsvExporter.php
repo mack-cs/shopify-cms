@@ -83,7 +83,12 @@ final class ShopifyCsvExporter
         $this->setIfHeaderExists($row, $headers, HeaderStore::PRODUCT_CATEGORY, $product->product_category);
         $this->setIfHeaderExists($row, $headers, HeaderStore::GOOGLE_PRODUCT_CATEGORY, $product->google_product_category);
 
-        $this->setIfHeaderExists($row, $headers, HeaderStore::COLOR_METAFIELD, $product->color_string);
+        $this->setIfHeaderExists(
+            $row,
+            $headers,
+            HeaderStore::COLOR_METAFIELD,
+            $this->normalizeColorExport($product->color_string)
+        );
 
         $this->setIfHeaderExists($row, $headers, HeaderStore::STATUS, $product->status);
         $this->setIfHeaderExists($row, $headers, HeaderStore::SEO_TITLE, $product->seo_title);
@@ -143,6 +148,21 @@ final class ShopifyCsvExporter
         if (!in_array($header, $headers, true)) return;
         if ($value === null) return;
         $row[$header] = (string)$value;
+    }
+
+    private function normalizeColorExport(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $noQuotes = str_replace('"', '', $trimmed);
+        return str_replace(',', ';', $noQuotes);
     }
 
     // private function approvedHandlesForImport(int $importId): array

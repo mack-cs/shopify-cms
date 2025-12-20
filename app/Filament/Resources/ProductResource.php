@@ -17,6 +17,7 @@ use Filament\Tables\Actions\EditAction;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\ImageColumn;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Toggle;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
@@ -71,20 +72,120 @@ class ProductResource extends Resource
                     }
                 }),
 
-            TextInput::make('google_product_category')
-                ->label('Google Product Category'),
+            Hidden::make('google_product_category'),
 
             Select::make('color_string')
-                ->label('Colors')
-                ->multiple()
-                ->options(fn () => \App\Models\Color::where('active', true)->pluck('name', 'name'))
-                ->saveRelationshipsUsing(null)
-                ->dehydrateStateUsing(fn ($state) => is_array($state) ? implode(';', $state) : $state)
-                ->afterStateHydrated(function ($component, $state) {
-                    if (is_string($state)) {
-                        $component->state(array_filter(explode(';', $state)));
-                    }
-                }),
+    ->label('Colors')
+    ->multiple()
+    ->searchable()
+    ->preload()
+    ->options(fn () => \App\Models\Color::query()
+        ->orderBy('name')
+        ->pluck('name', 'name')
+        ->all()
+    )
+
+    // ✅ DB -> UI state (ALWAYS return array for multiple select)
+    ->afterStateHydrated(function (Select $component, $state): void {
+        if (! is_string($state) || trim($state) === '') {
+            $component->state([]);   // IMPORTANT
+            return;
+        }
+
+        $normalized = str_replace(',', ';', $state);
+
+        $component->state(
+            array_values(array_filter(array_map('trim', explode(';', $normalized))))
+        );
+    })
+
+    // ✅ UI -> DB string
+    ->dehydrateStateUsing(function ($state) {
+        $arr = is_array($state) ? $state : [];
+
+        $clean = array_values(array_unique(array_filter(array_map(
+            fn ($v) => trim((string) $v),
+            $arr
+        ))));
+
+        return $clean ? implode('; ', $clean) : null;
+    })
+
+    // Optional: allow creating new colors
+    ->createOptionForm([
+        TextInput::make('name')->required()->maxLength(255),
+        Toggle::make('active')->default(true),
+    ])
+    ->createOptionUsing(function (array $data) {
+        $name = trim($data['name'] ?? '');
+        if ($name === '') {
+            return null;
+        }
+
+        $color = \App\Models\Color::firstOrCreate(
+            ['name' => $name],
+            ['active' => (bool) ($data['active'] ?? true)]
+        );
+
+        return $color->name; // must match the option "value"
+    }),
+
+            // Select::make('color_string')
+            //     ->label('Colors')
+            //     ->multiple()
+            //     ->searchable()
+            //     ->preload()
+            //     ->options(fn () => \App\Models\Color::orderBy('name')->pluck('name', 'name')->all())
+            //     ->getSearchResultsUsing(fn (string $search) => \App\Models\Color::where('name', 'like', "%{$search}%")
+            //         ->orderBy('name')
+            //         ->pluck('name', 'name')
+            //         ->all())
+            //     ->getOptionLabelsUsing(fn (array $values) => \App\Models\Color::whereIn('name', $values)
+            //         ->pluck('name', 'name')
+            //         ->all())
+            //     ->createOptionForm([
+            //         TextInput::make('name')
+            //             ->required()
+            //             ->maxLength(255),
+            //         Toggle::make('active')
+            //             ->default(true),
+            //     ])
+            //     ->createOptionUsing(function (array $data) {
+            //         $name = trim($data['name'] ?? '');
+            //         if ($name === '') {
+            //             return null;
+            //         }
+
+            //         $color = \App\Models\Color::firstOrCreate(
+            //             ['name' => $name],
+            //             ['active' => $data['active'] ?? true]
+            //         );
+
+            //         if (isset($data['active']) && $color->active !== (bool) $data['active']) {
+            //             $color->update(['active' => (bool) $data['active']]);
+            //         }
+
+            //         return $color->name;
+            //     })
+            //     ->saveRelationshipsUsing(null)
+            //     ->dehydrateStateUsing(function ($state) {
+            //         if (!is_array($state)) {
+            //             return $state;
+            //         }
+
+            //         $clean = array_values(array_unique(array_filter(array_map(
+            //             fn ($v) => trim((string) $v),
+            //             $state
+            //         ))));
+
+            //         return implode(';', $clean);
+            //     })
+            //     ->afterStateHydrated(function ($component, $state) {
+            //         if (is_string($state)) {
+            //             $normalized = str_replace(',', ';', $state);
+            //             $component->state(array_values(array_filter(array_map('trim', explode(';', $normalized)))));
+            //         }
+            //     }),
 
             TextInput::make('seo_title'),
             Textarea::make('seo_description'),
