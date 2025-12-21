@@ -27,8 +27,9 @@ use App\Filament\Resources\ImportResource\RelationManagers;
 class ImportResource extends Resource
 {
     protected static ?string $model = Import::class;
-
-    protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
+protected static ?string $navigationGroup = 'Product Data';
+protected static ?string $navigationLabel = 'Product Feed';
+    protected static ?string $navigationIcon = 'heroicon-o-arrows-right-left';
 
     public static function form(Form $form): Form
     {
@@ -106,14 +107,6 @@ class ImportResource extends Resource
             ->success()
             ->send();
     }),
-
-        // Action::make('exportAll')
-        //     ->label('Export (All)')
-        //     ->action(function (Import $record, ShopifyCsvExporter $exporter) {
-        //         $csv = $exporter->exportToString($record, 'all');
-        //         $name = 'export_'.$record->id.'_all.csv';
-        //         Storage::disk('local')->put("exports/{$name}", $csv);
-        //     }),
         Action::make('exportAll')
             ->label('Export (All)')
             ->disabled(fn (Import $record) => !$record->is_current || $record->status !== 'ready')
@@ -130,13 +123,6 @@ class ImportResource extends Resource
                     ->send();
             }),
 
-        // Action::make('exportApproved')
-        //     ->label('Export (Approved)')
-        //     ->action(function (Import $record, ShopifyCsvExporter $exporter) {
-        //         $csv = $exporter->exportToString($record, 'approved');
-        //         $name = 'export_'.$record->id.'_approved.csv';
-        //         Storage::disk('local')->put("exports/{$name}", $csv);
-        //     }),
         Action::make('exportApproved')
             ->label('Export (Approved)')
             ->disabled(fn (Import $record) => !$record->is_current || $record->status !== 'ready')

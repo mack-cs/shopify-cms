@@ -35,7 +35,9 @@ class ProductResource extends Resource
 {
     protected static ?string $model = Product::class;
 
-    protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
+    protected static ?string $navigationIcon = 'heroicon-o-cube';
+
+    protected static ?string $navigationGroup = 'Catalog';
 
     public static function form(Forms\Form $form): Forms\Form
     {
@@ -142,13 +144,6 @@ class ProductResource extends Resource
                 ->helperText('Internal only. Not exported.'),
             ])->columnSpan(1),
 
-
-
-
-
-
-
-
             Hidden::make('google_product_category'),
 
 
@@ -220,7 +215,8 @@ class ProductResource extends Resource
     {
         return [
             RelationManagers\ImagesRelationManager::class,
-            RelationManagers\VariantsRelationManager::class
+            RelationManagers\VariantsRelationManager::class,
+            RelationManagers\ChangeLogsRelationManager::class,
         ];
     }
 
