@@ -28,6 +28,8 @@ use Filament\Tables\Actions\DeleteBulkAction;
 use App\Filament\Resources\ProductResource\Pages;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use App\Filament\Resources\ProductResource\RelationManagers;
+use Filament\Forms\Components\Section;
+use Filament\Resources\RelationManagers\RelationManager;
 
 class ProductResource extends Resource
 {
@@ -38,29 +40,12 @@ class ProductResource extends Resource
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
-            TextInput::make('handle')->disabled(),
-            TextInput::make('title'),
-            Textarea::make('body_html'),
-            TextInput::make('vendor'),
-            TextInput::make('tags'),
-            TextInput::make('batch')
-                ->label('Batch')
-                ->datalist(fn () => Product::query()
-                    ->whereNotNull('batch')
-                    ->distinct()
-                    ->orderBy('batch')
-                    ->pluck('batch')
-                    ->all())
-                ->placeholder('import_YYYYMMDDH')
-                ->helperText('Internal only. Not exported.'),
 
-            TextInput::make('you_save')
-                ->label('You Save')
-                ->numeric()
-                ->inputMode('decimal')
-                ->helperText('Internal only. Not exported.'),
-
-            Select::make('product_category')
+            Section::make()->schema([
+                TextInput::make('handle')->disabled(),
+                TextInput::make('title'),
+                Textarea::make('body_html')->rows(5)->columnSpanFull(),
+                Select::make('product_category')
                 ->label('Category')
                 ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
                 ->searchable()
@@ -71,128 +56,103 @@ class ProductResource extends Resource
                         $set('google_product_category', $cat->google_product_category);
                     }
                 }),
+                TextInput::make('tags'),
+                TextInput::make('seo_title')->columnSpanFull(),
+                Textarea::make('seo_description')->columnSpanFull(),
 
-            Hidden::make('google_product_category'),
+            ])->columnSpan(2)->columns(2),
 
-            Select::make('color_string')
-    ->label('Colors')
-    ->multiple()
-    ->searchable()
-    ->preload()
-    ->options(fn () => \App\Models\Color::query()
-        ->orderBy('name')
-        ->pluck('name', 'name')
-        ->all()
-    )
+            Section::make()->schema([
+                TextInput::make('vendor'),
 
-    // ✅ DB -> UI state (ALWAYS return array for multiple select)
-    ->afterStateHydrated(function (Select $component, $state): void {
-        if (! is_string($state) || trim($state) === '') {
-            $component->state([]);   // IMPORTANT
-            return;
-        }
+                TextInput::make('you_save')
+                ->label('You Save')
+                ->numeric()
+                ->inputMode('decimal')
+                ->helperText('Internal only. Not exported.'),
+                TextInput::make('batch')
+                ->label('Batch')
+                ->datalist(fn () => Product::query()
+                    ->whereNotNull('batch')
+                    ->distinct()
+                    ->orderBy('batch')
+                    ->pluck('batch')
+                    ->all())
+                ->placeholder('import_YYYYMMDDH')
+                ->helperText('Internal only. Not exported.'),
+                       Select::make('color_string')
+                ->label('Colors')
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => \App\Models\Color::query()
+                    ->orderBy('name')
+                    ->pluck('name', 'name')
+                    ->all()
+                )
 
-        $normalized = str_replace(',', ';', $state);
+            // ✅ DB -> UI state (ALWAYS return array for multiple select)
+            ->afterStateHydrated(function (Select $component, $state): void {
+                if (! is_string($state) || trim($state) === '') {
+                    $component->state([]);   // IMPORTANT
+                    return;
+                }
 
-        $component->state(
-            array_values(array_filter(array_map('trim', explode(';', $normalized))))
-        );
-    })
+                $normalized = str_replace(',', ';', $state);
 
-    // ✅ UI -> DB string
-    ->dehydrateStateUsing(function ($state) {
-        $arr = is_array($state) ? $state : [];
+                $component->state(
+                    array_values(array_filter(array_map('trim', explode(';', $normalized))))
+                );
+            })
 
-        $clean = array_values(array_unique(array_filter(array_map(
-            fn ($v) => trim((string) $v),
-            $arr
-        ))));
+            // ✅ UI -> DB string
+            ->dehydrateStateUsing(function ($state) {
+                $arr = is_array($state) ? $state : [];
 
-        return $clean ? implode('; ', $clean) : null;
-    })
+                $clean = array_values(array_unique(array_filter(array_map(
+                    fn ($v) => trim((string) $v),
+                    $arr
+                ))));
 
-    // Optional: allow creating new colors
-    ->createOptionForm([
-        TextInput::make('name')->required()->maxLength(255),
-        Toggle::make('active')->default(true),
-    ])
-    ->createOptionUsing(function (array $data) {
-        $name = trim($data['name'] ?? '');
-        if ($name === '') {
-            return null;
-        }
+                return $clean ? implode('; ', $clean) : null;
+            })
 
-        $color = \App\Models\Color::firstOrCreate(
-            ['name' => $name],
-            ['active' => (bool) ($data['active'] ?? true)]
-        );
+            // Optional: allow creating new colors
+            ->createOptionForm([
+                TextInput::make('name')->required()->maxLength(255),
+                Toggle::make('active')->default(true),
+            ])
+            ->createOptionUsing(function (array $data) {
+                $name = trim($data['name'] ?? '');
+                if ($name === '') {
+                    return null;
+                }
 
-        return $color->name; // must match the option "value"
-    }),
+                $color = \App\Models\Color::firstOrCreate(
+                    ['name' => $name],
+                    ['active' => (bool) ($data['active'] ?? true)]
+                );
 
-            // Select::make('color_string')
-            //     ->label('Colors')
-            //     ->multiple()
-            //     ->searchable()
-            //     ->preload()
-            //     ->options(fn () => \App\Models\Color::orderBy('name')->pluck('name', 'name')->all())
-            //     ->getSearchResultsUsing(fn (string $search) => \App\Models\Color::where('name', 'like', "%{$search}%")
-            //         ->orderBy('name')
-            //         ->pluck('name', 'name')
-            //         ->all())
-            //     ->getOptionLabelsUsing(fn (array $values) => \App\Models\Color::whereIn('name', $values)
-            //         ->pluck('name', 'name')
-            //         ->all())
-            //     ->createOptionForm([
-            //         TextInput::make('name')
-            //             ->required()
-            //             ->maxLength(255),
-            //         Toggle::make('active')
-            //             ->default(true),
-            //     ])
-            //     ->createOptionUsing(function (array $data) {
-            //         $name = trim($data['name'] ?? '');
-            //         if ($name === '') {
-            //             return null;
-            //         }
+                return $color->name; // must match the option "value"
+            }),
 
-            //         $color = \App\Models\Color::firstOrCreate(
-            //             ['name' => $name],
-            //             ['active' => $data['active'] ?? true]
-            //         );
 
-            //         if (isset($data['active']) && $color->active !== (bool) $data['active']) {
-            //             $color->update(['active' => (bool) $data['active']]);
-            //         }
-
-            //         return $color->name;
-            //     })
-            //     ->saveRelationshipsUsing(null)
-            //     ->dehydrateStateUsing(function ($state) {
-            //         if (!is_array($state)) {
-            //             return $state;
-            //         }
-
-            //         $clean = array_values(array_unique(array_filter(array_map(
-            //             fn ($v) => trim((string) $v),
-            //             $state
-            //         ))));
-
-            //         return implode(';', $clean);
-            //     })
-            //     ->afterStateHydrated(function ($component, $state) {
-            //         if (is_string($state)) {
-            //             $normalized = str_replace(',', ';', $state);
-            //             $component->state(array_values(array_filter(array_map('trim', explode(';', $normalized)))));
-            //         }
-            //     }),
-
-            TextInput::make('seo_title'),
-            Textarea::make('seo_description'),
             Toggle::make('is_bundle')
                 ->label('Bundle')
                 ->helperText('Internal only. Not exported.'),
-        ]);
+            ])->columnSpan(1),
+
+
+
+
+
+
+
+
+            Hidden::make('google_product_category'),
+
+
+        ])->columns(3);
     }
 
     public static function table(Table $table): Table
@@ -259,7 +219,8 @@ class ProductResource extends Resource
     public static function getRelations(): array
     {
         return [
-            //
+            RelationManagers\ImagesRelationManager::class,
+            RelationManagers\VariantsRelationManager::class
         ];
     }
 
