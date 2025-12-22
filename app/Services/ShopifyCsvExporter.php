@@ -5,9 +5,12 @@ namespace App\Services;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\ShopifyRow;
+use App\Models\Variant;
+use App\Models\Image;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Writer;
 use SplTempFileObject;
+use App\Services\RowKey;
 
 final class ShopifyCsvExporter
 {
@@ -38,6 +41,7 @@ final class ShopifyCsvExporter
 
         // Preload normalized data
         $productsByHandle = Product::where('import_id', $import->id)->get()->keyBy('handle');
+        $this->ensureCombinedRows($import->id, $headers, $productsByHandle->values());
 
         foreach ($rowsQuery->cursor() as $shopifyRow) {
             $exportRow = $shopifyRow->data;
@@ -192,6 +196,120 @@ final class ShopifyCsvExporter
             ->havingRaw('COUNT(DISTINCT approvals.user_id) >= 2')
             ->pluck('products.handle')
             ->all();
+    }
+
+    private function ensureCombinedRows(int $importId, array $headers, $products): void
+    {
+        if (empty($headers)) {
+            return;
+        }
+
+        foreach ($products as $product) {
+            $variants = $product->variants()->orderBy('id')->get();
+            $images = $product->images()->orderBy('position')->get();
+
+            $rowCount = max($variants->count(), $images->count(), 1);
+            $minRowIndex = (int) (ShopifyRow::where('import_id', $importId)
+                ->where('handle', $product->handle)
+                ->min('row_index') ?? 0);
+            if ($minRowIndex === 0) {
+                $minRowIndex = (int) (ShopifyRow::where('import_id', $importId)->max('row_index') ?? 0) + 1;
+            }
+
+            $primaryRow = ShopifyRow::where('import_id', $importId)
+                ->where('handle', $product->handle)
+                ->where('row_type', 'product_primary')
+                ->first();
+
+            $basePrimary = $primaryRow?->data ?? array_fill_keys($headers, '');
+            if (array_key_exists(HeaderStore::HANDLE, $basePrimary)) {
+                $basePrimary[HeaderStore::HANDLE] = $product->handle;
+            }
+
+            ShopifyRow::where('import_id', $importId)
+                ->where('handle', $product->handle)
+                ->whereIn('row_type', ['variant', 'image'])
+                ->delete();
+
+            for ($i = 0; $i < $rowCount; $i++) {
+                $variant = $variants[$i] ?? null;
+                $image = $images[$i] ?? null;
+
+                $rowData = $i === 0 ? $basePrimary : array_fill_keys($headers, '');
+                if (array_key_exists(HeaderStore::HANDLE, $rowData)) {
+                    $rowData[HeaderStore::HANDLE] = $product->handle;
+                }
+
+                if ($variant) {
+                    $this->applyVariantToRowData($rowData, $variant);
+                }
+                if ($image) {
+                    $this->applyImageToRowData($rowData, $image);
+                }
+
+                $rowType = $i === 0 ? 'product_primary' : ($variant ? 'variant' : 'image');
+                $variantKey = $variant ? RowKey::variantKey($rowData) : null;
+                $imageKey = $image ? RowKey::imageKey($rowData) : null;
+
+                if ($i === 0 && $primaryRow) {
+                    $primaryRow->update([
+                        'row_index' => $minRowIndex,
+                        'row_type' => 'product_primary',
+                        'variant_key' => $variantKey,
+                        'image_key' => $imageKey,
+                        'data' => $rowData,
+                    ]);
+                } elseif ($i === 0 && !$primaryRow) {
+                    ShopifyRow::create([
+                        'import_id' => $importId,
+                        'row_index' => $minRowIndex,
+                        'handle' => $product->handle,
+                        'row_type' => 'product_primary',
+                        'variant_key' => $variantKey,
+                        'image_key' => $imageKey,
+                        'data' => $rowData,
+                    ]);
+                } else {
+                    ShopifyRow::create([
+                        'import_id' => $importId,
+                        'row_index' => $minRowIndex + $i,
+                        'handle' => $product->handle,
+                        'row_type' => $rowType,
+                        'variant_key' => $variantKey,
+                        'image_key' => $imageKey,
+                        'data' => $rowData,
+                    ]);
+                }
+            }
+        }
+    }
+
+    private function applyVariantToRowData(array &$rowData, Variant $variant): void
+    {
+        $rowData[HeaderStore::VARIANT_SKU] = $variant->sku ?? '';
+        $rowData[HeaderStore::VARIANT_BARCODE] = $variant->barcode ?? '';
+        $rowData[HeaderStore::OPTION1_NAME] = $variant->option1_name ?? '';
+        $rowData[HeaderStore::OPTION1_VALUE] = $variant->option1_value ?? '';
+        $rowData[HeaderStore::OPTION2_NAME] = $variant->option2_name ?? '';
+        $rowData[HeaderStore::OPTION2_VALUE] = $variant->option2_value ?? '';
+        $rowData[HeaderStore::OPTION3_NAME] = $variant->option3_name ?? '';
+        $rowData[HeaderStore::OPTION3_VALUE] = $variant->option3_value ?? '';
+        $rowData[HeaderStore::VARIANT_PRICE] = $variant->price ?? '';
+        $rowData[HeaderStore::VARIANT_COMPARE_AT] = $variant->compare_at_price ?? '';
+
+        $rowData['Variant Inventory Qty'] = $variant->inventory_qty ?? '';
+        $rowData['Variant Inventory Policy'] = $variant->inventory_policy ?? '';
+        $rowData['Variant Requires Shipping'] = $variant->requires_shipping ? 'true' : 'false';
+        $rowData['Variant Taxable'] = $variant->taxable ? 'true' : 'false';
+        $rowData['Variant Grams'] = $variant->weight ?? '';
+        $rowData['Variant Weight Unit'] = $variant->weight_unit ?? '';
+    }
+
+    private function applyImageToRowData(array &$rowData, Image $image): void
+    {
+        $rowData[HeaderStore::IMAGE_SRC] = $image->src ?? '';
+        $rowData[HeaderStore::IMAGE_POSITION] = $image->position ?? '';
+        $rowData[HeaderStore::IMAGE_ALT_TEXT] = $image->alt_text ?? '';
     }
 
 }

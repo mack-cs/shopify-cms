@@ -7,6 +7,7 @@ use Filament\Tables;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
+use App\Models\Import;
 use App\Models\Type;
 use App\Models\ShopifyRow;
 use Filament\Forms\Form;
@@ -42,6 +43,8 @@ use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Filament\Resources\RelationManagers\RelationManager;
 use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
+use League\Csv\Reader;
+use Illuminate\Validation\Rule;
 
 class ProductResource extends Resource
 {
@@ -60,7 +63,24 @@ class ProductResource extends Resource
                 Tabs\Tab::make('Details')->schema([
                     Grid::make(3)->schema([
                         Section::make()->schema([
-                            TextInput::make('handle')->disabled(),
+                            TextInput::make('handle')
+                                ->required()
+                                ->maxLength(255)
+                                ->disabled(fn (?Product $record): bool => (bool) $record)
+                                ->rules(function (?Product $record): array {
+                                    if ($record) {
+                                        return [];
+                                    }
+
+                                    $importId = Import::where('is_current', true)->value('id');
+                                    if (!$importId) {
+                                        return [];
+                                    }
+
+                                    return [
+                                        Rule::unique('products', 'handle')->where('import_id', $importId),
+                                    ];
+                                }),
                             TextInput::make('title'),
                             Textarea::make('body_html')->rows(5)->columnSpanFull(),
                             Select::make('type')
@@ -462,11 +482,24 @@ class ProductResource extends Resource
 
     private static function extraShopifyFields(?Product $record): array
     {
-        if (!$record) {
-            return [];
+        $headers = [];
+        $row = null;
+
+        if ($record) {
+            $headers = $record->import?->headers ?? [];
+            $row = ShopifyRow::where('import_id', $record->import_id)
+                ->where('handle', $record->handle)
+                ->where('row_type', 'product_primary')
+                ->first();
+        } else {
+            $currentImport = Import::where('is_current', true)->first();
+            $headers = $currentImport?->headers ?? [];
         }
 
-        $headers = $record->import?->headers ?? [];
+        if (empty($headers)) {
+            $headers = self::templateHeaders();
+        }
+
         $extraHeaders = HeaderStore::extraProductHeaders($headers);
         $extraHeaders = array_values(array_filter(
             $extraHeaders,
@@ -474,14 +507,6 @@ class ProductResource extends Resource
                 && $header !== 'Target gender (product.metafields.shopify.target-gender)'
                 && $header !== 'Cost per item'
         ));
-        if (empty($extraHeaders)) {
-            return [];
-        }
-
-        $row = ShopifyRow::where('import_id', $record->import_id)
-            ->where('handle', $record->handle)
-            ->where('row_type', 'product_primary')
-            ->first();
 
         return array_map(function (string $header) use ($row): array {
             return [
@@ -499,5 +524,17 @@ class ProductResource extends Resource
             ->first();
 
         return (string) ($row?->get($header, '') ?? '');
+    }
+
+    private static function templateHeaders(): array
+    {
+        $templatePath = storage_path('app/private/imports/products.csv');
+        if (!is_file($templatePath)) {
+            return [];
+        }
+
+        $csv = Reader::createFromPath($templatePath);
+        $csv->setHeaderOffset(0);
+        return $csv->getHeader();
     }
 }

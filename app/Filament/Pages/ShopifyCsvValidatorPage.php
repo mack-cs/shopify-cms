@@ -12,6 +12,7 @@ use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
 use Throwable;
@@ -52,10 +53,13 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
                                 ->action(function (ShopifyCsvValidator $validator): void {
                                     $path = $this->resolveUploadedPath($this->data['file'] ?? null);
                                     if (!$path) {
-                                        Notification::make()
+                                        $notification = Notification::make()
                                             ->title('Missing file')
-                                            ->danger()
-                                            ->send();
+                                            ->danger();
+                                        if ($user = Auth::user()) {
+                                            $notification->sendToDatabase($user);
+                                        }
+                                        $notification->send();
                                         return;
                                     }
 
@@ -64,10 +68,13 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
                                     } else {
                                         $disk = Storage::disk('public');
                                         if (!$disk->exists($path)) {
-                                            Notification::make()
+                                            $notification = Notification::make()
                                                 ->title('File not found')
-                                                ->danger()
-                                                ->send();
+                                                ->danger();
+                                            if ($user = Auth::user()) {
+                                                $notification->sendToDatabase($user);
+                                            }
+                                            $notification->send();
                                             return;
                                         }
 
@@ -77,10 +84,13 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
 
                                     $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
                                     if ($result['valid']) {
-                                        Notification::make()
+                                        $notification = Notification::make()
                                             ->title('CSV looks valid')
-                                            ->success()
-                                            ->send();
+                                            ->success();
+                                        if ($user = Auth::user()) {
+                                            $notification->sendToDatabase($user);
+                                        }
+                                        $notification->send();
                                         return;
                                     }
 
@@ -92,11 +102,14 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
                                         $body .= "\n...and {$moreCount} more.";
                                     }
 
-                                    Notification::make()
+                                    $notification = Notification::make()
                                         ->title('CSV validation failed')
                                         ->body($body)
-                                        ->danger()
-                                        ->send();
+                                        ->danger();
+                                    if ($user = Auth::user()) {
+                                        $notification->sendToDatabase($user);
+                                    }
+                                    $notification->send();
                                 }),
                         ]),
                     ]),

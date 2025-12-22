@@ -16,6 +16,7 @@ use App\Services\ShopifyCsvValidator;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Tables\Columns\TextColumn;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Filament\Notifications\Notification;
 use Filament\Forms\Components\FileUpload;
@@ -72,10 +73,11 @@ protected static ?string $navigationLabel = 'Product Feed';
                     $disk = Storage::disk('public');
 
                     if (!$record->filename || !$disk->exists($record->filename)) {
-                        Notification::make()
-                            ->title('File not found')
-                            ->danger()
-                            ->send();
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('File not found')
+                                ->danger()
+                        );
                         return;
                     }
 
@@ -84,10 +86,11 @@ protected static ?string $navigationLabel = 'Product Feed';
 
                     $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
                     if ($result['valid']) {
-                        Notification::make()
-                            ->title('CSV looks valid')
-                            ->success()
-                            ->send();
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('CSV looks valid')
+                                ->success()
+                        );
                         return;
                     }
 
@@ -99,11 +102,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                         $body .= "\n...and {$moreCount} more.";
                     }
 
-                    Notification::make()
-                        ->title('CSV validation failed')
-                        ->body($body)
-                        ->danger()
-                        ->send();
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('CSV validation failed')
+                            ->body($body)
+                            ->danger()
+                    );
                 }),
             Action::make('runImport')
     ->label('Process Import')
@@ -115,19 +119,21 @@ protected static ?string $navigationLabel = 'Product Feed';
         $disk = Storage::disk('public');
 
         if (!$record->filename) {
-            Notification::make()
-                ->title('Missing file path')
-                ->danger()
-                ->send();
+            self::sendNotification(
+                Notification::make()
+                    ->title('Missing file path')
+                    ->danger()
+            );
             return;
         }
 
         if (!$disk->exists($record->filename)) {
-            Notification::make()
-                ->title('File not found')
-                ->body("Could not find: {$record->filename} on public disk")
-                ->danger()
-                ->send();
+            self::sendNotification(
+                Notification::make()
+                    ->title('File not found')
+                    ->body("Could not find: {$record->filename} on public disk")
+                    ->danger()
+            );
             return;
         }
 
@@ -144,11 +150,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                 $body .= "\n...and {$moreCount} more.";
             }
 
-            Notification::make()
-                ->title('Import rejected: invalid CSV')
-                ->body($body)
-                ->danger()
-                ->send();
+            self::sendNotification(
+                Notification::make()
+                    ->title('Import rejected: invalid CSV')
+                    ->body($body)
+                    ->danger()
+            );
             return;
         }
 
@@ -162,11 +169,12 @@ protected static ?string $navigationLabel = 'Product Feed';
         // ✅ IMPORTANT: process THIS Import record
         $importer->importIntoExistingImport($record, $absolutePath);
 
-        Notification::make()
-            ->title('Import processed')
-            ->body("Import #{$record->id} is ready")
-            ->success()
-            ->send();
+        self::sendNotification(
+            Notification::make()
+                ->title('Import processed')
+                ->body("Import #{$record->id} is ready")
+                ->success()
+        );
     }),
         Action::make('exportAll')
             ->label('Export (All)')
@@ -177,11 +185,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                 $name = "products_{$timestamp}_all.csv";
                 Storage::disk('public')->put("exports/{$name}", $csv);
 
-                Notification::make()
-                    ->title('Export created')
-                    ->body("Saved to public/exports/{$name}")
-                    ->success()
-                    ->send();
+                self::sendNotification(
+                    Notification::make()
+                        ->title('Export created')
+                        ->body("Saved to public/exports/{$name}")
+                        ->success()
+                );
             }),
 
         Action::make('exportApproved')
@@ -197,21 +206,23 @@ protected static ?string $navigationLabel = 'Product Feed';
                     ->count();
 
                 if ($approvedHandles === 0) {
-                    Notification::make()
-                        ->title('Nothing to export')
-                        ->body('No products are approved for export yet (need 2 approvals each).')
-                        ->warning()
-                        ->send();
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Nothing to export')
+                            ->body('No products are approved for export yet (need 2 approvals each).')
+                            ->warning()
+                    );
                     return;
                 }
 
                 if ($approvedHandles < $totalHandles) {
                     $notApproved = $totalHandles - $approvedHandles;
-                    Notification::make()
-                        ->title('Partial export')
-                        ->body("Exporting {$approvedHandles} approved products. {$notApproved} are not approved yet.")
-                        ->warning()
-                        ->send();
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Partial export')
+                            ->body("Exporting {$approvedHandles} approved products. {$notApproved} are not approved yet.")
+                            ->warning()
+                    );
                 }
 
                 $csv = $exporter->exportToString($record, 'approved');
@@ -221,11 +232,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                 // If you want it downloadable easily, use public disk
                 Storage::disk('public')->put("exports/{$name}", $csv);
 
-                Notification::make()
-                    ->title('Export created')
-                    ->body("Saved to public/exports/{$name}")
-                    ->success()
-                    ->send();
+                self::sendNotification(
+                    Notification::make()
+                        ->title('Export created')
+                        ->body("Saved to public/exports/{$name}")
+                        ->success()
+                );
             })
         ]);
     }
@@ -244,5 +256,13 @@ protected static ?string $navigationLabel = 'Product Feed';
             'create' => Pages\CreateImport::route('/create'),
             'edit' => Pages\EditImport::route('/{record}/edit'),
         ];
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        if ($user = Auth::user()) {
+            $notification->sendToDatabase($user);
+        }
+        $notification->send();
     }
 }
