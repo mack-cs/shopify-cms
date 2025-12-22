@@ -19,6 +19,7 @@ use Filament\Tables\Columns\TextColumn;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Filament\Notifications\Notification;
+use Filament\Notifications\Actions\Action as NotificationAction;
 use Filament\Forms\Components\FileUpload;
 use Illuminate\Database\Eloquent\Builder;
 use App\Models\ShopifyRow;
@@ -183,13 +184,20 @@ protected static ?string $navigationLabel = 'Product Feed';
                 $csv = $exporter->exportToString($record, 'all');
                 $timestamp = now()->format('Ymd_His');
                 $name = "products_{$timestamp}_all.csv";
-                Storage::disk('public')->put("exports/{$name}", $csv);
+                $disk = Storage::disk('public');
+                $disk->put("exports/{$name}", $csv);
+                $url = $disk->url("exports/{$name}");
 
                 self::sendNotification(
                     Notification::make()
                         ->title('Export created')
                         ->body("Saved to public/exports/{$name}")
                         ->success()
+                        ->actions([
+                            NotificationAction::make('download')
+                                ->label('Download')
+                                ->url($url, shouldOpenInNewTab: true),
+                        ])
                 );
             }),
 
@@ -230,13 +238,20 @@ protected static ?string $navigationLabel = 'Product Feed';
                 $name = "products_{$timestamp}_approved.csv";
 
                 // If you want it downloadable easily, use public disk
-                Storage::disk('public')->put("exports/{$name}", $csv);
+                $disk = Storage::disk('public');
+                $disk->put("exports/{$name}", $csv);
+                $url = $disk->url("exports/{$name}");
 
                 self::sendNotification(
                     Notification::make()
                         ->title('Export created')
                         ->body("Saved to public/exports/{$name}")
                         ->success()
+                        ->actions([
+                            NotificationAction::make('download')
+                                ->label('Download')
+                                ->url($url, shouldOpenInNewTab: true),
+                        ])
                 );
             })
         ]);
