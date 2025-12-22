@@ -12,6 +12,7 @@ use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyCsvImporter;
+use App\Services\ShopifyCsvValidator;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Tables\Columns\TextColumn;
@@ -63,6 +64,47 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->color(fn (Import $record) => $record->is_current ? 'success' : 'gray'),
             TextColumn::make('created_at')->dateTime(),
         ])->actions([
+            Action::make('validateImport')
+                ->label('Validate CSV')
+                ->requiresConfirmation()
+                ->disabled(fn (Import $record) => !$record->is_current)
+                ->action(function (Import $record, ShopifyCsvValidator $validator) {
+                    $disk = Storage::disk('public');
+
+                    if (!$record->filename || !$disk->exists($record->filename)) {
+                        Notification::make()
+                            ->title('File not found')
+                            ->danger()
+                            ->send();
+                        return;
+                    }
+
+                    $absolutePath = $disk->path($record->filename);
+                    $templatePath = storage_path('app/private/imports/products.csv');
+
+                    $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
+                    if ($result['valid']) {
+                        Notification::make()
+                            ->title('CSV looks valid')
+                            ->success()
+                            ->send();
+                        return;
+                    }
+
+                    $errors = $result['errors'];
+                    $preview = array_slice($errors, 0, 5);
+                    $moreCount = max(0, count($errors) - count($preview));
+                    $body = implode("\n", $preview);
+                    if ($moreCount > 0) {
+                        $body .= "\n...and {$moreCount} more.";
+                    }
+
+                    Notification::make()
+                        ->title('CSV validation failed')
+                        ->body($body)
+                        ->danger()
+                        ->send();
+                }),
             Action::make('runImport')
     ->label('Process Import')
     ->requiresConfirmation()
@@ -90,6 +132,25 @@ protected static ?string $navigationLabel = 'Product Feed';
         }
 
         $absolutePath = $disk->path($record->filename);
+        $templatePath = storage_path('app/private/imports/products.csv');
+        $validator = app(ShopifyCsvValidator::class);
+        $validation = $validator->validateAgainstTemplate($absolutePath, $templatePath);
+        if (!$validation['valid']) {
+            $errors = $validation['errors'];
+            $preview = array_slice($errors, 0, 5);
+            $moreCount = max(0, count($errors) - count($preview));
+            $body = implode("\n", $preview);
+            if ($moreCount > 0) {
+                $body .= "\n...and {$moreCount} more.";
+            }
+
+            Notification::make()
+                ->title('Import rejected: invalid CSV')
+                ->body($body)
+                ->danger()
+                ->send();
+            return;
+        }
 
         if ($record->mode === 'overwrite') {
             ShopifyRow::where('import_id', '!=', $record->id)->delete();
