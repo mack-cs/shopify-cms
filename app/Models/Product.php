@@ -10,6 +10,7 @@ class Product extends Model
 {
     protected $fillable = [
         'import_id','handle','title','body_html','vendor','tags',
+        'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','approval_version',
         'batch','is_bundle','you_save',

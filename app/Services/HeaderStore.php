@@ -10,6 +10,8 @@ final class HeaderStore
     public const BODY_HTML = 'Body (HTML)';
     public const VENDOR = 'Vendor';
     public const TAGS = 'Tags';
+    public const TYPE = 'Type';
+    public const PUBLISHED = 'Published';
     public const PRODUCT_CATEGORY = 'Product Category';
     public const GOOGLE_PRODUCT_CATEGORY = 'Google Shopping / Google Product Category';
 

@@ -7,6 +7,7 @@ use Filament\Tables;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
+use App\Models\Type;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
 use Filament\Resources\Resource;
@@ -15,6 +16,10 @@ use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Toggle;
+use Filament\Forms\Components\Actions;
+use Filament\Forms\Components\Actions\Action as FormAction;
+use Filament\Forms\Components\Grid;
+use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Tables\Actions\EditAction;
@@ -49,31 +54,17 @@ class ProductResource extends Resource
                 TextInput::make('handle')->disabled(),
                 TextInput::make('title'),
                 Textarea::make('body_html')->rows(5)->columnSpanFull(),
-                Select::make('product_category')
-                    ->label('Category')
-                    ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
-                    ->searchable()
-                    ->reactive()
-                    ->afterStateUpdated(function ($state, callable $set) {
-                        $cat = \App\Models\Category::where('name', $state)->first();
-                        if ($cat) {
-                            $set('google_product_category', $cat->google_product_category);
-                        }
-                    }),
-                TextInput::make('google_product_category')
-                    ->label('Google Product Category'),
-                TextInput::make('tags'),
-                Select::make('status')
-                    ->label('Status')
+                Select::make('type')
+                    ->label('Type')
+                    ->options(fn () => Type::query()->orderBy('name')->pluck('name', 'name')->all())
                     ->searchable()
                     ->preload()
-                    ->options(fn () => Status::query()
-                        ->orderBy('name')
-                        ->pluck('name', 'name')
-                        ->all())
+                    ->reactive()
                     ->createOptionForm([
                         TextInput::make('name')->required()->maxLength(255),
-                        Toggle::make('active')->default(true),
+                        TextInput::make('google_product_category')
+                            ->label('Google Product Category')
+                            ->maxLength(255),
                     ])
                     ->createOptionUsing(function (array $data) {
                         $name = trim($data['name'] ?? '');
@@ -81,13 +72,31 @@ class ProductResource extends Resource
                             return null;
                         }
 
-                        $status = Status::firstOrCreate(
+                        $type = Type::firstOrCreate(
                             ['name' => $name],
-                            ['active' => (bool) ($data['active'] ?? true)]
+                            ['google_product_category' => trim((string) ($data['google_product_category'] ?? '')) ?: null]
                         );
 
-                        return $status->name;
+                        return $type->name;
+                    })
+                    ->afterStateUpdated(function ($state, callable $set): void {
+                        if (!$state) {
+                            $set('google_product_category', null);
+                            return;
+                        }
+
+                        $gpc = Type::where('name', $state)->value('google_product_category');
+                        if ($gpc !== null && $gpc !== '') {
+                            $set('google_product_category', $gpc);
+                        }
                     }),
+                Select::make('product_category')
+                    ->label('Category')
+                    ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
+                    ->searchable(),
+                TextInput::make('google_product_category')
+                    ->label('Google Product Category'),
+                TextInput::make('tags'),
                 TextInput::make('seo_title')
                     ->columnSpanFull()
                     ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
@@ -172,6 +181,72 @@ class ProductResource extends Resource
 
                 return $color->name; // must match the option "value"
             }),
+            Toggle::make('published')
+                ->label('Published')
+                ->helperText('Exported as true/false.')
+                ->afterStateHydrated(function (Toggle $component, $state): void {
+                    $component->state(filter_var($state, FILTER_VALIDATE_BOOLEAN));
+                })
+                ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false'),
+            Select::make('status')
+                ->label('Status')
+                ->searchable()
+                ->preload()
+                ->options(fn () => Status::query()
+                    ->orderBy('name')
+                    ->pluck('name', 'name')
+                    ->all())
+                ->createOptionForm([
+                    TextInput::make('name')->required()->maxLength(255),
+                    Toggle::make('active')->default(true),
+                ])
+                ->createOptionUsing(function (array $data) {
+                    $name = trim($data['name'] ?? '');
+                    if ($name === '') {
+                        return null;
+                    }
+
+                $status = Status::firstOrCreate(
+                    ['name' => $name],
+                    ['active' => (bool) ($data['active'] ?? true)]
+                );
+
+                return $status->name;
+            }),
+            Grid::make(2)->schema([
+                Placeholder::make('approvals_current')
+                    ->label('Approvals')
+                    ->content(fn (?Product $record): string => $record
+                        ? ($record->approvalsForCurrentVersionCount() . '/2')
+                        : '0/2'),
+                Actions::make([
+                    FormAction::make('approve')
+                        ->label('Approve')
+                        ->action(function (?Product $record): void {
+                            if (!$record) {
+                                return;
+                            }
+
+                            Approval::firstOrCreate([
+                                'product_id' => $record->id,
+                                'user_id' => Auth::id(),
+                                'approval_version' => $record->approval_version,
+                            ]);
+
+                            $count = $record->approvals()
+                                ->where('approval_version', $record->approval_version)
+                                ->distinct('user_id')
+                                ->count('user_id');
+
+                            Notification::make()
+                                ->title('Approved')
+                                ->body("Approvals for current version: {$count}/2")
+                                ->success()
+                                ->send();
+                        })
+                        ->visible(fn (?Product $record): bool => (bool) $record),
+                ]),
+            ]),
 
 
             Toggle::make('is_bundle')
@@ -192,7 +267,13 @@ class ProductResource extends Resource
                 ->size(40),
             TextColumn::make('handle')->searchable(),
             TextColumn::make('title')->searchable(),
+            TextColumn::make('type')->label('Type')->toggleable(),
             TextColumn::make('vendor'),
+            IconColumn::make('published')
+                ->label('Published')
+                ->boolean()
+                ->state(fn (Product $record): bool => filter_var($record->published, FILTER_VALIDATE_BOOLEAN))
+                ->toggleable(),
             TextColumn::make('batch')
                 ->label('Batch')
                 ->toggleable(),

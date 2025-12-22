@@ -8,7 +8,9 @@ use App\Models\Variant;
 use App\Models\Image;
 use App\Models\Category;
 use App\Models\Color;
+use App\Models\StyleProfile;
 use App\Models\Status;
+use App\Models\Type;
 use App\Models\ShopifyRow;
 use Illuminate\Support\Facades\DB;
 
@@ -35,6 +37,10 @@ final class Normalizer
                 $category = $this->syncCategory($categoryName, $googleCategory);
                 $this->syncColors($primary->get(HeaderStore::COLOR_METAFIELD, null));
                 $this->syncStatus($primary->get(HeaderStore::STATUS, null));
+                $this->syncType(
+                    $primary->get(HeaderStore::TYPE, null),
+                    $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null)
+                );
 
                 $product = Product::create([
                     'import_id' => $import->id,
@@ -43,6 +49,8 @@ final class Normalizer
                     'body_html' => $primary->get(HeaderStore::BODY_HTML, null),
                     'vendor' => $primary->get(HeaderStore::VENDOR, null),
                     'tags' => $primary->get(HeaderStore::TAGS, null),
+                    'type' => $primary->get(HeaderStore::TYPE, null),
+                    'published' => $primary->get(HeaderStore::PUBLISHED, null),
                     'product_category' => $category?->name,
                     'google_product_category' => $category?->google_product_category,
                     'status' => $primary->get(HeaderStore::STATUS, null),
@@ -52,6 +60,13 @@ final class Normalizer
                     'batch' => $this->defaultBatchForImport($import),
                     'is_bundle' => $this->inferIsBundle($handle, $primary->get(HeaderStore::TITLE, null)),
                 ]);
+
+                StyleProfile::where('handle', $handle)
+                    ->update([
+                        'product_id' => $product->id,
+                        'seo_sync_status' => 'draft',
+                        'seo_synced_at' => null,
+                    ]);
 
                 // Variants (include primary row if it contains variant data)
                 $variantRows = $handleRows->filter(function (ShopifyRow $r) {
@@ -186,6 +201,25 @@ final class Normalizer
         $existing = Status::whereRaw('LOWER(name) = ?', [$lower])->first();
         if (!$existing) {
             Status::create(['name' => $status, 'active' => true]);
+        }
+    }
+
+    private function syncType(?string $typeName, ?string $googleCategory): void
+    {
+        $typeName = $this->normalizeValue($typeName);
+        if ($typeName === null) {
+            return;
+        }
+
+        $googleCategory = $this->normalizeValue($googleCategory);
+
+        $type = Type::firstOrCreate(
+            ['name' => $typeName],
+            ['google_product_category' => $googleCategory]
+        );
+
+        if ($type->google_product_category === null && $googleCategory !== null) {
+            $type->update(['google_product_category' => $googleCategory]);
         }
     }
 }

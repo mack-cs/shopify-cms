@@ -79,6 +79,8 @@ final class ShopifyCsvExporter
         $this->setIfHeaderExists($row, $headers, HeaderStore::BODY_HTML, $product->body_html);
         $this->setIfHeaderExists($row, $headers, HeaderStore::VENDOR, $product->vendor);
         $this->setIfHeaderExists($row, $headers, HeaderStore::TAGS, $product->tags);
+        $this->setIfHeaderExists($row, $headers, HeaderStore::TYPE, $product->type);
+        $this->setIfHeaderExists($row, $headers, HeaderStore::PUBLISHED, $product->published);
 
         $this->setIfHeaderExists($row, $headers, HeaderStore::PRODUCT_CATEGORY, $product->product_category);
         $this->setIfHeaderExists($row, $headers, HeaderStore::GOOGLE_PRODUCT_CATEGORY, $product->google_product_category);
