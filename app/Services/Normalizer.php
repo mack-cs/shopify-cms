@@ -8,6 +8,7 @@ use App\Models\Variant;
 use App\Models\Image;
 use App\Models\Category;
 use App\Models\Color;
+use App\Models\Status;
 use App\Models\ShopifyRow;
 use Illuminate\Support\Facades\DB;
 
@@ -33,6 +34,7 @@ final class Normalizer
                 $googleCategory = $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null);
                 $category = $this->syncCategory($categoryName, $googleCategory);
                 $this->syncColors($primary->get(HeaderStore::COLOR_METAFIELD, null));
+                $this->syncStatus($primary->get(HeaderStore::STATUS, null));
 
                 $product = Product::create([
                     'import_id' => $import->id,
@@ -51,8 +53,10 @@ final class Normalizer
                     'is_bundle' => $this->inferIsBundle($handle, $primary->get(HeaderStore::TITLE, null)),
                 ]);
 
-                // Variants
-                $variantRows = $handleRows->where('row_type', 'variant');
+                // Variants (include primary row if it contains variant data)
+                $variantRows = $handleRows->filter(function (ShopifyRow $r) {
+                    return $r->variant_key !== null;
+                });
                 foreach ($variantRows as $vr) {
                     Variant::create([
                         'product_id' => $product->id,
@@ -169,5 +173,19 @@ final class Normalizer
 
         $trimmed = trim($value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function syncStatus(?string $status): void
+    {
+        $status = $this->normalizeValue($status);
+        if ($status === null) {
+            return;
+        }
+
+        $lower = strtolower($status);
+        $existing = Status::whereRaw('LOWER(name) = ?', [$lower])->first();
+        if (!$existing) {
+            Status::create(['name' => $status, 'active' => true]);
+        }
     }
 }

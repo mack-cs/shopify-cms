@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use Filament\Forms;
 use Filament\Tables;
+use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
 use Filament\Forms\Form;
@@ -11,25 +12,26 @@ use Filament\Tables\Table;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use Illuminate\Support\Facades\Auth;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Toggle;
+use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Tables\Actions\EditAction;
-use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\IconColumn;
-use Filament\Tables\Columns\ImageColumn;
-use Filament\Forms\Components\Hidden;
-use Filament\Forms\Components\Toggle;
+use Filament\Tables\Columns\TextColumn;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
+use Filament\Tables\Columns\ImageColumn;
+use Filament\Tables\Filters\SelectFilter;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Actions\DeleteBulkAction;
 use App\Filament\Resources\ProductResource\Pages;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
-use App\Filament\Resources\ProductResource\RelationManagers;
-use Filament\Forms\Components\Section;
 use Filament\Resources\RelationManagers\RelationManager;
+use App\Filament\Resources\ProductResource\RelationManagers;
 
 class ProductResource extends Resource
 {
@@ -48,19 +50,52 @@ class ProductResource extends Resource
                 TextInput::make('title'),
                 Textarea::make('body_html')->rows(5)->columnSpanFull(),
                 Select::make('product_category')
-                ->label('Category')
-                ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
-                ->searchable()
-                ->reactive()
-                ->afterStateUpdated(function ($state, callable $set) {
-                    $cat = \App\Models\Category::where('name', $state)->first();
-                    if ($cat) {
-                        $set('google_product_category', $cat->google_product_category);
-                    }
-                }),
+                    ->label('Category')
+                    ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
+                    ->searchable()
+                    ->reactive()
+                    ->afterStateUpdated(function ($state, callable $set) {
+                        $cat = \App\Models\Category::where('name', $state)->first();
+                        if ($cat) {
+                            $set('google_product_category', $cat->google_product_category);
+                        }
+                    }),
+                TextInput::make('google_product_category')
+                    ->label('Google Product Category'),
                 TextInput::make('tags'),
-                TextInput::make('seo_title')->columnSpanFull(),
-                Textarea::make('seo_description')->columnSpanFull(),
+                Select::make('status')
+                    ->label('Status')
+                    ->searchable()
+                    ->preload()
+                    ->options(fn () => Status::query()
+                        ->orderBy('name')
+                        ->pluck('name', 'name')
+                        ->all())
+                    ->createOptionForm([
+                        TextInput::make('name')->required()->maxLength(255),
+                        Toggle::make('active')->default(true),
+                    ])
+                    ->createOptionUsing(function (array $data) {
+                        $name = trim($data['name'] ?? '');
+                        if ($name === '') {
+                            return null;
+                        }
+
+                        $status = Status::firstOrCreate(
+                            ['name' => $name],
+                            ['active' => (bool) ($data['active'] ?? true)]
+                        );
+
+                        return $status->name;
+                    }),
+                TextInput::make('seo_title')
+                    ->columnSpanFull()
+                    ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
+                    ->helperText('Edit SEO in Styles when a style is linked.'),
+                Textarea::make('seo_description')
+                    ->columnSpanFull()
+                    ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
+                    ->helperText('Edit SEO in Styles when a style is linked.'),
 
             ])->columnSpan(2)->columns(2),
 
@@ -144,9 +179,6 @@ class ProductResource extends Resource
                 ->helperText('Internal only. Not exported.'),
             ])->columnSpan(1),
 
-            Hidden::make('google_product_category'),
-
-
         ])->columns(3);
     }
 
@@ -184,6 +216,17 @@ class ProductResource extends Resource
                 ->trueColor('success')
                 ->falseColor('gray'),
         ])->filters([
+            SelectFilter::make('vendor')
+                ->label('Vendor')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('vendor')
+                    ->where('vendor', '!=', '')
+                    ->distinct()
+                    ->orderBy('vendor')
+                    ->pluck('vendor', 'vendor')
+                    ->all())
+                ->searchable()
+                ->preload(),
             TernaryFilter::make('is_bundle')
                 ->label('Bundles'),
         ])->actions([
@@ -214,6 +257,7 @@ class ProductResource extends Resource
     public static function getRelations(): array
     {
         return [
+            RelationManagers\StyleProfileRelationManager::class,
             RelationManagers\ImagesRelationManager::class,
             RelationManagers\VariantsRelationManager::class,
             RelationManagers\ChangeLogsRelationManager::class,

@@ -62,5 +62,11 @@ class Product extends Model
         return $this->hasMany(ChangeLog::class);
     }
 
+    public function styleProfiles(): HasMany
+    {
+        return $this->hasMany(StyleProfile::class);
+    }
+
+
 
 }
