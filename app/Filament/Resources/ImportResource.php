@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use Filament\Forms;
 use Filament\Tables;
+use App\Enums\PermissionEnum;
 use App\Models\Import;
 use App\Models\Product;
 use Filament\Forms\Form;
@@ -64,6 +65,11 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->state(fn (Import $record) => $record->is_current ? 'Current' : 'Archived')
                 ->badge()
                 ->color(fn (Import $record) => $record->is_current ? 'success' : 'gray'),
+            TextColumn::make('is_valid')
+                ->label('Validation')
+                ->badge()
+                ->state(fn (Import $record) => $record->is_valid ? 'Valid' : 'Invalid')
+                ->color(fn (Import $record) => $record->is_valid ? 'success' : 'danger'),
             TextColumn::make('created_at')->dateTime(),
         ])->actions([
             Action::make('validateImport')
@@ -71,21 +77,7 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->requiresConfirmation()
                 ->disabled(fn (Import $record) => !$record->is_current)
                 ->action(function (Import $record, ShopifyCsvValidator $validator) {
-                    $disk = Storage::disk('public');
-
-                    if (!$record->filename || !$disk->exists($record->filename)) {
-                        self::sendNotification(
-                            Notification::make()
-                                ->title('File not found')
-                                ->danger()
-                        );
-                        return;
-                    }
-
-                    $absolutePath = $disk->path($record->filename);
-                    $templatePath = storage_path('app/private/imports/products.csv');
-
-                    $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
+                    $result = self::validateImportRecord($record, $validator);
                     if ($result['valid']) {
                         self::sendNotification(
                             Notification::make()
@@ -95,13 +87,7 @@ protected static ?string $navigationLabel = 'Product Feed';
                         return;
                     }
 
-                    $errors = $result['errors'];
-                    $preview = array_slice($errors, 0, 5);
-                    $moreCount = max(0, count($errors) - count($preview));
-                    $body = implode("\n", $preview);
-                    if ($moreCount > 0) {
-                        $body .= "\n...and {$moreCount} more.";
-                    }
+                    $body = self::formatValidationErrors($result['errors']);
 
                     self::sendNotification(
                         Notification::make()
@@ -113,11 +99,21 @@ protected static ?string $navigationLabel = 'Product Feed';
             Action::make('runImport')
     ->label('Process Import')
     ->requiresConfirmation()
-    ->disabled(fn (Import $record) => !$record->is_current || $record->status === 'processing' || $record->status === 'ready')
+    ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status === 'processing' || $record->status === 'ready')
     ->action(function (Import $record, ShopifyCsvImporter $importer) {
 
         // Your FileUpload uses disk('public'), so use the same disk here:
         $disk = Storage::disk('public');
+
+        if (!$record->is_valid) {
+            self::sendNotification(
+                Notification::make()
+                    ->title('Import blocked')
+                    ->body('CSV is invalid. Run validation and upload a corrected file.')
+                    ->danger()
+            );
+            return;
+        }
 
         if (!$record->filename) {
             self::sendNotification(
@@ -143,13 +139,8 @@ protected static ?string $navigationLabel = 'Product Feed';
         $validator = app(ShopifyCsvValidator::class);
         $validation = $validator->validateAgainstTemplate($absolutePath, $templatePath);
         if (!$validation['valid']) {
-            $errors = $validation['errors'];
-            $preview = array_slice($errors, 0, 5);
-            $moreCount = max(0, count($errors) - count($preview));
-            $body = implode("\n", $preview);
-            if ($moreCount > 0) {
-                $body .= "\n...and {$moreCount} more.";
-            }
+            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
+            $body = self::formatValidationErrors($validation['errors']);
 
             self::sendNotification(
                 Notification::make()
@@ -179,7 +170,7 @@ protected static ?string $navigationLabel = 'Product Feed';
     }),
         Action::make('exportAll')
             ->label('Export (All)')
-            ->disabled(fn (Import $record) => !$record->is_current || $record->status !== 'ready')
+            ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
             ->action(function (Import $record, ShopifyCsvExporter $exporter) {
                 $csv = $exporter->exportToString($record, 'all');
                 $timestamp = now()->format('Ymd_His');
@@ -191,10 +182,10 @@ protected static ?string $navigationLabel = 'Product Feed';
                 self::sendNotification(
                     Notification::make()
                         ->title('Export created')
-                        ->body("Saved to public/exports/{$name}")
-                        ->success()
-                        ->actions([
-                            NotificationAction::make('download')
+                ->body("Saved to public/exports/{$name}")
+                ->success()
+                ->actions([
+                    NotificationAction::make('download')
                                 ->label('Download')
                                 ->url($url, shouldOpenInNewTab: true),
                         ])
@@ -203,7 +194,7 @@ protected static ?string $navigationLabel = 'Product Feed';
 
         Action::make('exportApproved')
             ->label('Export (Approved)')
-            ->disabled(fn (Import $record) => !$record->is_current || $record->status !== 'ready')
+            ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
             ->action(function (Import $record, ShopifyCsvExporter $exporter) {
 
                 $totalHandles = Product::where('import_id', $record->id)->count();
@@ -255,6 +246,83 @@ protected static ?string $navigationLabel = 'Product Feed';
                 );
             })
         ]);
+    }
+
+    public static function getEloquentQuery(): Builder
+    {
+        $query = parent::getEloquentQuery();
+        $user = Auth::user();
+
+        if (!$user) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if ($user->can(PermissionEnum::ImportViewAll->value)) {
+            return $query;
+        }
+
+        return $query->where('is_current', true);
+    }
+
+    public static function canViewAny(): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ImportViewCurrent->value) ?? false;
+    }
+
+    public static function canCreate(): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ImportCreate->value) ?? false;
+    }
+
+    public static function canEdit($record): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ImportCreate->value) ?? false;
+    }
+
+    public static function canDelete($record): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ImportDelete->value) ?? false;
+    }
+
+    public static function canDeleteAny(): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ImportDelete->value) ?? false;
+    }
+
+    public static function validateImportRecord(Import $record, ShopifyCsvValidator $validator): array
+    {
+        $disk = Storage::disk('public');
+
+        if (!$record->filename || !$disk->exists($record->filename)) {
+            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
+            return [
+                'valid' => false,
+                'errors' => ['File not found.'],
+            ];
+        }
+
+        $absolutePath = $disk->path($record->filename);
+        $templatePath = storage_path('app/private/imports/products.csv');
+
+        $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
+        $record->forceFill([
+            'is_valid' => (bool) $result['valid'],
+            'status' => $result['valid'] ? 'uploaded' : 'failed',
+        ])->save();
+
+        return $result;
+    }
+
+    public static function formatValidationErrors(array $errors): string
+    {
+        $preview = array_slice($errors, 0, 5);
+        $moreCount = max(0, count($errors) - count($preview));
+        $body = implode("\n", $preview);
+        if ($moreCount > 0) {
+            $body .= "\n...and {$moreCount} more.";
+        }
+
+        return $body;
     }
 
     public static function getRelations(): array

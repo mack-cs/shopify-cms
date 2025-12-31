@@ -19,7 +19,11 @@ class DatabaseSeeder extends Seeder
             CategorySeeder::class,
             ColorSeeder::class,
             TypeSeeder::class,
+            RoleSeeder::class,
             UserSeeder::class,
+            SeoPageSeeder::class,
+            SearchTrendSeeder::class,
+            SeoMetricsSeeder::class,
         ]);
     }
 }

@@ -18,6 +18,11 @@ use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
+use App\Http\Middleware\ForcePasswordChange;
+use App\Filament\Widgets\SearchTrendsWidget;
+use App\Filament\Widgets\SeoMetricsStats;
+use App\Filament\Widgets\SeoMetricsTrendChart;
+use App\Filament\Widgets\SeoTopEntitiesStackedChart;
 
 class AdminPanelProvider extends PanelProvider
 {
@@ -35,7 +40,10 @@ class AdminPanelProvider extends PanelProvider
             ->navigationGroups([
                 NavigationGroup::make('Product Data'),
                 NavigationGroup::make('Catalog'),
+                NavigationGroup::make('Content'),
+                NavigationGroup::make('SEO'),
                 NavigationGroup::make('Audit & History'),
+                NavigationGroup::make('User Management'),
             ])
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\\Filament\\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
@@ -46,6 +54,10 @@ class AdminPanelProvider extends PanelProvider
             ->widgets([
                 Widgets\AccountWidget::class,
                 Widgets\FilamentInfoWidget::class,
+                // SearchTrendsWidget::class,
+                SeoMetricsStats::class,
+                SeoMetricsTrendChart::class,
+                SeoTopEntitiesStackedChart::class,
             ])
             ->middleware([
                 EncryptCookies::class,
@@ -60,6 +72,7 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->authMiddleware([
                 Authenticate::class,
+                ForcePasswordChange::class,
             ]);
     }
 }

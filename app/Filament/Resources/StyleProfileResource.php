@@ -3,6 +3,7 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\StyleProfileResource\Pages;
+use App\Enums\RolesEnum;
 use App\Models\Product;
 use App\Models\StyleProfile;
 use App\Services\StyleProfileCsvImporter;
@@ -21,7 +22,11 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Auth;
+use Filament\Tables\Actions\ExportBulkAction;
+use Filament\Tables\Actions\BulkActionGroup;
 use Illuminate\Support\Facades\Storage;
+use App\Filament\Exports\StyleProfileExporter;
 
 class StyleProfileResource extends Resource
 {
@@ -30,6 +35,7 @@ class StyleProfileResource extends Resource
     protected static ?string $navigationIcon = 'heroicon-o-sparkles';
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'Style Profiles';
+    protected static ?int $navigationSort = 4;
 
     public static function form(Forms\Form $form): Forms\Form
     {
@@ -160,7 +166,8 @@ class StyleProfileResource extends Resource
             ->headerActions([
                 Tables\Actions\CreateAction::make()
                     ->modalHeading('Add Style Profile')
-                    ->color('success'),
+                    ->color('success')
+                    ->createAnother(false),
                 Tables\Actions\Action::make('importCsv')
                     ->label('Import CSV')
                     ->color('info')
@@ -188,52 +195,78 @@ class StyleProfileResource extends Resource
                     }),
             ])
             ->bulkActions([
-                BulkAction::make('pushReadySeo')
-                    ->label('Push SEO (Ready)')
-                    ->requiresConfirmation()
-                    ->action(function ($records): void {
-                        $synced = 0;
-                        foreach ($records as $record) {
-                            if ($record->seo_sync_status !== 'ready') {
-                                continue;
-                            }
-                            $product = $record->product;
-                            if (!$product) {
-                                continue;
+                BulkActionGroup::make([
+                    BulkAction::make('pushReadySeo')
+                        ->label('Push SEO (Ready)')
+                        ->icon('heroicon-o-cloud-arrow-up')
+                        ->requiresConfirmation()
+                        ->action(function ($records): void {
+                            $synced = 0;
+                            foreach ($records as $record) {
+                                if ($record->seo_sync_status !== 'ready') {
+                                    continue;
+                                }
+                                $product = $record->product;
+                                if (!$product) {
+                                    continue;
+                                }
+
+                                $payload = [];
+                                if ($record->draft_seo_title) {
+                                    $payload['seo_title'] = $record->draft_seo_title;
+                                }
+                                if ($record->draft_seo_description) {
+                                    $payload['seo_description'] = $record->draft_seo_description;
+                                }
+
+                                if (!$payload) {
+                                    continue;
+                                }
+
+                                $product->update($payload);
+                                $record->update([
+                                    'seo_sync_status' => 'synced',
+                                    'seo_synced_at' => Carbon::now(),
+                                ]);
+                                $synced++;
                             }
 
-                            $payload = [];
-                            if ($record->draft_seo_title) {
-                                $payload['seo_title'] = $record->draft_seo_title;
-                            }
-                            if ($record->draft_seo_description) {
-                                $payload['seo_description'] = $record->draft_seo_description;
-                            }
-
-                            if (!$payload) {
-                                continue;
-                            }
-
-                            $product->update($payload);
-                            $record->update([
-                                'seo_sync_status' => 'synced',
-                                'seo_synced_at' => Carbon::now(),
-                            ]);
-                            $synced++;
-                        }
-
-                        Notification::make()
-                            ->title('SEO sync complete')
-                            ->body("Synced {$synced} style(s).")
-                            ->success()
-                            ->send();
-                    }),
+                            Notification::make()
+                                ->title('SEO sync complete')
+                                ->body("Synced {$synced} style(s).")
+                                ->success()
+                                ->send();
+                        }),
+                    ExportBulkAction::make()
+                        ->exporter(StyleProfileExporter::class)
+                        ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
+                ]),
             ]);
     }
 
     public static function canCreate(): bool
     {
-        return true;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+    }
+
+    public static function canViewAny(): bool
+    {
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+    }
+
+    public static function canEdit($record): bool
+    {
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+    }
+
+    public static function canDelete($record): bool
+    {
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+    }
+
+    public static function canDeleteAny(): bool
+    {
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
     }
 
     public static function getPages(): array

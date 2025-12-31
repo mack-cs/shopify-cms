@@ -4,6 +4,8 @@ namespace App\Filament\Resources;
 
 use Filament\Forms;
 use Filament\Tables;
+use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
@@ -28,6 +30,8 @@ use Filament\Forms\Components\Tabs;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Tables\Actions\EditAction;
+use Filament\Tables\Actions\ExportBulkAction;
+use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Forms\Components\TextInput;
@@ -36,8 +40,8 @@ use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Tables\Filters\TernaryFilter;
-use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Actions\DeleteBulkAction;
+use App\Filament\Exports\ProductExporter;
 use App\Filament\Resources\ProductResource\Pages;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Filament\Resources\RelationManagers\RelationManager;
@@ -53,6 +57,7 @@ class ProductResource extends Resource
     protected static ?string $navigationIcon = 'heroicon-o-cube';
 
     protected static ?string $navigationGroup = 'Catalog';
+    protected static ?int $navigationSort = 1;
 
     public static function form(Forms\Form $form): Forms\Form
     {
@@ -423,6 +428,17 @@ class ProductResource extends Resource
                 ->trueColor('success')
                 ->falseColor('gray'),
         ])->filters([
+            SelectFilter::make('type')
+                ->label('Type')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('type')
+                    ->where('type', '!=', '')
+                    ->distinct()
+                    ->orderBy('type')
+                    ->pluck('type', 'type')
+                    ->all())
+                ->searchable()
+                ->preload(),
             SelectFilter::make('vendor')
                 ->label('Vendor')
                 ->options(fn () => Product::query()
@@ -434,10 +450,23 @@ class ProductResource extends Resource
                     ->all())
                 ->searchable()
                 ->preload(),
+            TernaryFilter::make('approved')
+                ->label('Approved')
+                ->queries(
+                    true: fn ($query) => $query->whereRaw(
+                        '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
+                    ),
+                    false: fn ($query) => $query->whereRaw(
+                        '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
+                    )
+                ),
             TernaryFilter::make('is_bundle')
                 ->label('Bundles'),
         ])->actions([
-            EditAction::make(),
+            EditAction::make()
+                ->visible(fn (Product $record): bool => static::canEdit($record)),
+            Tables\Actions\DeleteAction::make()
+                ->visible(fn (Product $record): bool => static::canDelete($record)),
             Action::make('approve')
             ->label('Approve')
             ->action(function (Product $record) {
@@ -458,6 +487,12 @@ class ProductResource extends Resource
                     ->success()
                     ->send();
     })
+        ])->bulkActions([
+            BulkActionGroup::make([
+                ExportBulkAction::make()
+                    ->exporter(ProductExporter::class)
+                    ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
+            ]),
         ]);
     }
 
@@ -478,6 +513,31 @@ class ProductResource extends Resource
             'create' => Pages\CreateProduct::route('/create'),
             'edit' => Pages\EditProduct::route('/{record}/edit'),
         ];
+    }
+
+    public static function canViewAny(): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ProductView->value) ?? false;
+    }
+
+    public static function canCreate(): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ProductCreate->value) ?? false;
+    }
+
+    public static function canEdit($record): bool
+    {
+        return Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false;
+    }
+
+    public static function canDelete($record): bool
+    {
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    public static function canDeleteAny(): bool
+    {
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
     private static function extraShopifyFields(?Product $record): array

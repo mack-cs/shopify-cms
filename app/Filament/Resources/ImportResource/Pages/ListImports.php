@@ -13,7 +13,8 @@ class ListImports extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
-            Actions\CreateAction::make(),
+            Actions\CreateAction::make()
+                ->visible(fn (): bool => ImportResource::canCreate()),
         ];
     }
 }

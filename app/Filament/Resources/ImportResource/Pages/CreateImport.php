@@ -6,6 +6,8 @@ use App\Models\Import;
 use App\Filament\Resources\ImportResource;
 use Filament\Actions;
 use Filament\Resources\Pages\CreateRecord;
+use Filament\Notifications\Notification;
+use App\Services\ShopifyCsvValidator;
 
 class CreateImport extends CreateRecord
 {
@@ -31,6 +33,38 @@ class CreateImport extends CreateRecord
         }
 
         return $data;
+    }
+
+    protected function getRedirectUrl(): string
+    {
+        return ImportResource::getUrl('index');
+    }
+
+    protected function afterCreate(): void
+    {
+        $record = $this->getRecord();
+        if (!$record) {
+            return;
+        }
+
+        $validator = app(ShopifyCsvValidator::class);
+        $result = ImportResource::validateImportRecord($record, $validator);
+
+        if ($result['valid']) {
+            Notification::make()
+                ->title('CSV looks valid')
+                ->success()
+                ->send();
+            return;
+        }
+
+        $body = ImportResource::formatValidationErrors($result['errors']);
+
+        Notification::make()
+            ->title('CSV validation failed')
+            ->body($body)
+            ->danger()
+            ->send();
     }
 
 }
