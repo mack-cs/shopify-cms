@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Models\ChangeLog;
 use App\Models\Product;
+use App\Services\Normalizer;
 use Illuminate\Support\Facades\Auth;
 
 class ProductObserver
@@ -63,5 +64,10 @@ class ProductObserver
                 'new_value'   => is_scalar($newValue) ? (string)$newValue : json_encode($newValue),
             ]);
         }
+    }
+
+    public function updated(Product $product): void
+    {
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
 }

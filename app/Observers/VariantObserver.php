@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Models\Product;
 use App\Models\Variant;
+use App\Services\Normalizer;
 
 class VariantObserver
 {
@@ -16,6 +17,26 @@ class VariantObserver
         }
 
         $this->bumpProductApprovalVersion($variant->product_id);
+    }
+
+    public function saved(Variant $variant): void
+    {
+        $product = $variant->product;
+        if (!$product) {
+            return;
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
+    }
+
+    public function deleted(Variant $variant): void
+    {
+        $product = $variant->product;
+        if (!$product) {
+            return;
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
 
     private function bumpProductApprovalVersion(?int $productId): void

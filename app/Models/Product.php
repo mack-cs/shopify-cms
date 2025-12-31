@@ -14,11 +14,14 @@ class Product extends Model
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','approval_version',
         'batch','is_bundle','you_save',
+        'has_errors','error_fields',
     ];
 
     protected $casts = [
         'is_bundle' => 'boolean',
         'you_save' => 'decimal:2',
+        'has_errors' => 'boolean',
+        'error_fields' => 'array',
     ];
 
     public function import(): BelongsTo

@@ -10,7 +10,6 @@ use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
 use App\Models\Import;
-use App\Models\Type;
 use App\Models\ShopifyRow;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
@@ -47,6 +46,7 @@ use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Filament\Resources\RelationManagers\RelationManager;
 use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
+use App\Services\CategoryTypeMap;
 use League\Csv\Reader;
 use Illuminate\Validation\Rule;
 
@@ -90,44 +90,47 @@ class ProductResource extends Resource
                             Textarea::make('body_html')->rows(5)->columnSpanFull(),
                             Select::make('type')
                                 ->label('Type')
-                                ->options(fn () => Type::query()->orderBy('name')->pluck('name', 'name')->all())
+                                ->options(function (): array {
+                                    $types = CategoryTypeMap::types();
+                                    return array_combine($types, $types);
+                                })
                                 ->searchable()
                                 ->preload()
                                 ->reactive()
-                                ->createOptionForm([
-                                    TextInput::make('name')->required()->maxLength(255),
-                                    TextInput::make('google_product_category')
-                                        ->label('Google Product Category')
-                                        ->maxLength(255),
-                                ])
-                                ->createOptionUsing(function (array $data) {
-                                    $name = trim($data['name'] ?? '');
-                                    if ($name === '') {
-                                        return null;
-                                    }
-
-                                    $type = Type::firstOrCreate(
-                                        ['name' => $name],
-                                        ['google_product_category' => trim((string) ($data['google_product_category'] ?? '')) ?: null]
-                                    );
-
-                                    return $type->name;
-                                })
                                 ->afterStateUpdated(function ($state, callable $set): void {
                                     if (!$state) {
+                                        $set('product_category', null);
                                         $set('google_product_category', null);
                                         return;
                                     }
 
-                                    $gpc = Type::where('name', $state)->value('google_product_category');
-                                    if ($gpc !== null && $gpc !== '') {
-                                        $set('google_product_category', $gpc);
+                                    $mapping = CategoryTypeMap::byType($state);
+                                    if ($mapping) {
+                                        $set('product_category', $mapping['category']);
+                                        $set('google_product_category', $mapping['google_product_category']);
                                     }
                                 }),
                             Select::make('product_category')
                                 ->label('Category')
-                                ->options(fn () => \App\Models\Category::where('active', true)->pluck('name', 'name'))
-                                ->searchable(),
+                                ->options(function (): array {
+                                    $categories = CategoryTypeMap::categories();
+                                    return array_combine($categories, $categories);
+                                })
+                                ->searchable()
+                                ->reactive()
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if (!$state) {
+                                        $set('type', null);
+                                        $set('google_product_category', null);
+                                        return;
+                                    }
+
+                                    $mapping = CategoryTypeMap::byCategory($state);
+                                    if ($mapping) {
+                                        $set('type', $mapping['type']);
+                                        $set('google_product_category', $mapping['google_product_category']);
+                                    }
+                                }),
                             TextInput::make('google_product_category')
                                 ->label('Google Product Category'),
                             Select::make('google_shopping_age_group')
@@ -217,16 +220,86 @@ class ProductResource extends Resource
                                     }
                                     $component->state(self::shopifyRowValue($record, 'Cost per item'));
                                 }),
-                                   Select::make('color_string')
+                            Hidden::make('color_conflict_message')
+                                ->dehydrated(false),
+                            Hidden::make('color_selection_prev')
+                                ->dehydrated(false),
+                            Select::make('color_string')
                             ->label('Colors')
                             ->multiple()
                             ->searchable()
                             ->preload()
+                            ->reactive()
                             ->options(fn () => \App\Models\Color::query()
                                 ->orderBy('name')
                                 ->pluck('name', 'name')
                                 ->all()
                             )
+                            ->afterStateUpdated(function (Select $component, $state, callable $set, callable $get): void {
+                                $values = is_array($state) ? $state : [];
+                                $normalized = array_values(array_unique(array_filter(array_map(
+                                    fn ($v) => trim((string) $v),
+                                    $values
+                                ))));
+
+                                $prev = $get('color_selection_prev') ?? [];
+                                $prev = is_array($prev) ? $prev : [];
+                                $prevLower = array_map('strtolower', $prev);
+
+                                $lower = array_map('strtolower', $normalized);
+                                $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                $hasMulti = in_array('multicolour', $lower, true);
+
+                                $message = null;
+                                if ($hasSolidPlain && $hasMulti) {
+                                    $added = array_diff($lower, $prevLower);
+                                    if (in_array('multicolour', $added, true)) {
+                                        $message = 'Multicolour can’t be selected with Solid or Plain.';
+                                    } elseif (in_array('solid', $added, true) || in_array('plain', $added, true)) {
+                                        $message = 'You can’t select Solid or Plain with Multicolour.';
+                                    } else {
+                                        $message = 'Multicolour can’t be selected with Solid or Plain.';
+                                    }
+                                }
+
+                                if ($normalized !== $values) {
+                                    $set('color_string', $normalized);
+                                }
+
+                                $set('color_selection_prev', $normalized);
+                                $set('color_conflict_message', $message);
+
+                                $livewire = $component->getContainer()->getLivewire();
+                                if ($message) {
+                                    $livewire->validateOnly($component->getStatePath());
+                                } else {
+                                    $livewire->resetErrorBag($component->getStatePath());
+                                }
+                            })
+                            ->rules([
+                                function (Get $get): \Closure {
+                                    return function (string $attribute, $value, $fail) use ($get): void {
+                                        $values = is_array($value) ? $value : [];
+                                        $lower = array_map(
+                                            'strtolower',
+                                            array_values(array_unique(array_filter(array_map(
+                                                fn ($v) => trim((string) $v),
+                                                $values
+                                            ))))
+                                        );
+
+                                        $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                        $hasMulti = in_array('multicolour', $lower, true);
+                                        if (!$hasSolidPlain || !$hasMulti) {
+                                            return;
+                                        }
+
+                                        $message = $get('color_conflict_message')
+                                            ?: 'Multicolour can’t be selected with Solid or Plain.';
+                                        $fail($message);
+                                    };
+                                },
+                            ])
 
                         // ?. DB -> UI state (ALWAYS return array for multiple select)
                         ->afterStateHydrated(function (Select $component, $state): void {
@@ -398,6 +471,22 @@ class ProductResource extends Resource
                 ->size(40),
             TextColumn::make('handle')->searchable(),
             TextColumn::make('title')->searchable(),
+            IconColumn::make('has_errors')
+                ->label('Errors')
+                ->icon(fn (bool $state): string => $state ? 'heroicon-o-x-circle' : 'heroicon-o-check-circle')
+                ->color(fn (bool $state): string => $state ? 'danger' : 'success')
+                ->toggleable(),
+            TextColumn::make('error_fields')
+                ->label('Error fields')
+                ->formatStateUsing(function ($state): string {
+                    if (is_array($state)) {
+                        return empty($state) ? 'All required fields are good.' : implode(', ', $state);
+                    }
+
+                    $value = trim((string) $state);
+                    return $value === '' ? 'All required fields are good.' : $value;
+                })
+                ->toggleable(),
             TextColumn::make('type')->label('Type')->toggleable(),
             TextColumn::make('vendor'),
             IconColumn::make('published')
@@ -462,6 +551,8 @@ class ProductResource extends Resource
                 ),
             TernaryFilter::make('is_bundle')
                 ->label('Bundles'),
+            TernaryFilter::make('has_errors')
+                ->label('Errors'),
         ])->actions([
             EditAction::make()
                 ->visible(fn (Product $record): bool => static::canEdit($record)),

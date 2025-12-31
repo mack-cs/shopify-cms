@@ -4,14 +4,15 @@ namespace App\Services;
 
 use App\Models\Import;
 use App\Models\Product;
-use App\Models\Variant;
-use App\Models\Image;
 use App\Models\Category;
 use App\Models\Color;
 use App\Models\StyleProfile;
 use App\Models\Status;
 use App\Models\Type;
 use App\Models\ShopifyRow;
+use App\Models\RequiredField;
+use App\Models\Variant;
+use App\Models\Image;
 use Illuminate\Support\Facades\DB;
 
 final class Normalizer
@@ -33,14 +34,20 @@ final class Normalizer
                 $primary = $handleRows->firstWhere('row_type', 'product_primary') ?? $handleRows->first();
 
                 $categoryName = $primary->get(HeaderStore::PRODUCT_CATEGORY, null);
+                $typeName = $primary->get(HeaderStore::TYPE, null);
                 $googleCategory = $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null);
-                $category = $this->syncCategory($categoryName, $googleCategory);
-                $this->syncColors($primary->get(HeaderStore::COLOR_METAFIELD, null));
+
+                $resolved = CategoryTypeMap::resolve($categoryName, $typeName, $googleCategory);
+                $resolvedCategory = $this->normalizeValue($resolved['category'] ?? null);
+                $resolvedType = $this->normalizeValue($resolved['type'] ?? null);
+                $resolvedGoogle = $this->normalizeValue($resolved['google_product_category'] ?? null);
+
+                $normalizedColor = $this->normalizeColorString($primary->get(HeaderStore::COLOR_METAFIELD, null));
+
+                $this->syncCategory($resolvedCategory, $resolvedGoogle);
+                $this->syncColors($normalizedColor);
                 $this->syncStatus($primary->get(HeaderStore::STATUS, null));
-                $this->syncType(
-                    $primary->get(HeaderStore::TYPE, null),
-                    $primary->get(HeaderStore::GOOGLE_PRODUCT_CATEGORY, null)
-                );
+                $this->syncType($resolvedType, $resolvedGoogle);
 
                 $product = Product::create([
                     'import_id' => $import->id,
@@ -49,14 +56,14 @@ final class Normalizer
                     'body_html' => $primary->get(HeaderStore::BODY_HTML, null),
                     'vendor' => $primary->get(HeaderStore::VENDOR, null),
                     'tags' => $primary->get(HeaderStore::TAGS, null),
-                    'type' => $primary->get(HeaderStore::TYPE, null),
+                    'type' => $resolvedType ?? $primary->get(HeaderStore::TYPE, null),
                     'published' => $primary->get(HeaderStore::PUBLISHED, null),
-                    'product_category' => $category?->name,
-                    'google_product_category' => $category?->google_product_category,
+                    'product_category' => $resolvedCategory ?? $categoryName,
+                    'google_product_category' => $resolvedGoogle ?? $googleCategory,
                     'status' => $primary->get(HeaderStore::STATUS, null),
                     'seo_title' => $primary->get(HeaderStore::SEO_TITLE, null),
                     'seo_description' => $primary->get(HeaderStore::SEO_DESCRIPTION, null),
-                    'color_string' => $primary->get(HeaderStore::COLOR_METAFIELD, null),
+                    'color_string' => $normalizedColor,
                     'batch' => $this->defaultBatchForImport($import),
                     'is_bundle' => $this->inferIsBundle($handle, $primary->get(HeaderStore::TITLE, null)),
                 ]);
@@ -73,10 +80,12 @@ final class Normalizer
                     return $r->variant_key !== null;
                 });
                 foreach ($variantRows as $vr) {
+                    $sku = $this->normalizeValue($vr->get(HeaderStore::VARIANT_SKU, null));
+                    $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
                     Variant::create([
                         'product_id' => $product->id,
-                        'sku' => $vr->get(HeaderStore::VARIANT_SKU, null),
-                        'barcode' => $vr->get(HeaderStore::VARIANT_BARCODE, null),
+                        'sku' => $sku,
+                        'barcode' => $barcode,
                         'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
                         'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
                         'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),
@@ -102,7 +111,89 @@ final class Normalizer
                         'alt_text' => $ir->get(HeaderStore::IMAGE_ALT_TEXT, null),
                     ]);
                 }
+
+                $resolvedForErrors = CategoryTypeMap::resolve(
+                    $product->product_category,
+                    $product->type,
+                    $product->google_product_category
+                );
+
+                $errors = $this->buildErrorFields(
+                    $product,
+                    $primary,
+                    $handleRows,
+                    $resolvedForErrors
+                );
+
+                Product::withoutEvents(function () use ($product, $errors): void {
+                    $product->forceFill([
+                        'has_errors' => !empty($errors),
+                        'error_fields' => $errors,
+                    ])->save();
+                });
             }
+        });
+    }
+
+    public function recalculateErrors(Import $import): void
+    {
+        DB::transaction(function () use ($import) {
+            $rows = ShopifyRow::where('import_id', $import->id)
+                ->whereNotNull('handle')
+                ->orderBy('row_index')
+                ->get()
+                ->groupBy('handle');
+
+            foreach ($rows as $handle => $handleRows) {
+                /** @var ShopifyRow $primary */
+                $primary = $handleRows->firstWhere('row_type', 'product_primary') ?? $handleRows->first();
+                if (!$primary) {
+                    continue;
+                }
+
+                $product = Product::where('import_id', $import->id)
+                    ->where('handle', $handle)
+                    ->first();
+
+                if (!$product) {
+                    continue;
+                }
+
+                $this->recalculateErrorsForProduct($product, $handleRows, $primary);
+            }
+        });
+    }
+
+    public function recalculateErrorsForProduct(Product $product, $handleRows = null, ?ShopifyRow $primary = null): void
+    {
+        $handleRows = $handleRows
+            ?? ShopifyRow::where('import_id', $product->import_id)
+                ->where('handle', $product->handle)
+                ->orderBy('row_index')
+                ->get();
+
+        $primary = $primary
+            ?? $handleRows->firstWhere('row_type', 'product_primary')
+            ?? $handleRows->first();
+
+        $resolved = CategoryTypeMap::resolve(
+            $product->product_category,
+            $product->type,
+            $product->google_product_category
+        );
+
+        $errors = $this->buildErrorFields(
+            $product,
+            $primary,
+            $handleRows,
+            $resolved
+        );
+
+        Product::withoutEvents(function () use ($product, $errors): void {
+            $product->forceFill([
+                'has_errors' => !empty($errors),
+                'error_fields' => $errors,
+            ])->save();
         });
     }
 
@@ -137,6 +228,11 @@ final class Normalizer
             return null;
         }
 
+        $resolved = CategoryTypeMap::byCategory($name);
+        if (!$resolved) {
+            return null;
+        }
+
         $lower = strtolower($name);
         $category = Category::whereRaw('LOWER(name) = ?', [$lower])->first();
 
@@ -157,21 +253,12 @@ final class Normalizer
 
     private function syncColors(?string $colorString): void
     {
-        $colorString = $this->normalizeValue($colorString);
-        if ($colorString === null) {
+        $parts = $this->parseColorTokens($colorString);
+        if (empty($parts)) {
             return;
         }
 
-        $parts = str_contains($colorString, ';')
-            ? explode(';', $colorString)
-            : explode(',', $colorString);
-
-        foreach ($parts as $part) {
-            $name = $this->normalizeValue($part);
-            if ($name === null) {
-                continue;
-            }
-
+        foreach ($parts as $name) {
             $lower = strtolower($name);
             $existing = Color::whereRaw('LOWER(name) = ?', [$lower])->first();
             if (!$existing) {
@@ -188,6 +275,62 @@ final class Normalizer
 
         $trimmed = trim($value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function normalizeColorString(?string $value): ?string
+    {
+        $parts = $this->parseColorTokens($value);
+        return empty($parts) ? null : implode('; ', $parts);
+    }
+
+    private function parseColorTokens(?string $value): array
+    {
+        $value = $this->normalizeValue($value);
+        if ($value === null) {
+            return [];
+        }
+
+        $normalized = str_replace(',', ';', $value);
+        $rawParts = array_filter(array_map('trim', explode(';', $normalized)));
+
+        $tokens = [];
+        $seen = [];
+        foreach ($rawParts as $part) {
+            $token = $this->normalizeColorToken($part);
+            if ($token === null) {
+                continue;
+            }
+
+            $key = strtolower($token);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $tokens[] = $token;
+        }
+
+        return $tokens;
+    }
+
+    private function normalizeColorToken(string $value): ?string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $normalized = strtolower($trimmed);
+        $normalized = str_replace('&', 'and', $normalized);
+        $normalized = preg_replace('/\s+/', '-', $normalized);
+        $normalized = preg_replace('/-+/', '-', $normalized);
+        $normalized = trim($normalized, '-');
+
+        if ($normalized === 'multi') {
+            $normalized = 'multicolour';
+        }
+
+        return $normalized === '' ? null : $normalized;
     }
 
     private function syncStatus(?string $status): void
@@ -212,6 +355,9 @@ final class Normalizer
         }
 
         $googleCategory = $this->normalizeValue($googleCategory);
+        if (!CategoryTypeMap::byType($typeName)) {
+            return;
+        }
 
         $type = Type::firstOrCreate(
             ['name' => $typeName],
@@ -221,5 +367,213 @@ final class Normalizer
         if ($type->google_product_category === null && $googleCategory !== null) {
             $type->update(['google_product_category' => $googleCategory]);
         }
+    }
+
+    private function buildErrorFields(Product $product, ?ShopifyRow $primary, $handleRows, array $resolved): array
+    {
+        $errors = [];
+
+        if (!empty($resolved['mismatch'])) {
+            $errors[] = 'mismatch:category_type';
+        }
+
+        $requiredDefinitions = $this->requiredDefinitions();
+        $requiredProductFields = $requiredDefinitions['product'];
+        $productValues = [
+            'handle' => $product->handle,
+            'product_category' => $resolved['category'] ?? null,
+            'type' => $resolved['type'] ?? null,
+            'google_product_category' => $resolved['google_product_category'] ?? null,
+            'seo_title' => $product->seo_title,
+            'seo_description' => $product->seo_description,
+            'title' => $product->title,
+            'body_html' => $product->body_html,
+            'vendor' => $product->vendor,
+            'tags' => $product->tags,
+            'color' => $product->color_string,
+            'color_string' => $product->color_string,
+            'published' => $product->published,
+            'status' => $product->status,
+        ];
+
+        foreach ($requiredProductFields as $field) {
+            $attribute = $field['attribute'];
+            $label = $field['label'] ?? $attribute;
+            $value = $productValues[$attribute] ?? null;
+            if ($this->normalizeValue($value) === null) {
+                $errors[] = "missing:{$label}";
+            }
+        }
+
+        $requiredRowFields = $requiredDefinitions['row'];
+
+        foreach ($requiredRowFields as $field) {
+            $attribute = $field['attribute'];
+            $label = $field['label'] ?? $attribute;
+            $rowValue = $primary?->get($attribute, null);
+            if ($this->normalizeValue($rowValue) === null) {
+                $errors[] = "missing:{$label}";
+            }
+        }
+
+        $colorTokens = $this->parseColorTokens($product->color_string);
+        if (in_array('multicolour', $colorTokens, true)
+            && (in_array('solid', $colorTokens, true) || in_array('plain', $colorTokens, true))
+        ) {
+            $errors[] = 'conflict:color_multicolour_solid_plain';
+        }
+
+        $variants = $product->variants;
+
+        $requiredVariantFields = $requiredDefinitions['variant'];
+        if (!empty($requiredVariantFields)) {
+            if ($variants->isEmpty()) {
+                foreach ($requiredVariantFields as $field) {
+                    $attribute = $field['attribute'];
+                    $label = $field['label'] ?? $attribute;
+                    $errors[] = "missing:{$label}";
+                }
+            } else {
+                foreach ($variants as $variant) {
+                    foreach ($requiredVariantFields as $field) {
+                        $attribute = $field['attribute'];
+                        $label = $field['label'] ?? $attribute;
+                        $value = $this->variantValueFromModel($variant, $attribute);
+                        if ($this->normalizeValue($value) === null) {
+                            $errors[] = "missing:{$label}";
+                            break 2;
+                        }
+                    }
+
+                    $sku = $this->normalizeValue($variant->sku ?? null);
+                    $barcode = $this->normalizeValue($variant->barcode ?? null);
+                    if ($sku !== null && $barcode !== null && $barcode !== $sku) {
+                        $errors[] = 'mismatch:variant_barcode';
+                        break;
+                    }
+                }
+            }
+        }
+
+        $requiredImageFields = $requiredDefinitions['image'];
+        if (!empty($requiredImageFields)) {
+            $images = $product->images;
+
+            if ($images->isEmpty()) {
+                foreach ($requiredImageFields as $field) {
+                    $attribute = $field['attribute'];
+                    $label = $field['label'] ?? $attribute;
+                    $errors[] = "missing:{$label}";
+                }
+            } else {
+                foreach ($images as $image) {
+                    foreach ($requiredImageFields as $field) {
+                        $attribute = $field['attribute'];
+                        $label = $field['label'] ?? $attribute;
+                        $value = $this->imageValueFromModel($image, $attribute);
+                        if ($this->normalizeValue($value) === null) {
+                            $errors[] = "missing:{$label}";
+                            break 2;
+                        }
+                    }
+                }
+            }
+        }
+
+        return array_values(array_unique($errors));
+    }
+
+    private function requiredDefinitions(): array
+    {
+        $required = RequiredField::query()->where('required', true)->get();
+        if ($required->isEmpty()) {
+            $fallbackProduct = [];
+            foreach (config('product_error_rules.product_fields', []) as $attribute) {
+                $fallbackProduct[] = ['attribute' => $attribute, 'label' => $attribute];
+            }
+
+            $fallbackRow = [];
+            foreach (config('product_error_rules.row_fields', []) as $attribute) {
+                $fallbackRow[] = ['attribute' => $attribute, 'label' => $attribute];
+            }
+
+            $fallbackVariant = [];
+            foreach (config('product_error_rules.variant_fields', []) as $attribute) {
+                $fallbackVariant[] = ['attribute' => $attribute, 'label' => $attribute];
+            }
+
+            return [
+                'product' => $fallbackProduct,
+                'row' => $fallbackRow,
+                'variant' => $fallbackVariant,
+                'image' => [],
+            ];
+        }
+
+        $definitions = [
+            'product' => [],
+            'row' => [],
+            'variant' => [],
+            'image' => [],
+        ];
+
+        foreach ($required as $field) {
+            if ($field->source === 'product') {
+                $definitions['product'][] = [
+                    'attribute' => $field->attribute,
+                    'label' => $field->label,
+                ];
+                continue;
+            }
+            if ($field->source === 'row') {
+                $definitions['row'][] = [
+                    'attribute' => $field->attribute,
+                    'label' => $field->label,
+                ];
+                continue;
+            }
+            if ($field->source === 'variant') {
+                $definitions['variant'][] = [
+                    'attribute' => $field->attribute,
+                    'label' => $field->label,
+                ];
+                continue;
+            }
+            if ($field->source === 'image') {
+                $definitions['image'][] = [
+                    'attribute' => $field->attribute,
+                    'label' => $field->label,
+                ];
+            }
+        }
+
+        return $definitions;
+    }
+
+    private function variantValueFromModel(Variant $variant, string $attribute): mixed
+    {
+        return match ($attribute) {
+            'sku' => $variant->sku,
+            'barcode' => $variant->barcode,
+            'price' => $variant->price,
+            'compare_at_price' => $variant->compare_at_price,
+            'option1_name' => $variant->option1_name,
+            'option1_value' => $variant->option1_value,
+            'option2_name' => $variant->option2_name,
+            'option2_value' => $variant->option2_value,
+            'option3_name' => $variant->option3_name,
+            'option3_value' => $variant->option3_value,
+            default => null,
+        };
+    }
+
+    private function imageValueFromModel(Image $image, string $attribute): mixed
+    {
+        return match ($attribute) {
+            'src' => $image->src,
+            'position' => $image->position,
+            'alt_text' => $image->alt_text,
+            default => null,
+        };
     }
 }

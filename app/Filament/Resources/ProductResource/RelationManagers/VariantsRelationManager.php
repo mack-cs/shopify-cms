@@ -13,7 +13,14 @@ class VariantsRelationManager extends RelationManager
     public function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
-            Forms\Components\TextInput::make('sku')->label('SKU'),
+            Forms\Components\TextInput::make('sku')
+                ->label('SKU')
+                ->reactive()
+                ->afterStateUpdated(function ($state, callable $set, callable $get): void {
+                    if ($state && !$get('barcode')) {
+                        $set('barcode', $state);
+                    }
+                }),
             Forms\Components\TextInput::make('barcode')->label('Barcode'),
 
             Forms\Components\TextInput::make('price')->numeric(),

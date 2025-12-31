@@ -7,6 +7,7 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
+use App\Services\Normalizer;
 use App\Services\RowKey;
 use League\Csv\Reader;
 
@@ -15,6 +16,10 @@ class ImageObserver
     public function created(Image $image): void
     {
         $this->syncShopifyRow($image, null);
+        $product = $image->product_id ? Product::find($image->product_id) : null;
+        if ($product) {
+            app(Normalizer::class)->recalculateErrorsForProduct($product);
+        }
     }
 
     public function updating(Image $image): void
@@ -56,6 +61,18 @@ class ImageObserver
             ->where('row_type', 'image')
             ->where('image_key', $oldKey)
             ->delete();
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
+    }
+
+    public function updated(Image $image): void
+    {
+        $product = $image->product_id ? Product::find($image->product_id) : null;
+        if (!$product) {
+            return;
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
 
     private function bumpProductApprovalVersion(?int $productId): void

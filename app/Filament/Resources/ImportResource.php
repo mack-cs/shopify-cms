@@ -14,6 +14,7 @@ use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyCsvImporter;
 use App\Services\ShopifyCsvValidator;
+use App\Services\Normalizer;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Tables\Columns\TextColumn;
@@ -72,30 +73,30 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->color(fn (Import $record) => $record->is_valid ? 'success' : 'danger'),
             TextColumn::make('created_at')->dateTime(),
         ])->actions([
-            Action::make('validateImport')
-                ->label('Validate CSV')
-                ->requiresConfirmation()
-                ->disabled(fn (Import $record) => !$record->is_current)
-                ->action(function (Import $record, ShopifyCsvValidator $validator) {
-                    $result = self::validateImportRecord($record, $validator);
-                    if ($result['valid']) {
-                        self::sendNotification(
-                            Notification::make()
-                                ->title('CSV looks valid')
-                                ->success()
-                        );
-                        return;
-                    }
+            // Action::make('validateImport')
+            //     ->label('Validate CSV')
+            //     ->requiresConfirmation()
+            //     ->disabled(fn (Import $record) => !$record->is_current)
+            //     ->action(function (Import $record, ShopifyCsvValidator $validator) {
+            //         $result = self::validateImportRecord($record, $validator);
+            //         if ($result['valid']) {
+            //             self::sendNotification(
+            //                 Notification::make()
+            //                     ->title('CSV looks valid')
+            //                     ->success()
+            //             );
+            //             return;
+            //         }
 
-                    $body = self::formatValidationErrors($result['errors']);
+            //         $body = self::formatValidationErrors($result['errors']);
 
-                    self::sendNotification(
-                        Notification::make()
-                            ->title('CSV validation failed')
-                            ->body($body)
-                            ->danger()
-                    );
-                }),
+            //         self::sendNotification(
+            //             Notification::make()
+            //                 ->title('CSV validation failed')
+            //                 ->body($body)
+            //                 ->danger()
+            //         );
+            //     }),
             Action::make('runImport')
     ->label('Process Import')
     ->requiresConfirmation()
@@ -168,10 +169,20 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->success()
         );
     }),
-        Action::make('exportAll')
+            Action::make('exportAll')
             ->label('Export (All)')
             ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
-            ->action(function (Import $record, ShopifyCsvExporter $exporter) {
+            ->action(function (Import $record, ShopifyCsvExporter $exporter, Normalizer $normalizer) {
+                $normalizer->recalculateErrors($record);
+                if (Product::where('import_id', $record->id)->where('has_errors', true)->exists()) {
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Export blocked')
+                            ->body('Fix required fields before exporting.')
+                            ->danger()
+                    );
+                    return;
+                }
                 $csv = $exporter->exportToString($record, 'all');
                 $timestamp = now()->format('Ymd_His');
                 $name = "products_{$timestamp}_all.csv";
@@ -195,16 +206,36 @@ protected static ?string $navigationLabel = 'Product Feed';
         Action::make('exportApproved')
             ->label('Export (Approved)')
             ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
-            ->action(function (Import $record, ShopifyCsvExporter $exporter) {
-
-                $totalHandles = Product::where('import_id', $record->id)->count();
-
+            ->action(function (Import $record, ShopifyCsvExporter $exporter, Normalizer $normalizer) {
+                $normalizer->recalculateErrors($record);
                 $approvedHandles = Product::where('import_id', $record->id)
                     ->get()
                     ->filter(fn ($p) => $p->isApprovedByTwo())
-                    ->count();
+                    ->pluck('handle')
+                    ->filter()
+                    ->values()
+                    ->all();
 
-                if ($approvedHandles === 0) {
+                if (!empty($approvedHandles)) {
+                    $hasErrors = Product::where('import_id', $record->id)
+                        ->whereIn('handle', $approvedHandles)
+                        ->where('has_errors', true)
+                        ->exists();
+                    if ($hasErrors) {
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Export blocked')
+                                ->body('Fix required fields for approved products before exporting.')
+                                ->danger()
+                        );
+                        return;
+                    }
+                }
+
+                $totalHandles = Product::where('import_id', $record->id)->count();
+                $approvedCount = count($approvedHandles);
+
+                if ($approvedCount === 0) {
                     self::sendNotification(
                         Notification::make()
                             ->title('Nothing to export')
@@ -214,12 +245,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                     return;
                 }
 
-                if ($approvedHandles < $totalHandles) {
-                    $notApproved = $totalHandles - $approvedHandles;
+                if ($approvedCount < $totalHandles) {
+                    $notApproved = $totalHandles - $approvedCount;
                     self::sendNotification(
                         Notification::make()
                             ->title('Partial export')
-                            ->body("Exporting {$approvedHandles} approved products. {$notApproved} are not approved yet.")
+                            ->body("Exporting {$approvedCount} approved products. {$notApproved} are not approved yet.")
                             ->warning()
                     );
                 }

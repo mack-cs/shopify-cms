@@ -40,6 +40,8 @@ final class HeaderStore
     public const STATUS = 'Status'; // if present
     public const SEO_TITLE = 'SEO Title'; // if present in file
     public const SEO_DESCRIPTION = 'SEO Description'; // if present in file
+    public const COST_PER_ITEM = 'Cost per item';
+    public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
 
     public static function productHeaders(): array
     {

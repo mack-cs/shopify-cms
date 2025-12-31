@@ -4,9 +4,11 @@ namespace App\Providers;
 
 use App\Models\Image;
 use App\Models\Product;
+use App\Models\RequiredField;
 use App\Models\Variant;
 use App\Observers\ImageObserver;
 use App\Observers\ProductObserver;
+use App\Observers\RequiredFieldObserver;
 use App\Observers\VariantObserver;
 use Illuminate\Support\ServiceProvider;
 
@@ -28,5 +30,6 @@ class AppServiceProvider extends ServiceProvider
         Product::observe(ProductObserver::class);
         Variant::observe(VariantObserver::class);
         Image::observe(ImageObserver::class);
+        RequiredField::observe(RequiredFieldObserver::class);
     }
 }
