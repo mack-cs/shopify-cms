@@ -47,6 +47,9 @@ use Filament\Resources\RelationManagers\RelationManager;
 use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
 use App\Services\CategoryTypeMap;
+use App\Services\TagNormalizer;
+use App\Models\Tag;
+use App\Models\Color;
 use League\Csv\Reader;
 use Illuminate\Validation\Rule;
 
@@ -181,7 +184,35 @@ class ProductResource extends Resource
                                     }
                                     $component->state(self::shopifyRowValue($record, 'Target gender (product.metafields.shopify.target-gender)'));
                                 }),
-                            TextInput::make('tags'),
+                            Select::make('tags')
+                                ->label('Tags')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->options(fn () => \App\Models\Tag::query()
+                                    ->orderBy('name')
+                                    ->pluck('name', 'name')
+                                    ->all()
+                                )
+                                ->afterStateUpdated(function (Select $component, $state, callable $set): void {
+                                    $values = is_array($state) ? $state : [];
+                                    $normalized = TagNormalizer::parseTokens(implode(', ', $values));
+                                    if ($normalized !== $values) {
+                                        $set('tags', $normalized);
+                                    }
+                                })
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (! is_string($state) || trim($state) === '') {
+                                        $component->state([]);
+                                        return;
+                                    }
+
+                                    $component->state(TagNormalizer::parseTokens($state));
+                                })
+                                ->dehydrateStateUsing(function ($state): ?string {
+                                    $values = is_array($state) ? $state : [];
+                                    return TagNormalizer::normalizeFromArray($values);
+                                }),
                             TextInput::make('seo_title')
                                 ->columnSpanFull()
                                 ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
@@ -539,6 +570,54 @@ class ProductResource extends Resource
                     ->all())
                 ->searchable()
                 ->preload(),
+            SelectFilter::make('tags')
+                ->label('Tags')
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => Tag::query()
+                    ->orderBy('name')
+                    ->pluck('name', 'name')
+                    ->all())
+                ->query(function (Builder $query, array $data): Builder {
+                    $values = $data['values'] ?? [];
+                    if (!is_array($values) || empty($values)) {
+                        return $query;
+                    }
+
+                    return $query->where(function (Builder $sub) use ($values): void {
+                        foreach ($values as $tag) {
+                            $sub->orWhereRaw(
+                                "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
+                                [$tag]
+                            );
+                        }
+                    });
+                }),
+            SelectFilter::make('color_string')
+                ->label('Colors')
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => Color::query()
+                    ->orderBy('name')
+                    ->pluck('name', 'name')
+                    ->all())
+                ->query(function (Builder $query, array $data): Builder {
+                    $values = $data['values'] ?? [];
+                    if (!is_array($values) || empty($values)) {
+                        return $query;
+                    }
+
+                    return $query->where(function (Builder $sub) use ($values): void {
+                        foreach ($values as $color) {
+                            $sub->orWhereRaw(
+                                "FIND_IN_SET(?, REPLACE(REPLACE(color_string, '; ', ','), ';', ','))",
+                                [$color]
+                            );
+                        }
+                    });
+                }),
             TernaryFilter::make('approved')
                 ->label('Approved')
                 ->queries(

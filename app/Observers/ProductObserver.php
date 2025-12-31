@@ -5,6 +5,8 @@ namespace App\Observers;
 use App\Models\ChangeLog;
 use App\Models\Product;
 use App\Services\Normalizer;
+use App\Services\TagNormalizer;
+use App\Models\Tag;
 use Illuminate\Support\Facades\Auth;
 
 class ProductObserver
@@ -68,6 +70,38 @@ class ProductObserver
 
     public function updated(Product $product): void
     {
+        if ($product->wasChanged('tags')) {
+            $normalized = TagNormalizer::normalizeString($product->tags);
+            if ($normalized !== $product->tags) {
+                Product::withoutEvents(function () use ($product, $normalized): void {
+                    $product->forceFill(['tags' => $normalized])->save();
+                });
+            }
+        }
+
+        if ($product->wasChanged('tags')) {
+            $tokens = TagNormalizer::parseTokens($product->tags);
+            $isBundle = in_array('bundle', $tokens, true) || in_array('bundles', $tokens, true);
+            if ($product->is_bundle !== $isBundle) {
+                Product::withoutEvents(function () use ($product, $isBundle): void {
+                    $product->forceFill(['is_bundle' => $isBundle])->save();
+                });
+            }
+        }
+
         app(Normalizer::class)->recalculateErrorsForProduct($product);
+        $this->syncTagsForProduct($product);
+    }
+
+    private function syncTagsForProduct(Product $product): void
+    {
+        $tokens = TagNormalizer::parseTokens($product->tags);
+        if (empty($tokens)) {
+            return;
+        }
+
+        foreach ($tokens as $token) {
+            Tag::firstOrCreate(['name' => $token], ['active' => true]);
+        }
     }
 }

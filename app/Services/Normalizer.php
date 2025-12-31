@@ -13,7 +13,9 @@ use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Variant;
 use App\Models\Image;
+use App\Models\Tag;
 use Illuminate\Support\Facades\DB;
+use App\Services\TagNormalizer;
 
 final class Normalizer
 {
@@ -43,9 +45,11 @@ final class Normalizer
                 $resolvedGoogle = $this->normalizeValue($resolved['google_product_category'] ?? null);
 
                 $normalizedColor = $this->normalizeColorString($primary->get(HeaderStore::COLOR_METAFIELD, null));
+                $normalizedTags = TagNormalizer::normalizeString($primary->get(HeaderStore::TAGS, null));
 
                 $this->syncCategory($resolvedCategory, $resolvedGoogle);
                 $this->syncColors($normalizedColor);
+                $this->syncTags($normalizedTags);
                 $this->syncStatus($primary->get(HeaderStore::STATUS, null));
                 $this->syncType($resolvedType, $resolvedGoogle);
 
@@ -55,7 +59,7 @@ final class Normalizer
                     'title' => $primary->get(HeaderStore::TITLE, null),
                     'body_html' => $primary->get(HeaderStore::BODY_HTML, null),
                     'vendor' => $primary->get(HeaderStore::VENDOR, null),
-                    'tags' => $primary->get(HeaderStore::TAGS, null),
+                    'tags' => $normalizedTags,
                     'type' => $resolvedType ?? $primary->get(HeaderStore::TYPE, null),
                     'published' => $primary->get(HeaderStore::PUBLISHED, null),
                     'product_category' => $resolvedCategory ?? $categoryName,
@@ -65,7 +69,7 @@ final class Normalizer
                     'seo_description' => $primary->get(HeaderStore::SEO_DESCRIPTION, null),
                     'color_string' => $normalizedColor,
                     'batch' => $this->defaultBatchForImport($import),
-                    'is_bundle' => $this->inferIsBundle($handle, $primary->get(HeaderStore::TITLE, null)),
+                    'is_bundle' => $this->isBundleFromTags($normalizedTags),
                 ]);
 
                 StyleProfile::where('handle', $handle)
@@ -211,14 +215,14 @@ final class Normalizer
         return "import_{$stamp}";
     }
 
-    private function inferIsBundle(?string $handle, ?string $title): bool
+    private function isBundleFromTags(?string $tags): bool
     {
-        $haystack = trim(($handle ?? '') . ' ' . ($title ?? ''));
-        if ($haystack === '') {
+        $tokens = TagNormalizer::parseTokens($tags);
+        if (empty($tokens)) {
             return false;
         }
 
-        return preg_match('/\\b(trio|quad)\\b/i', $haystack) === 1;
+        return in_array('bundle', $tokens, true) || in_array('bundles', $tokens, true);
     }
 
     private function syncCategory(?string $name, ?string $googleCategory): ?Category
@@ -263,6 +267,21 @@ final class Normalizer
             $existing = Color::whereRaw('LOWER(name) = ?', [$lower])->first();
             if (!$existing) {
                 Color::create(['name' => $name, 'active' => true]);
+            }
+        }
+    }
+
+    private function syncTags(?string $tagsString): void
+    {
+        $tokens = TagNormalizer::parseTokens($tagsString);
+        if (empty($tokens)) {
+            return;
+        }
+
+        foreach ($tokens as $token) {
+            $existing = Tag::whereRaw('LOWER(name) = ?', [strtolower($token)])->first();
+            if (!$existing) {
+                Tag::create(['name' => $token, 'active' => true]);
             }
         }
     }
