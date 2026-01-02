@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\RequiredField;
 use App\Services\HeaderStore;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
 
 class RequiredFieldSeeder extends Seeder
@@ -73,32 +74,39 @@ class RequiredFieldSeeder extends Seeder
             $requiredLookup[$item['source'] . '|' . $item['attribute']] = true;
         }
 
+        $bulkEditableDefaults = [
+            'row|' . HeaderStore::JEWELRY_MATERIAL,
+            'product|published',
+            'product|status',
+            'row|Bracelet design (product.metafields.shopify.bracelet-design)',
+        ];
+
+        $bulkEditableLookup = array_fill_keys($bulkEditableDefaults, true);
+
         $rows = [];
         foreach ($headers as $header) {
             if (isset($productHeaderMap[$header])) {
                 $attribute = $productHeaderMap[$header];
-                $rows[] = $this->makeRow('product', 'product', $attribute, $header, $requiredLookup);
+                $rows[] = $this->makeRow('product', 'product', $attribute, $header, $requiredLookup, $bulkEditableLookup);
                 continue;
             }
             if (isset($variantHeaderMap[$header])) {
                 $attribute = $variantHeaderMap[$header];
-                $rows[] = $this->makeRow('variant', 'variant', $attribute, $header, $requiredLookup);
+                $rows[] = $this->makeRow('variant', 'variant', $attribute, $header, $requiredLookup, $bulkEditableLookup);
                 continue;
             }
             if (isset($imageHeaderMap[$header])) {
                 $attribute = $imageHeaderMap[$header];
-                $rows[] = $this->makeRow('image', 'image', $attribute, $header, $requiredLookup);
+                $rows[] = $this->makeRow('image', 'image', $attribute, $header, $requiredLookup, $bulkEditableLookup);
                 continue;
             }
 
-            $rows[] = $this->makeRow('extra', 'row', $header, $header, $requiredLookup);
+            $rows[] = $this->makeRow('extra', 'row', $header, $header, $requiredLookup, $bulkEditableLookup);
         }
 
-        foreach ($rows as $row) {
-            RequiredField::updateOrCreate(
-                ['source' => $row['source'], 'attribute' => $row['attribute']],
-                $row
-            );
+        DB::table('required_fields')->truncate();
+        if (!empty($rows)) {
+            DB::table('required_fields')->insert($rows);
         }
     }
 
@@ -107,9 +115,11 @@ class RequiredFieldSeeder extends Seeder
         string $source,
         string $attribute,
         string $label,
-        array $requiredLookup
+        array $requiredLookup,
+        array $bulkEditableLookup
     ): array {
         $isRequired = $requiredLookup[$source . '|' . $attribute] ?? false;
+        $isBulkEditable = $bulkEditableLookup[$source . '|' . $attribute] ?? false;
 
         return [
             'scope' => $scope,
@@ -117,6 +127,7 @@ class RequiredFieldSeeder extends Seeder
             'attribute' => $attribute,
             'label' => $label,
             'required' => $isRequired,
+            'bulk_editable' => $isBulkEditable,
         ];
     }
 

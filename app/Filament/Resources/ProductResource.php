@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\Approval;
 use App\Models\Import;
 use App\Models\ShopifyRow;
+use App\Models\RequiredField;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
 use Filament\Resources\Resource;
@@ -19,6 +20,7 @@ use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Toggle;
+use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Actions;
 use Filament\Forms\Components\Actions\Action as FormAction;
 use Filament\Forms\Components\Grid;
@@ -30,6 +32,7 @@ use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Tables\Actions\EditAction;
 use Filament\Tables\Actions\ExportBulkAction;
+use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
@@ -40,6 +43,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Actions\DeleteBulkAction;
+use Illuminate\Support\Collection;
 use App\Filament\Exports\ProductExporter;
 use App\Filament\Resources\ProductResource\Pages;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
@@ -48,6 +52,7 @@ use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
 use App\Services\CategoryTypeMap;
 use App\Services\TagNormalizer;
+use App\Services\Normalizer;
 use App\Models\Tag;
 use App\Models\Color;
 use League\Csv\Reader;
@@ -285,11 +290,11 @@ class ProductResource extends Resource
                                 if ($hasSolidPlain && $hasMulti) {
                                     $added = array_diff($lower, $prevLower);
                                     if (in_array('multicolour', $added, true)) {
-                                        $message = 'Multicolour can’t be selected with Solid or Plain.';
+                                        $message = "Multicolour can't be selected with Solid or Plain.";
                                     } elseif (in_array('solid', $added, true) || in_array('plain', $added, true)) {
-                                        $message = 'You can’t select Solid or Plain with Multicolour.';
+                                        $message = "You can't select Solid or Plain with Multicolour.";
                                     } else {
-                                        $message = 'Multicolour can’t be selected with Solid or Plain.';
+                                        $message = "Multicolour can't be selected with Solid or Plain.";
                                     }
                                 }
 
@@ -326,7 +331,7 @@ class ProductResource extends Resource
                                         }
 
                                         $message = $get('color_conflict_message')
-                                            ?: 'Multicolour can’t be selected with Solid or Plain.';
+                                            ?: "Multicolour can't be selected with Solid or Plain.";
                                         $fail($message);
                                     };
                                 },
@@ -414,33 +419,6 @@ class ProductResource extends Resource
                                 ->content(fn (?Product $record): string => $record
                                     ? ($record->approvalsForCurrentVersionCount() . '/2')
                                     : '0/2'),
-                            Actions::make([
-                                FormAction::make('approve')
-                                    ->label('Approve')
-                                    ->action(function (?Product $record): void {
-                                        if (!$record) {
-                                            return;
-                                        }
-
-                                        Approval::firstOrCreate([
-                                            'product_id' => $record->id,
-                                            'user_id' => Auth::id(),
-                                            'approval_version' => $record->approval_version,
-                                        ]);
-
-                                        $count = $record->approvals()
-                                            ->where('approval_version', $record->approval_version)
-                                            ->distinct('user_id')
-                                            ->count('user_id');
-
-                                        Notification::make()
-                                            ->title('Approved')
-                                            ->body("Approvals for current version: {$count}/2")
-                                            ->success()
-                                            ->send();
-                                    })
-                                    ->visible(fn (?Product $record): bool => (bool) $record),
-                            ]),
                         ]),
 
 
@@ -502,6 +480,16 @@ class ProductResource extends Resource
                 ->size(40),
             TextColumn::make('handle')->searchable(),
             TextColumn::make('title')->searchable(),
+            TextColumn::make('seo_title')
+                ->label('SEO title')
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('seo_description')
+                ->label('SEO description')
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('jewelry_material')
+                ->label('Jewelry material')
+                ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL))
+                ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('has_errors')
                 ->label('Errors')
                 ->icon(fn (bool $state): string => $state ? 'heroicon-o-x-circle' : 'heroicon-o-check-circle')
@@ -519,7 +507,7 @@ class ProductResource extends Resource
                 })
                 ->toggleable(),
             TextColumn::make('type')->label('Type')->toggleable(),
-            TextColumn::make('vendor'),
+            TextColumn::make('vendor')->toggleable(),
             IconColumn::make('published')
                 ->label('Published')
                 ->boolean()
@@ -532,9 +520,11 @@ class ProductResource extends Resource
                 ->label('Bundle')
                 ->boolean()
                 ->trueColor('warning')
-                ->falseColor('gray'),
+                ->falseColor('gray')
+                ->toggleable(),
             TextColumn::make('you_save')
-                ->label('You Save'),
+                ->label('You Save')
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('approvals_current')
                 ->label('Approvals')
                 ->state(fn (Product $record) => $record->approvalsForCurrentVersionCount())
@@ -637,28 +627,66 @@ class ProductResource extends Resource
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Tables\Actions\DeleteAction::make()
                 ->visible(fn (Product $record): bool => static::canDelete($record)),
-            Action::make('approve')
-            ->label('Approve')
-            ->action(function (Product $record) {
-                Approval::firstOrCreate([
-                    'product_id' => $record->id,
-                    'user_id' => Auth::id(),
-                    'approval_version' => $record->approval_version,
-                ]);
-
-                $count = $record->approvals()
-                    ->where('approval_version', $record->approval_version)
-                    ->distinct('user_id')
-                    ->count('user_id');
-
-                Notification::make()
-                    ->title('Approved')
-                    ->body("Approvals for current version: {$count}/2")
-                    ->success()
-                    ->send();
-    })
         ])->bulkActions([
             BulkActionGroup::make([
+                BulkAction::make('bulkEdit')
+                    ->label('Bulk Edit')
+                    ->icon('heroicon-o-pencil-square')
+                    ->form(self::bulkEditFormSchema())
+                    ->action(function (Collection $records, array $data): void {
+                        self::applyBulkEdits($records, $data);
+                    })
+                    ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkApprove')
+                    ->label('Bulk Approve')
+                    ->icon('heroicon-o-check-badge')
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records): void {
+                        $errorCount = $records->filter(fn (Product $record) => $record->has_errors)->count();
+                        $approvedCount = 0;
+                        $skippedCount = 0;
+
+                        foreach ($records as $record) {
+                            if ($record->has_errors) {
+                                continue;
+                            }
+
+                            $exists = Approval::where('product_id', $record->id)
+                                ->where('user_id', Auth::id())
+                                ->where('approval_version', $record->approval_version)
+                                ->exists();
+
+                            if ($exists) {
+                                $skippedCount++;
+                                continue;
+                            }
+
+                            Approval::create([
+                                'product_id' => $record->id,
+                                'user_id' => Auth::id(),
+                                'approval_version' => $record->approval_version,
+                            ]);
+                            $approvedCount++;
+                        }
+
+                        $parts = [];
+                        if ($approvedCount > 0) {
+                            $parts[] = "Approved {$approvedCount}.";
+                        }
+                        if ($skippedCount > 0) {
+                            $parts[] = "Skipped {$skippedCount} already approved by you.";
+                        }
+                        if ($errorCount > 0) {
+                            $parts[] = "Errors on {$errorCount}; fix before approval.";
+                        }
+
+                        Notification::make()
+                            ->title('Bulk approval complete')
+                            ->body($parts ? implode(' ', $parts) : 'No products were approved.')
+                            ->success()
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 ExportBulkAction::make()
                     ->exporter(ProductExporter::class)
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
@@ -766,5 +794,229 @@ class ProductResource extends Resource
         $csv = Reader::createFromPath($templatePath);
         $csv->setHeaderOffset(0);
         return $csv->getHeader();
+    }
+
+    private static function bulkEditFormSchema(): array
+    {
+        $fields = self::bulkEditableFields();
+        if (empty($fields)) {
+            return [
+                Placeholder::make('no_bulk_fields')
+                    ->content('No bulk-editable fields are configured.'),
+            ];
+        }
+
+        $schema = [
+            Placeholder::make('bulk_edit_hint')
+                ->content('Tick a field to enable it, then enter the value to apply to all selected products.'),
+        ];
+
+        $schema[] = Grid::make(1)
+            ->schema(array_map(function (array $field) {
+                $safeKey = $field['safe_key'];
+                $label = $field['label'];
+
+                return Grid::make(12)
+                    ->schema([
+                        Checkbox::make("fields.{$safeKey}")
+                            ->label($label)
+                            ->live()
+                            ->columnSpan(4),
+                        self::bulkEditComponent($field)
+                            ->label('')
+                            ->statePath("values.{$safeKey}")
+                            ->columnSpan(8)
+                            ->disabled(fn (Get $get): bool => !($get("fields.{$safeKey}") ?? false))
+                            ->dehydrated(fn (Get $get): bool => (bool) ($get("fields.{$safeKey}") ?? false)),
+                    ]);
+            }, $fields));
+
+        return $schema;
+    }
+
+    private static function bulkEditableFields(): array
+    {
+        $labelOverrides = [
+            'product|color_string' => 'Colors',
+            'product|product_category' => 'Category',
+            'product|google_product_category' => 'Google product category',
+            'product|seo_title' => 'SEO title',
+            'product|seo_description' => 'SEO description',
+            'row|' . HeaderStore::JEWELRY_MATERIAL => 'Jewelry material',
+            'row|Bracelet design (product.metafields.shopify.bracelet-design)' => 'Bracelet design',
+        ];
+
+        $lockedProductFields = [
+            'handle',
+            'title',
+            'body_html',
+            'seo_title',
+            'seo_description',
+        ];
+
+        $lockedRowFields = [
+            HeaderStore::IMAGE_SRC,
+            HeaderStore::IMAGE_ALT_TEXT,
+            HeaderStore::IMAGE_POSITION,
+        ];
+
+        $query = RequiredField::query()
+            ->where('bulk_editable', true)
+            ->whereIn('source', ['product', 'row'])
+            ->orderBy('label');
+
+        $fields = [];
+        foreach ($query->get() as $field) {
+            if ($field->source === 'product' && in_array($field->attribute, $lockedProductFields, true)) {
+                continue;
+            }
+            if ($field->source === 'row' && in_array($field->attribute, $lockedRowFields, true)) {
+                continue;
+            }
+
+            $labelKey = "{$field->source}|{$field->attribute}";
+            $label = $labelOverrides[$labelKey] ?? $field->label;
+
+            $key = "{$field->source}__{$field->attribute}";
+            $fields[] = [
+                'key' => $key,
+                'safe_key' => 'f_' . md5($key),
+                'source' => $field->source,
+                'attribute' => $field->attribute,
+                'label' => $label,
+            ];
+        }
+
+        return $fields;
+    }
+
+    private static function bulkEditComponent(array $field): Forms\Components\Component
+    {
+        if ($field['source'] === 'product' && $field['attribute'] === 'tags') {
+            return Select::make('tags')
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => Tag::query()->orderBy('name')->pluck('name', 'name')->all());
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'color_string') {
+            return Select::make('color_string')
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => Color::query()->orderBy('name')->pluck('name', 'name')->all());
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'type') {
+            $types = CategoryTypeMap::types();
+            return Select::make('type')
+                ->options(array_combine($types, $types))
+                ->searchable();
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'product_category') {
+            $categories = CategoryTypeMap::categories();
+            return Select::make('product_category')
+                ->options(array_combine($categories, $categories))
+                ->searchable();
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'status') {
+            return Select::make('status')
+                ->options(fn () => Status::query()->orderBy('name')->pluck('name', 'name')->all())
+                ->searchable();
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'published') {
+            return Toggle::make('published');
+        }
+
+        if ($field['source'] === 'product' && $field['attribute'] === 'body_html') {
+            return Textarea::make('body_html')->rows(4);
+        }
+
+        return TextInput::make($field['attribute']);
+    }
+
+    private static function applyBulkEdits(Collection $records, array $data): void
+    {
+        $selected = array_keys(array_filter($data['fields'] ?? []));
+        $values = $data['values'] ?? [];
+        if (!is_array($selected) || empty($selected)) {
+            return;
+        }
+
+        $fieldMap = [];
+        foreach (self::bulkEditableFields() as $field) {
+            $fieldMap[$field['safe_key']] = $field;
+        }
+
+        foreach ($records as $product) {
+            $productUpdates = [];
+            $rowUpdates = [];
+
+            foreach ($selected as $safeKey) {
+                $field = $fieldMap[$safeKey] ?? null;
+                if (!$field) {
+                    continue;
+                }
+
+                $value = $values[$safeKey] ?? null;
+                if ($field['source'] === 'product') {
+                    $attribute = $field['attribute'];
+                    if ($attribute === 'tags') {
+                        $arr = is_array($value) ? $value : [];
+                        $productUpdates['tags'] = TagNormalizer::normalizeFromArray($arr);
+                        continue;
+                    }
+                    if ($attribute === 'color_string') {
+                        $arr = is_array($value) ? $value : [];
+                        $clean = array_values(array_unique(array_filter(array_map(
+                            fn ($v) => trim((string) $v),
+                            $arr
+                        ))));
+                        $productUpdates['color_string'] = $clean ? implode('; ', $clean) : null;
+                        continue;
+                    }
+                    if ($attribute === 'published') {
+                        $productUpdates['published'] = $value ? 'true' : 'false';
+                        continue;
+                    }
+
+                    $productUpdates[$attribute] = $value;
+                    continue;
+                }
+
+                if ($field['source'] === 'row') {
+                    $rowUpdates[$field['attribute']] = $value;
+                }
+            }
+
+            if (!empty($productUpdates)) {
+                $product->fill($productUpdates);
+                $product->save();
+            }
+
+            if (!empty($rowUpdates)) {
+                $row = ShopifyRow::where('import_id', $product->import_id)
+                    ->where('handle', $product->handle)
+                    ->where('row_type', 'product_primary')
+                    ->first();
+                if ($row) {
+                    $dataRow = $row->data ?? [];
+                    foreach ($rowUpdates as $header => $value) {
+                        if (is_array($value)) {
+                            $value = implode('; ', array_values(array_filter(array_map('trim', $value))));
+                        }
+                        $dataRow[$header] = $value ?? '';
+                    }
+                    $row->data = $dataRow;
+                    $row->save();
+                }
+            }
+
+            app(Normalizer::class)->recalculateErrorsForProduct($product);
+        }
     }
 }

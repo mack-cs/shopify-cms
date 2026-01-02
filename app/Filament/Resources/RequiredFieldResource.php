@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\RequiredFieldResource\Pages;
 use App\Models\RequiredField;
+use App\Services\HeaderStore;
 use App\Models\Import;
 use App\Services\Normalizer;
 use Filament\Forms;
@@ -33,6 +34,9 @@ class RequiredFieldResource extends Resource
             Forms\Components\TextInput::make('source')->disabled(),
             Forms\Components\TextInput::make('attribute')->disabled(),
             Forms\Components\Toggle::make('required'),
+            Forms\Components\Toggle::make('bulk_editable')
+                ->label('Bulk editable')
+                ->disabled(fn (?RequiredField $record): bool => $record ? self::isBulkEditLocked($record) : false),
         ])->columns(2);
     }
 
@@ -50,6 +54,9 @@ class RequiredFieldResource extends Resource
                 TextColumn::make('source')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('attribute')->toggleable(isToggledHiddenByDefault: true),
                 ToggleColumn::make('required')->label('Required'),
+                ToggleColumn::make('bulk_editable')
+                    ->label('Bulk editable')
+                    ->disabled(fn (RequiredField $record): bool => self::isBulkEditLocked($record)),
             ])
             ->filters([
                 SelectFilter::make('scope')
@@ -98,6 +105,43 @@ class RequiredFieldResource extends Resource
 
     public static function canDeleteAny(): bool
     {
+        return false;
+    }
+
+    private static function isBulkEditLocked(RequiredField $record): bool
+    {
+        if ($record->source === 'product' && in_array($record->attribute, [
+            'handle',
+            'title',
+            'body_html',
+            'seo_title',
+            'seo_description',
+        ], true)) {
+            return true;
+        }
+
+        if ($record->source === 'variant' && in_array($record->attribute, [
+            'sku',
+            'barcode',
+            'url',
+            'image',
+            'image_src',
+        ], true)) {
+            return true;
+        }
+
+        if ($record->source === 'image') {
+            return true;
+        }
+
+        if ($record->source === 'row' && in_array($record->attribute, [
+            HeaderStore::IMAGE_SRC,
+            HeaderStore::IMAGE_ALT_TEXT,
+            HeaderStore::IMAGE_POSITION,
+        ], true)) {
+            return true;
+        }
+
         return false;
     }
 }
