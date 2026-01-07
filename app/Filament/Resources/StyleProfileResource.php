@@ -5,9 +5,14 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\StyleProfileResource\Pages;
 use App\Enums\RolesEnum;
 use App\Models\Product;
+use App\Models\Setting;
 use App\Models\StyleProfile;
 use App\Services\StyleProfileCsvImporter;
+use App\Services\TagNormalizer;
+use Filament\Forms\Components\Checkbox;
+use Filament\Forms\Get;
 use Filament\Forms;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -25,6 +30,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
+use Filament\Tables\Actions\DeleteBulkAction;
 use Illuminate\Support\Facades\Storage;
 use App\Filament\Exports\StyleProfileExporter;
 
@@ -49,7 +55,7 @@ class StyleProfileResource extends Resource
                         ->preload()
                         ->nullable()
                         ->getOptionLabelFromRecordUsing(fn (Product $record) => trim($record->handle . ' - ' . ($record->title ?? ''))),
-                    TextInput::make('sku')->required()->maxLength(80),
+                    TextInput::make('sku')->maxLength(80)->helperText('Optional. Defaults to handle.'),
                     TextInput::make('image_url')->label('Image')->maxLength(2048),
                 ])->columns(2),
             Section::make('Inputs')
@@ -111,23 +117,52 @@ class StyleProfileResource extends Resource
                         $source = $productImage ?: $record->image_url;
 
                         return self::normalizeImageUrl($source);
-                    }),
+                    })
+                    ->toggleable(),
                 TextColumn::make('product.title')
                     ->label('Product')
                     ->searchable()
-                    ->sortable(),
+                    ->sortable()
+                    ->toggleable(),
+                TextColumn::make('product.vendor')
+                    ->label('Vendor')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('handle')
                     ->label('Handle')
                     ->searchable()
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('sku')->searchable(),
-                TextColumn::make('materials')->searchable(),
+                TextColumn::make('sku')
+                    ->searchable()
+                    ->toggleable(),
+                TextColumn::make('materials')
+                    ->searchable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('style_type')->label('Style')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('draft_title')
+                    ->label('Title')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('draft_description')
+                    ->label('Description')
+                    ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('draft_seo_title')->label('SEO Title')->limit(60)->wrap()->toggleable(),
                 TextColumn::make('draft_seo_description')
                     ->label('SEO Desc')
                     ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('draft_image_alt_text')
+                    ->label('Image Alt')
+                    ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('image_url')
+                    ->label('Image URL')
+                    ->limit(60)
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('seo_sync_status')
@@ -148,10 +183,58 @@ class StyleProfileResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
-                SelectFilter::make('product_id')
-                    ->label('Product')
-                    ->relationship('product', 'handle')
-                    ->searchable(),
+                SelectFilter::make('vendor')
+                    ->label('Vendor')
+                    ->options(fn () => Product::query()
+                        ->whereNotNull('vendor')
+                        ->where('vendor', '!=', '')
+                        ->distinct()
+                        ->orderBy('vendor')
+                        ->pluck('vendor', 'vendor')
+                        ->all())
+                    ->searchable()
+                    ->query(function ($query, array $data) {
+                        $vendor = $data['value'] ?? null;
+                        if (!$vendor) {
+                            return;
+                        }
+
+                        $query->whereHas('product', fn ($builder) => $builder->where('vendor', $vendor));
+                    }),
+                SelectFilter::make('product_tag')
+                    ->label('Tag')
+                    ->options(fn (): array => self::tagOptions())
+                    ->searchable()
+                    ->query(function ($query, array $data) {
+                        $tag = $data['value'] ?? null;
+                        if (!$tag) {
+                            return;
+                        }
+
+                        $query->whereHas('product', function ($builder) use ($tag) {
+                            $builder->whereRaw(
+                                "CONCAT(',', REPLACE(tags, ' ', ''), ',') LIKE ?",
+                                ["%,{$tag},%"]
+                            );
+                        });
+                    }),
+                SelectFilter::make('product_color')
+                    ->label('Color')
+                    ->options(fn (): array => self::colorOptions())
+                    ->searchable()
+                    ->query(function ($query, array $data) {
+                        $color = $data['value'] ?? null;
+                        if (!$color) {
+                            return;
+                        }
+
+                        $query->whereHas('product', function ($builder) use ($color) {
+                            $builder->whereRaw(
+                                "CONCAT(';', REPLACE(color_string, ' ', ''), ';') LIKE ?",
+                                ["%;{$color};%"]
+                            );
+                        });
+                    }),
                 TernaryFilter::make('unlinked')
                     ->label('Unlinked')
                     ->queries(
@@ -164,6 +247,28 @@ class StyleProfileResource extends Resource
                 Tables\Actions\DeleteAction::make(),
             ])
             ->headerActions([
+                Tables\Actions\Action::make('toggleSeoLock')
+                    ->label(function (): string {
+                        $default = config('style_profiles.lock_product_seo', true);
+                        $enabled = Setting::getBool('style_profiles.lock_product_seo', $default);
+                        return $enabled ? 'SEO Lock: On' : 'SEO Lock: Off';
+                    })
+                    ->color(function (): string {
+                        $default = config('style_profiles.lock_product_seo', true);
+                        return Setting::getBool('style_profiles.lock_product_seo', $default) ? 'success' : 'gray';
+                    })
+                    ->icon(fn (): string => 'heroicon-o-lock-closed')
+                    ->requiresConfirmation()
+                    ->action(function (): void {
+                        $default = config('style_profiles.lock_product_seo', true);
+                        $enabled = Setting::getBool('style_profiles.lock_product_seo', $default);
+                        Setting::putBool('style_profiles.lock_product_seo', !$enabled);
+
+                        Notification::make()
+                            ->title(!$enabled ? 'SEO lock enabled' : 'SEO lock disabled')
+                            ->success()
+                            ->send();
+                    }),
                 Tables\Actions\CreateAction::make()
                     ->modalHeading('Add Style Profile')
                     ->color('success')
@@ -187,21 +292,247 @@ class StyleProfileResource extends Resource
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Imported: {$result['imported']}, " .
-                                "No Handle: {$result['skipped_no_handle']}, No SKU: {$result['skipped_no_sku']}, " .
+                                "No Handle: {$result['skipped_no_handle']}, " .
                                 "No product link: {$result['unlinked_no_product']}"
                             )
+                            ->success()
+                            ->send();
+                    }),
+                Tables\Actions\Action::make('loadMissingProducts')
+                    ->label('Load Missing Products')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->form([
+                        Select::make('vendor')
+                            ->label('Vendor')
+                            ->options(fn () => Product::query()
+                                ->whereNotNull('vendor')
+                                ->where('vendor', '!=', '')
+                                ->distinct()
+                                ->orderBy('vendor')
+                                ->pluck('vendor', 'vendor')
+                                ->all())
+                            ->searchable()
+                            ->placeholder('All vendors')
+                            ->nullable(),
+                        CheckboxList::make('fields')
+                            ->label('Copy fields')
+                            ->options([
+                                'title' => 'Title',
+                                'description' => 'Description',
+                                'seo_title' => 'SEO title',
+                                'seo_description' => 'SEO description',
+                                'image_alt' => 'Image alt text',
+                                'image_url' => 'Image URL',
+                            ])
+                            ->columns(2)
+                            ->default(['title', 'description', 'seo_title', 'seo_description', 'image_alt', 'image_url']),
+                    ])
+                    ->action(function (array $data): void {
+                        $fields = array_fill_keys($data['fields'] ?? [], true);
+                        $vendor = $data['vendor'] ?? null;
+
+                        $created = 0;
+                        $skippedExisting = 0;
+
+                        Product::query()
+                            ->when($vendor, fn ($query) => $query->where('vendor', $vendor))
+                            ->with(['variants', 'images'])
+                            ->chunkById(200, function ($products) use (&$created, &$skippedExisting, $fields): void {
+                                foreach ($products as $product) {
+                                    if (!$product->handle) {
+                                        continue;
+                                    }
+
+                                    $exists = StyleProfile::where('handle', $product->handle)->exists();
+                                    if ($exists) {
+                                        $skippedExisting++;
+                                        continue;
+                                    }
+
+                                    $image = $product->images
+                                        ->sortBy(fn ($img) => $img->position ?? PHP_INT_MAX)
+                                        ->first();
+                                    $imageUrl = $image?->src;
+                                    $imageAlt = $image?->alt_text;
+
+                                    $sku = trim((string) ($product->variants->first()?->sku ?? ''));
+                                    if ($sku === '') {
+                                        $sku = $product->handle;
+                                    }
+
+                                    $payload = [
+                                        'product_id' => $product->id,
+                                        'handle' => $product->handle,
+                                        'sku' => $sku,
+                                    ];
+
+                                    if (!empty($fields['title']) && $product->title) {
+                                        $payload['draft_title'] = $product->title;
+                                    }
+                                    if (!empty($fields['description']) && $product->body_html) {
+                                        $payload['draft_description'] = $product->body_html;
+                                    }
+                                    if (!empty($fields['seo_title']) && $product->seo_title) {
+                                        $payload['draft_seo_title'] = $product->seo_title;
+                                    }
+                                    if (!empty($fields['seo_description']) && $product->seo_description) {
+                                        $payload['draft_seo_description'] = $product->seo_description;
+                                    }
+                                    if (!empty($fields['image_alt']) && $imageAlt) {
+                                        $payload['draft_image_alt_text'] = $imageAlt;
+                                    }
+                                    if (!empty($fields['image_url']) && $imageUrl) {
+                                        $payload['image_url'] = $imageUrl;
+                                    }
+
+                                    StyleProfile::create($payload);
+                                    $created++;
+                                }
+                            });
+
+                        Notification::make()
+                            ->title('Style profiles loaded')
+                            ->body("Created {$created}. Skipped (existing handle): {$skippedExisting}.")
                             ->success()
                             ->send();
                     }),
             ])
             ->bulkActions([
                 BulkActionGroup::make([
-                    BulkAction::make('pushReadySeo')
-                        ->label('Push SEO (Ready)')
-                        ->icon('heroicon-o-cloud-arrow-up')
+                    DeleteBulkAction::make()
+                        ->label('Delete Styles')
+                        ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
+                    BulkAction::make('markReady')
+                        ->label('Mark Ready')
+                        ->icon('heroicon-o-check-circle')
                         ->requiresConfirmation()
                         ->action(function ($records): void {
+                            $updated = 0;
+                            foreach ($records as $record) {
+                                if ($record->seo_sync_status === 'ready') {
+                                    continue;
+                                }
+                                $record->update(['seo_sync_status' => 'ready']);
+                                $updated++;
+                            }
+
+                            Notification::make()
+                                ->title('Styles marked ready')
+                                ->body("Updated {$updated} style(s).")
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('bulkUpdateInputs')
+                        ->label('Bulk Update Inputs')
+                        ->icon('heroicon-o-pencil-square')
+                        ->form([
+                            Forms\Components\Grid::make(2)
+                                ->schema([
+                                    Checkbox::make('update_style_type')
+                                        ->label('Style')
+                                        ->inline()
+                                        ->live(),
+                                    TextInput::make('style_type')
+                                        ->label('Style')
+                                        ->maxLength(120)
+                                        ->disabled(fn (Get $get): bool => !$get('update_style_type')),
+                                    Checkbox::make('update_materials')
+                                        ->label('Materials')
+                                        ->inline()
+                                        ->live(),
+                                    TextInput::make('materials')
+                                        ->label('Materials')
+                                        ->maxLength(255)
+                                        ->disabled(fn (Get $get): bool => !$get('update_materials')),
+                                    Checkbox::make('update_components')
+                                        ->label('Components')
+                                        ->inline()
+                                        ->live(),
+                                    TextInput::make('components')
+                                        ->label('Components')
+                                        ->maxLength(255)
+                                        ->disabled(fn (Get $get): bool => !$get('update_components')),
+                                    Checkbox::make('update_colour_prompt')
+                                        ->label('Colour prompt')
+                                        ->inline()
+                                        ->live(),
+                                    Textarea::make('colour_prompt')
+                                        ->label('Colour prompt')
+                                        ->rows(2)
+                                        ->disabled(fn (Get $get): bool => !$get('update_colour_prompt')),
+                                ]),
+                        ])
+                        ->action(function ($records, array $data): void {
+                            $fields = [
+                                'style_type' => (bool) ($data['update_style_type'] ?? false),
+                                'materials' => (bool) ($data['update_materials'] ?? false),
+                                'components' => (bool) ($data['update_components'] ?? false),
+                                'colour_prompt' => (bool) ($data['update_colour_prompt'] ?? false),
+                            ];
+
+                            if (!array_filter($fields)) {
+                                Notification::make()
+                                    ->title('Choose at least one field')
+                                    ->warning()
+                                    ->send();
+                                return;
+                            }
+
+                            $payload = [];
+                            if (!empty($fields['style_type'])) {
+                                $payload['style_type'] = self::nullIfEmpty($data['style_type'] ?? null);
+                            }
+                            if (!empty($fields['materials'])) {
+                                $payload['materials'] = self::nullIfEmpty($data['materials'] ?? null);
+                            }
+                            if (!empty($fields['components'])) {
+                                $payload['components'] = self::nullIfEmpty($data['components'] ?? null);
+                            }
+                            if (!empty($fields['colour_prompt'])) {
+                                $payload['colour_prompt'] = self::nullIfEmpty($data['colour_prompt'] ?? null);
+                            }
+
+                            if (!$payload) {
+                                Notification::make()
+                                    ->title('No fields to update')
+                                    ->warning()
+                                    ->send();
+                                return;
+                            }
+
+                            foreach ($records as $record) {
+                                $record->update($payload);
+                            }
+
+                            Notification::make()
+                                ->title('Styles updated')
+                                ->success()
+                                ->send();
+                        }),
+                    BulkAction::make('pushReadySeo')
+                        ->label('Push to Product (Ready)')
+                        ->icon('heroicon-o-cloud-arrow-up')
+                        ->requiresConfirmation()
+                        ->form([
+                            CheckboxList::make('fields')
+                                ->label('Fields to sync')
+                                ->options([
+                                    'title' => 'Title',
+                                    'description' => 'Description',
+                                    'seo_title' => 'SEO title',
+                                    'seo_description' => 'SEO description',
+                                    'image_alt' => 'Image alt text',
+                                ])
+                                ->columns(2)
+                                ->default(['seo_title', 'seo_description']),
+                        ])
+                        ->action(function ($records, array $data): void {
+                            $fields = array_fill_keys($data['fields'] ?? [], true);
                             $synced = 0;
+                            $syncedIds = [];
+                            $syncedAt = Carbon::now();
                             foreach ($records as $record) {
                                 if ($record->seo_sync_status !== 'ready') {
                                     continue;
@@ -212,23 +543,46 @@ class StyleProfileResource extends Resource
                                 }
 
                                 $payload = [];
-                                if ($record->draft_seo_title) {
+                                if (!empty($fields['title']) && $record->draft_title) {
+                                    $payload['title'] = $record->draft_title;
+                                }
+                                if (!empty($fields['description']) && $record->draft_description) {
+                                    $payload['body_html'] = $record->draft_description;
+                                }
+                                if (!empty($fields['seo_title']) && $record->draft_seo_title) {
                                     $payload['seo_title'] = $record->draft_seo_title;
                                 }
-                                if ($record->draft_seo_description) {
+                                if (!empty($fields['seo_description']) && $record->draft_seo_description) {
                                     $payload['seo_description'] = $record->draft_seo_description;
                                 }
 
-                                if (!$payload) {
+                                $updatedImage = false;
+                                if (!empty($fields['image_alt']) && $record->draft_image_alt_text) {
+                                    $image = $product->images()
+                                        ->orderBy('position')
+                                        ->first();
+                                    if ($image) {
+                                        $image->update(['alt_text' => $record->draft_image_alt_text]);
+                                        $updatedImage = true;
+                                    }
+                                }
+
+                                if (!$payload && !$updatedImage) {
                                     continue;
                                 }
 
-                                $product->update($payload);
-                                $record->update([
-                                    'seo_sync_status' => 'synced',
-                                    'seo_synced_at' => Carbon::now(),
-                                ]);
+                                if ($payload) {
+                                    $product->update($payload);
+                                }
                                 $synced++;
+                                $syncedIds[] = $record->id;
+                            }
+
+                            if (!empty($syncedIds)) {
+                                StyleProfile::whereIn('id', $syncedIds)->update([
+                                    'seo_sync_status' => 'synced',
+                                    'seo_synced_at' => $syncedAt,
+                                ]);
                             }
 
                             Notification::make()
@@ -292,5 +646,60 @@ class StyleProfileResource extends Resource
         }
 
         return $trimmed;
+    }
+
+    private static function tagOptions(): array
+    {
+        $raw = Product::query()
+            ->whereNotNull('tags')
+            ->pluck('tags')
+            ->all();
+
+        $tokens = [];
+        foreach ($raw as $value) {
+            foreach (TagNormalizer::parseTokens($value) as $token) {
+                $tokens[$token] = $token;
+            }
+        }
+
+        ksort($tokens);
+        return $tokens;
+    }
+
+    private static function colorOptions(): array
+    {
+        $raw = Product::query()
+            ->whereNotNull('color_string')
+            ->pluck('color_string')
+            ->all();
+
+        $tokens = [];
+        foreach ($raw as $value) {
+            $parts = preg_split('/[;,]/', (string) $value);
+            if (!$parts) {
+                continue;
+            }
+
+            foreach ($parts as $part) {
+                $token = trim((string) $part);
+                if ($token === '') {
+                    continue;
+                }
+                $tokens[$token] = $token;
+            }
+        }
+
+        ksort($tokens);
+        return $tokens;
+    }
+
+    private static function nullIfEmpty(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim((string) $value);
+        return $trimmed === '' ? null : $trimmed;
     }
 }

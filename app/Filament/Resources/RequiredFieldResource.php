@@ -37,6 +37,9 @@ class RequiredFieldResource extends Resource
             Forms\Components\Toggle::make('bulk_editable')
                 ->label('Bulk editable')
                 ->disabled(fn (?RequiredField $record): bool => $record ? self::isBulkEditLocked($record) : false),
+            Forms\Components\Toggle::make('quick_edit')
+                ->label('Quick edit')
+                ->disabled(fn (?RequiredField $record): bool => $record ? self::isQuickEditLocked($record) : false),
         ])->columns(2);
     }
 
@@ -57,6 +60,9 @@ class RequiredFieldResource extends Resource
                 ToggleColumn::make('bulk_editable')
                     ->label('Bulk editable')
                     ->disabled(fn (RequiredField $record): bool => self::isBulkEditLocked($record)),
+                ToggleColumn::make('quick_edit')
+                    ->label('Quick edit')
+                    ->disabled(fn (RequiredField $record): bool => self::isQuickEditLocked($record)),
             ])
             ->filters([
                 SelectFilter::make('scope')
@@ -143,5 +149,10 @@ class RequiredFieldResource extends Resource
         }
 
         return false;
+    }
+
+    private static function isQuickEditLocked(RequiredField $record): bool
+    {
+        return $record->source === 'product' && $record->attribute === 'handle';
     }
 }

@@ -12,6 +12,7 @@ use App\Models\Approval;
 use App\Models\Import;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
+use App\Models\Setting;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
 use Filament\Resources\Resource;
@@ -57,6 +58,8 @@ use App\Models\Tag;
 use App\Models\Color;
 use League\Csv\Reader;
 use Illuminate\Validation\Rule;
+use Illuminate\Support\HtmlString;
+use Illuminate\Support\Arr;
 
 class ProductResource extends Resource
 {
@@ -220,12 +223,30 @@ class ProductResource extends Resource
                                 }),
                             TextInput::make('seo_title')
                                 ->columnSpanFull()
-                                ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
-                                ->helperText('Edit SEO in Styles when a style is linked.'),
+                                ->disabled(fn (?Product $record): bool => Setting::getBool(
+                                    'style_profiles.lock_product_seo',
+                                    config('style_profiles.lock_product_seo', true)
+                                ) && ($record?->styleProfiles()->exists() ?? false))
+                                ->helperText(function (?Product $record): ?string {
+                                    $locked = Setting::getBool(
+                                        'style_profiles.lock_product_seo',
+                                        config('style_profiles.lock_product_seo', true)
+                                    ) && ($record?->styleProfiles()->exists() ?? false);
+                                    return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
+                                }),
                             Textarea::make('seo_description')
                                 ->columnSpanFull()
-                                ->disabled(fn (?Product $record): bool => $record?->styleProfiles()->exists() ?? false)
-                                ->helperText('Edit SEO in Styles when a style is linked.'),
+                                ->disabled(fn (?Product $record): bool => Setting::getBool(
+                                    'style_profiles.lock_product_seo',
+                                    config('style_profiles.lock_product_seo', true)
+                                ) && ($record?->styleProfiles()->exists() ?? false))
+                                ->helperText(function (?Product $record): ?string {
+                                    $locked = Setting::getBool(
+                                        'style_profiles.lock_product_seo',
+                                        config('style_profiles.lock_product_seo', true)
+                                    ) && ($record?->styleProfiles()->exists() ?? false);
+                                    return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
+                                }),
 
                         ])->columnSpan(2)->columns(2),
                         Section::make()->schema([
@@ -477,18 +498,30 @@ class ProductResource extends Resource
                 ->label('')
                 ->state(fn (Product $record) => $record->images()->orderBy('position')->value('src'))
                 ->square()
-                ->size(40),
-            TextColumn::make('handle')->searchable(),
-            TextColumn::make('title')->searchable(),
+                ->size(40)
+                ->toggleable(),
+            TextColumn::make('handle')->searchable()->toggleable(),
+            TextColumn::make('title')->searchable()->toggleable(),
             TextColumn::make('seo_title')
                 ->label('SEO title')
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('seo_description')
                 ->label('SEO description')
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('color_string')
+                ->label('Colors')
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('jewelry_material')
                 ->label('Jewelry material')
                 ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL))
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('google_shopping_age_group')
+                ->label('Age group')
+                ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP))
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('cost_per_item')
+                ->label('Cost per item')
+                ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM))
                 ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('has_errors')
                 ->label('Errors')
@@ -497,6 +530,7 @@ class ProductResource extends Resource
                 ->toggleable(),
             TextColumn::make('error_fields')
                 ->label('Error fields')
+                ->color(fn (Product $record): string => $record->has_errors ? 'danger' : 'gray')
                 ->formatStateUsing(function ($state): string {
                     if (is_array($state)) {
                         return empty($state) ? 'All required fields are good.' : implode(', ', $state);
@@ -530,13 +564,15 @@ class ProductResource extends Resource
                 ->state(fn (Product $record) => $record->approvalsForCurrentVersionCount())
                 ->formatStateUsing(fn (int $state) => "{$state}/2")
                 ->badge()
-                ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray')),
+                ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
+                ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('approved')
                 ->label('Approved')
                 ->state(fn (Product $record) => $record->isApprovedByTwo())
                 ->boolean()
                 ->trueColor('success')
-                ->falseColor('gray'),
+                ->falseColor('gray')
+                ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
             SelectFilter::make('type')
                 ->label('Type')
@@ -624,6 +660,32 @@ class ProductResource extends Resource
                 ->label('Errors'),
         ])->actions([
             EditAction::make()
+                ->visible(fn (Product $record): bool => static::canEdit($record)),
+            Action::make('quickEdit')
+                ->label('Quick Edit')
+                ->icon('heroicon-o-adjustments-horizontal')
+                ->modalHeading(function (Product $record): HtmlString {
+                    $name = trim((string) ($record->title ?? ''));
+                    if ($name === '') {
+                        $name = trim((string) ($record->handle ?? ''));
+                    }
+                    if ($name === '') {
+                        return new HtmlString('Quick Edit');
+                    }
+
+                    $safeName = e($name);
+                    return new HtmlString("Quick Edit | <em>{$safeName}</em>");
+                })
+                ->form(function (Action $action, Form $form, Product $record): array {
+                    return self::form($form->model($record))->getComponents();
+                })
+                ->mountUsing(function (Action $action, Form $form, Product $record): void {
+                    $record->refresh();
+                    $form->fill($record->attributesToArray());
+                })
+                ->action(function (Product $record, array $data): void {
+                    self::applyEditModal($record, $data);
+                })
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Tables\Actions\DeleteAction::make()
                 ->visible(fn (Product $record): bool => static::canDelete($record)),
@@ -808,7 +870,47 @@ class ProductResource extends Resource
 
         $schema = [
             Placeholder::make('bulk_edit_hint')
+                ->label('')
                 ->content('Tick a field to enable it, then enter the value to apply to all selected products.'),
+        ];
+
+        $schema[] = Grid::make(1)
+            ->schema(array_map(function (array $field) {
+                $safeKey = $field['safe_key'];
+                $label = $field['label'];
+
+                return Grid::make(12)
+                    ->schema([
+                        Checkbox::make("fields.{$safeKey}")
+                            ->label($label)
+                            ->live()
+                            ->columnSpan(4),
+                        self::bulkEditComponent($field)
+                            ->label('')
+                            ->statePath("values.{$safeKey}")
+                            ->columnSpan(8)
+                            ->disabled(fn (Get $get): bool => !($get("fields.{$safeKey}") ?? false))
+                            ->dehydrated(fn (Get $get): bool => (bool) ($get("fields.{$safeKey}") ?? false)),
+                    ]);
+            }, $fields));
+
+        return $schema;
+    }
+
+    private static function quickEditFormSchema(): array
+    {
+        $fields = self::quickEditableFields();
+        if (empty($fields)) {
+            return [
+                Placeholder::make('no_quick_fields')
+                    ->content('No quick-edit fields are configured.'),
+            ];
+        }
+
+        $schema = [
+            Placeholder::make('quick_edit_hint')
+                ->label('Quick edit hint - (Tick the fields to edit for this row, then enter the values.)')
+                ->content(''),
         ];
 
         $schema[] = Grid::make(1)
@@ -836,6 +938,16 @@ class ProductResource extends Resource
 
     private static function bulkEditableFields(): array
     {
+        return self::editableFieldsByFlag('bulk_editable');
+    }
+
+    private static function quickEditableFields(): array
+    {
+        return self::editableFieldsByFlag('quick_edit');
+    }
+
+    private static function editableFieldsByFlag(string $flagColumn): array
+    {
         $labelOverrides = [
             'product|color_string' => 'Colors',
             'product|product_category' => 'Category',
@@ -846,23 +958,30 @@ class ProductResource extends Resource
             'row|Bracelet design (product.metafields.shopify.bracelet-design)' => 'Bracelet design',
         ];
 
-        $lockedProductFields = [
-            'handle',
-            'title',
-            'body_html',
-            'seo_title',
-            'seo_description',
-        ];
+        $lockedProductFields = $flagColumn === 'quick_edit'
+            ? ['handle']
+            : [
+                'handle',
+                'title',
+                'body_html',
+                'seo_title',
+                'seo_description',
+            ];
 
-        $lockedRowFields = [
-            HeaderStore::IMAGE_SRC,
-            HeaderStore::IMAGE_ALT_TEXT,
-            HeaderStore::IMAGE_POSITION,
-        ];
+        $lockedRowFields = $flagColumn === 'quick_edit'
+            ? []
+            : [
+                HeaderStore::IMAGE_SRC,
+                HeaderStore::IMAGE_ALT_TEXT,
+                HeaderStore::IMAGE_POSITION,
+            ];
 
         $query = RequiredField::query()
-            ->where('bulk_editable', true)
-            ->whereIn('source', ['product', 'row'])
+            ->where($flagColumn, true)
+            ->whereIn('source', $flagColumn === 'quick_edit'
+                ? ['product', 'row', 'variant', 'image']
+                : ['product', 'row']
+            )
             ->orderBy('label');
 
         $fields = [];
@@ -892,8 +1011,10 @@ class ProductResource extends Resource
 
     private static function bulkEditComponent(array $field): Forms\Components\Component
     {
+        $name = $field['safe_key'];
+
         if ($field['source'] === 'product' && $field['attribute'] === 'tags') {
-            return Select::make('tags')
+            return Select::make($name)
                 ->multiple()
                 ->searchable()
                 ->preload()
@@ -901,7 +1022,7 @@ class ProductResource extends Resource
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'color_string') {
-            return Select::make('color_string')
+            return Select::make($name)
                 ->multiple()
                 ->searchable()
                 ->preload()
@@ -910,33 +1031,160 @@ class ProductResource extends Resource
 
         if ($field['source'] === 'product' && $field['attribute'] === 'type') {
             $types = CategoryTypeMap::types();
-            return Select::make('type')
+            return Select::make($name)
                 ->options(array_combine($types, $types))
                 ->searchable();
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'product_category') {
             $categories = CategoryTypeMap::categories();
-            return Select::make('product_category')
+            return Select::make($name)
                 ->options(array_combine($categories, $categories))
                 ->searchable();
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'status') {
-            return Select::make('status')
+            return Select::make($name)
                 ->options(fn () => Status::query()->orderBy('name')->pluck('name', 'name')->all())
                 ->searchable();
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'published') {
-            return Toggle::make('published');
+            return Toggle::make($name);
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'body_html') {
-            return Textarea::make('body_html')->rows(4);
+            return Textarea::make($name)->rows(4);
         }
 
-        return TextInput::make($field['attribute']);
+        return TextInput::make($name);
+    }
+
+    private static function quickEditDefaults(Product $record): array
+    {
+        $rows = ShopifyRow::where('import_id', $record->import_id)
+            ->where('handle', $record->handle)
+            ->orderBy('row_index')
+            ->get();
+
+        $primaryRow = $rows->firstWhere('row_type', 'product_primary') ?? $rows->first();
+        $variantRow = $rows->firstWhere('row_type', 'variant');
+        $imageRow = $rows->firstWhere('row_type', 'image');
+
+        $values = [];
+        foreach (self::quickEditableFields() as $field) {
+            $values[$field['safe_key']] = self::quickEditDefaultValue(
+                $record,
+                $field,
+                $primaryRow,
+                $variantRow,
+                $imageRow
+            );
+        }
+
+        return [
+            'fields' => [],
+            'values' => $values,
+        ];
+    }
+
+    private static function editModalDefaults(Product $record): array
+    {
+        $data = $record->toArray();
+        $data['extra_shopify_fields'] = self::extraShopifyFields($record);
+
+        $ageGroupRaw = self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP);
+        $ageGroupRaw = trim($ageGroupRaw);
+        $data['google_shopping_age_group'] = $ageGroupRaw === ''
+            ? []
+            : array_values(array_filter(array_map('trim', explode(';', $ageGroupRaw))));
+        $data['target_gender'] = self::shopifyRowValue($record, 'Target gender (product.metafields.shopify.target-gender)');
+        $data['cost_per_item'] = self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM);
+
+        return $data;
+    }
+
+    private static function quickEditDefaultValue(
+        Product $record,
+        array $field,
+        ?ShopifyRow $primaryRow,
+        ?ShopifyRow $variantRow,
+        ?ShopifyRow $imageRow
+    )
+    {
+        if ($field['source'] === 'product') {
+            $attribute = $field['attribute'];
+            $attributeHeaders = [
+                'handle' => HeaderStore::HANDLE,
+                'title' => HeaderStore::TITLE,
+                'body_html' => HeaderStore::BODY_HTML,
+                'vendor' => HeaderStore::VENDOR,
+                'tags' => HeaderStore::TAGS,
+                'type' => HeaderStore::TYPE,
+                'published' => HeaderStore::PUBLISHED,
+                'product_category' => HeaderStore::PRODUCT_CATEGORY,
+                'google_product_category' => HeaderStore::GOOGLE_PRODUCT_CATEGORY,
+                'status' => HeaderStore::STATUS,
+                'seo_title' => HeaderStore::SEO_TITLE,
+                'seo_description' => HeaderStore::SEO_DESCRIPTION,
+                'color_string' => HeaderStore::COLOR_METAFIELD,
+            ];
+
+            $rowHeader = $attributeHeaders[$attribute] ?? null;
+            if ($attribute === 'tags') {
+                $raw = (string) ($record->tags ?? '');
+                if (trim($raw) === '' && $rowHeader && $primaryRow) {
+                    $raw = (string) $primaryRow->get($rowHeader, '');
+                }
+                return TagNormalizer::parseTokens($raw);
+            }
+            if ($attribute === 'color_string') {
+                $raw = (string) ($record->color_string ?? '');
+                if (trim($raw) === '' && $rowHeader && $primaryRow) {
+                    $raw = (string) $primaryRow->get($rowHeader, '');
+                }
+                $normalized = str_replace(',', ';', $raw);
+                return array_values(array_filter(array_map('trim', explode(';', $normalized))));
+            }
+            if ($attribute === 'published') {
+                $raw = $record->published;
+                if ($raw === null && $rowHeader && $primaryRow) {
+                    $raw = $primaryRow->get($rowHeader, null);
+                }
+                if (is_bool($raw)) {
+                    return $raw;
+                }
+                if (is_numeric($raw)) {
+                    return (bool) $raw;
+                }
+                return strtolower((string) $raw) === 'true';
+            }
+
+            $value = $record->{$attribute} ?? null;
+            if (is_string($value) && trim($value) === '') {
+                $value = null;
+            }
+
+            if ($value === null && $rowHeader && $primaryRow) {
+                $value = $primaryRow->get($rowHeader, '');
+            }
+
+            return $value;
+        }
+
+        if ($field['source'] === 'row') {
+            return $primaryRow?->get($field['attribute'], '') ?? '';
+        }
+
+        if ($field['source'] === 'variant') {
+            return $variantRow?->get($field['attribute'], '') ?? '';
+        }
+
+        if ($field['source'] === 'image') {
+            return $imageRow?->get($field['attribute'], '') ?? '';
+        }
+
+        return null;
     }
 
     private static function applyBulkEdits(Collection $records, array $data): void
@@ -1018,5 +1266,136 @@ class ProductResource extends Resource
 
             app(Normalizer::class)->recalculateErrorsForProduct($product);
         }
+    }
+
+    private static function applyQuickEdits(Product $product, array $data): void
+    {
+        $selected = array_keys(array_filter($data['fields'] ?? []));
+        $values = $data['values'] ?? [];
+        if (!is_array($selected) || empty($selected)) {
+            return;
+        }
+
+        $fieldMap = [];
+        foreach (self::quickEditableFields() as $field) {
+            $fieldMap[$field['safe_key']] = $field;
+        }
+
+        $productUpdates = [];
+        $rowUpdates = [];
+
+        foreach ($selected as $safeKey) {
+            $field = $fieldMap[$safeKey] ?? null;
+            if (!$field) {
+                continue;
+            }
+
+            $value = $values[$safeKey] ?? null;
+            if ($field['source'] === 'product') {
+                $attribute = $field['attribute'];
+                if ($attribute === 'tags') {
+                    $arr = is_array($value) ? $value : [];
+                    $productUpdates['tags'] = TagNormalizer::normalizeFromArray($arr);
+                    continue;
+                }
+                if ($attribute === 'color_string') {
+                    $arr = is_array($value) ? $value : [];
+                    $clean = array_values(array_unique(array_filter(array_map(
+                        fn ($v) => trim((string) $v),
+                        $arr
+                    ))));
+                    $productUpdates['color_string'] = $clean ? implode('; ', $clean) : null;
+                    continue;
+                }
+                if ($attribute === 'published') {
+                    $productUpdates['published'] = $value ? 'true' : 'false';
+                    continue;
+                }
+
+                $productUpdates[$attribute] = $value;
+                continue;
+            }
+
+            if ($field['source'] === 'row') {
+                $rowUpdates[$field['attribute']] = $value;
+            }
+        }
+
+        if (!empty($productUpdates)) {
+            $product->fill($productUpdates);
+            $product->save();
+        }
+
+        if (!empty($rowUpdates)) {
+            $row = ShopifyRow::where('import_id', $product->import_id)
+                ->where('handle', $product->handle)
+                ->where('row_type', 'product_primary')
+                ->first();
+            if ($row) {
+                $dataRow = $row->data ?? [];
+                foreach ($rowUpdates as $header => $value) {
+                    if (is_array($value)) {
+                        $value = implode('; ', array_values(array_filter(array_map('trim', $value))));
+                    }
+                    $dataRow[$header] = $value ?? '';
+                }
+                $row->data = $dataRow;
+                $row->save();
+            }
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
+    }
+
+    private static function applyEditModal(Product $product, array $data): void
+    {
+        $extra = $data['extra_shopify_fields'] ?? [];
+        $googleShoppingAgeGroup = $data['google_shopping_age_group'] ?? '';
+        $targetGender = $data['target_gender'] ?? '';
+        $costPerItem = $data['cost_per_item'] ?? '';
+
+        $productData = Arr::except($data, [
+            'extra_shopify_fields',
+            'google_shopping_age_group',
+            'target_gender',
+            'cost_per_item',
+        ]);
+
+        $product->fill($productData);
+        $product->save();
+
+        $headers = $product->import?->headers ?? [];
+        $allowed = array_flip(HeaderStore::extraProductHeaders($headers));
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if ($row) {
+            $rowData = $row->data ?? [];
+            if ($googleShoppingAgeGroup !== null) {
+                $rowData[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $googleShoppingAgeGroup ?: '';
+            }
+            if ($targetGender !== null) {
+                $rowData['Target gender (product.metafields.shopify.target-gender)'] = $targetGender ?: '';
+            }
+            if ($costPerItem !== null) {
+                $rowData['Cost per item'] = $costPerItem ?: '';
+            }
+
+            foreach ($extra as $item) {
+                $key = $item['key'] ?? null;
+                if (!$key || empty($allowed) || !isset($allowed[$key])) {
+                    continue;
+                }
+                $rowData[$key] = $item['value'] ?? '';
+            }
+
+            $row->data = $rowData;
+            $row->save();
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
 }

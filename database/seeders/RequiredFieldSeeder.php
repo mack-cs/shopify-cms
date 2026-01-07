@@ -82,26 +82,60 @@ class RequiredFieldSeeder extends Seeder
         ];
 
         $bulkEditableLookup = array_fill_keys($bulkEditableDefaults, true);
+        $quickEditDefaults = [];
+        $quickEditLookup = array_fill_keys($quickEditDefaults, true);
 
         $rows = [];
         foreach ($headers as $header) {
             if (isset($productHeaderMap[$header])) {
                 $attribute = $productHeaderMap[$header];
-                $rows[] = $this->makeRow('product', 'product', $attribute, $header, $requiredLookup, $bulkEditableLookup);
+                $rows[] = $this->makeRow(
+                    'product',
+                    'product',
+                    $attribute,
+                    $header,
+                    $requiredLookup,
+                    $bulkEditableLookup,
+                    $quickEditLookup
+                );
                 continue;
             }
             if (isset($variantHeaderMap[$header])) {
                 $attribute = $variantHeaderMap[$header];
-                $rows[] = $this->makeRow('variant', 'variant', $attribute, $header, $requiredLookup, $bulkEditableLookup);
+                $rows[] = $this->makeRow(
+                    'variant',
+                    'variant',
+                    $attribute,
+                    $header,
+                    $requiredLookup,
+                    $bulkEditableLookup,
+                    $quickEditLookup
+                );
                 continue;
             }
             if (isset($imageHeaderMap[$header])) {
                 $attribute = $imageHeaderMap[$header];
-                $rows[] = $this->makeRow('image', 'image', $attribute, $header, $requiredLookup, $bulkEditableLookup);
+                $rows[] = $this->makeRow(
+                    'image',
+                    'image',
+                    $attribute,
+                    $header,
+                    $requiredLookup,
+                    $bulkEditableLookup,
+                    $quickEditLookup
+                );
                 continue;
             }
 
-            $rows[] = $this->makeRow('extra', 'row', $header, $header, $requiredLookup, $bulkEditableLookup);
+            $rows[] = $this->makeRow(
+                'extra',
+                'row',
+                $header,
+                $header,
+                $requiredLookup,
+                $bulkEditableLookup,
+                $quickEditLookup
+            );
         }
 
         DB::table('required_fields')->truncate();
@@ -116,10 +150,12 @@ class RequiredFieldSeeder extends Seeder
         string $attribute,
         string $label,
         array $requiredLookup,
-        array $bulkEditableLookup
+        array $bulkEditableLookup,
+        array $quickEditLookup
     ): array {
         $isRequired = $requiredLookup[$source . '|' . $attribute] ?? false;
         $isBulkEditable = $bulkEditableLookup[$source . '|' . $attribute] ?? false;
+        $isQuickEdit = $quickEditLookup[$source . '|' . $attribute] ?? false;
 
         return [
             'scope' => $scope,
@@ -128,6 +164,7 @@ class RequiredFieldSeeder extends Seeder
             'label' => $label,
             'required' => $isRequired,
             'bulk_editable' => $isBulkEditable,
+            'quick_edit' => $isQuickEdit,
         ];
     }
 

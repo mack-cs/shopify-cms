@@ -21,7 +21,7 @@ class StyleProfileRelationManager extends RelationManager
     {
         return $form->schema([
             Forms\Components\TextInput::make('image_url')->label('Image')->maxLength(2048),
-            Forms\Components\TextInput::make('sku')->required()->maxLength(80),
+            Forms\Components\TextInput::make('sku')->maxLength(80),
 
             Forms\Components\TextInput::make('style_type')->label('Style')->maxLength(120),
             Forms\Components\TextInput::make('materials')->maxLength(255),

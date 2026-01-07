@@ -13,10 +13,12 @@ class RequiredField extends Model
         'label',
         'required',
         'bulk_editable',
+        'quick_edit',
     ];
 
     protected $casts = [
         'required' => 'boolean',
         'bulk_editable' => 'boolean',
+        'quick_edit' => 'boolean',
     ];
 }

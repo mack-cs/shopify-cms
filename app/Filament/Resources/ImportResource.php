@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use Filament\Forms;
 use Filament\Tables;
 use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
 use App\Models\Import;
 use App\Models\Product;
 use Filament\Forms\Form;
@@ -172,7 +173,17 @@ protected static ?string $navigationLabel = 'Product Feed';
             Action::make('exportAll')
             ->label('Export (All)')
             ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
+            ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
             ->action(function (Import $record, ShopifyCsvExporter $exporter, Normalizer $normalizer) {
+                if (!(Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)) {
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Export blocked')
+                            ->body('Only Super Admin can export all products.')
+                            ->danger()
+                    );
+                    return;
+                }
                 $normalizer->recalculateErrors($record);
                 if (Product::where('import_id', $record->id)->where('has_errors', true)->exists()) {
                     self::sendNotification(

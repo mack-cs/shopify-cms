@@ -45,6 +45,10 @@ class StyleProfile extends Model
             if ($handle) {
                 $profile->handle = $handle;
             }
+
+            if (!$profile->sku && $profile->handle) {
+                $profile->sku = $profile->handle;
+            }
         });
     }
 }

@@ -10,7 +10,7 @@ use League\Csv\Reader;
 final class StyleProfileCsvImporter
 {
     /**
-     * @return array{total:int, imported:int, skipped_no_handle:int, skipped_no_sku:int, unlinked_no_product:int}
+     * @return array{total:int, imported:int, skipped_no_handle:int, unlinked_no_product:int}
      */
     public function importFromPath(string $absolutePath): array
     {
@@ -46,7 +46,6 @@ final class StyleProfileCsvImporter
         $total = 0;
         $imported = 0;
         $skippedNoHandle = 0;
-        $skippedNoSku = 0;
         $unlinkedNoProduct = 0;
 
         DB::transaction(function () use (
@@ -56,7 +55,6 @@ final class StyleProfileCsvImporter
             &$total,
             &$imported,
             &$skippedNoHandle,
-            &$skippedNoSku,
             &$unlinkedNoProduct
         ): void {
             foreach ($csv->getRecords() as $row) {
@@ -81,8 +79,7 @@ final class StyleProfileCsvImporter
 
                 $sku = $data['sku'] ?? null;
                 if (!$sku) {
-                    $skippedNoSku++;
-                    continue;
+                    $sku = $handle;
                 }
 
                 $product = Product::where('handle', $handle)->first();
@@ -95,10 +92,12 @@ final class StyleProfileCsvImporter
                 $data['handle'] = $handle;
                 $data['sku'] = $sku;
 
-                StyleProfile::updateOrCreate(
-                    ['handle' => $handle, 'sku' => $sku],
-                    $data
-                );
+                $existing = StyleProfile::where('handle', $handle)->first();
+                if ($existing) {
+                    $existing->update($data);
+                } else {
+                    StyleProfile::create($data);
+                }
 
                 $imported++;
             }
@@ -108,7 +107,6 @@ final class StyleProfileCsvImporter
             'total' => $total,
             'imported' => $imported,
             'skipped_no_handle' => $skippedNoHandle,
-            'skipped_no_sku' => $skippedNoSku,
             'unlinked_no_product' => $unlinkedNoProduct,
         ];
     }
