@@ -22,5 +22,6 @@ return [
     ],
     'variant_fields' => [
         'sku',
+        'weight_unit',
     ],
 ];

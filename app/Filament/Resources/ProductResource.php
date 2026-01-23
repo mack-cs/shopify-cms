@@ -184,13 +184,14 @@ class ProductResource extends Resource
                                     'female' => 'Female',
                                     'unisex' => 'Unisex',
                                 ])
+                                ->default('unisex')
                                 ->placeholder('Select target gender')
                                 ->searchable()
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
                                     }
-                                    $component->state(self::shopifyRowValue($record, 'Target gender (product.metafields.shopify.target-gender)'));
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
                                 }),
                             Select::make('tags')
                                 ->label('Tags')
@@ -402,6 +403,58 @@ class ProductResource extends Resource
 
                             return $color->name; // must match the option "value"
                         }),
+                        TextInput::make('jewelry_material')
+                            ->label('Jewelry material')
+                            ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                if (!$record) {
+                                    return;
+                                }
+                                $component->state(self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL));
+                            }),
+                        Textarea::make('materials_and_dimensions')
+                            ->label('Materials and dimensions')
+                            ->rows(3)
+                            ->afterStateHydrated(function (Textarea $component, ?Product $record): void {
+                                if (!$record) {
+                                    return;
+                                }
+                                $component->state(self::shopifyRowValue($record, HeaderStore::MATERIALS_AND_DIMENSIONS));
+                            }),
+                        Grid::make(2)->schema([
+                            TextInput::make('jewelry_type')
+                                ->label('Jewelry type')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::JEWELRY_TYPE));
+                                }),
+                            TextInput::make('bracelet_design')
+                                ->label('Bracelet design')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::BRACELET_DESIGN));
+                                }),
+                            TextInput::make('age_group')
+                                ->label('Age group')
+                                ->default('adults')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
+                                }),
+                            TextInput::make('variant_weight_unit')
+                                ->label('Variant weight unit')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state($record->variants()->orderBy('id')->value('weight_unit'));
+                                }),
+                        ]),
                         Toggle::make('published')
                             ->label('Published')
                             ->helperText('Exported as true/false.')
@@ -821,12 +874,17 @@ class ProductResource extends Resource
         }
 
         $extraHeaders = HeaderStore::extraProductHeaders($headers);
-        $extraHeaders = array_values(array_filter(
-            $extraHeaders,
-            fn (string $header) => $header !== HeaderStore::GOOGLE_SHOPPING_AGE_GROUP
-                && $header !== 'Target gender (product.metafields.shopify.target-gender)'
-                && $header !== 'Cost per item'
-        ));
+          $extraHeaders = array_values(array_filter(
+              $extraHeaders,
+              fn (string $header) => $header !== HeaderStore::GOOGLE_SHOPPING_AGE_GROUP
+                  && $header !== HeaderStore::TARGET_GENDER
+                  && $header !== 'Cost per item'
+                  && $header !== HeaderStore::JEWELRY_MATERIAL
+                  && $header !== HeaderStore::MATERIALS_AND_DIMENSIONS
+                  && $header !== HeaderStore::JEWELRY_TYPE
+                  && $header !== HeaderStore::AGE_GROUP
+                  && $header !== HeaderStore::BRACELET_DESIGN
+          ));
 
         return array_map(function (string $header) use ($row): array {
             return [
@@ -1098,7 +1156,7 @@ class ProductResource extends Resource
         $data['google_shopping_age_group'] = $ageGroupRaw === ''
             ? []
             : array_values(array_filter(array_map('trim', explode(';', $ageGroupRaw))));
-        $data['target_gender'] = self::shopifyRowValue($record, 'Target gender (product.metafields.shopify.target-gender)');
+        $data['target_gender'] = self::shopifyRowValue($record, HeaderStore::TARGET_GENDER);
         $data['cost_per_item'] = self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM);
 
         return $data;
@@ -1352,13 +1410,25 @@ class ProductResource extends Resource
         $extra = $data['extra_shopify_fields'] ?? [];
         $googleShoppingAgeGroup = $data['google_shopping_age_group'] ?? '';
         $targetGender = $data['target_gender'] ?? '';
+        $ageGroup = $data['age_group'] ?? '';
         $costPerItem = $data['cost_per_item'] ?? '';
+        $materialsAndDimensions = $data['materials_and_dimensions'] ?? '';
+        $jewelryMaterial = $data['jewelry_material'] ?? '';
+        $jewelryType = $data['jewelry_type'] ?? '';
+        $braceletDesign = $data['bracelet_design'] ?? '';
+        $variantWeightUnit = $data['variant_weight_unit'] ?? null;
 
         $productData = Arr::except($data, [
             'extra_shopify_fields',
             'google_shopping_age_group',
             'target_gender',
+            'age_group',
             'cost_per_item',
+            'materials_and_dimensions',
+            'jewelry_material',
+            'jewelry_type',
+            'bracelet_design',
+            'variant_weight_unit',
         ]);
 
         $product->fill($productData);
@@ -1378,10 +1448,25 @@ class ProductResource extends Resource
                 $rowData[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $googleShoppingAgeGroup ?: '';
             }
             if ($targetGender !== null) {
-                $rowData['Target gender (product.metafields.shopify.target-gender)'] = $targetGender ?: '';
+                $rowData[HeaderStore::TARGET_GENDER] = $targetGender ?: '';
+            }
+            if ($ageGroup !== null) {
+                $rowData[HeaderStore::AGE_GROUP] = $ageGroup ?: '';
             }
             if ($costPerItem !== null) {
                 $rowData['Cost per item'] = $costPerItem ?: '';
+            }
+            if ($materialsAndDimensions !== null) {
+                $rowData[HeaderStore::MATERIALS_AND_DIMENSIONS] = $materialsAndDimensions ?: '';
+            }
+            if ($jewelryMaterial !== null) {
+                $rowData[HeaderStore::JEWELRY_MATERIAL] = $jewelryMaterial ?: '';
+            }
+            if ($jewelryType !== null) {
+                $rowData[HeaderStore::JEWELRY_TYPE] = $jewelryType ?: '';
+            }
+            if ($braceletDesign !== null) {
+                $rowData[HeaderStore::BRACELET_DESIGN] = $braceletDesign ?: '';
             }
 
             foreach ($extra as $item) {
@@ -1394,6 +1479,13 @@ class ProductResource extends Resource
 
             $row->data = $rowData;
             $row->save();
+        }
+
+        if ($variantWeightUnit !== null) {
+            $normalized = trim((string) $variantWeightUnit);
+            $product->variants()->update([
+                'weight_unit' => $normalized === '' ? null : $normalized,
+            ]);
         }
 
         app(Normalizer::class)->recalculateErrorsForProduct($product);

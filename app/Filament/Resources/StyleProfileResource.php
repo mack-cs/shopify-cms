@@ -600,27 +600,27 @@ class StyleProfileResource extends Resource
 
     public static function canCreate(): bool
     {
-        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
     }
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
     }
 
     public static function canEdit($record): bool
     {
-        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
     }
 
     public static function canDelete($record): bool
     {
-        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
     }
 
     public static function canDeleteAny(): bool
     {
-        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+        return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
     }
 
     public static function getPages(): array

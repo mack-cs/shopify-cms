@@ -50,5 +50,45 @@ class StyleProfile extends Model
                 $profile->sku = $profile->handle;
             }
         });
+
+        static::saved(function (self $profile): void {
+            if (!$profile->product_id) {
+                return;
+            }
+
+            if (!$profile->wasChanged(['draft_seo_title', 'draft_seo_description'])) {
+                return;
+            }
+
+            $product = $profile->product;
+            if (!$product) {
+                return;
+            }
+
+            $payload = [];
+            $seoTitle = self::nullIfEmpty($profile->draft_seo_title);
+            $seoDescription = self::nullIfEmpty($profile->draft_seo_description);
+
+            if ($product->seo_title !== $seoTitle) {
+                $payload['seo_title'] = $seoTitle;
+            }
+            if ($product->seo_description !== $seoDescription) {
+                $payload['seo_description'] = $seoDescription;
+            }
+
+            if ($payload) {
+                $product->update($payload);
+            }
+        });
+    }
+
+    private static function nullIfEmpty(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim($value);
+        return $trimmed === '' ? null : $trimmed;
     }
 }

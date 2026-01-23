@@ -4,12 +4,13 @@ namespace App\Filament\Resources\ProductResource\RelationManagers;
 
 use Filament\Forms;
 use Filament\Forms\Form;
-use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\ImageColumn;
-use Illuminate\Support\Carbon;
+use Illuminate\Support\HtmlString;
+use App\Models\ShopifyRow;
+use App\Services\HeaderStore;
 
 class StyleProfileRelationManager extends RelationManager
 {
@@ -20,38 +21,76 @@ class StyleProfileRelationManager extends RelationManager
     public function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
-            Forms\Components\TextInput::make('image_url')->label('Image')->maxLength(2048),
-            Forms\Components\TextInput::make('sku')->maxLength(80),
+            // Forms\Components\TextInput::make('image_url')->label('Image')->maxLength(2048),
+            Forms\Components\TextInput::make('sku')
+                ->maxLength(80)
+                ->disabled(),
 
-            Forms\Components\TextInput::make('style_type')->label('Style')->maxLength(120),
+            Forms\Components\TextInput::make('style_type')
+                ->label('Style')
+                ->maxLength(120)
+                ->disabled()
+                ->dehydrated(false)
+                ->afterStateHydrated(function (Forms\Components\TextInput $component, $record): void {
+                    $component->state($record?->product?->type);
+                }),
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\TextInput::make('product_colors')
+                        ->label('Colors')
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, $record): void {
+                            $component->state($record?->product?->color_string);
+                        }),
+                    Forms\Components\TextInput::make('jewelry_material_display')
+                        ->label('Jewelry material')
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, $record): void {
+                            $product = $record?->product;
+                            if (!$product) {
+                                $component->state(null);
+                                return;
+                            }
+
+                            $row = ShopifyRow::where('import_id', $product->import_id)
+                                ->where('handle', $product->handle)
+                                ->where('row_type', 'product_primary')
+                                ->first();
+
+                            $component->state((string) ($row?->get(HeaderStore::JEWELRY_MATERIAL, '') ?? ''));
+                        }),
+                ])
+                ->columnSpanFull(),
             Forms\Components\TextInput::make('materials')->maxLength(255),
             Forms\Components\TextInput::make('components')->maxLength(255),
-            Forms\Components\Textarea::make('colour_prompt')->rows(2),
-
-            Forms\Components\TextInput::make('draft_title')->label('Title')->maxLength(255),
-            Forms\Components\Textarea::make('draft_description')->label('Description')->rows(5),
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\Textarea::make('colour_prompt')
+                        ->rows(4),
+                    Forms\Components\Textarea::make('product_description')
+                        ->label('Description')
+                        ->rows(4)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\Textarea $component, $record): void {
+                            $raw = $record?->product?->body_html ?? '';
+                            $component->state(trim(strip_tags((string) $raw)));
+                        }),
+                ])
+                ->columnSpanFull(),
 
             Forms\Components\TextInput::make('draft_seo_title')
                 ->label('SEO Title')
-                ->maxLength(255),
+                ->maxLength(255)
+                ->columnSpanFull(),
 
             Forms\Components\Textarea::make('draft_seo_description')
                 ->label('SEO Description (160 chars)')
                 ->rows(2)
-                ->maxLength(160),
-
-            Forms\Components\Select::make('seo_sync_status')
-                ->label('Sync Status')
-                ->options([
-                    'draft' => 'Draft',
-                    'ready' => 'Ready to sync',
-                ])
-                ->required()
-                ->default('draft'),
-            Forms\Components\Textarea::make('draft_image_alt_text')
-                ->label('Image Alt Text (125 chars)')
-                ->rows(2)
-                ->maxLength(125),
+                ->maxLength(160)
+                ->columnSpanFull(),
         ]);
     }
 
@@ -73,65 +112,23 @@ class StyleProfileRelationManager extends RelationManager
                     return self::normalizeImageUrl($source);
                 }),
             Tables\Columns\TextColumn::make('sku')->searchable(),
-            Tables\Columns\TextColumn::make('draft_title')->label('Title')->limit(60)->wrap(),
+            Tables\Columns\TextColumn::make('product.color_string')->label('Colors')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_title')->label('SEO Title')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_description')->label('SEO Desc')->limit(80)->wrap(),
-            Tables\Columns\TextColumn::make('seo_sync_status')
-                ->label('Sync Status')
-                ->badge()
-                ->color(fn (string $state): string => match ($state) {
-                    'ready' => 'warning',
-                    'synced' => 'success',
-                    default => 'gray',
-                }),
             Tables\Columns\TextColumn::make('applied_at')->dateTime()->label('Applied')->toggleable(),
         ])->headerActions([
-            Tables\Actions\CreateAction::make(),
+            Tables\Actions\CreateAction::make()
+                ->disabled(fn (): bool => (bool) $this->getOwnerRecord()?->styleProfiles()->exists()),
         ])->actions([
-            Tables\Actions\Action::make('applySeoToProduct')
-                ->label('Push SEO')
-                ->requiresConfirmation()
-                ->disabled(fn ($record): bool => $record->seo_sync_status !== 'ready')
-                ->action(function ($record): void {
-                    $product = $record->product;
-                    if (!$product) {
-                        Notification::make()
-                            ->title('No product linked')
-                            ->body('Link this style to a product before pushing SEO.')
-                            ->warning()
-                            ->send();
-                        return;
+            Tables\Actions\EditAction::make()
+                ->modalHeading(function ($record): string|HtmlString {
+                    $title = $record?->product?->title;
+                    if (!$title) {
+                        return 'Edit style';
                     }
 
-                    $payload = [];
-                    if ($record->draft_seo_title) {
-                        $payload['seo_title'] = $record->draft_seo_title;
-                    }
-                    if ($record->draft_seo_description) {
-                        $payload['seo_description'] = $record->draft_seo_description;
-                    }
-
-                    if (!$payload) {
-                        Notification::make()
-                            ->title('Nothing to update')
-                            ->body('Add a draft SEO title or description first.')
-                            ->warning()
-                            ->send();
-                        return;
-                    }
-
-                    $product->update($payload);
-                    $record->update([
-                        'seo_sync_status' => 'synced',
-                        'seo_synced_at' => Carbon::now(),
-                    ]);
-
-                    Notification::make()
-                        ->title('Product SEO updated')
-                        ->success()
-                        ->send();
+                    return new HtmlString('Edit style for <em>' . e($title) . '</em>');
                 }),
-            Tables\Actions\EditAction::make(),
             Tables\Actions\DeleteAction::make(),
         ]);
     }

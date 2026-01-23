@@ -34,6 +34,26 @@ final class Normalizer
             foreach ($rows as $handle => $handleRows) {
                 /** @var ShopifyRow $primary */
                 $primary = $handleRows->firstWhere('row_type', 'product_primary') ?? $handleRows->first();
+                if ($primary) {
+                    $data = $primary->data ?? [];
+                    $targetGender = trim((string) ($data[HeaderStore::TARGET_GENDER] ?? ''));
+                    $ageGroup = trim((string) ($data[HeaderStore::AGE_GROUP] ?? ''));
+
+                    $updated = false;
+                    if ($targetGender === '') {
+                        $data[HeaderStore::TARGET_GENDER] = 'unisex';
+                        $updated = true;
+                    }
+                    if ($ageGroup === '') {
+                        $data[HeaderStore::AGE_GROUP] = 'adults';
+                        $updated = true;
+                    }
+
+                    if ($updated) {
+                        $primary->data = $data;
+                        $primary->save();
+                    }
+                }
 
                 $categoryName = $primary->get(HeaderStore::PRODUCT_CATEGORY, null);
                 $typeName = $primary->get(HeaderStore::TYPE, null);
@@ -72,20 +92,17 @@ final class Normalizer
                     'is_bundle' => $this->isBundleFromTags($normalizedTags),
                 ]);
 
-                StyleProfile::where('handle', $handle)
-                    ->update([
-                        'product_id' => $product->id,
-                        'seo_sync_status' => 'draft',
-                        'seo_synced_at' => null,
-                    ]);
-
                 // Variants (include primary row if it contains variant data)
                 $variantRows = $handleRows->filter(function (ShopifyRow $r) {
                     return $r->variant_key !== null;
                 });
+                $firstSku = null;
                 foreach ($variantRows as $vr) {
                     $sku = $this->normalizeValue($vr->get(HeaderStore::VARIANT_SKU, null));
                     $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
+                    if ($firstSku === null && $sku !== null) {
+                        $firstSku = $sku;
+                    }
                     Variant::create([
                         'product_id' => $product->id,
                         'sku' => $sku,
@@ -106,6 +123,11 @@ final class Normalizer
                 $imageRows = $handleRows->filter(function (ShopifyRow $r) {
                     return trim((string)$r->get(HeaderStore::IMAGE_SRC, '')) !== '';
                 });
+                $imageRow = $imageRows
+                    ->sortBy(fn (ShopifyRow $row) => (int) ($row->get(HeaderStore::IMAGE_POSITION, 0) ?: 0))
+                    ->first();
+                $imageUrl = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_SRC, null));
+                $imageAlt = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_ALT_TEXT, null));
 
                 foreach ($imageRows as $ir) {
                     Image::create([
@@ -113,6 +135,29 @@ final class Normalizer
                         'src' => $ir->get(HeaderStore::IMAGE_SRC, null),
                         'position' => (int)($ir->get(HeaderStore::IMAGE_POSITION, 0) ?: 0) ?: null,
                         'alt_text' => $ir->get(HeaderStore::IMAGE_ALT_TEXT, null),
+                    ]);
+                }
+
+                $existingStyleProfile = StyleProfile::where('handle', $handle)->first();
+                if ($existingStyleProfile) {
+                    $existingStyleProfile->update([
+                        'product_id' => $product->id,
+                        'seo_sync_status' => 'draft',
+                        'seo_synced_at' => null,
+                    ]);
+                } else {
+                    StyleProfile::create([
+                        'product_id' => $product->id,
+                        'handle' => $handle,
+                        'sku' => $firstSku ?? $handle,
+                        'image_url' => $imageUrl,
+                        'draft_title' => $this->normalizeValue($product->title),
+                        'draft_description' => $this->normalizeValue($product->body_html),
+                        'draft_seo_title' => $this->normalizeValue($product->seo_title),
+                        'draft_seo_description' => $this->normalizeValue($product->seo_description),
+                        'draft_image_alt_text' => $imageAlt,
+                        'seo_sync_status' => 'draft',
+                        'seo_synced_at' => null,
                     ]);
                 }
 
@@ -474,6 +519,16 @@ final class Normalizer
             }
         }
 
+        if ($variants->isNotEmpty()) {
+            foreach ($variants as $variant) {
+                $unit = $this->normalizeValue($variant->weight_unit);
+                if ($unit !== null && strtolower($unit) !== 'g') {
+                    $errors[] = 'invalid:variant_weight_unit';
+                    break;
+                }
+            }
+        }
+
         $requiredImageFields = $requiredDefinitions['image'];
         if (!empty($requiredImageFields)) {
             $images = $product->images;
@@ -582,6 +637,7 @@ final class Normalizer
             'option2_value' => $variant->option2_value,
             'option3_name' => $variant->option3_name,
             'option3_value' => $variant->option3_value,
+            'weight_unit' => $variant->weight_unit,
             default => null,
         };
     }

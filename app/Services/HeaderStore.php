@@ -42,6 +42,11 @@ final class HeaderStore
     public const SEO_DESCRIPTION = 'SEO Description'; // if present in file
     public const COST_PER_ITEM = 'Cost per item';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
+    public const MATERIALS_AND_DIMENSIONS = 'Materials and Dimensions (product.metafields.custom.materials_and_dimensions)';
+    public const JEWELRY_TYPE = 'Jewelry type (product.metafields.shopify.jewelry-type)';
+    public const TARGET_GENDER = 'Target gender (product.metafields.shopify.target-gender)';
+    public const AGE_GROUP = 'Age group (product.metafields.shopify.age-group)';
+    public const BRACELET_DESIGN = 'Bracelet design (product.metafields.shopify.bracelet-design)';
 
     public static function productHeaders(): array
     {
@@ -59,6 +64,12 @@ final class HeaderStore
             self::SEO_TITLE,
             self::SEO_DESCRIPTION,
             self::COLOR_METAFIELD,
+            self::MATERIALS_AND_DIMENSIONS,
+            self::JEWELRY_MATERIAL,
+            self::JEWELRY_TYPE,
+            self::TARGET_GENDER,
+            self::AGE_GROUP,
+            self::BRACELET_DESIGN,
         ];
     }
 
@@ -115,13 +126,13 @@ final class HeaderStore
         return [
             self::GOOGLE_SHOPPING_GENDER,
             self::GOOGLE_SHOPPING_AGE_GROUP,
-            'Target gender (product.metafields.shopify.target-gender)',
-            'Age group (product.metafields.shopify.age-group)',
+            self::TARGET_GENDER,
+            self::AGE_GROUP,
             self::COLOR_METAFIELD,
-            'Bracelet design (product.metafields.shopify.bracelet-design)',
+            self::BRACELET_DESIGN,
             'Earring design (product.metafields.shopify.earring-design)',
-            'Jewelry material (product.metafields.shopify.jewelry-material)',
-            'Jewelry type (product.metafields.shopify.jewelry-type)',
+            self::JEWELRY_MATERIAL,
+            self::JEWELRY_TYPE,
             'Necklace design (product.metafields.shopify.necklace-design)',
             'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)',
             'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)',
