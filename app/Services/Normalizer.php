@@ -100,6 +100,10 @@ final class Normalizer
                 foreach ($variantRows as $vr) {
                     $sku = $this->normalizeValue($vr->get(HeaderStore::VARIANT_SKU, null));
                     $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
+                    $weightUnit = $this->normalizeValue($vr->get(HeaderStore::VARIANT_WEIGHT_UNIT, null));
+                    if ($weightUnit === null) {
+                        $weightUnit = 'g';
+                    }
                     if ($firstSku === null && $sku !== null) {
                         $firstSku = $sku;
                     }
@@ -107,6 +111,8 @@ final class Normalizer
                         'product_id' => $product->id,
                         'sku' => $sku,
                         'barcode' => $barcode,
+                        'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_WEIGHT, null)),
+                        'weight_unit' => $weightUnit,
                         'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
                         'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
                         'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),

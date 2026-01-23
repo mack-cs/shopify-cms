@@ -99,129 +99,233 @@ class ProductResource extends Resource
                                 }),
                             TextInput::make('title'),
                             Textarea::make('body_html')->rows(5)->columnSpanFull(),
-                            Select::make('type')
-                                ->label('Type')
-                                ->options(function (): array {
-                                    $types = CategoryTypeMap::types();
-                                    return array_combine($types, $types);
-                                })
-                                ->searchable()
-                                ->preload()
-                                ->reactive()
-                                ->afterStateUpdated(function ($state, callable $set): void {
-                                    if (!$state) {
-                                        $set('product_category', null);
-                                        $set('google_product_category', null);
-                                        return;
-                                    }
+                            Grid::make(3)->schema([
+                                Select::make('target_gender')
+                                    ->label('Target gender')
+                                    ->options([
+                                        'male' => 'Male',
+                                        'female' => 'Female',
+                                        'unisex' => 'Unisex',
+                                    ])
+                                    ->default('unisex')
+                                    ->placeholder('Select target gender')
+                                    ->searchable()
+                                    ->afterStateHydrated(function (Select $component, ?Product $record): void {
+                                        if (!$record) {
+                                            return;
+                                        }
+                                        $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
+                                    }),
+                                Select::make('type')
+                                    ->label('Type')
+                                    ->options(function (): array {
+                                        $types = CategoryTypeMap::types();
+                                        return array_combine($types, $types);
+                                    })
+                                    ->searchable()
+                                    ->preload()
+                                    ->reactive()
+                                    ->afterStateUpdated(function ($state, callable $set): void {
+                                        if (!$state) {
+                                            $set('product_category', null);
+                                            $set('google_product_category', null);
+                                            return;
+                                        }
 
-                                    $mapping = CategoryTypeMap::byType($state);
-                                    if ($mapping) {
-                                        $set('product_category', $mapping['category']);
-                                        $set('google_product_category', $mapping['google_product_category']);
-                                    }
-                                }),
-                            Select::make('product_category')
-                                ->label('Category')
-                                ->options(function (): array {
-                                    $categories = CategoryTypeMap::categories();
-                                    return array_combine($categories, $categories);
-                                })
-                                ->searchable()
-                                ->reactive()
-                                ->afterStateUpdated(function ($state, callable $set): void {
-                                    if (!$state) {
-                                        $set('type', null);
-                                        $set('google_product_category', null);
-                                        return;
-                                    }
+                                        $mapping = CategoryTypeMap::byType($state);
+                                        if ($mapping) {
+                                            $set('product_category', $mapping['category']);
+                                            $set('google_product_category', $mapping['google_product_category']);
+                                        }
+                                    }),
+                                TextInput::make('google_product_category')
+                                    ->label('Google Product Category')
+                                    ->disabled(),
+                            ])->columnSpanFull(),
+                            Grid::make(2)->schema([
+                                Select::make('product_category')
+                                    ->label('Category')
+                                    ->options(function (): array {
+                                        $categories = CategoryTypeMap::categories();
+                                        return array_combine($categories, $categories);
+                                    })
+                                    ->searchable()
+                                    ->reactive()
+                                    ->afterStateUpdated(function ($state, callable $set): void {
+                                        if (!$state) {
+                                            $set('type', null);
+                                            $set('google_product_category', null);
+                                            return;
+                                        }
 
-                                    $mapping = CategoryTypeMap::byCategory($state);
-                                    if ($mapping) {
-                                        $set('type', $mapping['type']);
-                                        $set('google_product_category', $mapping['google_product_category']);
-                                    }
-                                }),
-                            TextInput::make('google_product_category')
-                                ->label('Google Product Category'),
-                            Select::make('google_shopping_age_group')
-                                ->label('Google Shopping / Age Group')
-                                ->options([
-                                    'adult' => 'Adult',
-                                    'teen' => 'Teen',
-                                    'kids' => 'Kids',
-                                    'toddler' => 'Toddler',
-                                    'infant' => 'Infant',
-                                    'newborn' => 'Newborn',
-                                ])
-                                ->multiple()
-                                ->searchable()
-                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
-                                    if (!$record) {
-                                        return;
-                                    }
-                                    $raw = self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP);
-                                    if (trim($raw) === '') {
-                                        $component->state([]);
-                                        return;
-                                    }
-                                    $component->state(
-                                        array_values(array_filter(array_map('trim', explode(';', $raw))))
-                                    );
-                                })
-                                ->dehydrateStateUsing(function ($state) {
-                                    $values = is_array($state) ? $state : [];
-                                    $clean = array_values(array_unique(array_filter(array_map(
-                                        fn ($v) => trim((string) $v),
-                                        $values
-                                    ))));
-                                    return $clean ? implode(';', $clean) : null;
-                                }),
-                            Select::make('target_gender')
-                                ->label('Target gender')
-                                ->options([
-                                    'male' => 'Male',
-                                    'female' => 'Female',
-                                    'unisex' => 'Unisex',
-                                ])
-                                ->default('unisex')
-                                ->placeholder('Select target gender')
-                                ->searchable()
-                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
-                                    if (!$record) {
-                                        return;
-                                    }
-                                    $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
-                                }),
-                            Select::make('tags')
-                                ->label('Tags')
-                                ->multiple()
-                                ->searchable()
-                                ->preload()
-                                ->options(fn () => \App\Models\Tag::query()
-                                    ->orderBy('name')
-                                    ->pluck('name', 'name')
-                                    ->all()
-                                )
-                                ->afterStateUpdated(function (Select $component, $state, callable $set): void {
-                                    $values = is_array($state) ? $state : [];
-                                    $normalized = TagNormalizer::parseTokens(implode(', ', $values));
-                                    if ($normalized !== $values) {
-                                        $set('tags', $normalized);
-                                    }
-                                })
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    if (! is_string($state) || trim($state) === '') {
-                                        $component->state([]);
-                                        return;
-                                    }
+                                        $mapping = CategoryTypeMap::byCategory($state);
+                                        if ($mapping) {
+                                            $set('type', $mapping['type']);
+                                            $set('google_product_category', $mapping['google_product_category']);
+                                        }
+                                    }),
+                                Select::make('tags')
+                                    ->label('Tags')
+                                    ->multiple()
+                                    ->searchable()
+                                    ->preload()
+                                    ->options(fn () => \App\Models\Tag::query()
+                                        ->orderBy('name')
+                                        ->pluck('name', 'name')
+                                        ->all()
+                                    )
+                                    ->afterStateUpdated(function (Select $component, $state, callable $set): void {
+                                        $values = is_array($state) ? $state : [];
+                                        $normalized = TagNormalizer::parseTokens(implode(', ', $values));
+                                        if ($normalized !== $values) {
+                                            $set('tags', $normalized);
+                                        }
+                                    })
+                                    ->afterStateHydrated(function (Select $component, $state): void {
+                                        if (! is_string($state) || trim($state) === '') {
+                                            $component->state([]);
+                                            return;
+                                        }
 
-                                    $component->state(TagNormalizer::parseTokens($state));
-                                })
-                                ->dehydrateStateUsing(function ($state): ?string {
-                                    $values = is_array($state) ? $state : [];
-                                    return TagNormalizer::normalizeFromArray($values);
-                                }),
+                                        $component->state(TagNormalizer::parseTokens($state));
+                                    })
+                                    ->dehydrateStateUsing(function ($state): ?string {
+                                        $values = is_array($state) ? $state : [];
+                                        return TagNormalizer::normalizeFromArray($values);
+                                    }),
+                            ])->columnSpanFull(),
+                            Grid::make(2)->schema([
+                                Select::make('color_string')
+                                    ->label('Colors')
+                                    ->multiple()
+                                    ->searchable()
+                                    ->preload()
+                                    ->reactive()
+                                    ->options(fn () => \App\Models\Color::query()
+                                        ->orderBy('name')
+                                        ->pluck('name', 'name')
+                                        ->all()
+                                    )
+                                    ->afterStateUpdated(function (Select $component, $state, callable $set, callable $get): void {
+                                        $values = is_array($state) ? $state : [];
+                                        $normalized = array_values(array_unique(array_filter(array_map(
+                                            fn ($v) => trim((string) $v),
+                                            $values
+                                        ))));
+
+                                        $prev = $get('color_selection_prev') ?? [];
+                                        $prev = is_array($prev) ? $prev : [];
+                                        $prevLower = array_map('strtolower', $prev);
+
+                                        $lower = array_map('strtolower', $normalized);
+                                        $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                        $hasMulti = in_array('multicolour', $lower, true);
+
+                                        $message = null;
+                                        if ($hasSolidPlain && $hasMulti) {
+                                            $added = array_diff($lower, $prevLower);
+                                            if (in_array('multicolour', $added, true)) {
+                                                $message = "Multicolour can't be selected with Solid or Plain.";
+                                            } elseif (in_array('solid', $added, true) || in_array('plain', $added, true)) {
+                                                $message = "You can't select Solid or Plain with Multicolour.";
+                                            } else {
+                                                $message = "Multicolour can't be selected with Solid or Plain.";
+                                            }
+                                        }
+
+                                        if ($normalized !== $values) {
+                                            $set('color_string', $normalized);
+                                        }
+
+                                        $set('color_selection_prev', $normalized);
+                                        $set('color_conflict_message', $message);
+
+                                        $livewire = $component->getContainer()->getLivewire();
+                                        if ($message) {
+                                            $livewire->validateOnly($component->getStatePath());
+                                        } else {
+                                            $livewire->resetErrorBag($component->getStatePath());
+                                        }
+                                    })
+                                    ->rules([
+                                        function (Get $get): \Closure {
+                                            return function (string $attribute, $value, $fail) use ($get): void {
+                                                $values = is_array($value) ? $value : [];
+                                                $lower = array_map(
+                                                    'strtolower',
+                                                    array_values(array_unique(array_filter(array_map(
+                                                        fn ($v) => trim((string) $v),
+                                                        $values
+                                                    ))))
+                                                );
+
+                                                $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                                $hasMulti = in_array('multicolour', $lower, true);
+                                                if (!$hasSolidPlain || !$hasMulti) {
+                                                    return;
+                                                }
+
+                                                $message = $get('color_conflict_message')
+                                                    ?: "Multicolour can't be selected with Solid or Plain.";
+                                                $fail($message);
+                                            };
+                                        },
+                                    ])
+
+                                    // ?. DB -> UI state (ALWAYS return array for multiple select)
+                                    ->afterStateHydrated(function (Select $component, $state): void {
+                                        if (! is_string($state) || trim($state) === '') {
+                                            $component->state([]);   // IMPORTANT
+                                            return;
+                                        }
+
+                                        $normalized = str_replace(',', ';', $state);
+
+                                        $component->state(
+                                            array_values(array_filter(array_map('trim', explode(';', $normalized))))
+                                        );
+                                    })
+
+                                    // ?. UI -> DB string
+                                    ->dehydrateStateUsing(function ($state) {
+                                        $arr = is_array($state) ? $state : [];
+
+                                        $clean = array_values(array_unique(array_filter(array_map(
+                                            fn ($v) => trim((string) $v),
+                                            $arr
+                                        ))));
+
+                                        return $clean ? implode('; ', $clean) : null;
+                                    })
+
+                                    // Optional: allow creating new colors
+                                    ->createOptionForm([
+                                        TextInput::make('name')->required()->maxLength(255),
+                                        Toggle::make('active')->default(true),
+                                    ])
+                                    ->createOptionUsing(function (array $data) {
+                                        $name = trim($data['name'] ?? '');
+                                        if ($name === '') {
+                                            return null;
+                                        }
+
+                                        $color = \App\Models\Color::firstOrCreate(
+                                            ['name' => $name],
+                                            ['active' => (bool) ($data['active'] ?? true)]
+                                        );
+
+                                        return $color->name; // must match the option "value"
+                                    }),
+                                Textarea::make('materials_and_dimensions')
+                                    ->label('Materials and dimensions')
+                                    ->rows(3)
+                                    ->afterStateHydrated(function (Textarea $component, ?Product $record): void {
+                                        if (!$record) {
+                                            return;
+                                        }
+                                        $component->state(self::shopifyRowValue($record, HeaderStore::MATERIALS_AND_DIMENSIONS));
+                                    }),
+                            ])->columnSpanFull(),
                             TextInput::make('seo_title')
                                 ->columnSpanFull()
                                 ->disabled(fn (?Product $record): bool => Setting::getBool(
@@ -268,141 +372,42 @@ class ProductResource extends Resource
                                 ->all())
                             ->placeholder('import_YYYYMMDDH')
                             ->helperText('Internal only. Not exported.'),
-                            TextInput::make('cost_per_item')
-                                ->label('Cost per item')
-                                ->numeric()
-                                ->inputMode('decimal')
-                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
-                                    if (!$record) {
-                                        return;
-                                    }
-                                    $component->state(self::shopifyRowValue($record, 'Cost per item'));
-                                }),
-                            Hidden::make('color_conflict_message')
-                                ->dehydrated(false),
-                            Hidden::make('color_selection_prev')
-                                ->dehydrated(false),
-                            Select::make('color_string')
-                            ->label('Colors')
-                            ->multiple()
-                            ->searchable()
-                            ->preload()
-                            ->reactive()
-                            ->options(fn () => \App\Models\Color::query()
-                                ->orderBy('name')
-                                ->pluck('name', 'name')
-                                ->all()
-                            )
-                            ->afterStateUpdated(function (Select $component, $state, callable $set, callable $get): void {
-                                $values = is_array($state) ? $state : [];
-                                $normalized = array_values(array_unique(array_filter(array_map(
-                                    fn ($v) => trim((string) $v),
-                                    $values
-                                ))));
-
-                                $prev = $get('color_selection_prev') ?? [];
-                                $prev = is_array($prev) ? $prev : [];
-                                $prevLower = array_map('strtolower', $prev);
-
-                                $lower = array_map('strtolower', $normalized);
-                                $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
-                                $hasMulti = in_array('multicolour', $lower, true);
-
-                                $message = null;
-                                if ($hasSolidPlain && $hasMulti) {
-                                    $added = array_diff($lower, $prevLower);
-                                    if (in_array('multicolour', $added, true)) {
-                                        $message = "Multicolour can't be selected with Solid or Plain.";
-                                    } elseif (in_array('solid', $added, true) || in_array('plain', $added, true)) {
-                                        $message = "You can't select Solid or Plain with Multicolour.";
-                                    } else {
-                                        $message = "Multicolour can't be selected with Solid or Plain.";
-                                    }
+                        TextInput::make('cost_per_item')
+                            ->label('Cost per item')
+                            ->numeric()
+                            ->inputMode('decimal')
+                            ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                if (!$record) {
+                                    return;
                                 }
-
-                                if ($normalized !== $values) {
-                                    $set('color_string', $normalized);
-                                }
-
-                                $set('color_selection_prev', $normalized);
-                                $set('color_conflict_message', $message);
-
-                                $livewire = $component->getContainer()->getLivewire();
-                                if ($message) {
-                                    $livewire->validateOnly($component->getStatePath());
-                                } else {
-                                    $livewire->resetErrorBag($component->getStatePath());
-                                }
-                            })
-                            ->rules([
-                                function (Get $get): \Closure {
-                                    return function (string $attribute, $value, $fail) use ($get): void {
-                                        $values = is_array($value) ? $value : [];
-                                        $lower = array_map(
-                                            'strtolower',
-                                            array_values(array_unique(array_filter(array_map(
-                                                fn ($v) => trim((string) $v),
-                                                $values
-                                            ))))
-                                        );
-
-                                        $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
-                                        $hasMulti = in_array('multicolour', $lower, true);
-                                        if (!$hasSolidPlain || !$hasMulti) {
-                                            return;
-                                        }
-
-                                        $message = $get('color_conflict_message')
-                                            ?: "Multicolour can't be selected with Solid or Plain.";
-                                        $fail($message);
-                                    };
-                                },
+                                $component->state(self::shopifyRowValue($record, 'Cost per item'));
+                            }),
+                        Select::make('google_shopping_age_group')
+                            ->label('Google Shopping / Age Group')
+                            ->options([
+                                'adult' => 'Adult',
+                                'teen' => 'Teen',
+                                'kids' => 'Kids',
+                                'toddler' => 'Toddler',
+                                'infant' => 'Infant',
+                                'newborn' => 'Newborn',
                             ])
-
-                        // ?. DB -> UI state (ALWAYS return array for multiple select)
-                        ->afterStateHydrated(function (Select $component, $state): void {
-                            if (! is_string($state) || trim($state) === '') {
-                                $component->state([]);   // IMPORTANT
-                                return;
-                            }
-
-                            $normalized = str_replace(',', ';', $state);
-
-                            $component->state(
-                                array_values(array_filter(array_map('trim', explode(';', $normalized))))
-                            );
-                        })
-
-                        // ?. UI -> DB string
-                        ->dehydrateStateUsing(function ($state) {
-                            $arr = is_array($state) ? $state : [];
-
-                            $clean = array_values(array_unique(array_filter(array_map(
-                                fn ($v) => trim((string) $v),
-                                $arr
-                            ))));
-
-                            return $clean ? implode('; ', $clean) : null;
-                        })
-
-                        // Optional: allow creating new colors
-                        ->createOptionForm([
-                            TextInput::make('name')->required()->maxLength(255),
-                            Toggle::make('active')->default(true),
-                        ])
-                        ->createOptionUsing(function (array $data) {
-                            $name = trim($data['name'] ?? '');
-                            if ($name === '') {
-                                return null;
-                            }
-
-                            $color = \App\Models\Color::firstOrCreate(
-                                ['name' => $name],
-                                ['active' => (bool) ($data['active'] ?? true)]
-                            );
-
-                            return $color->name; // must match the option "value"
-                        }),
+                            ->searchable()
+                            ->afterStateHydrated(function (Select $component, ?Product $record): void {
+                                if (!$record) {
+                                    return;
+                                }
+                                $raw = trim(self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP));
+                                $component->state($raw !== '' ? $raw : null);
+                            })
+                            ->dehydrateStateUsing(function ($state): ?string {
+                                $value = is_string($state) ? trim($state) : '';
+                                return $value === '' ? null : $value;
+                            }),
+                        Hidden::make('color_conflict_message')
+                            ->dehydrated(false),
+                        Hidden::make('color_selection_prev')
+                            ->dehydrated(false),
                         TextInput::make('jewelry_material')
                             ->label('Jewelry material')
                             ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
@@ -410,15 +415,6 @@ class ProductResource extends Resource
                                     return;
                                 }
                                 $component->state(self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL));
-                            }),
-                        Textarea::make('materials_and_dimensions')
-                            ->label('Materials and dimensions')
-                            ->rows(3)
-                            ->afterStateHydrated(function (Textarea $component, ?Product $record): void {
-                                if (!$record) {
-                                    return;
-                                }
-                                $component->state(self::shopifyRowValue($record, HeaderStore::MATERIALS_AND_DIMENSIONS));
                             }),
                         Grid::make(2)->schema([
                             TextInput::make('jewelry_type')
@@ -446,13 +442,20 @@ class ProductResource extends Resource
                                     }
                                     $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
                                 }),
-                            TextInput::make('variant_weight_unit')
+                            Select::make('variant_weight_unit')
                                 ->label('Variant weight unit')
-                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                ->options([
+                                    'g' => 'g',
+                                    'kg' => 'kg',
+                                    'mg' => 'mg',
+                                ])
+                                ->default('g')
+                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
                                     }
-                                    $component->state($record->variants()->orderBy('id')->value('weight_unit'));
+                                    $value = $record->variants()->orderBy('id')->value('weight_unit');
+                                    $component->state($value ?: 'g');
                                 }),
                         ]),
                         Toggle::make('published')
@@ -1151,11 +1154,8 @@ class ProductResource extends Resource
         $data = $record->toArray();
         $data['extra_shopify_fields'] = self::extraShopifyFields($record);
 
-        $ageGroupRaw = self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP);
-        $ageGroupRaw = trim($ageGroupRaw);
-        $data['google_shopping_age_group'] = $ageGroupRaw === ''
-            ? []
-            : array_values(array_filter(array_map('trim', explode(';', $ageGroupRaw))));
+        $ageGroupRaw = trim(self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP));
+        $data['google_shopping_age_group'] = $ageGroupRaw !== '' ? $ageGroupRaw : null;
         $data['target_gender'] = self::shopifyRowValue($record, HeaderStore::TARGET_GENDER);
         $data['cost_per_item'] = self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM);
 
@@ -1483,8 +1483,11 @@ class ProductResource extends Resource
 
         if ($variantWeightUnit !== null) {
             $normalized = trim((string) $variantWeightUnit);
+            if ($normalized === '') {
+                $normalized = 'g';
+            }
             $product->variants()->update([
-                'weight_unit' => $normalized === '' ? null : $normalized,
+                'weight_unit' => $normalized,
             ]);
         }
 

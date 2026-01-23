@@ -25,6 +25,8 @@ final class HeaderStore
     public const VARIANT_PRICE = 'Variant Price';
     public const VARIANT_COMPARE_AT = 'Variant Compare At Price';
     public const VARIANT_BARCODE = 'Variant Barcode';
+    public const VARIANT_WEIGHT = 'Variant Weight';
+    public const VARIANT_WEIGHT_UNIT = 'Variant Weight Unit';
 
     public const OPTION1_NAME = 'Option1 Name';
     public const OPTION1_VALUE = 'Option1 Value';
@@ -80,6 +82,8 @@ final class HeaderStore
             self::VARIANT_PRICE,
             self::VARIANT_COMPARE_AT,
             self::VARIANT_BARCODE,
+            self::VARIANT_WEIGHT,
+            self::VARIANT_WEIGHT_UNIT,
             self::OPTION1_NAME,
             self::OPTION1_VALUE,
             self::OPTION2_NAME,
