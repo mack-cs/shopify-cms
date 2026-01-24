@@ -45,7 +45,7 @@ final class Normalizer
                         $updated = true;
                     }
                     if ($ageGroup === '') {
-                        $data[HeaderStore::AGE_GROUP] = 'adults';
+                        $data[HeaderStore::AGE_GROUP] = 'universal';
                         $updated = true;
                     }
 

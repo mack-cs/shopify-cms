@@ -94,6 +94,7 @@ final class ShopifyCsvValidator
             foreach (HeaderStore::semicolonSeparatedHeaders() as $header) {
                 $this->checkSemicolonSeparator($errors, $rowLabel, $row, $header);
             }
+
         }
         } catch (\League\Csv\SyntaxError $e) {
             $errors[] = 'Header error: ' . $e->getMessage();
@@ -180,4 +181,5 @@ final class ShopifyCsvValidator
             $errors[] = "{$rowLabel}: {$header} must use ';' separators (no commas).";
         }
     }
+
 }

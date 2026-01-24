@@ -72,13 +72,16 @@ class CreateProduct extends CreateRecord
         }
 
         if (array_key_exists('google_shopping_age_group', $formState)) {
-            $data[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $formState['google_shopping_age_group'] ?? '';
+            $value = trim((string) ($formState['google_shopping_age_group'] ?? ''));
+            $data[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $value === '' ? '' : strtolower($value);
         }
         if (array_key_exists('target_gender', $formState)) {
-            $data[HeaderStore::TARGET_GENDER] = $formState['target_gender'] ?? '';
+            $value = trim((string) ($formState['target_gender'] ?? ''));
+            $data[HeaderStore::TARGET_GENDER] = $value === '' ? '' : strtolower($value);
         }
         if (array_key_exists('age_group', $formState)) {
-            $data[HeaderStore::AGE_GROUP] = $formState['age_group'] ?? '';
+            $value = trim((string) ($formState['age_group'] ?? ''));
+            $data[HeaderStore::AGE_GROUP] = $value === '' ? '' : strtolower($value);
         }
         if (array_key_exists('materials_and_dimensions', $formState)) {
             $data[HeaderStore::MATERIALS_AND_DIMENSIONS] = $formState['materials_and_dimensions'] ?? '';

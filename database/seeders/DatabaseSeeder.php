@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             ColorSeeder::class,
             TypeSeeder::class,
             TagSeeder::class,
+            DropdownOptionSeeder::class,
             RequiredFieldSeeder::class,
             RoleSeeder::class,
             UserSeeder::class,

@@ -148,6 +148,19 @@ final class HeaderStore
     {
         $templateDir = storage_path('app/public/template');
         $paths = glob($templateDir . '/*.csv') ?: [];
+        $paths = array_values(array_filter($paths, function (string $path): bool {
+            $name = strtolower(basename($path));
+            if (str_contains($name, 'drp-downs')) {
+                return false;
+            }
+            if (str_contains($name, 'dropdown')) {
+                return false;
+            }
+            if (str_contains($name, 'products_export')) {
+                return true;
+            }
+            return false;
+        }));
 
         if (empty($paths)) {
             $legacyPath = storage_path('app/private/imports/products.csv');

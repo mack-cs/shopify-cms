@@ -56,6 +56,7 @@ use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Models\Tag;
 use App\Models\Color;
+use App\Models\DropdownOption;
 use League\Csv\Reader;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\HtmlString;
@@ -100,22 +101,35 @@ class ProductResource extends Resource
                             TextInput::make('title'),
                             Textarea::make('body_html')->rows(5)->columnSpanFull(),
                             Grid::make(3)->schema([
-                                Select::make('target_gender')
-                                    ->label('Target gender')
-                                    ->options([
-                                        'male' => 'Male',
-                                        'female' => 'Female',
-                                        'unisex' => 'Unisex',
-                                    ])
-                                    ->default('unisex')
-                                    ->placeholder('Select target gender')
-                                    ->searchable()
-                                    ->afterStateHydrated(function (Select $component, ?Product $record): void {
-                                        if (!$record) {
-                                            return;
-                                        }
-                                        $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
-                                    }),
+                            Select::make('target_gender')
+                                ->label('Target gender')
+                                ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::TARGET_GENDER))
+                                ->default('unisex')
+                                ->placeholder('Select target gender')
+                                ->searchable()
+                                ->createOptionForm([
+                                    TextInput::make('value')->required()->maxLength(255),
+                                ])
+                                ->createOptionUsing(function (array $data) {
+                                    $value = trim((string) ($data['value'] ?? ''));
+                                    if ($value === '') {
+                                        return null;
+                                    }
+
+                                    DropdownOption::create([
+                                        'header' => HeaderStore::TARGET_GENDER,
+                                        'value' => $value,
+                                        'active' => true,
+                                    ]);
+
+                                    return $value;
+                                })
+                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
+                                }),
                                 Select::make('type')
                                     ->label('Type')
                                     ->options(function (): array {
@@ -195,17 +209,21 @@ class ProductResource extends Resource
                                     }),
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
-                                Select::make('color_string')
-                                    ->label('Colors')
-                                    ->multiple()
-                                    ->searchable()
-                                    ->preload()
-                                    ->reactive()
-                                    ->options(fn () => \App\Models\Color::query()
-                                        ->orderBy('name')
-                                        ->pluck('name', 'name')
-                                        ->all()
-                                    )
+                            Select::make('color_string')
+                                ->label('Colors')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->reactive()
+                                ->options(function (Get $get): array {
+                                    $vendor = $get('vendor');
+                                    $type = $get('type');
+                                    return self::dropdownOptionsForHeader(
+                                        HeaderStore::COLOR_METAFIELD,
+                                        $vendor,
+                                        $type
+                                    );
+                                })
                                     ->afterStateUpdated(function (Select $component, $state, callable $set, callable $get): void {
                                         $values = is_array($state) ? $state : [];
                                         $normalized = array_values(array_unique(array_filter(array_map(
@@ -299,23 +317,31 @@ class ProductResource extends Resource
                                     })
 
                                     // Optional: allow creating new colors
-                                    ->createOptionForm([
-                                        TextInput::make('name')->required()->maxLength(255),
-                                        Toggle::make('active')->default(true),
-                                    ])
-                                    ->createOptionUsing(function (array $data) {
-                                        $name = trim($data['name'] ?? '');
-                                        if ($name === '') {
-                                            return null;
-                                        }
+                                ->createOptionForm([
+                                    TextInput::make('value')->required()->maxLength(255),
+                                    TextInput::make('vendor')
+                                        ->label('Vendor')
+                                        ->helperText('Leave blank for global options.'),
+                                    TextInput::make('product_type')
+                                        ->label('Product type')
+                                        ->helperText('Optional; use to limit to a specific type.'),
+                                ])
+                                ->createOptionUsing(function (array $data) {
+                                    $value = trim((string) ($data['value'] ?? ''));
+                                    if ($value === '') {
+                                        return null;
+                                    }
 
-                                        $color = \App\Models\Color::firstOrCreate(
-                                            ['name' => $name],
-                                            ['active' => (bool) ($data['active'] ?? true)]
-                                        );
+                                    DropdownOption::create([
+                                        'header' => HeaderStore::COLOR_METAFIELD,
+                                        'value' => $value,
+                                        'vendor' => self::nullIfEmpty($data['vendor'] ?? null),
+                                        'product_type' => self::nullIfEmpty($data['product_type'] ?? null),
+                                        'active' => true,
+                                    ]);
 
-                                        return $color->name; // must match the option "value"
-                                    }),
+                                    return $value;
+                                }),
                                 Textarea::make('materials_and_dimensions')
                                     ->label('Materials and dimensions')
                                     ->rows(3)
@@ -398,33 +424,74 @@ class ProductResource extends Resource
                                     return;
                                 }
                                 $raw = trim(self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP));
-                                $component->state($raw !== '' ? $raw : null);
+                                $component->state($raw !== '' ? strtolower($raw) : null);
                             })
                             ->dehydrateStateUsing(function ($state): ?string {
-                                $value = is_string($state) ? trim($state) : '';
+                                $value = is_string($state) ? strtolower(trim($state)) : '';
                                 return $value === '' ? null : $value;
                             }),
                         Hidden::make('color_conflict_message')
                             ->dehydrated(false),
                         Hidden::make('color_selection_prev')
                             ->dehydrated(false),
-                        TextInput::make('jewelry_material')
+                        Select::make('jewelry_material')
                             ->label('Jewelry material')
-                            ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                            ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::JEWELRY_MATERIAL))
+                            ->searchable()
+                            ->createOptionForm([
+                                TextInput::make('value')->required()->maxLength(255),
+                            ])
+                            ->createOptionUsing(function (array $data) {
+                                $value = trim((string) ($data['value'] ?? ''));
+                                if ($value === '') {
+                                    return null;
+                                }
+
+                                DropdownOption::create([
+                                    'header' => HeaderStore::JEWELRY_MATERIAL,
+                                    'value' => $value,
+                                    'active' => true,
+                                ]);
+
+                                return $value;
+                            })
+                            ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                 if (!$record) {
                                     return;
                                 }
                                 $component->state(self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL));
                             }),
                         Grid::make(2)->schema([
-                            TextInput::make('jewelry_type')
+                            Select::make('jewelry_type')
                                 ->label('Jewelry type')
-                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::JEWELRY_TYPE))
+                                ->searchable()
+                                ->createOptionForm([
+                                    TextInput::make('value')->required()->maxLength(255),
+                                ])
+                                ->createOptionUsing(function (array $data) {
+                                    $value = trim((string) ($data['value'] ?? ''));
+                                    if ($value === '') {
+                                        return null;
+                                    }
+
+                                    DropdownOption::create([
+                                        'header' => HeaderStore::JEWELRY_TYPE,
+                                        'value' => strtolower($value),
+                                        'active' => true,
+                                    ]);
+
+                                    return strtolower($value);
+                                })
+                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
                                     }
                                     $component->state(self::shopifyRowValue($record, HeaderStore::JEWELRY_TYPE));
-                                }),
+                                })
+                                ->columnSpanFull(),
+                        ])->columnSpanFull(),
+                        Grid::make(2)->schema([
                             TextInput::make('bracelet_design')
                                 ->label('Bracelet design')
                                 ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
@@ -432,15 +499,6 @@ class ProductResource extends Resource
                                         return;
                                     }
                                     $component->state(self::shopifyRowValue($record, HeaderStore::BRACELET_DESIGN));
-                                }),
-                            TextInput::make('age_group')
-                                ->label('Age group')
-                                ->default('adults')
-                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
-                                    if (!$record) {
-                                        return;
-                                    }
-                                    $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
                                 }),
                             Select::make('variant_weight_unit')
                                 ->label('Variant weight unit')
@@ -457,7 +515,36 @@ class ProductResource extends Resource
                                     $value = $record->variants()->orderBy('id')->value('weight_unit');
                                     $component->state($value ?: 'g');
                                 }),
-                        ]),
+                        ])->columnSpanFull(),
+                        Select::make('age_group')
+                            ->label('Age group')
+                            ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::AGE_GROUP))
+                            ->default('universal')
+                            ->searchable()
+                            ->createOptionForm([
+                                TextInput::make('value')->required()->maxLength(255),
+                            ])
+                            ->createOptionUsing(function (array $data) {
+                                $value = trim((string) ($data['value'] ?? ''));
+                                if ($value === '') {
+                                    return null;
+                                }
+
+                                DropdownOption::create([
+                                    'header' => HeaderStore::AGE_GROUP,
+                                    'value' => strtolower($value),
+                                    'active' => true,
+                                ]);
+
+                                return strtolower($value);
+                            })
+                            ->afterStateHydrated(function (Select $component, ?Product $record): void {
+                                if (!$record) {
+                                    return;
+                                }
+                                $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
+                            })
+                            ->columnSpanFull(),
                         Toggle::make('published')
                             ->label('Published')
                             ->helperText('Exported as true/false.')
@@ -556,7 +643,13 @@ class ProductResource extends Resource
                 ->square()
                 ->size(40)
                 ->toggleable(),
-            TextColumn::make('handle')->searchable()->toggleable(),
+            TextColumn::make('handle')
+                ->searchable(query: function (Builder $query, string $search): Builder {
+                    return $query->where('handle', 'like', "%{$search}%")
+                        ->orWhere('title', 'like', "%{$search}%")
+                        ->orWhereHas('variants', fn (Builder $variantQuery) => $variantQuery->where('sku', 'like', "%{$search}%"));
+                })
+                ->toggleable(),
             TextColumn::make('title')->searchable()->toggleable(),
             TextColumn::make('seo_title')
                 ->label('SEO title')
@@ -1101,7 +1194,7 @@ class ProductResource extends Resource
                 ->multiple()
                 ->searchable()
                 ->preload()
-                ->options(fn () => Color::query()->orderBy('name')->pluck('name', 'name')->all());
+                ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::COLOR_METAFIELD));
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'type') {
@@ -1459,13 +1552,16 @@ class ProductResource extends Resource
         if ($row) {
             $rowData = $row->data ?? [];
             if ($googleShoppingAgeGroup !== null) {
-                $rowData[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $googleShoppingAgeGroup ?: '';
+                $value = trim((string) $googleShoppingAgeGroup);
+                $rowData[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $value === '' ? '' : strtolower($value);
             }
             if ($targetGender !== null) {
-                $rowData[HeaderStore::TARGET_GENDER] = $targetGender ?: '';
+                $value = trim((string) $targetGender);
+                $rowData[HeaderStore::TARGET_GENDER] = $value === '' ? '' : strtolower($value);
             }
             if ($ageGroup !== null) {
-                $rowData[HeaderStore::AGE_GROUP] = $ageGroup ?: '';
+                $value = trim((string) $ageGroup);
+                $rowData[HeaderStore::AGE_GROUP] = $value === '' ? '' : strtolower($value);
             }
             if ($costPerItem !== null) {
                 $rowData['Cost per item'] = $costPerItem ?: '';
@@ -1506,5 +1602,27 @@ class ProductResource extends Resource
         }
 
         app(Normalizer::class)->recalculateErrorsForProduct($product);
+    }
+
+    private static function nullIfEmpty(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim((string) $value);
+        return $trimmed === '' ? null : $trimmed;
+    }
+
+    private static function dropdownOptionsForHeader(
+        string $header,
+        ?string $vendor = null,
+        ?string $productType = null
+    ): array {
+        return DropdownOption::optionsForHeader($header, $vendor, $productType)
+            ->unique()
+            ->sort()
+            ->mapWithKeys(fn (string $value): array => [$value => $value])
+            ->all();
     }
 }
