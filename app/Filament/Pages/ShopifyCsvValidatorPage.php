@@ -3,6 +3,7 @@
 namespace App\Filament\Pages;
 
 use App\Services\ShopifyCsvValidator;
+use App\Services\HeaderStore;
 use Filament\Forms\Components\Actions;
 use Filament\Forms\Components\Actions\Action;
 use Filament\Forms\Components\FileUpload;
@@ -80,7 +81,18 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
 
                                         $absolutePath = $disk->path($path);
                                     }
-                                    $templatePath = storage_path('app/private/imports/products.csv');
+                                    $templatePath = HeaderStore::latestTemplatePath();
+                                    if ($templatePath === null) {
+                                        $notification = Notification::make()
+                                            ->title('Template missing')
+                                            ->body('No CSV template found in storage/app/public/template or legacy imports.')
+                                            ->danger();
+                                        if ($user = Auth::user()) {
+                                            $notification->sendToDatabase($user);
+                                        }
+                                        $notification->send();
+                                        return;
+                                    }
 
                                     $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
                                     if ($result['valid']) {

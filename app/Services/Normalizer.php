@@ -111,7 +111,7 @@ final class Normalizer
                         'product_id' => $product->id,
                         'sku' => $sku,
                         'barcode' => $barcode,
-                        'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_WEIGHT, null)),
+                        'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
                         'weight_unit' => $weightUnit,
                         'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
                         'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
@@ -283,27 +283,8 @@ final class Normalizer
             return null;
         }
 
-        $resolved = CategoryTypeMap::byCategory($name);
-        if (!$resolved) {
-            return null;
-        }
-
         $lower = strtolower($name);
-        $category = Category::whereRaw('LOWER(name) = ?', [$lower])->first();
-
-        if (!$category) {
-            return Category::create([
-                'name' => $name,
-                'google_product_category' => $this->normalizeValue($googleCategory),
-                'active' => true,
-            ]);
-        }
-
-        if (!$category->google_product_category && $this->normalizeValue($googleCategory)) {
-            $category->update(['google_product_category' => $this->normalizeValue($googleCategory)]);
-        }
-
-        return $category;
+        return Category::whereRaw('LOWER(name) = ?', [$lower])->first();
     }
 
     private function syncColors(?string $colorString): void
@@ -472,6 +453,14 @@ final class Normalizer
             $value = $productValues[$attribute] ?? null;
             if ($this->normalizeValue($value) === null) {
                 $errors[] = "missing:{$label}";
+            }
+        }
+
+        $categoryValue = $this->normalizeValue($resolved['category'] ?? $product->product_category);
+        if ($categoryValue !== null) {
+            $exists = Category::whereRaw('LOWER(name) = ?', [strtolower($categoryValue)])->exists();
+            if (!$exists) {
+                $errors[] = 'invalid:category';
             }
         }
 

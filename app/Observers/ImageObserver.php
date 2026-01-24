@@ -171,8 +171,8 @@ class ImageObserver
             return $headers;
         }
 
-        $templatePath = storage_path('app/private/imports/products.csv');
-        if (!is_file($templatePath)) {
+        $templatePath = HeaderStore::latestTemplatePath();
+        if ($templatePath === null || !is_file($templatePath)) {
             return [];
         }
 

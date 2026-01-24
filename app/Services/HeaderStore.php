@@ -25,7 +25,7 @@ final class HeaderStore
     public const VARIANT_PRICE = 'Variant Price';
     public const VARIANT_COMPARE_AT = 'Variant Compare At Price';
     public const VARIANT_BARCODE = 'Variant Barcode';
-    public const VARIANT_WEIGHT = 'Variant Weight';
+    public const VARIANT_GRAMS = 'Variant Grams';
     public const VARIANT_WEIGHT_UNIT = 'Variant Weight Unit';
 
     public const OPTION1_NAME = 'Option1 Name';
@@ -82,7 +82,7 @@ final class HeaderStore
             self::VARIANT_PRICE,
             self::VARIANT_COMPARE_AT,
             self::VARIANT_BARCODE,
-            self::VARIANT_WEIGHT,
+            self::VARIANT_GRAMS,
             self::VARIANT_WEIGHT_UNIT,
             self::OPTION1_NAME,
             self::OPTION1_VALUE,
@@ -142,5 +142,19 @@ final class HeaderStore
             'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)',
             'Search product boosts (product.metafields.shopify--discovery--product_search_boost.queries)',
         ];
+    }
+
+    public static function latestTemplatePath(): ?string
+    {
+        $templateDir = storage_path('app/public/template');
+        $paths = glob($templateDir . '/*.csv') ?: [];
+
+        if (empty($paths)) {
+            $legacyPath = storage_path('app/private/imports/products.csv');
+            return is_file($legacyPath) ? $legacyPath : null;
+        }
+
+        usort($paths, fn (string $a, string $b): int => filemtime($b) <=> filemtime($a));
+        return $paths[0] ?? null;
     }
 }

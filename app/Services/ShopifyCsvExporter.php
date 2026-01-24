@@ -8,6 +8,7 @@ use App\Models\ShopifyRow;
 use App\Models\Variant;
 use App\Models\Image;
 use Illuminate\Support\Facades\DB;
+use League\Csv\Reader;
 use League\Csv\Writer;
 use SplTempFileObject;
 use App\Services\RowKey;
@@ -24,7 +25,17 @@ final class ShopifyCsvExporter
     {
         $headers = $import->headers ?? [];
         if (empty($headers)) {
-            throw new \RuntimeException('Import headers missing; cannot export.');
+            $templatePath = HeaderStore::latestTemplatePath();
+            if ($templatePath === null || !is_file($templatePath)) {
+                throw new \RuntimeException('Import headers missing; cannot export.');
+            }
+
+            $csv = Reader::createFromPath($templatePath);
+            $csv->setHeaderOffset(0);
+            $headers = $csv->getHeader();
+            if (empty($headers)) {
+                throw new \RuntimeException('Template headers missing; cannot export.');
+            }
         }
 
         $writer = Writer::createFromFileObject(new SplTempFileObject());

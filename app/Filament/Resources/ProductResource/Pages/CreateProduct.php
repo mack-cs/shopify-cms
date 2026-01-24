@@ -109,13 +109,27 @@ class CreateProduct extends CreateRecord
 
     private function templateHeaders(): array
     {
-        $templatePath = storage_path('app/private/imports/products.csv');
-        if (!is_file($templatePath)) {
+        $templatePath = $this->latestTemplatePath();
+        if ($templatePath === null || !is_file($templatePath)) {
             return [];
         }
 
         $csv = Reader::createFromPath($templatePath);
         $csv->setHeaderOffset(0);
         return $csv->getHeader();
+    }
+
+    private function latestTemplatePath(): ?string
+    {
+        $templateDir = storage_path('app/public/template');
+        $paths = glob($templateDir . '/*.csv') ?: [];
+
+        if (empty($paths)) {
+            $legacyPath = storage_path('app/private/imports/products.csv');
+            return is_file($legacyPath) ? $legacyPath : null;
+        }
+
+        usort($paths, fn (string $a, string $b): int => filemtime($b) <=> filemtime($a));
+        return $paths[0] ?? null;
     }
 }

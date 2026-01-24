@@ -16,6 +16,7 @@ use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyCsvImporter;
 use App\Services\ShopifyCsvValidator;
 use App\Services\Normalizer;
+use App\Services\HeaderStore;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Tables\Columns\TextColumn;
@@ -137,7 +138,16 @@ protected static ?string $navigationLabel = 'Product Feed';
         }
 
         $absolutePath = $disk->path($record->filename);
-        $templatePath = storage_path('app/private/imports/products.csv');
+        $templatePath = HeaderStore::latestTemplatePath();
+        if ($templatePath === null) {
+            self::sendNotification(
+                Notification::make()
+                    ->title('Template missing')
+                    ->body('No CSV template found in storage/app/public/template or legacy imports.')
+                    ->danger()
+            );
+            return;
+        }
         $validator = app(ShopifyCsvValidator::class);
         $validation = $validator->validateAgainstTemplate($absolutePath, $templatePath);
         if (!$validation['valid']) {
@@ -344,7 +354,14 @@ protected static ?string $navigationLabel = 'Product Feed';
         }
 
         $absolutePath = $disk->path($record->filename);
-        $templatePath = storage_path('app/private/imports/products.csv');
+        $templatePath = HeaderStore::latestTemplatePath();
+        if ($templatePath === null) {
+            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
+            return [
+                'valid' => false,
+                'errors' => ['Template file missing.'],
+            ];
+        }
 
         $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
         $record->forceFill([

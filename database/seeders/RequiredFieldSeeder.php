@@ -38,6 +38,8 @@ class RequiredFieldSeeder extends Seeder
             HeaderStore::VARIANT_PRICE => 'price',
             HeaderStore::VARIANT_COMPARE_AT => 'compare_at_price',
             HeaderStore::VARIANT_BARCODE => 'barcode',
+            HeaderStore::VARIANT_GRAMS => 'weight',
+            HeaderStore::VARIANT_WEIGHT_UNIT => 'weight_unit',
             HeaderStore::OPTION1_NAME => 'option1_name',
             HeaderStore::OPTION1_VALUE => 'option1_value',
             HeaderStore::OPTION2_NAME => 'option2_name',
@@ -170,8 +172,8 @@ class RequiredFieldSeeder extends Seeder
 
     private function loadTemplateHeaders(): array
     {
-        $templatePath = storage_path('app/private/imports/products.csv');
-        if (!is_file($templatePath)) {
+        $templatePath = HeaderStore::latestTemplatePath();
+        if ($templatePath === null || !is_file($templatePath)) {
             return [];
         }
 
