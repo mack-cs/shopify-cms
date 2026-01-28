@@ -40,7 +40,13 @@ class DropdownOptionResource extends Resource
                 ->label('Product type')
                 ->maxLength(255),
             Forms\Components\TextInput::make('collection_style')
-                ->label('Collection/Style')
+                ->label('Collection')
+                ->maxLength(255),
+            Forms\Components\TextInput::make('collection_tag_primary')
+                ->label('Collection tag 1')
+                ->maxLength(255),
+            Forms\Components\TextInput::make('collection_tag_secondary')
+                ->label('Collection tag 2')
                 ->maxLength(255),
             Forms\Components\Toggle::make('active')
                 ->default(true),
@@ -59,7 +65,9 @@ class DropdownOptionResource extends Resource
                 TextColumn::make('value')->searchable()->wrap(),
                 TextColumn::make('vendor')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_type')->label('Product type')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('collection_style')->label('Collection/Style')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('collection_style')->label('Collection')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('collection_tag_primary')->label('Collection tag 1')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('collection_tag_secondary')->label('Collection tag 2')->toggleable(isToggledHiddenByDefault: true),
                 ToggleColumn::make('active'),
                 TextColumn::make('sort_order')->toggleable(isToggledHiddenByDefault: true),
             ])

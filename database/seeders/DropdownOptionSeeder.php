@@ -3,7 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\DropdownOption;
-use App\Services\HeaderStore;
+use App\Services\TagNormalizer;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
@@ -12,54 +12,62 @@ class DropdownOptionSeeder extends Seeder
 {
     public function run(): void
     {
-        $path = storage_path('app/public/template/drp-downs.csv');
+        $path = storage_path('app/public/template/dropdown-seed.csv');
         if (!is_file($path)) {
             return;
         }
 
         $csv = Reader::createFromPath($path);
         $csv->setHeaderOffset(0);
-        $headers = $csv->getHeader();
-        if (empty($headers)) {
+        $rawHeaders = $csv->getHeader();
+        if (empty($rawHeaders)) {
             return;
         }
 
-        $collectionHeader = 'Collections/ Style';
-        $productTypeHeader = 'Product Type/ Style ';
-        $headerMap = [
-            'Colour' => HeaderStore::COLOR_METAFIELD,
-            'Jewelry material' => HeaderStore::JEWELRY_MATERIAL,
-            'Age group' => HeaderStore::AGE_GROUP,
-            'Jewelry type' => HeaderStore::JEWELRY_TYPE,
-            'Target gender' => HeaderStore::TARGET_GENDER,
-        ];
+        $headerLookup = [];
+        foreach ($rawHeaders as $rawHeader) {
+            $headerLookup[$rawHeader] = $this->normalizeHeader($rawHeader);
+        }
+
+        $collectionHeader = $this->findHeaderByNormalized($headerLookup, 'Collection');
+        if ($collectionHeader === null) {
+            return;
+        }
+        $tagsHeader = $this->findHeaderByNormalized($headerLookup, 'Tags');
+        if ($tagsHeader === null) {
+            return;
+        }
 
         $rows = [];
         $sort = 0;
         foreach ($csv->getRecords() as $record) {
             $collectionStyle = $this->normalizeValue($record[$collectionHeader] ?? null);
-            $productType = $this->normalizeValue($record[$productTypeHeader] ?? null);
-            $vendor = $this->deriveVendor($collectionStyle, $productType);
+            $tagsValue = $this->normalizeValue($record[$tagsHeader] ?? null);
+            $tags = $this->normalizeTags($tagsValue);
+            $tagPrimary = $tags[0] ?? null;
+            $tagSecondary = $tags[1] ?? null;
 
-            foreach ($headers as $header) {
-                if ($header === $collectionHeader || $header === $productTypeHeader) {
+            foreach ($headerLookup as $rawHeader => $normalizedHeader) {
+                if ($rawHeader === $collectionHeader || $rawHeader === $tagsHeader) {
                     continue;
                 }
 
-                $raw = $record[$header] ?? null;
+                $raw = $record[$rawHeader] ?? null;
                 $values = $this->parseValues($raw);
                 if (empty($values)) {
                     continue;
                 }
 
-                $targetHeader = $headerMap[$header] ?? $header;
+                $targetHeader = $normalizedHeader;
                 foreach ($values as $value) {
                     $rows[] = [
                         'header' => $targetHeader,
                         'value' => $value,
-                        'vendor' => $targetHeader === HeaderStore::COLOR_METAFIELD ? $vendor : null,
-                        'product_type' => $targetHeader === HeaderStore::COLOR_METAFIELD ? $productType : null,
+                        'vendor' => null,
+                        'product_type' => null,
                         'collection_style' => $collectionStyle,
+                        'collection_tag_primary' => $tagPrimary,
+                        'collection_tag_secondary' => $tagSecondary,
                         'active' => true,
                         'sort_order' => $sort++,
                         'created_at' => now(),
@@ -107,23 +115,30 @@ class DropdownOptionSeeder extends Seeder
         return $trimmed === '' ? null : $trimmed;
     }
 
-    private function deriveVendor(?string $collectionStyle, ?string $productType): ?string
+    private function normalizeHeader(string $header): string
     {
-        if ($collectionStyle === null) {
-            return null;
+        $header = str_replace("\r", '', $header);
+        $lines = preg_split('/\n/', $header) ?: [$header];
+        return trim($lines[0] ?? $header);
+    }
+
+    private function findHeaderByNormalized(array $headerLookup, string $normalizedHeader): ?string
+    {
+        foreach ($headerLookup as $rawHeader => $normalized) {
+            if ($normalized === $normalizedHeader) {
+                return $rawHeader;
+            }
         }
 
-        if ($productType === null) {
-            return $collectionStyle;
+        return null;
+    }
+
+    private function normalizeTags(?string $value): array
+    {
+        if ($value === null) {
+            return [];
         }
 
-        $lower = strtolower($collectionStyle);
-        $typeLower = strtolower($productType);
-        if (str_ends_with($lower, $typeLower)) {
-            $vendor = trim(substr($collectionStyle, 0, strlen($collectionStyle) - strlen($productType)));
-            return $vendor !== '' ? $vendor : null;
-        }
-
-        return $collectionStyle;
+        return TagNormalizer::parseTokens($value);
     }
 }

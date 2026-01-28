@@ -38,14 +38,24 @@ final class Normalizer
                     $data = $primary->data ?? [];
                     $targetGender = trim((string) ($data[HeaderStore::TARGET_GENDER] ?? ''));
                     $ageGroup = trim((string) ($data[HeaderStore::AGE_GROUP] ?? ''));
+                    $jewelryType = trim((string) ($data[HeaderStore::JEWELRY_TYPE] ?? ''));
+                    $googleShoppingAgeGroup = trim((string) ($data[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] ?? ''));
 
                     $updated = false;
-                    if ($targetGender === '') {
+                    if (strtolower($targetGender) !== 'unisex') {
                         $data[HeaderStore::TARGET_GENDER] = 'unisex';
                         $updated = true;
                     }
-                    if ($ageGroup === '') {
+                    if (strtolower($ageGroup) !== 'universal') {
                         $data[HeaderStore::AGE_GROUP] = 'universal';
+                        $updated = true;
+                    }
+                    if (strtolower($jewelryType) !== 'handcrafted-jewellery') {
+                        $data[HeaderStore::JEWELRY_TYPE] = 'handcrafted-jewellery';
+                        $updated = true;
+                    }
+                    if (strtolower($googleShoppingAgeGroup) !== 'adult') {
+                        $data[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = 'adult';
                         $updated = true;
                     }
 
