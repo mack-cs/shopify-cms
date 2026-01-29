@@ -69,6 +69,7 @@ class RequiredFieldSeeder extends Seeder
             ['source' => 'variant', 'attribute' => 'sku'],
             ['source' => 'row', 'attribute' => HeaderStore::JEWELRY_MATERIAL],
             ['source' => 'row', 'attribute' => HeaderStore::COST_PER_ITEM],
+            ['source' => 'row', 'attribute' => HeaderStore::SEO_DEINDEX],
         ];
 
         $requiredLookup = [];

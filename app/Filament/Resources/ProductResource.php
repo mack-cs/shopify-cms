@@ -351,6 +351,7 @@ class ProductResource extends Resource
                                 }),
                                 Select::make('materials_and_dimensions')
                                     ->label('Materials and dimensions')
+                                    ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                         HeaderStore::MATERIALS_AND_DIMENSIONS,
                                         tags: self::filterTags($get)
@@ -367,6 +368,7 @@ class ProductResource extends Resource
                             Grid::make(2)->schema([
                                 Select::make('jewelry_material')
                                     ->label('Jewelry material')
+                                    ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                         HeaderStore::JEWELRY_MATERIAL,
                                         tags: self::filterTags($get)
@@ -417,6 +419,7 @@ class ProductResource extends Resource
                                     }),
                                 Select::make('jewelry_type')
                                     ->label('Jewelry type')
+                                    ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                         HeaderStore::JEWELRY_TYPE,
                                         tags: self::filterTags($get)
@@ -473,12 +476,45 @@ class ProductResource extends Resource
                                     ) && ($record?->styleProfiles()->exists() ?? false);
                                     return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
                                 }),
+                            Grid::make(3)->schema([
+                                Toggle::make('seo_deindex')
+                                    ->label('SEO: Deindex products')
+                                    ->helperText('Exported as true/false.')
+                                    ->afterStateHydrated(function (Toggle $component, ?Product $record): void {
+                                        if (!$record) {
+                                            return;
+                                        }
+                                        $raw = self::shopifyRowValue($record, HeaderStore::SEO_DEINDEX);
+                                        $component->state(filter_var($raw, FILTER_VALIDATE_BOOLEAN));
+                                    })
+                                    ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false'),
+                                Placeholder::make('approvals_current')
+                                    ->label('Approvals')
+                                    ->content(fn (?Product $record): string => $record
+                                        ? ($record->approvalsForCurrentVersionCount() . '/2')
+                                        : '0/2'),
+                                Toggle::make('is_bundle')
+                                    ->label('Bundle')
+                                    ->helperText('Internal only. Not exported.'),
+                            ])->columnSpanFull(),
 
                         ])->columnSpan(2)->columns(2),
                         Section::make()->schema([
-                            TextInput::make('vendor'),
+                            Select::make('vendor')
+                                ->label('Vendor')
+                                ->placeholder('Select option')
+                                ->options(fn () => Product::query()
+                                    ->whereNotNull('vendor')
+                                    ->where('vendor', '!=', '')
+                                    ->distinct()
+                                    ->orderBy('vendor')
+                                    ->pluck('vendor', 'vendor')
+                                    ->all())
+                                ->searchable()
+                                ->preload(),
                             Select::make('collection_filter')
                                 ->label('Collection')
+                                ->placeholder('Select option')
                                 ->options(fn (): array => self::collectionOptions())
                                 ->searchable()
                                 ->reactive()
@@ -489,40 +525,28 @@ class ProductResource extends Resource
                                     }
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
-                                ->afterStateUpdated(function ($state, callable $set): void {
-                                    $tags = self::collectionTags($state);
-                                    if ($tags !== []) {
-                                        $set('tags', $tags);
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                    $collectionTags = self::collectionTags($state);
+                                    if ($collectionTags === []) {
+                                        return;
                                     }
+
+                                    $current = $get('tags');
+                                    $normalized = self::normalizeTagList($current);
+                                    $collectionPool = self::allCollectionTags();
+
+                                    $kept = array_values(array_filter(
+                                        $normalized,
+                                        fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                                    ));
+
+                                    $merged = array_values(array_unique(array_merge($kept, $collectionTags)));
+                                    $set('tags', $merged);
                                 }),
 
-                            TextInput::make('you_save')
-                            ->label('You Save')
-                            ->numeric()
-                            ->inputMode('decimal')
-                            ->helperText('Internal only. Not exported.'),
-                            TextInput::make('batch')
-                            ->label('Batch')
-                            ->datalist(fn () => Product::query()
-                                ->whereNotNull('batch')
-                                ->distinct()
-                                ->orderBy('batch')
-                                ->pluck('batch')
-                                ->all())
-                            ->placeholder('import_YYYYMMDDH')
-                            ->helperText('Internal only. Not exported.'),
-                        TextInput::make('cost_per_item')
-                            ->label('Cost per item')
-                            ->numeric()
-                            ->inputMode('decimal')
-                            ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
-                                if (!$record) {
-                                    return;
-                                }
-                                $component->state(self::shopifyRowValue($record, 'Cost per item'));
-                            }),
                         Select::make('google_shopping_age_group')
                             ->label('Google Shopping / Age Group')
+                            ->placeholder('Select option')
                             ->options([
                                 'adult' => 'Adult',
                                 'teen' => 'Teen',
@@ -550,6 +574,7 @@ class ProductResource extends Resource
                         Grid::make(2)->schema([
                             Select::make('bracelet_design')
                                 ->label('Bracelet design')
+                                ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     HeaderStore::BRACELET_DESIGN,
                                     tags: self::filterTags($get)
@@ -557,14 +582,26 @@ class ProductResource extends Resource
                                 ->searchable()
                                 ->reactive()
                                 ->visible(fn (Get $get): bool => in_array('bracelets', self::filterTags($get), true))
+                                ->columnSpanFull()
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
                                     }
                                     $component->state(self::shopifyRowValue($record, HeaderStore::BRACELET_DESIGN));
                                 }),
+                            TextInput::make('cost_per_item')
+                                ->label('Cost per item')
+                                ->numeric()
+                                ->inputMode('decimal')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, 'Cost per item'));
+                                }),
                             Select::make('variant_weight_unit')
                                 ->label('Variant weight unit')
+                                ->placeholder('Select option')
                                 ->options([
                                     'g' => 'g',
                                     'kg' => 'kg',
@@ -579,9 +616,10 @@ class ProductResource extends Resource
                                     $component->state($value ?: 'g');
                                 }),
                         ])->columnSpanFull(),
-                        Grid::make(2)->schema([
+                        Grid::make(1)->schema([
                             Select::make('necklace_design')
                                 ->label('Necklace design')
+                                ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Necklace design (product.metafields.shopify.necklace-design)',
                                     tags: self::filterTags($get)
@@ -600,6 +638,7 @@ class ProductResource extends Resource
                                 }),
                             Select::make('earring_design')
                                 ->label('Earring design')
+                                ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Earring design (product.metafields.shopify.earring-design)',
                                     tags: self::filterTags($get)
@@ -620,6 +659,7 @@ class ProductResource extends Resource
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
                                 ->label('Pattern category')
+                                ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Pattern Category (product.metafields.custom.pattern_category)',
                                     tags: self::filterTags($get)
@@ -637,6 +677,7 @@ class ProductResource extends Resource
                                 }),
                             Select::make('product_metals')
                                 ->label('Product metals')
+                                ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Product Metals (product.metafields.custom.product_metals)',
                                     tags: self::filterTags($get)
@@ -653,39 +694,33 @@ class ProductResource extends Resource
                                     ));
                                 }),
                         ])->columnSpanFull(),
-                        Select::make('age_group')
-                            ->label('Age group')
-                            ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                HeaderStore::AGE_GROUP,
-                                tags: self::filterTags($get)
-                            ))
-                            ->default('universal')
-                            ->searchable()
-                            ->reactive()
-                            ->createOptionForm([
-                                TextInput::make('value')->required()->maxLength(255),
-                            ])
-                            ->createOptionUsing(function (array $data) {
-                                $value = trim((string) ($data['value'] ?? ''));
-                                if ($value === '') {
-                                    return null;
-                                }
-
-                                DropdownOption::create([
-                                    'header' => HeaderStore::AGE_GROUP,
-                                    'value' => strtolower($value),
-                                    'active' => true,
-                                ]);
-
-                                return strtolower($value);
-                            })
-                            ->afterStateHydrated(function (Select $component, ?Product $record): void {
-                                if (!$record) {
-                                    return;
-                                }
-                                $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
-                            })
-                            ->columnSpanFull(),
+                        Grid::make(2)->schema([
+                            Select::make('age_group')
+                                ->label('Age group')
+                                ->placeholder('Select option')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::AGE_GROUP,
+                                    tags: self::filterTags($get)
+                                ))
+                                ->default('universal')
+                                ->searchable()
+                                ->reactive()
+                                ->afterStateHydrated(function (Select $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
+                                }),
+                            Select::make('status')
+                                ->label('Status')
+                                ->placeholder('Select option')
+                                ->searchable()
+                                ->preload()
+                                ->options(fn () => Status::query()
+                                    ->orderBy('name')
+                                    ->pluck('name', 'name')
+                                    ->all()),
+                        ])->columnSpanFull(),
                         Toggle::make('published')
                             ->label('Published')
                             ->helperText('Exported as true/false.')
@@ -693,42 +728,20 @@ class ProductResource extends Resource
                                 $component->state(filter_var($state, FILTER_VALIDATE_BOOLEAN));
                             })
                             ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false'),
-                        Select::make('status')
-                            ->label('Status')
-                            ->searchable()
-                            ->preload()
-                            ->options(fn () => Status::query()
-                                ->orderBy('name')
-                                ->pluck('name', 'name')
+                        TextInput::make('you_save')
+                            ->label('You Save')
+                            ->numeric()
+                            ->inputMode('decimal')
+                            ->helperText('Internal only. Not exported.'),
+                        TextInput::make('batch')
+                            ->label('Batch')
+                            ->datalist(fn () => Product::query()
+                                ->whereNotNull('batch')
+                                ->distinct()
+                                ->orderBy('batch')
+                                ->pluck('batch')
                                 ->all())
-                            ->createOptionForm([
-                                TextInput::make('name')->required()->maxLength(255),
-                                Toggle::make('active')->default(true),
-                            ])
-                            ->createOptionUsing(function (array $data) {
-                                $name = trim($data['name'] ?? '');
-                                if ($name === '') {
-                                    return null;
-                                }
-
-                            $status = Status::firstOrCreate(
-                                ['name' => $name],
-                                ['active' => (bool) ($data['active'] ?? true)]
-                            );
-
-                            return $status->name;
-                        }),
-                        Grid::make(2)->schema([
-                            Placeholder::make('approvals_current')
-                                ->label('Approvals')
-                                ->content(fn (?Product $record): string => $record
-                                    ? ($record->approvalsForCurrentVersionCount() . '/2')
-                                    : '0/2'),
-                        ]),
-
-
-                        Toggle::make('is_bundle')
-                            ->label('Bundle')
+                            ->placeholder('import_YYYYMMDDH')
                             ->helperText('Internal only. Not exported.'),
                         ])->columnSpan(1),
                     ]),
@@ -1696,6 +1709,7 @@ class ProductResource extends Resource
         $googleShoppingAgeGroup = $data['google_shopping_age_group'] ?? '';
         $targetGender = $data['target_gender'] ?? '';
         $ageGroup = $data['age_group'] ?? '';
+        $seoDeindex = $data['seo_deindex'] ?? null;
         $costPerItem = $data['cost_per_item'] ?? '';
         $materialsAndDimensions = $data['materials_and_dimensions'] ?? '';
         $jewelryMaterial = $data['jewelry_material'] ?? '';
@@ -1712,6 +1726,7 @@ class ProductResource extends Resource
             'google_shopping_age_group',
             'target_gender',
             'age_group',
+            'seo_deindex',
             'cost_per_item',
             'materials_and_dimensions',
             'jewelry_material',
@@ -1749,6 +1764,9 @@ class ProductResource extends Resource
             if ($ageGroup !== null) {
                 $value = trim((string) $ageGroup);
                 $rowUpdates[HeaderStore::AGE_GROUP] = $value === '' ? '' : strtolower($value);
+            }
+            if ($seoDeindex !== null) {
+                $rowUpdates[HeaderStore::SEO_DEINDEX] = $seoDeindex ? 'true' : 'false';
             }
             if ($costPerItem !== null) {
                 $rowUpdates['Cost per item'] = $costPerItem ?: '';
@@ -1921,6 +1939,41 @@ class ProductResource extends Resource
         ], fn (?string $tag): bool => $tag !== null && trim($tag) !== '');
 
         return $tags === [] ? [] : $tags;
+    }
+
+    private static function allCollectionTags(): array
+    {
+        $primary = DropdownOption::query()
+            ->whereNotNull('collection_tag_primary')
+            ->where('collection_tag_primary', '!=', '')
+            ->distinct()
+            ->pluck('collection_tag_primary')
+            ->all();
+
+        $secondary = DropdownOption::query()
+            ->whereNotNull('collection_tag_secondary')
+            ->where('collection_tag_secondary', '!=', '')
+            ->distinct()
+            ->pluck('collection_tag_secondary')
+            ->all();
+
+        return array_values(array_unique(array_merge($primary, $secondary)));
+    }
+
+    private static function normalizeTagList(mixed $value): array
+    {
+        if (is_array($value)) {
+            $tokens = [];
+            foreach ($value as $item) {
+                $token = TagNormalizer::normalizeToken((string) $item);
+                if ($token !== null) {
+                    $tokens[] = $token;
+                }
+            }
+            return array_values(array_unique($tokens));
+        }
+
+        return TagNormalizer::parseTokens(is_string($value) ? $value : '');
     }
 
     private static function filterTags(Get $get, ?string $vendor = null, ?string $productType = null): array

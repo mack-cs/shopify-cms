@@ -42,6 +42,7 @@ final class HeaderStore
     public const STATUS = 'Status'; // if present
     public const SEO_TITLE = 'SEO Title'; // if present in file
     public const SEO_DESCRIPTION = 'SEO Description'; // if present in file
+    public const SEO_DEINDEX = 'SEO: Deindex_Products (product.metafields.seo.hide_from_google)';
     public const COST_PER_ITEM = 'Cost per item';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
     public const MATERIALS_AND_DIMENSIONS = 'Materials and Dimensions (product.metafields.custom.materials_and_dimensions)';

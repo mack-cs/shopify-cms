@@ -17,6 +17,7 @@ class ShopifyCsvImporter
 
     public function importIntoExistingImport(Import $import, string $absolutePath): void
     {
+        set_time_limit(300);
         DB::transaction(function () use ($import, $absolutePath) {
 
             // wipe previous processed data for this import (so re-processing works)

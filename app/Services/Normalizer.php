@@ -14,6 +14,7 @@ use App\Models\RequiredField;
 use App\Models\Variant;
 use App\Models\Image;
 use App\Models\Tag;
+use App\Models\DropdownOption;
 use Illuminate\Support\Facades\DB;
 use App\Services\TagNormalizer;
 
@@ -76,6 +77,9 @@ final class Normalizer
 
                 $normalizedColor = $this->normalizeColorString($primary->get(HeaderStore::COLOR_METAFIELD, null));
                 $normalizedTags = TagNormalizer::normalizeString($primary->get(HeaderStore::TAGS, null));
+                $collectionContext = $this->resolveCollectionContext($normalizedTags);
+
+                $this->capturePendingDropdownOptions($primary, $collectionContext);
 
                 $this->syncCategory($resolvedCategory, $resolvedGoogle);
                 $this->syncColors($normalizedColor);
@@ -485,6 +489,11 @@ final class Normalizer
             }
         }
 
+        $errors = array_merge(
+            $errors,
+            $this->dropdownInactiveErrors($product, $primary)
+        );
+
         $colorTokens = $this->parseColorTokens($product->color_string);
         if (in_array('multicolour', $colorTokens, true)
             && (in_array('solid', $colorTokens, true) || in_array('plain', $colorTokens, true))
@@ -560,6 +569,163 @@ final class Normalizer
         }
 
         return array_values(array_unique($errors));
+    }
+
+    private function capturePendingDropdownOptions(ShopifyRow $primary, array $collectionContext): void
+    {
+        $headers = $this->controlledDropdownHeaders();
+        foreach ($headers as $header) {
+            $raw = $primary->get($header, null);
+            $values = $this->parseDropdownValues($header, $raw);
+            if (empty($values)) {
+                continue;
+            }
+
+            foreach ($values as $value) {
+                $query = DropdownOption::query()
+                    ->where('header', $header)
+                    ->where('value', $value);
+
+                if ($collectionContext['tag_primary'] !== null) {
+                    $query->where('collection_tag_primary', $collectionContext['tag_primary']);
+                } else {
+                    $query->whereNull('collection_tag_primary');
+                }
+
+                if ($collectionContext['tag_secondary'] !== null) {
+                    $query->where('collection_tag_secondary', $collectionContext['tag_secondary']);
+                } else {
+                    $query->whereNull('collection_tag_secondary');
+                }
+
+                if ($query->exists()) {
+                    continue;
+                }
+
+                DropdownOption::create([
+                    'header' => $header,
+                    'value' => $value,
+                    'collection_style' => $collectionContext['collection_style'],
+                    'collection_tag_primary' => $collectionContext['tag_primary'],
+                    'collection_tag_secondary' => $collectionContext['tag_secondary'],
+                    'active' => false,
+                    'sort_order' => 0,
+                ]);
+            }
+        }
+    }
+
+    private function dropdownInactiveErrors(Product $product, ?ShopifyRow $primary): array
+    {
+        if (!$primary) {
+            return [];
+        }
+
+        $errors = [];
+        $collectionContext = $this->resolveCollectionContext($product->tags);
+        $headers = $this->controlledDropdownHeaders();
+
+        foreach ($headers as $header) {
+            $raw = $primary->get($header, null);
+            $values = $this->parseDropdownValues($header, $raw);
+            if (empty($values)) {
+                continue;
+            }
+
+            foreach ($values as $value) {
+                $query = DropdownOption::query()
+                    ->where('header', $header)
+                    ->where('value', $value);
+
+                if ($collectionContext['tag_primary'] !== null) {
+                    $query->where('collection_tag_primary', $collectionContext['tag_primary']);
+                } else {
+                    $query->whereNull('collection_tag_primary');
+                }
+
+                if ($collectionContext['tag_secondary'] !== null) {
+                    $query->where('collection_tag_secondary', $collectionContext['tag_secondary']);
+                } else {
+                    $query->whereNull('collection_tag_secondary');
+                }
+
+                $option = $query->first();
+                if (!$option || !$option->active) {
+                    $errors[] = "inactive:dropdown:{$header}";
+                    break;
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    private function controlledDropdownHeaders(): array
+    {
+        return [
+            HeaderStore::COLOR_METAFIELD,
+            HeaderStore::JEWELRY_MATERIAL,
+            HeaderStore::MATERIALS_AND_DIMENSIONS,
+            HeaderStore::BRACELET_DESIGN,
+            'Necklace design (product.metafields.shopify.necklace-design)',
+            'Earring design (product.metafields.shopify.earring-design)',
+            'Pattern Category (product.metafields.custom.pattern_category)',
+            'Product Metals (product.metafields.custom.product_metals)',
+        ];
+    }
+
+    private function parseDropdownValues(string $header, mixed $raw): array
+    {
+        $value = $this->normalizeValue(is_string($raw) ? $raw : null);
+        if ($value === null) {
+            return [];
+        }
+
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            return $this->parseColorTokens($value);
+        }
+
+        if (!str_contains($value, ';')) {
+            return [$value];
+        }
+
+        $parts = array_map('trim', explode(';', $value));
+        return array_values(array_filter($parts, fn (string $part) => $part !== ''));
+    }
+
+    private function resolveCollectionContext(?string $tags): array
+    {
+        $tokens = TagNormalizer::parseTokens($tags);
+        if (empty($tokens)) {
+            return [
+                'collection_style' => null,
+                'tag_primary' => null,
+                'tag_secondary' => null,
+            ];
+        }
+
+        $match = DropdownOption::query()
+            ->whereIn('collection_tag_primary', $tokens)
+            ->where(function ($query) use ($tokens): void {
+                $query->whereIn('collection_tag_secondary', $tokens)
+                    ->orWhereNull('collection_tag_secondary');
+            })
+            ->orderBy('collection_style')
+            ->first();
+
+        if ($match) {
+            return [
+                'collection_style' => $match->collection_style,
+                'tag_primary' => $match->collection_tag_primary,
+                'tag_secondary' => $match->collection_tag_secondary,
+            ];
+        }
+
+        return [
+            'collection_style' => null,
+            'tag_primary' => $tokens[0] ?? null,
+            'tag_secondary' => $tokens[1] ?? null,
+        ];
     }
 
     private function requiredDefinitions(): array
