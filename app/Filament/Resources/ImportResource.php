@@ -15,6 +15,8 @@ use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyCsvImporter;
 use App\Services\ShopifyCsvValidator;
+use App\Services\ShopifyApiImporter;
+use App\Jobs\ShopifySyncJob;
 use App\Services\Normalizer;
 use App\Services\HeaderStore;
 use Filament\Forms\Components\Hidden;
@@ -74,6 +76,53 @@ protected static ?string $navigationLabel = 'Product Feed';
                 ->state(fn (Import $record) => $record->is_valid ? 'Valid' : 'Invalid')
                 ->color(fn (Import $record) => $record->is_valid ? 'success' : 'danger'),
             TextColumn::make('created_at')->dateTime(),
+        ])->headerActions([
+            Action::make('syncFromShopify')
+                ->label('Sync from Shopify')
+                ->requiresConfirmation()
+                ->color('primary')
+                ->visible(function (): bool {
+                    $user = Auth::user();
+                    if (!$user) {
+                        return false;
+                    }
+                    return $user->can(PermissionEnum::ShopifyManage->value)
+                        || $user->can(PermissionEnum::ImportCreate->value);
+                })
+                ->action(function (ShopifyApiImporter $importer): void {
+                    $user = Auth::user();
+                    if (!$user) {
+                        return;
+                    }
+
+                    if (!config('services.shopify.shop') || !config('services.shopify.admin_access_token')) {
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Shopify credentials missing')
+                                ->body('Set SHOPIFY_SHOP and SHOPIFY_ADMIN_ACCESS_TOKEN in .env before syncing.')
+                                ->danger()
+                        );
+                        return;
+                    }
+
+                    try {
+                        $import = $importer->createOrReuseCurrentImport($user->id);
+                        ShopifySyncJob::dispatch($import->id);
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Shopify sync queued')
+                                ->body("Import #{$import->id} is processing in the background")
+                                ->success()
+                        );
+                    } catch (\Throwable $e) {
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Shopify sync failed')
+                                ->body($e->getMessage())
+                                ->danger()
+                        );
+                    }
+                }),
         ])->actions([
             // Action::make('validateImport')
             //     ->label('Validate CSV')

@@ -6,10 +6,12 @@ use App\Models\Image;
 use App\Models\Product;
 use App\Models\RequiredField;
 use App\Models\Variant;
+use App\Models\ShopifyCollection;
 use App\Observers\ImageObserver;
 use App\Observers\ProductObserver;
 use App\Observers\RequiredFieldObserver;
 use App\Observers\VariantObserver;
+use App\Observers\ShopifyCollectionObserver;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -31,5 +33,6 @@ class AppServiceProvider extends ServiceProvider
         Variant::observe(VariantObserver::class);
         Image::observe(ImageObserver::class);
         RequiredField::observe(RequiredFieldObserver::class);
+        ShopifyCollection::observe(ShopifyCollectionObserver::class);
     }
 }

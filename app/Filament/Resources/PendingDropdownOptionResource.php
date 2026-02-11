@@ -184,7 +184,10 @@ class PendingDropdownOptionResource extends Resource
                     ->on('shopify_rows.handle', '=', 'products.handle');
             })
             ->where('shopify_rows.row_type', 'product_primary')
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(shopify_rows.data, ?)) = ?", ['$.\"' . $header . '\"', $value]);
+            ->whereRaw(
+                "JSON_UNQUOTE(JSON_EXTRACT(shopify_rows.data, CONCAT('$.\"', REPLACE(?, '\"', '\\\\\"'), '\"'))) = ?",
+                [$header, $value]
+            );
 
         if ($tagPrimary) {
             $query->whereRaw(
@@ -254,7 +257,10 @@ class PendingDropdownOptionResource extends Resource
                     ->on('shopify_rows.handle', '=', 'products.handle');
             })
             ->where('shopify_rows.row_type', 'product_primary')
-            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(shopify_rows.data, ?)) = ?", ['$.\"' . $header . '\"', $value]);
+            ->whereRaw(
+                "JSON_UNQUOTE(JSON_EXTRACT(shopify_rows.data, CONCAT('$.\"', REPLACE(?, '\"', '\\\\\"'), '\"'))) = ?",
+                [$header, $value]
+            );
 
         if ($tagPrimary) {
             $query->whereRaw(

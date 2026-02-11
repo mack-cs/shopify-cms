@@ -12,6 +12,7 @@ This document describes how to reproduce, run, and operate the Shopify CSV edito
 
 Primary code paths:
 - Import pipeline: `app/Services/ShopifyCsvImporter.php`, `app/Services/RowClassifier.php`, `app/Services/Normalizer.php`
+- API sync pipeline: `app/Services/ShopifyApiImporter.php`, `app/Services/ShopifyApiClient.php`
 - Export pipeline: `app/Services/ShopifyCsvExporter.php`
 - Admin UI: `app/Filament/Resources/*.php`
 
@@ -20,7 +21,7 @@ Primary code paths:
 - PHP 8.2+
 - Composer
 - Node.js + npm
-- Database: MySQL/MariaDB recommended (see notes about SQLite below)
+- Database: MySQL/MariaDB
 - Laravel CLI tooling (included via Composer)
 
 ## Quick start (local)
@@ -47,8 +48,6 @@ DB_DATABASE=shopify_editor
 DB_USERNAME=root
 DB_PASSWORD=secret
 ```
-
-SQLite (local-only) needs extra work; see "SQLite caveat" below.
 
 4) Run migrations
 ```
@@ -81,13 +80,16 @@ This runs:
 
 Admin panel: `http://localhost:8000/admin`
 
-## Default users (seeded)
+## Queue worker timeouts (production)
 
-From `database/seeders/UserSeeder.php`:
-- `admin@leighavenue.co.za` / password: `password`
-- `shonayimack@mackscs.com` / password: `#Mack#36#LA#Dev#`
+Shopify sync runs as a queued job and can take longer than 300s. Make sure your
+queue worker timeout is high enough in production.
 
-These credentials are for local/dev only. Change them immediately after first login.
+Example Supervisor command:
+```
+command=php /path/to/artisan queue:work --timeout=1800 --sleep=3 --tries=1
+```
+
 
 ## Access control
 
@@ -178,11 +180,270 @@ The importer and exporter rely on these Shopify headers:
 
 Defined in `app/Services/HeaderStore.php`. If your Shopify CSV uses different header names, update that file.
 
+## Shopify API sync
+
+The app can now sync products directly from Shopify Admin API, while preserving the same CSV-style header structure.
+
+## Shopify Collections (SEO + URL updates)
+
+This app also syncs Shopify **collections** and allows pushing updates back to Shopify for SEO/title/description, with safe URL handling.
+
+### What is stored locally (minimal fields)
+
+Collections are stored in the `collections` table with:
+- `shopify_id` (Shopify GID, required for updates)
+- `handle` (URL slug)
+- `title` (on-page title)
+- `description_html` (on-page description)
+- `seo_title`, `seo_description`
+
+Schema: `database/migrations/2026_02_11_000000_create_collections_table.php`  
+Model: `app/Models/ShopifyCollection.php`
+
+### How collection sync works
+
+Collections are fetched during Shopify API sync:
+- Importer: `app/Services/ShopifyApiImporter.php`
+- Query: GraphQL `collections` (id, handle, title, descriptionHtml, seo)
+- Stored via `ShopifyCollection::updateOrCreate()` keyed by (`import_id`, `shopify_id`)
+
+This keeps collection records **deduplicated per import**.
+
+### Avoiding duplicates (Collections)
+
+Collections are scoped to the **current import** in the admin UI:
+- Resource: `app/Filament/Resources/ShopifyCollectionResource.php`
+- Query: `getEloquentQuery()` filters by `imports.is_current = true`
+
+Old imports won’t show duplicates in the Collections list.
+
+### Pushing collections back to Shopify (SEO + title/description)
+
+The UI supports **single** and **bulk** push to Shopify:
+- Resource: `app/Filament/Resources/ShopifyCollectionResource.php`
+- Mutation service: `app/Services/ShopifyCollectionUpdater.php`
+
+Supported fields:
+- `title`
+- `description_html`
+- `seo_title`
+- `seo_description`
+
+### Safe URL changes (Handle)
+
+To avoid changing URLs locally:
+- The **handle field is read-only** in the edit form.
+- The push action includes a **Handle override** field.
+  - This updates the Shopify URL **without changing the local record**.
+  - The local handle will update after the **next sync** from Shopify.
+- Bulk push **does not** allow handle changes.
+
+Code paths:
+- UI: `app/Filament/Resources/ShopifyCollectionResource.php`
+- Mutation: `app/Services/ShopifyCollectionUpdater.php`
+
+### Repro steps (Collections)
+
+1) Run migrations
+```
+php artisan migrate
+```
+
+2) Run Shopify sync (same as products)
+- Trigger from Filament: **Product Feed → Sync from Shopify**
+- Collections are pulled and stored automatically.
+
+3) Edit collections in Filament → **Catalog → Collections**
+- Update SEO/title/description locally.
+- Use **Push to Shopify** to apply changes.
+
+### Shopify app creation + OAuth access token (step-by-step)
+
+Use these steps to create a Shopify app, connect it, and obtain an Admin API access token.
+
+Steps
+1) Create App in Dev Dashboard
+- Go to `dev.shopify.com/dashboard/`
+- Create a new app
+
+2) Configure App Scopes
+- Navigate to Admin API section
+- Choose your permissions carefully (select only what you need)
+- Note the scopes you've selected
+
+3) Set Up Redirect URL
+- Open `webhook.site`
+- Copy the webhook URL provided (keep it handy)
+- In your app settings, add this URL to the Redirect URLs section
+
+4) Release App Version
+- Click Release and name the version (e.g., "version1")
+- Click on the version you just created
+- Verify you can see:
+  - The scopes you set
+  - The redirect URL you configured
+
+5) Get App Credentials
+- Go to App Settings
+- Copy your Client ID and Client Secret (keep these secure)
+
+6) Build Authorization URL
+- Replace the placeholders in the URL below:
+  - STORE: your Shopify store name (without `.myshopify.com`)
+  - SCOPE: your selected scopes (comma-separated, URL-encoded)
+  - REDIRECT_URI: your webhook.site URL (URL-encoded)
+  - CLIENT_ID: your app's Client ID
+```
+https://STORE.myshopify.com/admin/oauth/authorize?client_id=CLIENT_ID&scope=SCOPE&redirect_uri=REDIRECT_URI
+```
+
+7) Install App on Store
+- Open the authorization URL in a new browser tab
+- Install the app on your Shopify store
+- After installation, you'll be redirected to webhook.site
+
+8) Get Authorization Code
+- On webhook.site, you'll see the authorization code in the query parameters
+- Copy the `code` parameter value
+
+9) Exchange Code for Access Token
+- Use the following curl command (replace STORE, CLIENT_ID, SECRET, and CODE):
+```
+curl -X POST https://STORE.myshopify.com/admin/oauth/access_token \
+  -d "client_id=CLIENT_ID" \
+  -d "client_secret=SECRET" \
+  -d "code=CODE"
+```
+- The response will contain your `access_token`.
+
+10) Test Your Access Token
+- Test the access token with a GraphQL query:
+```
+curl -X POST \
+https://STORE.myshopify.com/admin/api/2026-01/graphql.json \
+-H 'Content-Type: application/json' \
+-H 'X-Shopify-Access-Token: YOUR_ACCESS_TOKEN' \
+-d '{
+  "query": "query GetProducts { products(first: 10) { nodes { id title } } }"
+}'
+```
+- Replace `2026-01` with the API version you're using.
+
+Security Notes
+- Never commit your `client_secret` or `access_token` to version control
+- Use environment variables to store sensitive credentials
+- The access token has the permissions of the scopes you selected - choose them carefully
+
+Troubleshooting
+- Invalid redirect URI: Make sure the redirect URI in your app settings exactly matches the one in your authorization URL
+- Invalid code: Authorization codes expire quickly - use the code immediately after receiving it
+- 403 Forbidden: Check that your scopes include the necessary permissions for the API calls you're making
+
+### Reproducible setup (end-to-end)
+
+This section documents the exact steps and code path used to pull Shopify data into this app (instead of duplicating data manually).
+
+1) Create a Shopify Admin API access token
+- Create a Custom App in your Shopify Admin (Settings -> Apps and sales channels -> Develop apps).
+- Grant **read** access to the data this app fetches:
+  - Products (includes product fields, tags, vendor, type, status, SEO).
+  - Variants (SKU, price, compare at, barcode, options).
+  - Inventory item cost (unit cost lives under inventory items).
+  - Images.
+  - Metafields (product metafields).
+  - Metaobjects (only required if your metafields reference metaobjects).
+- Install the app to your store and copy the Admin API access token.
+
+2) Configure Shopify credentials in `.env`:
+```
+SHOPIFY_SHOP=your-store.myshopify.com
+SHOPIFY_ADMIN_ACCESS_TOKEN=shpat_...
+SHOPIFY_API_VERSION=2026-01
+```
+
+3) (Recommended) Provide a CSV template for field mapping
+- Place your latest Shopify export template at:
+  - `storage/app/public/template/products_export*.csv`
+- The API importer uses the **latest** file in that folder to decide which headers to populate.
+- If no template exists, it falls back to `HeaderStore::knownHeaders()` in `app/Services/HeaderStore.php`.
+
+4) Run the queue worker
+- Sync runs as a queued job (`App\Jobs\ShopifySyncJob`) with a 1800s timeout.
+- Ensure `QUEUE_CONNECTION=database` (default in `.env.example`) and run:
+```
+php artisan queue:work --timeout=1800 --sleep=3 --tries=1
+```
+
+5) Trigger the sync in Filament
+- Go to Filament -> **Product Feed** -> **Sync from Shopify**.
+- The UI checks `SHOPIFY_SHOP` + `SHOPIFY_ADMIN_ACCESS_TOKEN` before dispatching.
+- A background job pulls data and sets the Import status to `ready` when complete.
+
+### How the API sync works (exact code flow)
+
+**Entry point**
+- Filament action: `app/Filament/Resources/ImportResource.php` (`syncFromShopify`)
+- Job: `app/Jobs/ShopifySyncJob.php`
+- Importer: `app/Services/ShopifyApiImporter.php`
+- HTTP client: `app/Services/ShopifyApiClient.php`
+
+**Credentials + request**
+- The client reads `SHOPIFY_SHOP`, `SHOPIFY_ADMIN_ACCESS_TOKEN`, and `SHOPIFY_API_VERSION` from `config/services.php`.
+- It sends POST requests to:
+  - `https://{shop}/admin/api/{version}/graphql.json`
+- Header used:
+  - `X-Shopify-Access-Token: {token}`
+
+**GraphQL data pulled**
+- Products are paginated 100 at a time.
+- For each product, the query includes:
+  - Core product fields (handle, title, body HTML, vendor, type, status, tags, SEO, product category).
+  - Metafields (namespace, key, value, type) up to 250 per product.
+  - Variants (SKU, price, compare at, barcode, options, inventory unit cost) up to 250 per product.
+  - Images (url, alt text) up to 250 per product.
+
+**Row construction (CSV-shaped output)**
+- The importer builds a "blank row" for every header (from template or `HeaderStore`).
+- Each product becomes:
+  - 1 `product_primary` row (first variant + first image merged into this row).
+  - 0+ `variant` rows (remaining variants).
+  - 0+ `image` rows (remaining images).
+- Rows are written to `shopify_rows` with:
+  - `row_type` (`product_primary`, `variant`, `image`)
+  - `variant_key` / `image_key` (computed from row contents)
+  - `data` (full JSON header/value map)
+
+**Metafields mapping**
+- Headers that match `(...product.metafields.{namespace}.{key})` are populated.
+- Values are normalized:
+  - `list.*` types -> semicolon-separated values.
+  - `boolean` -> `true` / `false` strings.
+  - Metaobject references are resolved to display labels when possible.
+- All metafields (not just templated ones) are also stored in `shopify_metafields`.
+
+**Normalization**
+- After rows are created, `Normalizer` builds products/variants/images.
+- Status is updated to `ready` and Filament sends a notification.
+
+### Avoiding duplication (how re-syncing stays clean)
+
+- Sync creates or reuses the **current Import**:
+  - `ShopifyApiImporter::createOrReuseCurrentImport()`
+- Before each sync, data for that Import is cleared:
+  - `shopify_rows`, `products`, and `shopify_metafields` for the current `import_id`.
+- This means re-syncing **replaces** the current import's data instead of duplicating it.
+- If you want a full clean slate, delete old imports or set the current import to the one you want to overwrite.
+
+Notes:
+- Metafields are populated based on the headers in your latest CSV template.
+- Variants and images are imported into their own rows for proper normalization.
+
 ## Database schema overview
 
 Core tables:
 - `imports`: upload metadata, status, headers, is_current
 - `shopify_rows`: every CSV row with full JSON payload
+- `shopify_metafields`: all Shopify metafields per product handle (full set, not just template headers)
 - `products`: normalized product data + approval_version
 - `variants`: normalized variants
 - `images`: normalized images
@@ -193,18 +454,6 @@ Core tables:
 - `notifications`: Filament database notifications
 
 Schema is defined in `database/migrations/`.
-
-## SQLite caveat
-
-`database/migrations/2025_12_20_140000_update_approvals_unique_index.php` uses:
-```
-SHOW INDEX FROM approvals
-```
-which is MySQL/MariaDB-specific. On SQLite this migration will fail.
-
-If you want to use SQLite:
-- Comment out or adjust this migration to use SQLite-compatible index checks, or
-- Switch to MySQL/MariaDB (recommended).
 
 ## File storage
 
@@ -237,4 +486,3 @@ Run the queue listener in dev (done by `composer run dev`).
 - [ ] `php artisan db:seed` (users)
 - [ ] `php artisan storage:link`
 - [ ] `composer run dev`
-

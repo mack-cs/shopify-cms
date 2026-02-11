@@ -26,4 +26,14 @@ class Import extends Model
     {
         return $this->hasMany(Product::class);
     }
+
+    public function metafields(): HasMany
+    {
+        return $this->hasMany(ShopifyMetafield::class);
+    }
+
+    public function collections(): HasMany
+    {
+        return $this->hasMany(ShopifyCollection::class);
+    }
 }
