@@ -40,16 +40,16 @@ final class ShopifyCollectionSeoImporter
 
             $payload = [];
             if ($map['title'] !== null) {
-                $payload['title'] = $this->nullIfEmpty($row[$map['title']] ?? null);
+                $payload['draft_title'] = $this->nullIfEmpty($row[$map['title']] ?? null);
             }
             if ($map['description_html'] !== null) {
-                $payload['description_html'] = $this->nullIfEmpty($row[$map['description_html']] ?? null);
+                $payload['draft_description_html'] = $this->nullIfEmpty($row[$map['description_html']] ?? null);
             }
             if ($map['seo_title'] !== null) {
-                $payload['seo_title'] = $this->nullIfEmpty($row[$map['seo_title']] ?? null);
+                $payload['draft_seo_title'] = $this->nullIfEmpty($row[$map['seo_title']] ?? null);
             }
             if ($map['seo_description'] !== null) {
-                $payload['seo_description'] = $this->nullIfEmpty($row[$map['seo_description']] ?? null);
+                $payload['draft_seo_description'] = $this->nullIfEmpty($row[$map['seo_description']] ?? null);
             }
 
             if ($payload === []) {

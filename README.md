@@ -2,6 +2,29 @@
 
 This document describes how to reproduce, run, and operate the Shopify CSV editor end-to-end.
 
+## Quick Start (Collections)
+
+1) Sync collections (collections-only)
+```
+Filament → Catalog → Collections → Sync Collections
+```
+
+2) Import SEO CSV (optional)
+```
+Filament → Catalog → Collections → Import SEO CSV
+```
+
+CSV template (headers only):
+```csv
+Handle,Title,Description HTML,SEO Title,SEO Description
+```
+
+3) Approve SEO (2 people)
+- Use **Bulk Approve** in Collections (needs two distinct users).
+
+4) Push approved to Shopify
+- Row or bulk **Push to Shopify** (only approved records).
+
 ## What this app does
 
 - Imports a Shopify product CSV and stores every row as raw data.
@@ -188,6 +211,14 @@ The app can now sync products directly from Shopify Admin API, while preserving 
 
 This app also syncs Shopify **collections** and allows pushing updates back to Shopify for SEO/title/description, with safe URL handling.
 
+### Separate workflow (collections-only)
+
+Collections are **independent of products**. They have their own:
+- Sync flow (Collections-only job)
+- Local storage
+- Approvals (2 users required)
+- CSV import for SEO/page title
+
 ### What is stored locally (minimal fields)
 
 Collections are stored in the `collections` table with:
@@ -196,9 +227,13 @@ Collections are stored in the `collections` table with:
 - `title` (on-page title)
 - `description_html` (on-page description)
 - `seo_title`, `seo_description`
+- `approval_version` (for 2‑person approval gating)
 
 Schema: `database/migrations/2026_02_11_000000_create_collections_table.php`  
+Approval columns: `database/migrations/2026_02_11_010000_add_approval_version_to_collections_table.php`  
+Approvals table: `database/migrations/2026_02_11_010100_create_collection_approvals_table.php`  
 Model: `app/Models/ShopifyCollection.php`
+Approvals model: `app/Models/CollectionApproval.php`
 
 ### How collection sync works
 
@@ -216,6 +251,24 @@ Collections are scoped to the **current import** in the admin UI:
 - Query: `getEloquentQuery()` filters by `imports.is_current = true`
 
 Old imports won’t show duplicates in the Collections list.
+
+### Collections‑only sync (separate workflow)
+
+Collections now have a dedicated sync button and job that **do not touch products**.
+
+UI:
+- Filament → **Catalog → Collections** → **Sync Collections**
+
+Code:
+- Job: `app/Jobs/ShopifyCollectionsSyncJob.php`
+- Importer: `app/Services/ShopifyCollectionsImporter.php`
+- Client: `app/Services/ShopifyApiClient.php`
+
+GraphQL:
+- `customCollections` (manual collections)
+- `smartCollections` (automated collections)
+
+Both are merged and de‑duplicated by Shopify ID.
 
 ### Pushing collections back to Shopify (SEO + title/description)
 
@@ -242,6 +295,52 @@ Code paths:
 - UI: `app/Filament/Resources/ShopifyCollectionResource.php`
 - Mutation: `app/Services/ShopifyCollectionUpdater.php`
 
+### Collection approvals (2 people)
+
+Collections use the same approval concept as products:
+- Each collection has an `approval_version`
+- Any edit bumps `approval_version` (previous approvals expire)
+- A collection is “approved” only if **2 distinct users** approved the current version
+
+Code:
+- Observer: `app/Observers/ShopifyCollectionObserver.php`
+- Model helpers: `ShopifyCollection::approvalsForCurrentVersionCount()` and `isApprovedByTwo()`
+- Approvals: `collection_approvals` table
+
+### Sync is blocked unless approved
+
+- Row **Push to Shopify** requires 2 approvals.
+- Bulk push **skips unapproved** records and reports a count.
+
+### Missing SEO filter
+
+Collections list includes a filter to find records missing:
+- `seo_title` or `seo_description`
+
+### CSV Import for collection SEO (bulk)
+
+You can import SEO/title/description in bulk using a CSV file.
+
+UI:
+- Filament → **Catalog → Collections** → **Import SEO CSV**
+
+Match & update:
+- Matches by `handle`
+- Updates only existing collections in the latest collections import
+
+CSV headers (case‑insensitive):
+- `Handle` (required)
+- `Title` or `Page Title` (updates `title`)
+- `Description HTML` or `Description` or `Body HTML` (updates `description_html`)
+- `SEO Title` or `Meta Title` (updates `seo_title`)
+- `SEO Description` or `Meta Description` (updates `seo_description`)
+
+Example:
+```
+Handle,Title,Description HTML,SEO Title,SEO Description
+spring-collection,Spring Collection,<p>Fresh picks for spring.</p>,Spring Collection | Brand,Shop the Spring Collection for fresh styles.
+```
+
 ### Repro steps (Collections)
 
 1) Run migrations
@@ -249,11 +348,20 @@ Code paths:
 php artisan migrate
 ```
 
-2) Run Shopify sync (same as products)
-- Trigger from Filament: **Product Feed → Sync from Shopify**
-- Collections are pulled and stored automatically.
+2) Run collections-only sync
+- Filament → **Catalog → Collections** → **Sync Collections**
 
-3) Edit collections in Filament → **Catalog → Collections**
+3) Import SEO CSV (optional)
+- Filament → **Catalog → Collections** → **Import SEO CSV**
+
+4) Approve SEO
+- Use **Bulk Approve** in the Collections list (2 distinct users required).
+
+5) Sync approved collections to Shopify
+- Row action **Push to Shopify** (approved only)
+- Bulk action **Push to Shopify** (approved only)
+
+6) Edit collections in Filament → **Catalog → Collections**
 - Update SEO/title/description locally.
 - Use **Push to Shopify** to apply changes.
 

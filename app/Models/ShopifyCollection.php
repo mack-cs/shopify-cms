@@ -19,6 +19,10 @@ class ShopifyCollection extends Model
         'seo_title',
         'seo_description',
         'approval_version',
+        'draft_title',
+        'draft_description_html',
+        'draft_seo_title',
+        'draft_seo_description',
     ];
 
     public function import(): BelongsTo

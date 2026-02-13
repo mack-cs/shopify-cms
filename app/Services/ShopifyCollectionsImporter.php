@@ -11,8 +11,21 @@ final class ShopifyCollectionsImporter
         private readonly ShopifyApiClient $client,
     ) {}
 
-    public function createCollectionsImport(int $userId): Import
+    public function createOrReuseCollectionsImport(int $userId): Import
     {
+        $existing = Import::where('filename', 'shopify-collections')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($existing) {
+            $existing->update([
+                'status' => 'processing',
+                'created_by' => $userId,
+                'is_valid' => true,
+            ]);
+            return $existing;
+        }
+
         return Import::create([
             'filename' => 'shopify-collections',
             'mode' => 'overwrite',
@@ -25,8 +38,6 @@ final class ShopifyCollectionsImporter
 
     public function importIntoExistingImport(Import $import): void
     {
-        ShopifyCollection::where('import_id', $import->id)->delete();
-
         $seen = [];
         foreach ($this->fetchCollections() as $collection) {
             $shopifyId = trim((string) data_get($collection, 'id', ''));

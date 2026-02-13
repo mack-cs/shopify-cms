@@ -37,24 +37,47 @@ class ShopifyCollectionResource extends Resource
         return $form
             ->schema([
                 Forms\Components\TextInput::make('title')
-                    ->label('Title')
-                    ->maxLength(255),
+                    ->label('Shopify Title')
+                    ->maxLength(255)
+                    ->disabled(),
                 Forms\Components\TextInput::make('handle')
                     ->label('Handle')
                     ->maxLength(255)
                     ->helperText('Controls the collection URL slug.')
                     ->disabled(),
                 Forms\Components\Textarea::make('description_html')
-                    ->label('Description (HTML)')
+                    ->label('Shopify Description (HTML)')
                     ->rows(6)
+                    ->disabled()
                     ->columnSpanFull(),
                 Forms\Components\TextInput::make('seo_title')
-                    ->label('SEO Title')
-                    ->maxLength(255),
+                    ->label('Shopify SEO Title')
+                    ->maxLength(255)
+                    ->disabled(),
                 Forms\Components\Textarea::make('seo_description')
-                    ->label('SEO Description')
+                    ->label('Shopify SEO Description')
                     ->rows(3)
-                    ->maxLength(512),
+                    ->maxLength(512)
+                    ->disabled(),
+                Forms\Components\Section::make('Draft (Local)')
+                    ->schema([
+                        Forms\Components\TextInput::make('draft_title')
+                            ->label('Draft Title')
+                            ->maxLength(255),
+                        Forms\Components\Textarea::make('draft_description_html')
+                            ->label('Draft Description (HTML)')
+                            ->rows(6)
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('draft_seo_title')
+                            ->label('Draft SEO Title')
+                            ->maxLength(255),
+                        Forms\Components\Textarea::make('draft_seo_description')
+                            ->label('Draft SEO Description')
+                            ->rows(3)
+                            ->maxLength(512),
+                    ])
+                    ->columns(2)
+                    ->columnSpanFull(),
             ]);
     }
 
@@ -85,14 +108,24 @@ class ShopifyCollectionResource extends Resource
                     ->trueColor('success')
                     ->falseColor('gray')
                     ->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('seo_title')
-                    ->label('SEO Title')
+                Tables\Columns\TextColumn::make('draft_seo_title')
+                    ->label('Draft SEO Title')
                     ->limit(60)
                     ->wrap(),
-                Tables\Columns\TextColumn::make('seo_description')
-                    ->label('SEO Desc')
+                Tables\Columns\TextColumn::make('draft_seo_description')
+                    ->label('Draft SEO Desc')
                     ->limit(80)
                     ->wrap(),
+                Tables\Columns\TextColumn::make('seo_title')
+                    ->label('Shopify SEO Title')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('seo_description')
+                    ->label('Shopify SEO Desc')
+                    ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('description_html')
                     ->label('Description')
                     ->limit(60)
@@ -114,19 +147,66 @@ class ShopifyCollectionResource extends Resource
                     ->label('Missing SEO')
                     ->queries(
                         true: fn ($query) => $query->where(function ($sub): void {
-                            $sub->whereNull('seo_title')
-                                ->orWhere('seo_title', '')
-                                ->orWhereNull('seo_description')
-                                ->orWhere('seo_description', '');
+                            $sub->whereNull('draft_title')
+                                ->orWhere('draft_title', '')
+                                ->orWhereNull('draft_seo_title')
+                                ->orWhere('draft_seo_title', '')
+                                ->orWhereNull('draft_seo_description')
+                                ->orWhere('draft_seo_description', '');
                         }),
-                        false: fn ($query) => $query->whereNotNull('seo_title')
-                            ->where('seo_title', '!=', '')
-                            ->whereNotNull('seo_description')
-                            ->where('seo_description', '!=', '')
+                        false: fn ($query) => $query->whereNotNull('draft_title')
+                            ->where('draft_title', '!=', '')
+                            ->whereNotNull('draft_seo_title')
+                            ->where('draft_seo_title', '!=', '')
+                            ->whereNotNull('draft_seo_description')
+                            ->where('draft_seo_description', '!=', '')
                     ),
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
+                Tables\Actions\Action::make('approve')
+                    ->label('Approve')
+                    ->icon('heroicon-o-check-badge')
+                    ->requiresConfirmation()
+                    ->action(function (ShopifyCollection $record): void {
+                        if (!self::draftSeoComplete($record)) {
+                            Notification::make()
+                                ->title('Cannot approve')
+                                ->body('Draft title and SEO fields are required before approval.')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        $exists = CollectionApproval::where('collection_id', $record->id)
+                            ->where('user_id', Auth::id())
+                            ->where('approval_version', $record->approval_version)
+                            ->exists();
+
+                        if ($exists) {
+                            Notification::make()
+                                ->title('Already approved')
+                                ->body('You have already approved this version.')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        CollectionApproval::create([
+                            'collection_id' => $record->id,
+                            'user_id' => Auth::id(),
+                            'approval_version' => $record->approval_version,
+                        ]);
+
+                        if ($record->approvalsForCurrentVersionCount() >= 2) {
+                            self::applyApprovedDrafts($record);
+                        }
+
+                        Notification::make()
+                            ->title('Approval recorded')
+                            ->success()
+                            ->send();
+                    }),
                 Tables\Actions\Action::make('pushToShopify')
                     ->label('Push to Shopify')
                     ->icon('heroicon-o-cloud-arrow-up')
@@ -212,7 +292,7 @@ class ShopifyCollectionResource extends Resource
                         }
 
                         try {
-                            $import = $importer->createCollectionsImport($user->id);
+                            $import = $importer->createOrReuseCollectionsImport($user->id);
                             ShopifyCollectionsSyncJob::dispatch($import->id);
 
                             Notification::make()
@@ -282,8 +362,14 @@ class ShopifyCollectionResource extends Resource
                         ->action(function ($records): void {
                             $approvedCount = 0;
                             $skippedCount = 0;
+                            $missingSeoCount = 0;
 
                             foreach ($records as $record) {
+                                if (!self::draftSeoComplete($record)) {
+                                    $missingSeoCount++;
+                                    continue;
+                                }
+
                                 $exists = CollectionApproval::where('collection_id', $record->id)
                                     ->where('user_id', Auth::id())
                                     ->where('approval_version', $record->approval_version)
@@ -300,6 +386,10 @@ class ShopifyCollectionResource extends Resource
                                     'approval_version' => $record->approval_version,
                                 ]);
                                 $approvedCount++;
+
+                                if ($record->approvalsForCurrentVersionCount() >= 2) {
+                                    self::applyApprovedDrafts($record);
+                                }
                             }
 
                             $parts = [];
@@ -308,6 +398,9 @@ class ShopifyCollectionResource extends Resource
                             }
                             if ($skippedCount > 0) {
                                 $parts[] = "Skipped {$skippedCount} already approved by you.";
+                            }
+                            if ($missingSeoCount > 0) {
+                                $parts[] = "Missing draft SEO on {$missingSeoCount}; cannot approve.";
                             }
 
                             Notification::make()
@@ -455,5 +548,24 @@ class ShopifyCollectionResource extends Resource
         }
 
         return $payload;
+    }
+
+    private static function draftSeoComplete(ShopifyCollection $record): bool
+    {
+        return trim((string) ($record->draft_title ?? '')) !== ''
+            && trim((string) ($record->draft_seo_title ?? '')) !== ''
+            && trim((string) ($record->draft_seo_description ?? '')) !== '';
+    }
+
+    private static function applyApprovedDrafts(ShopifyCollection $record): void
+    {
+        ShopifyCollection::withoutEvents(function () use ($record): void {
+            $record->forceFill([
+                'title' => $record->draft_title,
+                'description_html' => $record->draft_description_html,
+                'seo_title' => $record->draft_seo_title,
+                'seo_description' => $record->draft_seo_description,
+            ])->save();
+        });
     }
 }
