@@ -1,0 +1,70 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
+
+class NewProductDraft extends Model
+{
+    protected $fillable = [
+        'handle',
+        'shopify_id',
+        'sku',
+        'title',
+        'body_html',
+        'vendor',
+        'product_category',
+        'status',
+        'seo_title',
+        'seo_description',
+        'image_path',
+        'variant_price',
+        'variant_compare_at_price',
+        'variant_inventory_qty',
+        'variant_inventory_policy',
+        'variant_fulfillment_service',
+        'payload',
+        'approval_version',
+        'created_by',
+    ];
+
+    protected $casts = [
+        'payload' => 'array',
+        'variant_price' => 'decimal:2',
+        'variant_compare_at_price' => 'decimal:2',
+        'variant_inventory_qty' => 'integer',
+    ];
+
+    public function imageUrl(): ?string
+    {
+        if (!$this->image_path) {
+            return null;
+        }
+
+        return Storage::disk('public')->url($this->image_path);
+    }
+
+    public function approvals(): HasMany
+    {
+        return $this->hasMany(NewProductDraftApproval::class);
+    }
+
+    public function approvalsForCurrentVersion(): HasMany
+    {
+        return $this->approvals()->where('approval_version', $this->approval_version);
+    }
+
+    public function approvalsForCurrentVersionCount(): int
+    {
+        return $this->approvalsForCurrentVersion()
+            ->distinct('user_id')
+            ->count('user_id');
+    }
+
+    public function isApprovedByTwo(): bool
+    {
+        return $this->approvalsForCurrentVersionCount() >= 2;
+    }
+}

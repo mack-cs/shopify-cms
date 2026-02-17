@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ProductResource\Pages;
 
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
+use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Product;
 use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
@@ -24,6 +25,7 @@ class ListProducts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
+            PendingProductSyncBanner::class,
             ProductStatusStats::class,
         ];
     }
