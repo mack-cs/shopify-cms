@@ -5,6 +5,8 @@ namespace App\Jobs;
 use App\Models\Import;
 use App\Models\User;
 use App\Services\ShopifyApiImporter;
+use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftSeeder;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -22,7 +24,11 @@ class ShopifySyncJob implements ShouldQueue
     {
     }
 
-    public function handle(ShopifyApiImporter $importer): void
+    public function handle(
+        ShopifyApiImporter $importer,
+        NewProductDraftProductSync $draftSync,
+        NewProductDraftSeeder $draftSeeder
+    ): void
     {
         set_time_limit(0);
 
@@ -35,6 +41,8 @@ class ShopifySyncJob implements ShouldQueue
 
         try {
             $importer->importIntoExistingImport($import);
+            $draftSeeder->seedMissingFromProducts($import->id, $import->created_by);
+            $draftSync->syncApprovedDrafts();
             $user = User::find($import->created_by);
             if ($user) {
                 Notification::make()

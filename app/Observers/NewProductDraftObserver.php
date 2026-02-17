@@ -3,6 +3,7 @@
 namespace App\Observers;
 
 use App\Models\NewProductDraft;
+use App\Services\NewProductDraftProductSync;
 
 class NewProductDraftObserver
 {
@@ -27,5 +28,18 @@ class NewProductDraftObserver
         if (!empty($meaningful)) {
             $draft->approval_version = ($draft->approval_version ?? 1) + 1;
         }
+    }
+
+    public function saved(NewProductDraft $draft): void
+    {
+        if (!$draft->handle) {
+            return;
+        }
+
+        if (!$draft->isApprovedByTwo()) {
+            return;
+        }
+
+        app(NewProductDraftProductSync::class)->syncApprovedDrafts(collect([$draft]));
     }
 }

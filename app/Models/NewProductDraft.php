@@ -16,10 +16,17 @@ class NewProductDraft extends Model
         'body_html',
         'vendor',
         'product_category',
+        'google_product_category',
+        'type',
+        'tags',
+        'color_string',
         'status',
+        'published',
         'seo_title',
         'seo_description',
         'image_path',
+        'image_url',
+        'batch',
         'variant_price',
         'variant_compare_at_price',
         'variant_inventory_qty',
@@ -39,11 +46,15 @@ class NewProductDraft extends Model
 
     public function imageUrl(): ?string
     {
-        if (!$this->image_path) {
-            return null;
+        if ($this->image_url) {
+            return $this->image_url;
         }
 
-        return Storage::disk('public')->url($this->image_path);
+        if ($this->image_path) {
+            return Storage::disk('public')->url($this->image_path);
+        }
+
+        return null;
     }
 
     public function approvals(): HasMany

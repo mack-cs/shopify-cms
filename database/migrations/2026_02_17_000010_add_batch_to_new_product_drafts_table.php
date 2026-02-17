@@ -9,16 +9,15 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('new_product_drafts', function (Blueprint $table) {
-            $table->string('image_path')->nullable()->after('seo_description');
-            $table->string('image_url')->nullable()->after('image_path');
+            $table->string('batch', 32)->nullable()->index()->after('image_path');
         });
     }
 
     public function down(): void
     {
         Schema::table('new_product_drafts', function (Blueprint $table) {
-            $table->dropColumn('image_url');
-            $table->dropColumn('image_path');
+            $table->dropIndex(['batch']);
+            $table->dropColumn('batch');
         });
     }
 };

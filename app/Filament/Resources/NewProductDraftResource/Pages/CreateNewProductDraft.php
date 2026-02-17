@@ -16,6 +16,7 @@ class CreateNewProductDraft extends CreateRecord
         $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
         $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
         $data['status'] = $data['status'] ?? 'draft';
+        $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
         return $data;
     }
 }

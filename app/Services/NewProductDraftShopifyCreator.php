@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\NewProductDraft;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Storage;
 
 final class NewProductDraftShopifyCreator
 {
@@ -158,8 +157,8 @@ final class NewProductDraftShopifyCreator
         $product = $payload['product'] ?? null;
         $mediaError = null;
 
-        if ($product && $draft->image_path) {
-            $mediaError = $this->attachPrimaryImage($product['id'] ?? null, $draft->image_path);
+        if ($product && ($draft->image_path || $draft->image_url)) {
+            $mediaError = $this->attachPrimaryImage($product['id'] ?? null, $draft->imageUrl());
         }
 
         return [
@@ -170,14 +169,13 @@ final class NewProductDraftShopifyCreator
         ];
     }
 
-    private function attachPrimaryImage(?string $productId, string $imagePath): ?string
+    private function attachPrimaryImage(?string $productId, ?string $imageUrl): ?string
     {
         if (!$productId) {
             return 'Missing product id for media upload.';
         }
 
-        $url = Storage::disk('public')->url($imagePath);
-        if (!$url) {
+        if (!$imageUrl) {
             return 'Unable to resolve image URL.';
         }
 
@@ -185,7 +183,7 @@ final class NewProductDraftShopifyCreator
             'productId' => $productId,
             'media' => [
                 [
-                    'originalSource' => $url,
+                    'originalSource' => $imageUrl,
                     'mediaContentType' => 'IMAGE',
                 ],
             ],

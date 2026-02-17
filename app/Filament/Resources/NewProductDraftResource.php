@@ -6,6 +6,7 @@ use App\Enums\RolesEnum;
 use App\Filament\Resources\NewProductDraftResource\Pages;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
+use App\Models\Variant;
 use App\Services\NewProductDraftCsvImporter;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
@@ -21,8 +22,11 @@ use Filament\Tables\Actions\Action;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Actions\DeleteBulkAction;
+use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Columns\TextInputColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
 use Illuminate\Support\Facades\Auth;
@@ -39,6 +43,11 @@ class NewProductDraftResource extends Resource
     protected static ?string $navigationLabel = 'New Products';
     protected static ?int $navigationSort = 3;
 
+    private static function defaultBatch(): string
+    {
+        return 'batch' . now()->format('Ymd');
+    }
+
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
@@ -47,9 +56,37 @@ class NewProductDraftResource extends Resource
                     TextInput::make('title')->required()->maxLength(255),
                     Textarea::make('body_html')->label('Description')->rows(5),
                     TextInput::make('handle')->maxLength(255)->helperText('Filled after Shopify creates the product.'),
-                    TextInput::make('sku')->maxLength(255),
+                    TextInput::make('sku')
+                        ->maxLength(255)
+                        ->rules([
+                            function (?NewProductDraft $record) {
+                                return function (string $attribute, $value, $fail) use ($record): void {
+                                    $sku = trim((string) $value);
+                                    if ($sku === '') {
+                                        return;
+                                    }
+
+                                    $draftQuery = NewProductDraft::query()->where('sku', $sku);
+                                    if ($record) {
+                                        $draftQuery->where('id', '!=', $record->id);
+                                    }
+
+                                    if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                        $fail('SKU must be unique across new products and existing products.');
+                                    }
+                                };
+                            },
+                        ]),
                     TextInput::make('vendor')->maxLength(255),
+                    TextInput::make('type')->label('Type')->maxLength(255),
+                    TextInput::make('batch')
+                        ->label('Batch')
+                        ->default(fn () => self::defaultBatch())
+                        ->helperText('Optional. Defaults to today, e.g. batch20260217.'),
                     TextInput::make('product_category')->label('Product Category')->maxLength(255),
+                    TextInput::make('google_product_category')->label('Google Product Category')->maxLength(255),
+                    Textarea::make('tags')->label('Tags')->rows(2)->helperText('Comma-separated.'),
+                    TextInput::make('color_string')->label('Colors')->maxLength(512),
                     Select::make('status')
                         ->options([
                             'draft' => 'draft',
@@ -57,6 +94,13 @@ class NewProductDraftResource extends Resource
                             'archived' => 'archived',
                         ])
                         ->default('draft')
+                        ->required(),
+                    Select::make('published')
+                        ->options([
+                            'true' => 'true',
+                            'false' => 'false',
+                        ])
+                        ->default('false')
                         ->required(),
                 ])->columns(2),
             Section::make('Approval')
@@ -115,6 +159,10 @@ class NewProductDraftResource extends Resource
                         ->imageEditor()
                         ->maxSize(5120)
                         ->helperText('Optional. Uploaded image will be used for Shopify creation.'),
+                    TextInput::make('image_url')
+                        ->label('Image URL')
+                        ->placeholder('https://...')
+                        ->helperText('Optional. Use external URL instead of upload.'),
                 ]),
             Section::make('Additional Fields')
                 ->schema([
@@ -129,21 +177,111 @@ class NewProductDraftResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->defaultSort('updated_at', 'desc')
+            ->defaultSort('created_at', 'desc')
             ->columns([
-                TextColumn::make('title')->searchable()->sortable()->limit(60)->wrap(),
-                TextColumn::make('handle')->searchable()->sortable()->toggleable(),
-                TextColumn::make('sku')->searchable()->toggleable(),
-                TextColumn::make('status')->badge(),
+                ImageColumn::make('image_thumb')
+                    ->label('')
+                    ->circular()
+                    ->size(32)
+                    ->state(fn (NewProductDraft $record) => $record->imageUrl())
+                    ->toggleable(),
+                TextInputColumn::make('title')
+                    ->rules(['required'])
+                    ->searchable()
+                    ->sortable()
+                    ->placeholder('Title')
+                    ->toggleable(),
+                TextColumn::make('handle')
+                    ->searchable()
+                    ->sortable()
+                    ->toggleable(),
+                TextInputColumn::make('sku')
+                    ->rules([
+                        function () {
+                            return function (string $attribute, $value, $fail): void {
+                                $sku = trim((string) $value);
+                                if ($sku === '') {
+                                    return;
+                                }
+
+                                $recordId = request()->input('componentData.0.id')
+                                    ?? request()->input('componentData.0.recordId');
+                                $recordId = is_numeric($recordId) ? (int) $recordId : null;
+
+                                $draftQuery = NewProductDraft::query()->where('sku', $sku);
+                                if ($recordId) {
+                                    $draftQuery->where('id', '!=', $recordId);
+                                }
+
+                                if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                    $fail('SKU must be unique across new products and existing products.');
+                                }
+                            };
+                        },
+                    ])
+                    ->toggleable(),
+                TextColumn::make('type')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextInputColumn::make('batch')
+                    ->placeholder('batchYYYYMMDD')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('vendor')
+                    ->searchable()
+                    ->toggleable(),
+                TextColumn::make('product_category')
+                    ->label('Product Category')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('google_product_category')
+                    ->label('Google Product Category')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('tags')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('color_string')
+                    ->label('Colors')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('body_html')
+                    ->label('Description')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('status')
+                    ->badge()
+                    ->toggleable(),
+                TextColumn::make('published')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seo_title')
+                    ->label('SEO Title')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seo_description')
+                    ->label('SEO Description')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('variant_price')
+                    ->label('Price')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('variant_compare_at_price')
+                    ->label('Compare-at')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('variant_inventory_qty')
+                    ->label('Inventory')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('approvals_current')
                     ->label('Approvals')
                     ->state(fn (NewProductDraft $record) => $record->approvalsForCurrentVersionCount())
                     ->toggleable(),
                 IconColumn::make('approved')
                     ->label('Approved')
-                    ->boolean(fn (NewProductDraft $record) => $record->isApprovedByTwo()),
-                TextColumn::make('updated_at')->dateTime()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('created_at')->dateTime()->toggleable(isToggledHiddenByDefault: true),
+                    ->boolean(fn (NewProductDraft $record) => $record->isApprovedByTwo())
+                    ->toggleable(),
+                TextColumn::make('updated_at')
+                    ->dateTime()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')
+                    ->dateTime()
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->actions([
                 Action::make('approve')
@@ -221,7 +359,8 @@ class NewProductDraftResource extends Resource
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Created: {$result['created']}, " .
-                                "Updated: {$result['updated']}, Missing title: {$result['skipped_missing_title']}"
+                                "Updated: {$result['updated']}, Missing title: {$result['skipped_missing_title']}, " .
+                                "Duplicate SKU: {$result['skipped_duplicate_sku']}"
                             )
                             ->success()
                             ->send();
@@ -297,6 +436,32 @@ class NewProductDraftResource extends Resource
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),
+            ])
+            ->filters([
+                Filter::make('title_filter')
+                    ->form([
+                        TextInput::make('title')
+                            ->label('Title'),
+                    ])
+                    ->query(function ($query, array $data) {
+                        $title = trim((string) ($data['title'] ?? ''));
+                        if ($title === '') {
+                            return $query;
+                        }
+                        return $query->where('title', 'like', "%{$title}%");
+                    }),
+                Filter::make('sku_filter')
+                    ->form([
+                        TextInput::make('sku')
+                            ->label('SKU'),
+                    ])
+                    ->query(function ($query, array $data) {
+                        $sku = trim((string) ($data['sku'] ?? ''));
+                        if ($sku === '') {
+                            return $query;
+                        }
+                        return $query->where('sku', 'like', "%{$sku}%");
+                    }),
             ]);
     }
 

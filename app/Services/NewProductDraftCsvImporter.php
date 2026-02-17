@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\NewProductDraft;
+use App\Models\Variant;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
@@ -10,7 +11,13 @@ use League\Csv\Reader;
 final class NewProductDraftCsvImporter
 {
     /**
-     * @return array{total:int, created:int, updated:int, skipped_missing_title:int}
+     * @return array{
+     *   total:int,
+     *   created:int,
+     *   updated:int,
+     *   skipped_missing_title:int,
+     *   skipped_duplicate_sku:int
+     * }
      */
     public function importFromPath(string $absolutePath): array
     {
@@ -30,10 +37,17 @@ final class NewProductDraftCsvImporter
             'description html' => 'body_html',
             'body html' => 'body_html',
             'vendor' => 'vendor',
+            'tags' => 'tags',
+            'product type' => 'type',
+            'type' => 'type',
             'product category' => 'product_category',
+            'google product category' => 'google_product_category',
             'status' => 'status',
+            'published' => 'published',
             'seo title' => 'seo_title',
             'seo description' => 'seo_description',
+            'colors' => 'color_string',
+            'color' => 'color_string',
             'price' => 'variant_price',
             'compare at price' => 'variant_compare_at_price',
             'compare-at price' => 'variant_compare_at_price',
@@ -49,6 +63,7 @@ final class NewProductDraftCsvImporter
         $created = 0;
         $updated = 0;
         $skippedMissingTitle = 0;
+        $skippedDuplicateSku = 0;
 
         DB::transaction(function () use (
             $csv,
@@ -57,7 +72,8 @@ final class NewProductDraftCsvImporter
             &$total,
             &$created,
             &$updated,
-            &$skippedMissingTitle
+            &$skippedMissingTitle,
+            &$skippedDuplicateSku
         ): void {
             foreach ($csv->getRecords() as $row) {
                 $total++;
@@ -89,6 +105,17 @@ final class NewProductDraftCsvImporter
                 $handle = $data['handle'] ?? null;
                 $sku = $data['sku'] ?? null;
 
+                if ($sku) {
+                    $draftQuery = NewProductDraft::query()->where('sku', $sku);
+                    if ($handle) {
+                        $draftQuery->where('handle', '!=', $handle);
+                    }
+                    if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                        $skippedDuplicateSku++;
+                        continue;
+                    }
+                }
+
                 $draft = null;
                 if ($handle) {
                     $draft = NewProductDraft::where('handle', $handle)->first();
@@ -106,6 +133,9 @@ final class NewProductDraftCsvImporter
                     if (empty($data['variant_fulfillment_service'])) {
                         $draft->variant_fulfillment_service = 'manual';
                     }
+                    if (empty($data['batch'])) {
+                        $draft->batch = $draft->batch ?? ('batch' . now()->format('Ymd'));
+                    }
                     $draft->payload = $mergedPayload;
                     $draft->save();
                     $updated++;
@@ -116,6 +146,7 @@ final class NewProductDraftCsvImporter
                 $data['created_by'] = Auth::id();
                 $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
                 $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
+                $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
 
                 NewProductDraft::create($data);
                 $created++;
@@ -127,6 +158,7 @@ final class NewProductDraftCsvImporter
             'created' => $created,
             'updated' => $updated,
             'skipped_missing_title' => $skippedMissingTitle,
+            'skipped_duplicate_sku' => $skippedDuplicateSku,
         ];
     }
 
