@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Import;
+use App\Models\Setting;
 use App\Models\User;
 use App\Services\ShopifyApiImporter;
 use App\Services\NewProductDraftProductSync;
@@ -43,6 +44,7 @@ class ShopifySyncJob implements ShouldQueue
             $importer->importIntoExistingImport($import);
             $draftSeeder->seedMissingFromProducts($import->id, $import->created_by);
             $draftSync->syncApprovedDrafts();
+            Setting::putValue('shopify_last_sync_at', now()->toISOString());
             $user = User::find($import->created_by);
             if ($user) {
                 Notification::make()

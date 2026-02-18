@@ -7,6 +7,7 @@ use Filament\Tables;
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Models\Import;
+use App\Models\Setting;
 use App\Models\Product;
 use Filament\Forms\Form;
 use Filament\Tables\Table;
@@ -108,10 +109,12 @@ protected static ?string $navigationLabel = 'Product Feed';
                     try {
                         $import = $importer->createOrReuseCurrentImport($user->id);
                         ShopifySyncJob::dispatch($import->id);
+                        $lastSync = Setting::getValue('shopify_last_sync_at');
+                        $lastSyncLabel = $lastSync ? " Last sync: {$lastSync}." : '';
                         self::sendNotification(
                             Notification::make()
                                 ->title('Shopify sync queued')
-                                ->body("Import #{$import->id} is processing in the background")
+                                ->body("Import #{$import->id} is processing in the background.{$lastSyncLabel}")
                                 ->success()
                         );
                     } catch (\Throwable $e) {
