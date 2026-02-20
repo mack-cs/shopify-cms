@@ -6,8 +6,16 @@ use App\Enums\RolesEnum;
 use App\Filament\Resources\NewProductDraftResource\Pages;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
+use App\Models\Product;
+use App\Models\ShopifyRow;
+use App\Models\StyleProfile;
+use App\Models\DropdownOption;
+use App\Models\Tag;
 use App\Models\Variant;
+use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\HeaderStore;
+use App\Services\TagNormalizer;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Select;
@@ -15,8 +23,11 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\KeyValue;
 use Filament\Forms\Components\Placeholder;
+use Filament\Forms\Components\Group;
+use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
+use Illuminate\Support\HtmlString;
 use Filament\Tables;
 use Filament\Tables\Actions\Action;
 use Filament\Tables\Actions\BulkAction;
@@ -51,42 +62,497 @@ class NewProductDraftResource extends Resource
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
-            Section::make('Core')
+            Forms\Components\Grid::make(3)
                 ->schema([
-                    TextInput::make('title')->required()->maxLength(255),
-                    Textarea::make('body_html')->label('Description')->rows(5),
-                    TextInput::make('handle')->maxLength(255)->helperText('Filled after Shopify creates the product.'),
-                    TextInput::make('sku')
-                        ->maxLength(255)
-                        ->rules([
-                            function (?NewProductDraft $record) {
-                                return function (string $attribute, $value, $fail) use ($record): void {
-                                    $sku = trim((string) $value);
-                                    if ($sku === '') {
+                    Group::make([
+                        Section::make('Core')
+                            ->schema([
+                    Forms\Components\Grid::make(3)
+                        ->schema([
+                            TextInput::make('title')
+                                ->required()
+                                ->maxLength(255)
+                                ->columnSpan(1),
+                            TextInput::make('sku')
+                                ->maxLength(255)
+                                ->rules([
+                                    function (?NewProductDraft $record) {
+                                        return function (string $attribute, $value, $fail) use ($record): void {
+                                            $sku = trim((string) $value);
+                                            if ($sku === '') {
+                                                return;
+                                            }
+
+                                            $draftQuery = NewProductDraft::query()->where('sku', $sku);
+                                            if ($record) {
+                                                $draftQuery->where('id', '!=', $record->id);
+                                            }
+
+                                            if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                                $fail('SKU must be unique across new products and existing products.');
+                                            }
+                                        };
+                                    },
+                                ])
+                                ->columnSpan(1),
+                            TextInput::make('handle')
+                                ->maxLength(255)
+                                ->disabled()
+                                ->columnSpan(1),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(3)
+                        ->schema([
+                            Select::make('collection_filter')
+                                ->label('Collection')
+                                ->placeholder('Select option')
+                                ->options(fn (): array => self::collectionOptions())
+                                ->searchable()
+                                ->reactive()
+                                ->dehydrated(false)
+                                ->afterStateHydrated(function (Select $component, ?NewProductDraft $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $component->state(self::collectionFromTags($record->tags));
+                                })
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                    $collectionTags = self::collectionTags($state);
+                                    if ($collectionTags === []) {
                                         return;
                                     }
 
-                                    $draftQuery = NewProductDraft::query()->where('sku', $sku);
-                                    if ($record) {
-                                        $draftQuery->where('id', '!=', $record->id);
+                                    $current = $get('tags');
+                                    $normalized = self::normalizeTagList($current);
+                                    $collectionPool = self::allCollectionTags();
+
+                                    $kept = array_values(array_filter(
+                                        $normalized,
+                                        fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                                    ));
+
+                                    $merged = array_values(array_unique(array_merge($kept, $collectionTags)));
+                                    $set('tags', $merged);
+                                }),
+                            Select::make('vendor')
+                                ->label('Vendor')
+                                ->placeholder('Select option')
+                                ->options(fn () => Product::query()
+                                    ->whereNotNull('vendor')
+                                    ->where('vendor', '!=', '')
+                                    ->distinct()
+                                    ->orderBy('vendor')
+                                    ->pluck('vendor', 'vendor')
+                                    ->all())
+                                ->searchable()
+                                ->preload(),
+                            TextInput::make('material_cost')
+                                ->label('Material Cost')
+                                ->numeric()
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if (!is_string($state)) {
+                                        return;
+                                    }
+                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
+                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+                                    if ($normalized === null) {
+                                        return;
+                                    }
+                                    $parts = explode('.', $normalized);
+                                    if (count($parts) > 2) {
+                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
+                                    }
+                                    if ($normalized !== $state) {
+                                        $set('material_cost', $normalized);
+                                    }
+                                })
+                                ->dehydrateStateUsing(function ($state) {
+                                    if (!is_string($state)) {
+                                        return $state;
+                                    }
+                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
+                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+                                    if ($normalized === null) {
+                                        return $state;
+                                    }
+                                    $parts = explode('.', $normalized);
+                                    if (count($parts) > 2) {
+                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
+                                    }
+                                    return $normalized;
+                                }),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(3)
+                        ->schema([
+                            Select::make('type')
+                                ->label('Type')
+                                ->options(function (): array {
+                                    $types = CategoryTypeMap::types();
+                                    return array_combine($types, $types);
+                                })
+                                ->searchable()
+                                ->preload()
+                                ->reactive()
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if (!$state) {
+                                        $set('product_category', null);
+                                        $set('google_product_category', null);
+                                        return;
                                     }
 
-                                    if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
-                                        $fail('SKU must be unique across new products and existing products.');
+                                    $mapping = CategoryTypeMap::byType($state);
+                                    if ($mapping) {
+                                        $set('product_category', $mapping['category']);
+                                        $set('google_product_category', $mapping['google_product_category']);
                                     }
-                                };
-                            },
-                        ]),
-                    TextInput::make('vendor')->maxLength(255),
-                    TextInput::make('type')->label('Type')->maxLength(255),
-                    TextInput::make('batch')
-                        ->label('Batch')
-                        ->default(fn () => self::defaultBatch())
-                        ->helperText('Optional. Defaults to today, e.g. batch20260217.'),
-                    TextInput::make('product_category')->label('Product Category')->maxLength(255),
-                    TextInput::make('google_product_category')->label('Google Product Category')->maxLength(255),
-                    Textarea::make('tags')->label('Tags')->rows(2)->helperText('Comma-separated.'),
-                    TextInput::make('color_string')->label('Colors')->maxLength(512),
+                                }),
+                            Select::make('product_category')
+                                ->label('Category')
+                                ->options(function (): array {
+                                    $categories = CategoryTypeMap::categories();
+                                    return array_combine($categories, $categories);
+                                })
+                                ->searchable()
+                                ->reactive()
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if (!$state) {
+                                        $set('type', null);
+                                        $set('google_product_category', null);
+                                        return;
+                                    }
+
+                                    $mapping = CategoryTypeMap::byCategory($state);
+                                    if ($mapping) {
+                                        $set('type', $mapping['type']);
+                                        $set('google_product_category', $mapping['google_product_category']);
+                                    }
+                                }),
+                            TextInput::make('google_product_category')
+                                ->label('Google Product Category')
+                                ->disabled(),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                        ->schema([
+                            Textarea::make('body_html')
+                                ->label('Description')
+                                ->rows(3)
+                                ->columnSpan(1),
+                            Textarea::make('uvp_short_paragraph')
+                                ->label('UVP Short Paragraph')
+                                ->rows(3)
+                                ->columnSpan(1),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                        ->schema([
+                            Select::make('color_string')
+                                ->label('Colors')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->reactive()
+                                ->options(function (Get $get): array {
+                                    $vendor = $get('vendor');
+                                    $type = $get('type');
+                                    $tags = self::filterTags($get, $vendor, $type);
+                                    return self::dropdownOptionsForHeader(
+                                        HeaderStore::COLOR_METAFIELD,
+                                        vendor: $vendor,
+                                        productType: $type,
+                                        tags: $tags
+                                    );
+                                })
+                                ->afterStateUpdated(function (Select $component, $state, callable $set, callable $get): void {
+                                    $values = is_array($state) ? $state : [];
+                                    $normalized = array_values(array_unique(array_filter(array_map(
+                                        fn ($v) => trim((string) $v),
+                                        $values
+                                    ))));
+
+                                    $prev = $get('color_selection_prev') ?? [];
+                                    $prev = is_array($prev) ? $prev : [];
+                                    $prevLower = array_map('strtolower', $prev);
+
+                                    $lower = array_map('strtolower', $normalized);
+                                    $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                    $hasMulti = in_array('multicolour', $lower, true);
+
+                                    $message = null;
+                                    if ($hasSolidPlain && $hasMulti) {
+                                        $added = array_diff($lower, $prevLower);
+                                        if (in_array('multicolour', $added, true)) {
+                                            $message = "Multicolour can't be selected with Solid or Plain.";
+                                        } elseif (in_array('solid', $added, true) || in_array('plain', $added, true)) {
+                                            $message = "You can't select Solid or Plain with Multicolour.";
+                                        } else {
+                                            $message = "Multicolour can't be selected with Solid or Plain.";
+                                        }
+                                    }
+
+                                    if ($normalized !== $values) {
+                                        $set('color_string', $normalized);
+                                    }
+
+                                    $set('color_selection_prev', $normalized);
+                                    $set('color_conflict_message', $message);
+
+                                    $livewire = $component->getContainer()->getLivewire();
+                                    if ($message) {
+                                        $livewire->validateOnly($component->getStatePath());
+                                    } else {
+                                        $livewire->resetErrorBag($component->getStatePath());
+                                    }
+                                })
+                                ->rules([
+                                    function (Get $get): \Closure {
+                                        return function (string $attribute, $value, $fail) use ($get): void {
+                                            $values = is_array($value) ? $value : [];
+                                            $lower = array_map(
+                                                'strtolower',
+                                                array_values(array_unique(array_filter(array_map(
+                                                    fn ($v) => trim((string) $v),
+                                                    $values
+                                                ))))
+                                            );
+
+                                            $hasSolidPlain = in_array('solid', $lower, true) || in_array('plain', $lower, true);
+                                            $hasMulti = in_array('multicolour', $lower, true);
+                                            if (!$hasSolidPlain || !$hasMulti) {
+                                                return;
+                                            }
+
+                                            $message = $get('color_conflict_message')
+                                                ?: "Multicolour can't be selected with Solid or Plain.";
+                                            $fail($message);
+                                        };
+                                    },
+                                ])
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (! is_string($state) || trim($state) === '') {
+                                        $component->state([]);
+                                        return;
+                                    }
+
+                                    $normalized = str_replace(',', ';', $state);
+
+                                    $component->state(
+                                        array_values(array_filter(array_map('trim', explode(';', $normalized))))
+                                    );
+                                })
+                                ->dehydrateStateUsing(function ($state) {
+                                    $arr = is_array($state) ? $state : [];
+
+                                    $clean = array_values(array_unique(array_filter(array_map(
+                                        fn ($v) => trim((string) $v),
+                                        $arr
+                                    ))));
+
+                                    return $clean ? implode('; ', $clean) : null;
+                                }),
+                            Select::make('tags')
+                                ->label('Tags')
+                                ->multiple()
+                                ->searchable()
+                                ->reactive()
+                                ->preload()
+                                ->options(fn () => Tag::query()
+                                    ->orderBy('name')
+                                    ->pluck('name', 'name')
+                                    ->all())
+                                ->afterStateUpdated(function (Select $component, $state, callable $set): void {
+                                    $values = is_array($state) ? $state : [];
+                                    $normalized = TagNormalizer::parseTokens(implode(', ', $values));
+                                    if ($normalized !== $values) {
+                                        $set('tags', $normalized);
+                                    }
+                                })
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (! is_string($state) || trim($state) === '') {
+                                        $component->state([]);
+                                        return;
+                                    }
+
+                                    $component->state(TagNormalizer::parseTokens($state));
+                                })
+                                ->dehydrateStateUsing(function ($state): ?string {
+                                    $values = is_array($state) ? $state : [];
+                                    return TagNormalizer::normalizeFromArray($values);
+                                }),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                        ->schema([
+                            Textarea::make('materials_and_dimensions')
+                                ->label('Materials and Dimensions')
+                                ->rows(2),
+                            Textarea::make('complementary_products')
+                                ->label('Complementary products')
+                                ->rows(2),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                        ->schema([
+                            Select::make('jewelry_material')
+                                ->label('Jewelry material')
+                                ->placeholder('Select option')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::JEWELRY_MATERIAL,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                ))
+                                ->searchable()
+                                ->reactive(),
+                            Select::make('product_materials')
+                                ->label('Product Materials')
+                                ->placeholder('Select option')
+                                ->options(fn (): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PRODUCT_MATERIALS
+                                ))
+                                ->searchable()
+                                ->reactive(),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(3)
+                        ->schema([
+                            Select::make('metal')
+                                ->label('Metal')
+                                ->placeholder('Select option')
+                                ->options(fn (): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PRODUCT_METALS
+                                ))
+                                ->searchable()
+                                ->reactive(),
+                            Select::make('colour_style')
+                                ->label('Colour Style')
+                                ->placeholder('Select option')
+                                ->options(fn (): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
+                                ->searchable()
+                                ->reactive(),
+                            Select::make('size')
+                                ->label('Size')
+                                ->placeholder('Select option')
+                                ->options(fn (): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::SIZE
+                                ))
+                                ->searchable()
+                                ->reactive(),
+                        ])
+                        ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                        ->schema([
+                            TextInput::make('siblings')
+                                ->label('Siblings'),
+                            TextInput::make('siblings_collection_name')
+                                ->label('Siblings Collection Name'),
+                        ])
+                        ->columnSpanFull(),
+                            ])->columns(2),
+                        Section::make('Variant Defaults')
+                            ->schema([
+                                Forms\Components\Grid::make(3)
+                                    ->schema([
+                                        TextInput::make('variant_price')->label('Price')->numeric(),
+                                        TextInput::make('variant_compare_at_price')->label('Compare-at price')->numeric(),
+                                        TextInput::make('variant_inventory_qty')->label('Inventory')->numeric(),
+                                    ])
+                                    ->columnSpanFull(),
+                            ]),
+                    ])->columnSpan(2),
+                    Section::make('Images')
+                        ->schema([
+                    Placeholder::make('image_preview')
+                        ->label('Preview')
+                        ->content(function (Get $get, ?NewProductDraft $record): HtmlString {
+                            $url = null;
+                            $imagePath = $get('image_path');
+                            $imageUrl = $get('image_url');
+
+                                    if (is_string($imageUrl) && trim($imageUrl) !== '') {
+                                        $url = trim($imageUrl);
+                                    } elseif (is_string($imagePath) && trim($imagePath) !== '') {
+                                        $url = Storage::disk('public')->url($imagePath);
+                                    } elseif ($record) {
+                                        $url = $record->imageUrl();
+                                    }
+
+                            if (!$url) {
+                                return new HtmlString('<div class="text-sm text-gray-500">No image selected.</div>');
+                            }
+
+                            $safeUrl = e($url);
+                            $isImage = (bool) preg_match('/\\.(jpe?g|png|gif|webp|svg)(\\?.*)?$/i', $url);
+
+                            if ($isImage) {
+                                return new HtmlString(
+                                    '<div style="width:100%;max-height:250px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">'
+                                    . '<img src="' . $safeUrl . '" alt="Image preview" style="width:100%;height:250px;object-fit:cover;display:block;" />'
+                                    . '</div>'
+                                );
+                            }
+
+                            return new HtmlString(
+                                '<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">'
+                                . '<iframe src="' . $safeUrl . '" style="width:100%;height:250px;border:0;"></iframe>'
+                                . '</div>'
+                            );
+                        }),
+                    Forms\Components\FileUpload::make('image_path')
+                        ->label('Primary Image')
+                                ->disk('public')
+                                ->directory('new-product-images')
+                                ->preserveFilenames()
+                                ->getUploadedFileNameForStorageUsing(function ($file, Forms\Get $get): string {
+                                    $disk = Storage::disk('public');
+                                    $directory = 'new-product-images';
+                                    $original = $file->getClientOriginalName();
+                                    $name = pathinfo($original, PATHINFO_FILENAME);
+                                    $ext = strtolower($file->getClientOriginalExtension());
+                                    $ext = $ext !== '' ? ".{$ext}" : '';
+
+                                    $candidate = "{$name}{$ext}";
+                                    $path = "{$directory}/{$candidate}";
+                                    $suffix = 1;
+
+                                    while ($disk->exists($path)) {
+                                        $candidate = "{$name}-{$suffix}{$ext}";
+                                        $path = "{$directory}/{$candidate}";
+                                        $suffix++;
+                                    }
+
+                                    return $candidate;
+                                })
+                                ->image()
+                                ->imageEditor()
+                                ->maxSize(5120)
+                                ->helperText('Optional. Uploaded image will be used for Shopify creation.')
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if ($state) {
+                                        $set('image_url', null);
+                                    }
+                                })
+                                ->visible(fn (Get $get): bool => blank($get('image_url'))),
+                    TextInput::make('image_url')
+                        ->label('Product Image URL')
+                        ->placeholder('https://...')
+                        ->helperText('Use a direct image URL (not a product page).')
+                        ->afterStateUpdated(function ($state, callable $set): void {
+                            if (is_string($state) && trim($state) !== '') {
+                                $set('image_path', null);
+                            }
+                        })
+                        ->visible(fn (Get $get): bool => blank($get('image_path'))),
+                    Select::make('product_design')
+                        ->label('Product design')
+                        ->placeholder('Select option')
+                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                            HeaderStore::BRACELET_DESIGN,
+                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                        ))
+                        ->searchable()
+                        ->reactive(),
                     Select::make('status')
                         ->options([
                             'draft' => 'draft',
@@ -102,68 +568,13 @@ class NewProductDraftResource extends Resource
                         ])
                         ->default('false')
                         ->required(),
-                ])->columns(2),
-            Section::make('Approval')
-                ->schema([
-                    Placeholder::make('approval_version')
-                        ->label('Approval Version')
-                        ->content(fn (?NewProductDraft $record) => $record?->approval_version ?? 1),
-                    Placeholder::make('approvals_current')
-                        ->label('Approvals (Current Version)')
-                        ->content(fn (?NewProductDraft $record) => $record?->approvalsForCurrentVersionCount() ?? 0),
-                    Placeholder::make('approved')
-                        ->label('Approved By Two')
-                        ->content(fn (?NewProductDraft $record) => ($record?->isApprovedByTwo() ?? false) ? 'Yes' : 'No'),
-                ])->columns(3)->collapsed(),
-            Section::make('SEO')
-                ->schema([
-                    TextInput::make('seo_title')->label('SEO Title')->maxLength(255),
-                    Textarea::make('seo_description')->label('SEO Description')->rows(2)->maxLength(160),
-                ])->columns(2),
-            Section::make('Variant Defaults')
-                ->schema([
-                    TextInput::make('variant_price')->label('Price')->numeric(),
-                    TextInput::make('variant_compare_at_price')->label('Compare-at price')->numeric(),
-                    TextInput::make('variant_inventory_qty')->label('Inventory')->numeric(),
-                    TextInput::make('variant_inventory_policy')->default('deny')->disabled(),
-                    TextInput::make('variant_fulfillment_service')->default('manual')->disabled(),
-                ])->columns(2),
-            Section::make('Images')
-                ->schema([
-                    Forms\Components\FileUpload::make('image_path')
-                        ->label('Primary Image')
-                        ->disk('public')
-                        ->directory('new-product-images')
-                        ->preserveFilenames()
-                        ->getUploadedFileNameForStorageUsing(function ($file, Forms\Get $get): string {
-                            $disk = Storage::disk('public');
-                            $directory = 'new-product-images';
-                            $original = $file->getClientOriginalName();
-                            $name = pathinfo($original, PATHINFO_FILENAME);
-                            $ext = strtolower($file->getClientOriginalExtension());
-                            $ext = $ext !== '' ? ".{$ext}" : '';
-
-                            $candidate = "{$name}{$ext}";
-                            $path = "{$directory}/{$candidate}";
-                            $suffix = 1;
-
-                            while ($disk->exists($path)) {
-                                $candidate = "{$name}-{$suffix}{$ext}";
-                                $path = "{$directory}/{$candidate}";
-                                $suffix++;
-                            }
-
-                            return $candidate;
-                        })
-                        ->image()
-                        ->imageEditor()
-                        ->maxSize(5120)
-                        ->helperText('Optional. Uploaded image will be used for Shopify creation.'),
-                    TextInput::make('image_url')
-                        ->label('Image URL')
-                        ->placeholder('https://...')
-                        ->helperText('Optional. Use external URL instead of upload.'),
-                ]),
+                    TextInput::make('batch')
+                        ->label('Batch')
+                        ->default(fn () => self::defaultBatch()),
+                ])
+                ->columnSpan(1),
+                ])
+                ->columnSpanFull(),
             Section::make('Additional Fields')
                 ->schema([
                     KeyValue::make('payload')
@@ -172,6 +583,132 @@ class NewProductDraftResource extends Resource
                         ->addActionLabel('Add field'),
                 ]),
         ]);
+    }
+
+    private static function collectionOptions(): array
+    {
+        $collections = DropdownOption::query()
+            ->whereNotNull('collection_style')
+            ->where('collection_style', '!=', '')
+            ->orderBy('collection_style')
+            ->pluck('collection_style')
+            ->all();
+
+        return array_combine($collections, $collections);
+    }
+
+    private static function collectionFromTags(?string $tags): ?string
+    {
+        if (!$tags) {
+            return null;
+        }
+
+        $normalized = self::normalizeTagList($tags);
+        if (empty($normalized)) {
+            return null;
+        }
+
+        return DropdownOption::query()
+            ->whereIn('collection_tag_primary', $normalized)
+            ->where(function ($query) use ($normalized) {
+                $query->whereIn('collection_tag_secondary', $normalized)
+                    ->orWhereNull('collection_tag_secondary');
+            })
+            ->orderBy('collection_style')
+            ->value('collection_style');
+    }
+
+    private static function collectionTags(?string $collection): array
+    {
+        if ($collection === null || trim($collection) === '') {
+            return [];
+        }
+
+        $rows = DropdownOption::query()
+            ->where('collection_style', $collection)
+            ->whereNotNull('collection_tag_primary')
+            ->orderBy('collection_tag_primary')
+            ->get(['collection_tag_primary', 'collection_tag_secondary']);
+
+        $tags = [];
+        foreach ($rows as $row) {
+            if ($row->collection_tag_primary) {
+                $tags[] = $row->collection_tag_primary;
+            }
+            if ($row->collection_tag_secondary) {
+                $tags[] = $row->collection_tag_secondary;
+            }
+        }
+
+        return array_values(array_unique(array_filter(array_map('trim', $tags))));
+    }
+
+    private static function allCollectionTags(): array
+    {
+        $primary = DropdownOption::query()
+            ->whereNotNull('collection_tag_primary')
+            ->where('collection_tag_primary', '!=', '')
+            ->pluck('collection_tag_primary')
+            ->all();
+
+        $secondary = DropdownOption::query()
+            ->whereNotNull('collection_tag_secondary')
+            ->where('collection_tag_secondary', '!=', '')
+            ->pluck('collection_tag_secondary')
+            ->all();
+
+        return array_values(array_unique(array_filter(array_merge($primary, $secondary))));
+    }
+
+    private static function normalizeTagList(mixed $tags): array
+    {
+        if (is_array($tags)) {
+            return array_values(array_filter(array_map('trim', $tags)));
+        }
+
+        if (is_string($tags) && trim($tags) !== '') {
+            return TagNormalizer::parseTokens($tags);
+        }
+
+        return [];
+    }
+
+    private static function dropdownOptionsForHeader(
+        string $header,
+        ?string $vendor = null,
+        ?string $productType = null,
+        mixed $tags = null
+    ): array {
+        return DropdownOption::optionsForHeader($header, $vendor, $productType, $tags)
+            ->unique()
+            ->sort()
+            ->mapWithKeys(fn (string $value): array => [$value => $value])
+            ->all();
+    }
+
+    private static function filterTags(Get $get, ?string $vendor = null, ?string $productType = null): array
+    {
+        $collection = $get('collection_filter');
+        if ($collection) {
+            $tags = self::collectionTags($collection);
+            if (!empty($tags)) {
+                return $tags;
+            }
+        }
+
+        $rawTags = $get('tags');
+        if (is_array($rawTags)) {
+            $tokens = [];
+            foreach ($rawTags as $value) {
+                $token = TagNormalizer::normalizeToken((string) $value);
+                if ($token !== null) {
+                    $tokens[] = $token;
+                }
+            }
+            return array_values(array_unique($tokens));
+        }
+
+        return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
     }
 
     public static function table(Table $table): Table
@@ -249,16 +786,6 @@ class NewProductDraftResource extends Resource
                     ->toggleable(),
                 TextColumn::make('published')
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('seo_title')
-                    ->label('SEO Title')
-                    ->limit(60)
-                    ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('seo_description')
-                    ->label('SEO Description')
-                    ->limit(60)
-                    ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_price')
                     ->label('Price')
                     ->toggleable(isToggledHiddenByDefault: true),
@@ -267,6 +794,42 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_inventory_qty')
                     ->label('Inventory')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('material_cost')
+                    ->label('Material Cost')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('jewelry_material')
+                    ->label('Jewelry material')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product_materials')
+                    ->label('Product Materials')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('materials_and_dimensions')
+                    ->label('Materials and Dimensions')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product_design')
+                    ->label('Product design')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('metal')
+                    ->label('Metal')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('colour_style')
+                    ->label('Colour Style')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('size')
+                    ->label('Size')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('siblings')
+                    ->label('Siblings')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('siblings_collection_name')
+                    ->label('Siblings Collection Name')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('uvp_short_paragraph')
+                    ->label('UVP Short Paragraph')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('complementary_products')
+                    ->label('Complementary products')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('approvals_current')
                     ->label('Approvals')
@@ -287,12 +850,27 @@ class NewProductDraftResource extends Resource
                 Action::make('approve')
                     ->label('Approve')
                     ->icon('heroicon-o-check-badge')
+                    ->color('success')
                     ->requiresConfirmation()
-                    ->visible(function (NewProductDraft $record): bool {
-                        return !NewProductDraftApproval::where('new_product_draft_id', $record->id)
+                    ->disabled(function (NewProductDraft $record): bool {
+                        return NewProductDraftApproval::where('new_product_draft_id', $record->id)
                             ->where('user_id', Auth::id())
                             ->where('approval_version', $record->approval_version)
                             ->exists();
+                    })
+                    ->tooltip(function (NewProductDraft $record): ?string {
+                        $approved = NewProductDraftApproval::where('new_product_draft_id', $record->id)
+                            ->where('user_id', Auth::id())
+                            ->where('approval_version', $record->approval_version)
+                            ->exists();
+                        return $approved ? 'Already approved by you' : 'Approve this draft';
+                    })
+                    ->extraAttributes(function (NewProductDraft $record): array {
+                        $approved = NewProductDraftApproval::where('new_product_draft_id', $record->id)
+                            ->where('user_id', Auth::id())
+                            ->where('approval_version', $record->approval_version)
+                            ->exists();
+                        return ['title' => $approved ? 'Already approved by you' : 'Approve this draft'];
                     })
                     ->action(function (NewProductDraft $record): void {
                         NewProductDraftApproval::firstOrCreate([
@@ -307,8 +885,136 @@ class NewProductDraftResource extends Resource
                             ->success()
                             ->send();
                     }),
-                Tables\Actions\EditAction::make(),
-                Tables\Actions\DeleteAction::make(),
+                Action::make('editStyle')
+                    ->label('Style')
+                    ->icon('heroicon-o-swatch')
+                    ->color('info')
+                    ->tooltip('Edit style profile')
+                    ->extraAttributes(['title' => 'Edit style profile'])
+                    ->visible(function (NewProductDraft $record): bool {
+                        if (!$record->handle) {
+                            return false;
+                        }
+                        return Product::where('handle', $record->handle)->exists();
+                    })
+                    ->modalHeading(function (NewProductDraft $record) {
+                        return $record->title ? "Edit style for {$record->title}" : 'Edit style';
+                    })
+                    ->form([
+                        Forms\Components\Grid::make(2)
+                            ->schema([
+                                Forms\Components\TextInput::make('sku')
+                                    ->maxLength(80)
+                                    ->disabled()
+                                    ->dehydrated(false),
+                                Forms\Components\TextInput::make('style_type')
+                                    ->label('Style')
+                                    ->maxLength(120)
+                                    ->disabled()
+                                    ->dehydrated(false),
+                            ])
+                            ->columnSpanFull(),
+                        Forms\Components\Grid::make(2)
+                            ->schema([
+                                Forms\Components\TextInput::make('product_colors')
+                                    ->label('Colors')
+                                    ->disabled()
+                                    ->dehydrated(false),
+                                Forms\Components\TextInput::make('jewelry_material_display')
+                                    ->label('Jewelry material')
+                                    ->disabled()
+                                    ->dehydrated(false),
+                            ])
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('materials')->maxLength(255),
+                        Forms\Components\TextInput::make('components')->maxLength(255),
+                        Forms\Components\Grid::make(2)
+                            ->schema([
+                                Forms\Components\Textarea::make('colour_prompt')
+                                    ->rows(4),
+                                Forms\Components\Textarea::make('product_description')
+                                    ->label('Description')
+                                    ->rows(4)
+                                    ->disabled()
+                                    ->dehydrated(false),
+                            ])
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('draft_seo_title')
+                            ->label('SEO Title')
+                            ->maxLength(255)
+                            ->columnSpanFull(),
+                        Forms\Components\Textarea::make('draft_seo_description')
+                            ->label('SEO Description (160 chars)')
+                            ->rows(2)
+                            ->maxLength(160)
+                            ->columnSpanFull(),
+                    ])
+                    ->fillForm(function (NewProductDraft $record): array {
+                        $product = Product::where('handle', $record->handle)->with(['variants', 'images'])->first();
+                        if (!$product) {
+                            return [];
+                        }
+
+                        $styleProfile = StyleProfile::where('product_id', $product->id)->first();
+                        $row = ShopifyRow::where('import_id', $product->import_id)
+                            ->where('handle', $product->handle)
+                            ->where('row_type', 'product_primary')
+                            ->first();
+
+                        $sku = trim((string) ($product->variants->first()?->sku ?? ''));
+                        if ($sku === '') {
+                            $sku = $product->handle;
+                        }
+
+                        $description = trim(strip_tags((string) ($product->body_html ?? '')));
+
+                        return [
+                            'sku' => $sku,
+                            'style_type' => $product->type,
+                            'product_colors' => $product->color_string,
+                            'jewelry_material_display' => (string) ($row?->get(HeaderStore::JEWELRY_MATERIAL, '') ?? ''),
+                            'materials' => $styleProfile?->materials,
+                            'components' => $styleProfile?->components,
+                            'colour_prompt' => $styleProfile?->colour_prompt,
+                            'product_description' => $description,
+                            'draft_seo_title' => $styleProfile?->draft_seo_title,
+                            'draft_seo_description' => $styleProfile?->draft_seo_description,
+                        ];
+                    })
+                    ->action(function (NewProductDraft $record, array $data): void {
+                        $product = Product::where('handle', $record->handle)->with(['variants', 'images'])->first();
+                        if (!$product) {
+                            Notification::make()
+                                ->title('Product not found')
+                                ->body('Sync products before editing styles.')
+                                ->danger()
+                                ->send();
+                            return;
+                        }
+
+                        $styleProfile = StyleProfile::firstOrCreate(
+                            ['product_id' => $product->id],
+                            [
+                                'handle' => $product->handle,
+                                'sku' => trim((string) ($product->variants->first()?->sku ?? $product->handle)),
+                            ]
+                        );
+
+                        $styleProfile->update([
+                            'materials' => $data['materials'] ?? null,
+                            'components' => $data['components'] ?? null,
+                            'colour_prompt' => $data['colour_prompt'] ?? null,
+                            'draft_seo_title' => $data['draft_seo_title'] ?? null,
+                            'draft_seo_description' => $data['draft_seo_description'] ?? null,
+                        ]);
+
+                        Notification::make()
+                            ->title('Style saved')
+                            ->success()
+                            ->send();
+                    }),
+                Tables\Actions\EditAction::make()->color('warning'),
+                Tables\Actions\DeleteAction::make()->color('danger'),
             ])
             ->headerActions([
                 Tables\Actions\CreateAction::make()

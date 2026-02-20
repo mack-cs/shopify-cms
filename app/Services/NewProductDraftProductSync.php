@@ -5,6 +5,9 @@ namespace App\Services;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyRow;
+use App\Models\Variant;
+use App\Services\HeaderStore;
 use Illuminate\Support\Collection;
 
 final class NewProductDraftProductSync
@@ -49,6 +52,9 @@ final class NewProductDraftProductSync
 
             if ($product) {
                 $product->fill($data)->save();
+                $this->syncVariantFromDraft($product, $draft);
+                $this->syncCostPerItemRow($product, $draft);
+                $this->syncShopifyRowFieldsFromDraft($product, $draft);
                 $updated++;
                 continue;
             }
@@ -90,10 +96,108 @@ final class NewProductDraftProductSync
             'google_product_category' => $draft->google_product_category,
             'status' => $draft->status,
             'published' => $draft->published,
-            'seo_title' => $draft->seo_title,
-            'seo_description' => $draft->seo_description,
             'color_string' => $draft->color_string,
             'batch' => $draft->batch,
         ], static fn ($value) => $value !== null);
+    }
+
+    private function syncVariantFromDraft(Product $product, NewProductDraft $draft): void
+    {
+        $variant = Variant::where('product_id', $product->id)->orderBy('id')->first();
+        if (!$variant) {
+            return;
+        }
+
+        $updates = [];
+        if ($draft->sku) {
+            $updates['sku'] = $draft->sku;
+        }
+        if ($draft->variant_price !== null) {
+            $updates['price'] = $draft->variant_price;
+        }
+        if ($draft->variant_compare_at_price !== null) {
+            $updates['compare_at_price'] = $draft->variant_compare_at_price;
+        }
+        if ($draft->variant_inventory_qty !== null) {
+            $updates['inventory_qty'] = $draft->variant_inventory_qty;
+        }
+
+        if (!empty($updates)) {
+            $variant->update($updates);
+        }
+    }
+
+    private function syncCostPerItemRow(Product $product, NewProductDraft $draft): void
+    {
+        if ($draft->variant_price === null && $draft->variant_inventory_qty === null) {
+            return;
+        }
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if (!$row) {
+            return;
+        }
+
+        if ($draft->variant_price !== null) {
+            $row->set(HeaderStore::COST_PER_ITEM, (string) $draft->variant_price);
+        }
+        if ($draft->variant_inventory_qty !== null) {
+            $row->set(HeaderStore::VARIANT_INVENTORY_QTY, (string) $draft->variant_inventory_qty);
+        }
+        $row->save();
+    }
+
+    private function syncShopifyRowFieldsFromDraft(Product $product, NewProductDraft $draft): void
+    {
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if (!$row) {
+            return;
+        }
+
+        $updates = [];
+
+        $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost);
+        $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material);
+        $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials);
+        $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions);
+        $this->addRowUpdate($updates, HeaderStore::BRACELET_DESIGN, $draft->product_design);
+        $this->addRowUpdate($updates, HeaderStore::PRODUCT_METALS, $draft->metal);
+        $this->addRowUpdate($updates, HeaderStore::PATTERN_CATEGORY, $draft->colour_style);
+        $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size);
+        $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings);
+        $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name);
+        $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products);
+
+        if (empty($updates)) {
+            return;
+        }
+
+        foreach ($updates as $header => $value) {
+            $row->set($header, $value);
+        }
+
+        $row->save();
+    }
+
+    private function addRowUpdate(array &$updates, string $header, mixed $value): void
+    {
+        if ($value === null) {
+            return;
+        }
+
+        $stringValue = is_scalar($value) ? (string) $value : null;
+        if ($stringValue === null) {
+            return;
+        }
+
+        $updates[$header] = $stringValue;
     }
 }

@@ -4,9 +4,12 @@ namespace App\Observers;
 
 use App\Models\ChangeLog;
 use App\Models\Product;
+use App\Models\ShopifyRow;
 use App\Services\Normalizer;
 use App\Services\TagNormalizer;
 use App\Models\Tag;
+use App\Models\NewProductDraft;
+use App\Services\HeaderStore;
 use Illuminate\Support\Facades\Auth;
 
 class ProductObserver
@@ -91,6 +94,79 @@ class ProductObserver
 
         app(Normalizer::class)->recalculateErrorsForProduct($product);
         $this->syncTagsForProduct($product);
+
+        $this->syncDraftForProduct($product);
+    }
+
+    private function syncDraftForProduct(Product $product): void
+    {
+        if (!$product->handle) {
+            return;
+        }
+
+        $variant = $product->variants()->orderBy('id')->first();
+        $sku = trim((string) ($variant?->sku ?? ''));
+        $imageUrl = $product->images()->orderBy('position')->value('src');
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+        $costPerItem = $row?->get(HeaderStore::COST_PER_ITEM, null);
+
+        $payload = [
+            'handle' => $product->handle,
+            'title' => $product->title,
+            'body_html' => $product->body_html,
+            'vendor' => $product->vendor,
+            'tags' => $product->tags,
+            'type' => $product->type,
+            'published' => $product->published,
+            'product_category' => $product->product_category,
+            'google_product_category' => $product->google_product_category,
+            'status' => $product->status,
+            'color_string' => $product->color_string,
+            'batch' => $product->batch,
+        ];
+
+        if ($sku !== '') {
+            $payload['sku'] = $sku;
+        }
+        if ($imageUrl) {
+            $payload['image_url'] = $imageUrl;
+        }
+        if ($costPerItem !== null && $costPerItem !== '') {
+            $payload['variant_price'] = $costPerItem;
+        } elseif ($variant?->price !== null) {
+            $payload['variant_price'] = $variant->price;
+        }
+        if ($variant?->compare_at_price !== null) {
+            $payload['variant_compare_at_price'] = $variant->compare_at_price;
+        }
+        if ($variant?->inventory_qty !== null) {
+            $payload['variant_inventory_qty'] = $variant->inventory_qty;
+        }
+
+        if ($row) {
+            $payload['material_cost'] = $row->get(HeaderStore::MATERIAL_COST, null);
+            $payload['jewelry_material'] = $row->get(HeaderStore::JEWELRY_MATERIAL, null);
+            $payload['product_materials'] = $row->get(HeaderStore::PRODUCT_MATERIALS, null);
+            $payload['materials_and_dimensions'] = $row->get(HeaderStore::MATERIALS_AND_DIMENSIONS, null);
+            $payload['product_design'] = $row->get(HeaderStore::BRACELET_DESIGN, null);
+            $payload['metal'] = $row->get(HeaderStore::PRODUCT_METALS, null);
+            $payload['colour_style'] = $row->get(HeaderStore::PATTERN_CATEGORY, null);
+            $payload['size'] = $row->get(HeaderStore::SIZE, null);
+            $payload['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
+            $payload['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
+            $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
+        }
+
+        NewProductDraft::withoutEvents(function () use ($product, $payload): void {
+            NewProductDraft::updateOrCreate(
+                ['handle' => $product->handle],
+                $payload
+            );
+        });
     }
 
     private function syncTagsForProduct(Product $product): void

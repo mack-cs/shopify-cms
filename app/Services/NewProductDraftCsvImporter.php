@@ -44,8 +44,6 @@ final class NewProductDraftCsvImporter
             'google product category' => 'google_product_category',
             'status' => 'status',
             'published' => 'published',
-            'seo title' => 'seo_title',
-            'seo description' => 'seo_description',
             'colors' => 'color_string',
             'color' => 'color_string',
             'price' => 'variant_price',
@@ -57,6 +55,26 @@ final class NewProductDraftCsvImporter
             'variant inventory qty' => 'variant_inventory_qty',
             'variant inventory policy' => 'variant_inventory_policy',
             'variant fulfillment service' => 'variant_fulfillment_service',
+            'material cost' => 'material_cost',
+            'material cost use 19 00 not 19 00' => 'material_cost',
+            'jewelry material' => 'jewelry_material',
+            'product materials' => 'product_materials',
+            'propduct materials' => 'product_materials',
+            'propduct materials new metafield' => 'product_materials',
+            'product materials new metafield' => 'product_materials',
+            'materials and dimensions' => 'materials_and_dimensions',
+            'product design' => 'product_design',
+            'product design beaded' => 'product_design',
+            'metal' => 'metal',
+            'colour style' => 'colour_style',
+            'colour style solid multicolor' => 'colour_style',
+            'size' => 'size',
+            'siblings' => 'siblings',
+            'siblings add product siblings here' => 'siblings',
+            'siblings collection name' => 'siblings_collection_name',
+            'uvp short paragraph' => 'uvp_short_paragraph',
+            'complementary products' => 'complementary_products',
+            'complementary products finish the set and get one free' => 'complementary_products',
         ];
 
         $total = 0;
@@ -90,6 +108,9 @@ final class NewProductDraftCsvImporter
 
                     $field = $map[$normalized] ?? null;
                     if ($field) {
+                        if ($field === 'material_cost') {
+                            $value = $this->normalizeNumeric($value);
+                        }
                         $data[$field] = $value;
                     } else {
                         $payload[$header] = $value;
@@ -168,5 +189,19 @@ final class NewProductDraftCsvImporter
         $lower = preg_replace('/[^\\x20-\\x7E]/', '', $lower);
         $lower = preg_replace('/[^a-z0-9]+/', ' ', $lower);
         return trim($lower);
+    }
+
+    private function normalizeNumeric(string $value): string
+    {
+        $normalized = str_replace([' ', ','], ['', '.'], $value);
+        $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+        if ($normalized === null) {
+            return $value;
+        }
+        $parts = explode('.', $normalized);
+        if (count($parts) > 2) {
+            $normalized = array_shift($parts) . '.' . implode('', $parts);
+        }
+        return $normalized;
     }
 }

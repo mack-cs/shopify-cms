@@ -27,6 +27,7 @@ final class HeaderStore
     public const VARIANT_BARCODE = 'Variant Barcode';
     public const VARIANT_GRAMS = 'Variant Grams';
     public const VARIANT_WEIGHT_UNIT = 'Variant Weight Unit';
+    public const VARIANT_INVENTORY_QTY = 'Variant Inventory Qty';
 
     public const OPTION1_NAME = 'Option1 Name';
     public const OPTION1_VALUE = 'Option1 Value';
@@ -44,6 +45,15 @@ final class HeaderStore
     public const SEO_DESCRIPTION = 'SEO Description'; // if present in file
     public const SEO_DEINDEX = 'SEO: Deindex_Products (product.metafields.seo.hide_from_google)';
     public const COST_PER_ITEM = 'Cost per item';
+    public const MATERIAL_COST = 'Material Cost';
+    public const PRODUCT_MATERIALS = 'Product Materials (product.metafields.custom.product_materials)';
+    public const PRODUCT_METALS = 'Product Metals (product.metafields.custom.product_metals)';
+    public const PATTERN_CATEGORY = 'Pattern Category (product.metafields.custom.pattern_category)';
+    public const SIZE = 'Size';
+    public const SIBLINGS = 'Siblings';
+    public const SIBLINGS_COLLECTION_NAME = 'Siblings Collection Name';
+    public const UVP_SHORT_PARAGRAPH = 'UVP Short Paragraph';
+    public const COMPLEMENTARY_PRODUCTS = 'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
     public const MATERIALS_AND_DIMENSIONS = 'Materials and Dimensions (product.metafields.custom.materials_and_dimensions)';
     public const JEWELRY_TYPE = 'Jewelry type (product.metafields.shopify.jewelry-type)';

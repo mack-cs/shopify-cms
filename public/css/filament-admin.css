@@ -1,0 +1,9 @@
+/* Filament admin panel overrides */
+:root {
+  --fi-content-x-padding: 0rem;
+}
+
+/* Main content container padding (left/right) */
+.fi-main-ctn {
+  padding-inline: var(--fi-content-x-padding) !important;
+}
