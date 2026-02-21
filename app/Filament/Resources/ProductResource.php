@@ -1093,6 +1093,21 @@ class ProductResource extends Resource
                             ->send();
                     })
                     ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkSyncShopify')
+                    ->label('Sync Approved to Shopify')
+                    ->icon('heroicon-o-cloud-arrow-up')
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records): void {
+                        $ids = $records->pluck('id')->all();
+                        \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id());
+
+                        Notification::make()
+                            ->title('Shopify sync queued')
+                            ->body('Only approved products will be synced.')
+                            ->success()
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 ExportBulkAction::make()
                     ->exporter(ProductExporter::class)
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
@@ -1713,6 +1728,12 @@ class ProductResource extends Resource
         $costPerItem = $data['cost_per_item'] ?? '';
         $materialsAndDimensions = $data['materials_and_dimensions'] ?? '';
         $jewelryMaterial = $data['jewelry_material'] ?? '';
+        if (is_array($jewelryMaterial)) {
+            $jewelryMaterial = implode('; ', array_values(array_unique(array_filter(array_map(
+                fn ($v) => trim((string) $v),
+                $jewelryMaterial
+            )))));
+        }
         $jewelryType = $data['jewelry_type'] ?? '';
         $braceletDesign = $data['bracelet_design'] ?? '';
         $necklaceDesign = $data['necklace_design'] ?? '';
@@ -1750,6 +1771,30 @@ class ProductResource extends Resource
             ->where('handle', $product->handle)
             ->where('row_type', 'product_primary')
             ->first();
+
+        if (!$row) {
+            $rowIndex = (int) (ShopifyRow::where('import_id', $product->import_id)->max('row_index') ?? 0);
+            $row = ShopifyRow::create([
+                'import_id' => $product->import_id,
+                'row_index' => $rowIndex + 1,
+                'handle' => $product->handle,
+                'row_type' => 'product_primary',
+                'variant_key' => null,
+                'image_key' => null,
+                'data' => [
+                    HeaderStore::HANDLE => $product->handle,
+                    HeaderStore::TITLE => $product->title,
+                    HeaderStore::BODY_HTML => $product->body_html,
+                    HeaderStore::VENDOR => $product->vendor,
+                    HeaderStore::TAGS => $product->tags,
+                    HeaderStore::TYPE => $product->type,
+                    HeaderStore::STATUS => $product->status,
+                    HeaderStore::PUBLISHED => $product->published,
+                    HeaderStore::PRODUCT_CATEGORY => $product->product_category,
+                    HeaderStore::GOOGLE_PRODUCT_CATEGORY => $product->google_product_category,
+                ],
+            ]);
+        }
 
         if ($row) {
             $rowUpdates = [];

@@ -118,7 +118,10 @@ class StyleProfileRelationManager extends RelationManager
             Tables\Columns\TextColumn::make('applied_at')->dateTime()->label('Applied')->toggleable(),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
-                ->disabled(fn (): bool => (bool) $this->getOwnerRecord()?->styleProfiles()->exists()),
+                ->disabled(fn (): bool => (bool) $this->getOwnerRecord()?->styleProfiles()->exists())
+                ->after(function (): void {
+                    $this->dispatch('products-table-refresh');
+                }),
         ])->actions([
             Tables\Actions\EditAction::make()
                 ->modalHeading(function ($record): string|HtmlString {
@@ -128,6 +131,9 @@ class StyleProfileRelationManager extends RelationManager
                     }
 
                     return new HtmlString('Edit style for <em>' . e($title) . '</em>');
+                })
+                ->after(function (): void {
+                    $this->dispatch('products-table-refresh');
                 }),
             Tables\Actions\DeleteAction::make(),
         ]);

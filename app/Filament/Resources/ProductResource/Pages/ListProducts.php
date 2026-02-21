@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 class ListProducts extends ListRecords
 {
     protected static string $resource = ProductResource::class;
+    protected $listeners = ['products-table-refresh' => '$refresh'];
 
     protected function getHeaderActions(): array
     {

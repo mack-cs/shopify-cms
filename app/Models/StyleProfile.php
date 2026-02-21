@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use App\Services\HeaderStore;
+use App\Models\ShopifyRow;
 
 class StyleProfile extends Model
 {
@@ -78,6 +80,17 @@ class StyleProfile extends Model
 
             if ($payload) {
                 $product->update($payload);
+            }
+
+            $row = ShopifyRow::where('import_id', $product->import_id)
+                ->where('handle', $product->handle)
+                ->where('row_type', 'product_primary')
+                ->first();
+
+            if ($row) {
+                $row->set(HeaderStore::SEO_TITLE, $seoTitle ?? '');
+                $row->set(HeaderStore::SEO_DESCRIPTION, $seoDescription ?? '');
+                $row->save();
             }
         });
     }

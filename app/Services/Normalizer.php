@@ -332,14 +332,38 @@ final class Normalizer
         }
     }
 
-    private function normalizeValue(?string $value): ?string
+    private function normalizeValue(mixed $value): ?string
     {
         if ($value === null) {
             return null;
         }
 
-        $trimmed = trim($value);
+        if (is_array($value)) {
+            $flat = array_values(array_unique(array_filter(array_map(
+                fn ($v) => trim((string) $v),
+                $value
+            ))));
+
+            if (empty($flat)) {
+                return null;
+            }
+
+            return implode('; ', $flat);
+        }
+
+        $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function rowValueInsensitive(array $data, string $attribute): mixed
+    {
+        $needle = strtolower(trim($attribute));
+        foreach ($data as $key => $value) {
+            if (strtolower(trim((string) $key)) === $needle) {
+                return $value;
+            }
+        }
+        return null;
     }
 
     private function normalizeColorString(?string $value): ?string
@@ -484,6 +508,9 @@ final class Normalizer
             $attribute = $field['attribute'];
             $label = $field['label'] ?? $attribute;
             $rowValue = $primary?->get($attribute, null);
+            if ($rowValue === null && $primary) {
+                $rowValue = $this->rowValueInsensitive($primary->data ?? [], $attribute);
+            }
             if ($this->normalizeValue($rowValue) === null) {
                 $errors[] = "missing:{$label}";
             }
@@ -763,6 +790,9 @@ final class Normalizer
         ];
 
         foreach ($required as $field) {
+            if ($field->source === 'row' && $field->attribute === HeaderStore::SEO_DEINDEX) {
+                continue;
+            }
             if ($field->source === 'product') {
                 $definitions['product'][] = [
                     'attribute' => $field->attribute,

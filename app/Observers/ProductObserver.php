@@ -28,6 +28,8 @@ class ProductObserver
             'batch',
             'is_bundle',
             'you_save',
+            'seo_title',
+            'seo_description',
         ];
 
         // 2) If any meaningful field changed, bump approval_version

@@ -17,15 +17,8 @@ class EditProduct extends EditRecord
         $data = $this->form->getState();
         $extra = $data['extra_shopify_fields'] ?? [];
 
-        if (empty($extra)) {
-            return;
-        }
-
         $headers = $this->record->import?->headers ?? [];
         $allowed = array_flip(HeaderStore::extraProductHeaders($headers));
-        if (empty($allowed)) {
-            return;
-        }
 
         $row = ShopifyRow::where('import_id', $this->record->import_id)
             ->where('handle', $this->record->handle)
@@ -33,7 +26,27 @@ class EditProduct extends EditRecord
             ->first();
 
         if (!$row) {
-            return;
+            $rowIndex = (int) (ShopifyRow::where('import_id', $this->record->import_id)->max('row_index') ?? 0);
+            $row = ShopifyRow::create([
+                'import_id' => $this->record->import_id,
+                'row_index' => $rowIndex + 1,
+                'handle' => $this->record->handle,
+                'row_type' => 'product_primary',
+                'variant_key' => null,
+                'image_key' => null,
+                'data' => [
+                    HeaderStore::HANDLE => $this->record->handle,
+                    HeaderStore::TITLE => $this->record->title,
+                    HeaderStore::BODY_HTML => $this->record->body_html,
+                    HeaderStore::VENDOR => $this->record->vendor,
+                    HeaderStore::TAGS => $this->record->tags,
+                    HeaderStore::TYPE => $this->record->type,
+                    HeaderStore::STATUS => $this->record->status,
+                    HeaderStore::PUBLISHED => $this->record->published,
+                    HeaderStore::PRODUCT_CATEGORY => $this->record->product_category,
+                    HeaderStore::GOOGLE_PRODUCT_CATEGORY => $this->record->google_product_category,
+                ],
+            ]);
         }
 
         $data = $row->data ?? [];
@@ -54,7 +67,14 @@ class EditProduct extends EditRecord
             $data[HeaderStore::MATERIALS_AND_DIMENSIONS] = $formState['materials_and_dimensions'] ?? '';
         }
         if (array_key_exists('jewelry_material', $formState)) {
-            $data[HeaderStore::JEWELRY_MATERIAL] = $formState['jewelry_material'] ?? '';
+            $raw = $formState['jewelry_material'] ?? '';
+            if (is_array($raw)) {
+                $raw = implode('; ', array_values(array_unique(array_filter(array_map(
+                    fn ($v) => trim((string) $v),
+                    $raw
+                )))));
+            }
+            $data[HeaderStore::JEWELRY_MATERIAL] = $raw;
         }
         if (array_key_exists('jewelry_type', $formState)) {
             $data[HeaderStore::JEWELRY_TYPE] = $formState['jewelry_type'] ?? '';
@@ -67,7 +87,7 @@ class EditProduct extends EditRecord
         }
         foreach ($extra as $item) {
             $key = $item['key'] ?? null;
-            if (!$key || !isset($allowed[$key])) {
+            if (!$key || (!empty($allowed) && !isset($allowed[$key]))) {
                 continue;
             }
             $data[$key] = $item['value'] ?? '';
@@ -82,6 +102,8 @@ class EditProduct extends EditRecord
                 'weight_unit' => $normalized === '' ? null : $normalized,
             ]);
         }
+
+        app(\App\Services\Normalizer::class)->recalculateErrorsForProduct($this->record);
     }
 
     protected function getHeaderActions(): array
