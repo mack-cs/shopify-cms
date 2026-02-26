@@ -9,6 +9,7 @@ class Category extends Model
     protected $fillable = [
         'name',
         'google_product_category',
+        'shopify_taxonomy_gid',
         'active',
     ];
 

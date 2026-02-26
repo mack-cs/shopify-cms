@@ -1,0 +1,21 @@
+
+   ErrorException 
+
+  Writing to C:/Users/shona/AppData/Roaming/PsySH/psysh_history is not allowed.
+
+  at vendor\psy\psysh\src\ConfigPaths.php:419
+    415▕             if (\is_writable($file)) {
+    416▕                 return $file;
+    417▕             }
+    418▕ 
+  ➜ 419▕             \trigger_error(\sprintf('Writing to %s is not allowed.', $file), \E_USER_NOTICE);
+    420▕ 
+    421▕             return false;
+    422▕         }
+    423▕
+
+  1   vendor\psy\psysh\src\ConfigPaths.php:419
+
+  2   vendor\psy\psysh\src\Configuration.php:683
+      Psy\ConfigPaths::touchFileWithMkdir("C:/Users/shona/AppData/Roaming/PsySH/psysh_history")
+

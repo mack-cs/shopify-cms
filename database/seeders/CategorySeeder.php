@@ -15,7 +15,7 @@ class CategorySeeder extends Seeder
         DB::table('categories')->upsert(
             $rows,
             ['name'], // unique key
-            ['google_product_category', 'active']
+            ['google_product_category', 'shopify_taxonomy_gid', 'active']
         );
     }
 }

@@ -14,8 +14,6 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\SoftDeletingScope;
 
 class CategoryResource extends Resource
 {
@@ -35,6 +33,9 @@ class CategoryResource extends Resource
                 TextInput::make('google_product_category')
                     ->label('Google Product Category')
                     ->maxLength(255),
+                TextInput::make('shopify_taxonomy_gid')
+                    ->label('Shopify Taxonomy GID')
+                    ->maxLength(255),
                 Toggle::make('active')
                     ->default(true),
             ]);
@@ -51,6 +52,11 @@ class CategoryResource extends Resource
                     ->label('Google Product Category')
                     ->searchable()
                     ->sortable(),
+                TextColumn::make('shopify_taxonomy_gid')
+                    ->label('Shopify Taxonomy GID')
+                    ->searchable()
+                    ->sortable()
+                    ->copyable(),
                 IconColumn::make('active')
                     ->boolean()
                     ->trueColor('success')

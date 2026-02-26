@@ -203,18 +203,26 @@ class NewProductDraftResource extends Resource
 
                                     $mapping = CategoryTypeMap::byType($state);
                                     if ($mapping) {
-                                        $set('product_category', $mapping['category']);
+                                        $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
                                         $set('google_product_category', $mapping['google_product_category']);
                                     }
                                 }),
                             Select::make('product_category')
                                 ->label('Category')
-                                ->options(function (): array {
-                                    $categories = CategoryTypeMap::categories();
-                                    return array_combine($categories, $categories);
-                                })
+                                ->options(fn (): array => CategoryTypeMap::categoryOptions())
                                 ->searchable()
                                 ->reactive()
+                                ->getOptionLabelUsing(fn ($value): ?string => CategoryTypeMap::categoryLabelForValue(
+                                    is_string($value) ? $value : null
+                                ))
+                                ->dehydrateStateUsing(function ($state): ?string {
+                                    if (!is_string($state) || trim($state) === '') {
+                                        return null;
+                                    }
+
+                                    $mapping = CategoryTypeMap::byCategoryValue($state);
+                                    return $mapping['shopify_taxonomy_gid'] ?? $state;
+                                })
                                 ->afterStateUpdated(function ($state, callable $set): void {
                                     if (!$state) {
                                         $set('type', null);
@@ -222,7 +230,7 @@ class NewProductDraftResource extends Resource
                                         return;
                                     }
 
-                                    $mapping = CategoryTypeMap::byCategory($state);
+                                    $mapping = CategoryTypeMap::byCategoryValue(is_string($state) ? $state : null);
                                     if ($mapping) {
                                         $set('type', $mapping['type']);
                                         $set('google_product_category', $mapping['google_product_category']);
@@ -767,6 +775,9 @@ class NewProductDraftResource extends Resource
                     ->toggleable(),
                 TextColumn::make('product_category')
                     ->label('Product Category')
+                    ->formatStateUsing(fn ($state): string => (string) (
+                        CategoryTypeMap::categoryLabelForValue(is_string($state) ? $state : null) ?? $state ?? ''
+                    ))
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('google_product_category')
                     ->label('Google Product Category')

@@ -152,7 +152,7 @@ class ProductResource extends Resource
 
                                         $mapping = CategoryTypeMap::byType($state);
                                         if ($mapping) {
-                                            $set('product_category', $mapping['category']);
+                                            $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
                                             $set('google_product_category', $mapping['google_product_category']);
                                         }
                                     }),
@@ -163,12 +163,20 @@ class ProductResource extends Resource
                             Grid::make(2)->schema([
                                 Select::make('product_category')
                                     ->label('Category')
-                                    ->options(function (): array {
-                                        $categories = CategoryTypeMap::categories();
-                                        return array_combine($categories, $categories);
-                                    })
+                                    ->options(fn (): array => CategoryTypeMap::categoryOptions())
                                     ->searchable()
                                     ->reactive()
+                                    ->getOptionLabelUsing(fn ($value): ?string => CategoryTypeMap::categoryLabelForValue(
+                                        is_string($value) ? $value : null
+                                    ))
+                                    ->dehydrateStateUsing(function ($state): ?string {
+                                        if (!is_string($state) || trim($state) === '') {
+                                            return null;
+                                        }
+
+                                        $mapping = CategoryTypeMap::byCategoryValue($state);
+                                        return $mapping['shopify_taxonomy_gid'] ?? $state;
+                                    })
                                     ->afterStateUpdated(function ($state, callable $set): void {
                                         if (!$state) {
                                             $set('type', null);
@@ -176,7 +184,7 @@ class ProductResource extends Resource
                                             return;
                                         }
 
-                                        $mapping = CategoryTypeMap::byCategory($state);
+                                        $mapping = CategoryTypeMap::byCategoryValue(is_string($state) ? $state : null);
                                         if ($mapping) {
                                             $set('type', $mapping['type']);
                                             $set('google_product_category', $mapping['google_product_category']);
@@ -1415,9 +1423,19 @@ class ProductResource extends Resource
         }
 
         if ($field['source'] === 'product' && $field['attribute'] === 'product_category') {
-            $categories = CategoryTypeMap::categories();
             return Select::make($name)
-                ->options(array_combine($categories, $categories))
+                ->options(CategoryTypeMap::categoryOptions())
+                ->getOptionLabelUsing(fn ($value): ?string => CategoryTypeMap::categoryLabelForValue(
+                    is_string($value) ? $value : null
+                ))
+                ->dehydrateStateUsing(function ($state): ?string {
+                    if (!is_string($state) || trim($state) === '') {
+                        return null;
+                    }
+
+                    $mapping = CategoryTypeMap::byCategoryValue($state);
+                    return $mapping['shopify_taxonomy_gid'] ?? $state;
+                })
                 ->searchable();
         }
 

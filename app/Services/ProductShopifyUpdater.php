@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Category;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
@@ -24,8 +25,11 @@ final class ProductShopifyUpdater
 
     /** @var array<string, string|null> */
     private array $categoryIdByTypeCache = [];
+    /** @var array<string, string|null> */
+    private array $categoryIdByNameCache = [];
+    /** @var array<string, string|null> */
+    private array $categoryNameByGidCache = [];
 
-    private ?string $shopCurrencyCodeCache = null;
     private ?bool $categoryGraphqlSupported = null;
 
     public function __construct(
@@ -286,7 +290,7 @@ private function updateProduct(Product $product): array
     }
 
     // ✅ Resolve category to a Shopify taxonomy GID if possible
-    $resolvedCategoryGid = $this->resolveProductCategoryGid($product, $productCategory, $productType);
+    $resolvedCategoryGid = $this->resolveProductCategoryGid($productCategory, $productType);
 
     // ✅ IMPORTANT FIX:
     // If we resolved a taxonomy GID, inject it into row data BEFORE metafields.
@@ -507,18 +511,7 @@ private function updateProduct(Product $product): array
 
         $existingRawValues = $existingRawValues->merge($shopifyRawValues);
 
-        $rowCategoryValue = trim((string) ($rowData[HeaderStore::PRODUCT_CATEGORY] ?? ''));
-        $rowCategoryIsGid = str_starts_with($rowCategoryValue, 'gid://');
-
-        $currentCategoryLooksUncategorized = $currentCategoryName !== null
-            && str_contains(strtolower(trim($currentCategoryName)), 'uncategorized');
-
-        $hasCategoryContext = $rowCategoryIsGid
-            || (
-                $currentCategoryId !== null
-                && $currentCategoryId !== ''
-                && !$currentCategoryLooksUncategorized
-            );
+        $hasShopifyCategoryContext = $this->hasCategoryContext($currentCategoryId, $currentCategoryName);
 
         $inputs = [];
         $indexMap = [];
@@ -544,12 +537,32 @@ private function updateProduct(Product $product): array
                 continue;
             }
 
-            if ($this->isSubtypeConstrainedShopifyMetafield($identifier['namespace'], $identifier['key']) && !$hasCategoryContext) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Skipped metafield {$lookup}: missing Shopify taxonomy category (Product Category must be a Shopify GID or already set on product).",
-                ];
-                continue;
+            if ($this->isSubtypeConstrainedShopifyMetafield($identifier['namespace'], $identifier['key'])) {
+                // For constrained Shopify taxonomy metafields, trust the actual current Shopify category.
+                if (!$hasShopifyCategoryContext) {
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => "Skipped metafield {$lookup}: missing Shopify taxonomy category on the product.",
+                    ];
+                    continue;
+                }
+
+                if (!$this->categorySupportsSubtypeConstrainedMetafield($identifier['namespace'], $identifier['key'], $currentCategoryId, $currentCategoryName)) {
+                    // Gift Cards products should sync without noise even if jewelry-only CSV fields are present.
+                    if (
+                        $this->isGiftCardsCategoryContext($currentCategoryId, $currentCategoryName)
+                        && $this->isJewelryOnlyShopifyMetafield($identifier['namespace'], $identifier['key'])
+                    ) {
+                        continue;
+                    }
+
+                    $categoryLabel = $this->categoryContextLabel($currentCategoryId, $currentCategoryName);
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => "Skipped metafield {$lookup}: product category '{$categoryLabel}' is not compatible with this Shopify taxonomy metafield.",
+                    ];
+                    continue;
+                }
             }
 
             $stringValue = $this->normalizeMetafieldInputFromAccepted((string) $header, $stringValue, $type);
@@ -671,9 +684,6 @@ private function updateProduct(Product $product): array
         $locationId = null;
         $variantInputs = [];
 
-        // ✅ KEY FIX #2: Always use store currency for unitCost updates (unitCost.currencyCode is often null)
-        $shopCurrency = $this->shopCurrencyCode();
-
         foreach ($rowDataList as $rowData) {
             if (!is_array($rowData)) {
                 continue;
@@ -730,33 +740,21 @@ private function updateProduct(Product $product): array
                 }
             }
 
-            // Cost per item (unitCost) — always use shop currency
+            // Cost per item: InventoryItemInput.cost uses shop default currency.
             $costPerItem = $this->normalizeNumeric($rowData[HeaderStore::COST_PER_ITEM] ?? null);
             if ($inventoryItemId && $costPerItem !== null) {
-                if ($shopCurrency === null) {
+                $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
+                    'inventoryItemId' => $inventoryItemId,
+                    'cost' => (string) $costPerItem,
+                ]);
+
+                $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
+                if (is_array($errors) && !empty($errors)) {
+                    $messages = $this->formatUserErrors($errors);
                     $warnings[] = [
                         'product_id' => $product->id,
-                        'warning' => 'Missing shop currency code for cost per item.',
+                        'warning' => $messages !== '' ? $messages : 'Shopify cost per item update failed.',
                     ];
-                } else {
-                    $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
-                        'input' => [
-                            'id' => $inventoryItemId,
-                            'unitCost' => [
-                                'amount' => (string) $costPerItem,
-                                'currencyCode' => $shopCurrency,
-                            ],
-                        ],
-                    ]);
-
-                    $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
-                    if (is_array($errors) && !empty($errors)) {
-                        $messages = $this->formatUserErrors($errors);
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => $messages !== '' ? $messages : 'Shopify cost per item update failed.',
-                        ];
-                    }
                 }
             }
 
@@ -922,10 +920,24 @@ GQL;
     private function inventoryItemUpdateMutation(): string
     {
         return <<<'GQL'
-mutation InventoryItemUpdate($input: InventoryItemInput!) {
-  inventoryItemUpdate(input: $input) {
-    inventoryItem { id }
-    userErrors { field message }
+mutation InventoryItemUpdate($inventoryItemId: ID!, $cost: Decimal!) {
+  inventoryItemUpdate(
+    id: $inventoryItemId,
+    input: {
+      cost: $cost
+    }
+  ) {
+    inventoryItem {
+      id
+      unitCost {
+        amount
+        currencyCode
+      }
+    }
+    userErrors {
+      field
+      message
+    }
   }
 }
 GQL;
@@ -949,17 +961,6 @@ GQL;
 query Locations {
   locations(first: 1) {
     nodes { id }
-  }
-}
-GQL;
-    }
-
-    private function shopCurrencyQuery(): string
-    {
-        return <<<'GQL'
-query ShopCurrency {
-  shop {
-    currencyCode
   }
 }
 GQL;
@@ -1034,106 +1035,89 @@ GQL;
         };
     }
 
-    private function shopCurrencyCode(): ?string
-{
-    if ($this->shopCurrencyCodeCache !== null) {
-        return $this->shopCurrencyCodeCache;
-    }
-
-    $currency = '';
-
-    // ✅ FIX: don't early-return on GraphQL failure; fall back to REST
-    try {
-        $data = $this->client->graphql($this->shopCurrencyQuery(), []);
-        $currency = trim((string) data_get($data, 'shop.currencyCode', ''));
-    } catch (\Throwable) {
-        $currency = '';
-    }
-
-    if ($currency === '') {
-        try {
-            // Shopify REST "shop.json" typically returns shop.currency (e.g. "ZAR", "USD")
-            $rest = $this->client->rest('GET', 'shop.json');
-            $currency = trim((string) data_get($rest, 'shop.currency', ''));
-        } catch (\Throwable) {
-            $currency = '';
-        }
-    }
-
-    // ✅ FINAL FALLBACK: env/config (prevents "Missing shop currency code" warning)
-    if ($currency === '') {
-        $currency = trim((string) (config('services.shopify.currency')
-            ?? env('SHOPIFY_CURRENCY')
-            ?? env('SHOP_CURRENCY_CODE')
-            ?? ''));
-    }
-
-    if ($currency === '') {
-        return null;
-    }
-
-    $this->shopCurrencyCodeCache = $currency;
-    return $currency;
-}
-
-    // private function shopCurrencyCode(): ?string
-    // {
-    //     if ($this->shopCurrencyCodeCache !== null) {
-    //         return $this->shopCurrencyCodeCache;
-    //     }
-
-    //     try {
-    //         $data = $this->client->graphql($this->shopCurrencyQuery(), []);
-    //     } catch (\Throwable) {
-    //         return null;
-    //     }
-
-    //     $currency = trim((string) data_get($data, 'shop.currencyCode', ''));
-    //     if ($currency === '') {
-    //         try {
-    //             $rest = $this->client->rest('GET', 'shop.json');
-    //             $currency = trim((string) data_get($rest, 'shop.currency', ''));
-    //         } catch (\Throwable) {
-    //             $currency = '';
-    //         }
-    //     }
-
-    //     if ($currency === '') {
-    //         return null;
-    //     }
-
-    //     $this->shopCurrencyCodeCache = $currency;
-    //     return $currency;
-    // }
-
-    private function resolveProductCategoryGid(Product $product, ?string $productCategory, ?string $productType): ?string
+    private function resolveProductCategoryGid(?string $productCategory, ?string $productType): ?string
     {
-        $normalizedCategory = $productCategory !== null ? trim($productCategory) : '';
+        $normalizedCategory = CategoryTypeMap::normalizeCategory($productCategory) ?? '';
         if ($normalizedCategory !== '' && str_starts_with($normalizedCategory, 'gid://')) {
             return $normalizedCategory;
         }
 
         if ($normalizedCategory !== '' && !$this->looksUncategorizedCategory($normalizedCategory)) {
-            $taxonomyId = $this->findTaxonomyNodeIdByCategoryName($normalizedCategory);
-            if ($taxonomyId !== null) {
-                return $taxonomyId;
+            $seededCategoryGid = $this->seededCategoryGidByName($normalizedCategory);
+            if ($seededCategoryGid !== null) {
+                return $seededCategoryGid;
             }
 
-            $fromPeers = $this->findCategoryGidFromPeerProducts($product, $productType, $normalizedCategory);
-            if ($fromPeers !== null) {
-                return $fromPeers;
+            $mappedCategory = CategoryTypeMap::byCategory($normalizedCategory);
+            $mappedCategoryGid = $this->normalizeTaxonomyGid($mappedCategory['shopify_taxonomy_gid'] ?? null);
+            if ($mappedCategoryGid !== null) {
+                return $mappedCategoryGid;
             }
+
         }
 
-        $typeCategory = trim((string) $productType);
+        $typeCategory = CategoryTypeMap::normalizeType($productType) ?? '';
         if ($typeCategory !== '') {
-            $taxonomyId = $this->findTaxonomyNodeIdByCategoryName($typeCategory);
-            if ($taxonomyId !== null) {
-                return $taxonomyId;
+            if (array_key_exists($typeCategory, $this->categoryIdByTypeCache)) {
+                return $this->categoryIdByTypeCache[$typeCategory];
             }
+
+            $mappedType = CategoryTypeMap::byType($typeCategory);
+            $mappedTypeGid = $this->normalizeTaxonomyGid($mappedType['shopify_taxonomy_gid'] ?? null);
+            if ($mappedTypeGid !== null) {
+                $this->categoryIdByTypeCache[$typeCategory] = $mappedTypeGid;
+                return $mappedTypeGid;
+            }
+
+            $mappedTypeCategory = CategoryTypeMap::normalizeCategory($mappedType['category'] ?? null);
+            if ($mappedTypeCategory !== null) {
+                $seededByTypeCategory = $this->seededCategoryGidByName($mappedTypeCategory);
+                if ($seededByTypeCategory !== null) {
+                    $this->categoryIdByTypeCache[$typeCategory] = $seededByTypeCategory;
+                    return $seededByTypeCategory;
+                }
+            }
+
+            $this->categoryIdByTypeCache[$typeCategory] = null;
         }
 
         return null;
+    }
+
+    private function seededCategoryGidByName(string $categoryName): ?string
+    {
+        $normalized = CategoryTypeMap::normalizeCategory($categoryName);
+        if ($normalized === null || $normalized === '') {
+            return null;
+        }
+
+        $key = strtolower($normalized);
+        if (array_key_exists($key, $this->categoryIdByNameCache)) {
+            return $this->categoryIdByNameCache[$key];
+        }
+
+        $gid = Category::query()
+            ->whereRaw('LOWER(name) = ?', [$key])
+            ->value('shopify_taxonomy_gid');
+
+        $resolved = $this->normalizeTaxonomyGid($gid);
+        $this->categoryIdByNameCache[$key] = $resolved;
+
+        return $resolved;
+    }
+
+    private function normalizeTaxonomyGid(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $gid = trim($value);
+        if ($gid === '' || !str_starts_with($gid, 'gid://shopify/')) {
+            return null;
+        }
+
+        return $gid;
     }
 
     /**
@@ -1280,147 +1264,6 @@ GQL;
             || str_contains($normalized, 'provided invalid value for productcategory')
             || str_contains($normalized, 'provided invalid value for producttaxonomynodeid');
     }
-
-    private function findTaxonomyNodeIdByCategoryName(string $fullName): ?string
-    {
-        $normalizedTarget = strtolower(trim($fullName));
-        if ($normalizedTarget === '') {
-            return null;
-        }
-
-        $queries = [
-            $this->taxonomyCategoriesQueryA(),
-            $this->taxonomyCategoriesQueryB(),
-            $this->taxonomyCategoriesQueryC(),
-            $this->taxonomyCategoriesQueryD(),
-        ];
-
-        foreach ($queries as $query) {
-            try {
-                $data = $this->client->graphql($query, ['query' => $fullName]);
-            } catch (\Throwable $e) {
-                if (str_contains(strtolower($e->getMessage()), 'cannot query field')) {
-                    continue;
-                }
-                return null;
-            }
-
-            $nodes = data_get($data, 'taxonomy.categories.nodes', []);
-            if (!is_array($nodes) || empty($nodes)) {
-                $edges = data_get($data, 'taxonomy.categories.edges', []);
-                if (is_array($edges)) {
-                    $nodes = collect($edges)
-                        ->map(fn ($edge) => is_array($edge) ? ($edge['node'] ?? null) : null)
-                        ->filter()
-                        ->values()
-                        ->all();
-                }
-            }
-
-            if (!is_array($nodes) || empty($nodes)) {
-                $nodes = data_get($data, 'productTaxonomyNodes.nodes', []);
-            }
-
-            if (!is_array($nodes) || empty($nodes)) {
-                $edges = data_get($data, 'productTaxonomyNodes.edges', []);
-                if (is_array($edges)) {
-                    $nodes = collect($edges)
-                        ->map(fn ($edge) => is_array($edge) ? ($edge['node'] ?? null) : null)
-                        ->filter()
-                        ->values()
-                        ->all();
-                }
-            }
-
-            if (!is_array($nodes) || empty($nodes)) {
-                continue;
-            }
-
-            foreach ($nodes as $node) {
-                if (!is_array($node)) {
-                    continue;
-                }
-
-                $name = strtolower(trim((string) ($node['fullName'] ?? ($node['name'] ?? ''))));
-                $id = trim((string) ($node['id'] ?? ''));
-                if ($name === '' || $id === '') {
-                    continue;
-                }
-
-                // ✅ KEY FIX #3: Relax matching so real Shopify taxonomy names resolve
-                if ($name === $normalizedTarget || str_contains($name, $normalizedTarget) || str_contains($normalizedTarget, $name)) {
-                    return $id;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private function taxonomyCategoriesQueryA(): string
-    {
-        return <<<'GQL'
-query TaxonomyCategoriesA($query: String!) {
-  taxonomy {
-    categories(first: 25, query: $query) {
-      nodes {
-        id
-        fullName
-      }
-    }
-  }
-}
-GQL;
-    }
-
-    private function taxonomyCategoriesQueryB(): string
-    {
-        return <<<'GQL'
-query TaxonomyCategoriesB($query: String!) {
-  productTaxonomyNodes(first: 25, query: $query) {
-    nodes {
-      id
-      fullName
-    }
-  }
-}
-GQL;
-    }
-
-    private function taxonomyCategoriesQueryC(): string
-    {
-        return <<<'GQL'
-query TaxonomyCategoriesC($query: String!) {
-  taxonomy {
-    categories(first: 25, search: $query) {
-      edges {
-        node {
-          id
-          fullName
-        }
-      }
-    }
-  }
-}
-GQL;
-    }
-
-    private function taxonomyCategoriesQueryD(): string
-    {
-        return <<<'GQL'
-query TaxonomyCategoriesD($query: String!) {
-  productTaxonomyNodes(first: 25, search: $query) {
-    edges {
-      node {
-        id
-        fullName
-      }
-    }
-  }
-}
-GQL;
-    }
-
     private function looksUncategorizedCategory(string $value): bool
     {
         return str_contains(strtolower(trim($value)), 'uncategorized');
@@ -1435,11 +1278,6 @@ GQL;
 
         $name = trim((string) ($currentCategoryName ?? ''));
         return $name === '' || !$this->looksUncategorizedCategory($name);
-    }
-
-    private function findCategoryGidFromPeerProducts(Product $product, ?string $productType, ?string $preferredCategoryName): ?string
-    {
-        return null;
     }
 
     private function metafieldIdentifierFromHeader(string $header): ?array
@@ -1886,6 +1724,97 @@ GQL;
         ], true);
     }
 
+    private function categorySupportsSubtypeConstrainedMetafield(
+        string $namespace,
+        string $key,
+        ?string $currentCategoryId,
+        ?string $currentCategoryName
+    ): bool {
+        if ($namespace !== 'shopify') {
+            return true;
+        }
+
+        if (!$this->isJewelryOnlyShopifyMetafield($namespace, $key)) {
+            return true;
+        }
+
+        $categoryText = $this->categoryContextLabel($currentCategoryId, $currentCategoryName);
+        $normalized = strtolower(trim($categoryText));
+        if ($normalized === '') {
+            return false;
+        }
+
+        return str_contains($normalized, 'jewelry')
+            || str_contains($normalized, 'bracelet')
+            || str_contains($normalized, 'earring')
+            || str_contains($normalized, 'necklace')
+            || str_contains($normalized, 'charm');
+    }
+
+    private function isJewelryOnlyShopifyMetafield(string $namespace, string $key): bool
+    {
+        if ($namespace !== 'shopify') {
+            return false;
+        }
+
+        return in_array($key, [
+            'age-group',
+            'jewelry-type',
+            'target-gender',
+            'bracelet-design',
+            'earring-design',
+            'necklace-design',
+            'jewelry-material',
+        ], true);
+    }
+
+    private function isGiftCardsCategoryContext(?string $currentCategoryId, ?string $currentCategoryName): bool
+    {
+        $id = trim((string) ($currentCategoryId ?? ''));
+        if (strcasecmp($id, 'gid://shopify/TaxonomyCategory/gc') === 0) {
+            return true;
+        }
+
+        $label = strtolower(trim($this->categoryContextLabel($currentCategoryId, $currentCategoryName)));
+        return $label === 'gift cards' || str_contains($label, 'gift card');
+    }
+
+    private function categoryContextLabel(?string $currentCategoryId, ?string $currentCategoryName): string
+    {
+        $name = trim((string) ($currentCategoryName ?? ''));
+        if ($name !== '') {
+            return $name;
+        }
+
+        $fromGid = $this->categoryNameFromGid($currentCategoryId);
+        if ($fromGid !== null) {
+            return $fromGid;
+        }
+
+        return trim((string) ($currentCategoryId ?? ''));
+    }
+
+    private function categoryNameFromGid(?string $gid): ?string
+    {
+        $normalizedGid = $this->normalizeTaxonomyGid($gid);
+        if ($normalizedGid === null) {
+            return null;
+        }
+
+        if (array_key_exists($normalizedGid, $this->categoryNameByGidCache)) {
+            return $this->categoryNameByGidCache[$normalizedGid];
+        }
+
+        $name = Category::query()
+            ->where('shopify_taxonomy_gid', $normalizedGid)
+            ->value('name');
+
+        $resolved = is_string($name) ? trim($name) : null;
+        $this->categoryNameByGidCache[$normalizedGid] = $resolved !== '' ? $resolved : null;
+
+        return $this->categoryNameByGidCache[$normalizedGid];
+    }
+
     private function normalizeMetafieldInputFromAccepted(string $header, string $value, string $type): string
     {
         $trimmed = trim($value);
@@ -2169,13 +2098,22 @@ GQL;
 
     private function valueFromRow(array $rowData, string $header, mixed $fallback = null): ?string
     {
-        $value = $rowData[$header] ?? $fallback;
-        if ($value === null) {
+        $hasHeader = array_key_exists($header, $rowData);
+        $value = $hasHeader ? $rowData[$header] : $fallback;
+
+        if ($value !== null) {
+            $trimmed = trim((string) $value);
+            if ($trimmed !== '') {
+                return $trimmed;
+            }
+        }
+
+        if ($fallback === null) {
             return null;
         }
 
-        $trimmed = trim((string) $value);
-        return $trimmed === '' ? null : $trimmed;
+        $fallbackTrimmed = trim((string) $fallback);
+        return $fallbackTrimmed === '' ? null : $fallbackTrimmed;
     }
 
     private function normalizeNumeric(mixed $value): ?float
@@ -2303,3 +2241,5 @@ GQL;
         return $trimmed === '';
     }
 }
+
+
