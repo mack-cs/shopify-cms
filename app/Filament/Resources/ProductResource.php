@@ -54,6 +54,7 @@ use App\Services\HeaderStore;
 use App\Services\CategoryTypeMap;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
+use App\Services\DropdownCollectionCatalog;
 use App\Models\Tag;
 use App\Models\Color;
 use App\Models\DropdownOption;
@@ -225,6 +226,14 @@ class ProductResource extends Resource
                             Grid::make(2)->schema([
                             Select::make('color_string')
                                 ->label('Colors')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'color_string',
+                                    HeaderStore::COLOR_METAFIELD,
+                                    true,
+                                    true
+                                ))
                                 ->multiple()
                                 ->searchable()
                                 ->preload()
@@ -341,25 +350,27 @@ class ProductResource extends Resource
                                     TextInput::make('product_type')
                                         ->label('Product type')
                                         ->helperText('Optional; use to limit to a specific type.'),
+                                    Select::make('collection_style')
+                                        ->label('Collection')
+                                        ->options(fn (): array => self::collectionOptions())
+                                        ->default(fn (Get $get): ?string => self::defaultCollectionStyleForState($get))
+                                        ->searchable()
+                                        ->placeholder('Use current product collection by default')
+                                        ->helperText('Pick a collection only if you want to override the current one.'),
                                 ])
-                                ->createOptionUsing(function (array $data) {
-                                    $value = trim((string) ($data['value'] ?? ''));
-                                    if ($value === '') {
-                                        return null;
-                                    }
-
-                                    DropdownOption::create([
-                                        'header' => HeaderStore::COLOR_METAFIELD,
-                                        'value' => $value,
-                                        'vendor' => self::nullIfEmpty($data['vendor'] ?? null),
-                                        'product_type' => self::nullIfEmpty($data['product_type'] ?? null),
-                                        'active' => true,
-                                    ]);
-
-                                    return $value;
-                                }),
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    HeaderStore::COLOR_METAFIELD,
+                                    true
+                                )),
                                 Select::make('materials_and_dimensions')
                                     ->label('Materials and dimensions')
+                                    ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                        $get,
+                                        $record,
+                                        'materials_and_dimensions',
+                                        HeaderStore::MATERIALS_AND_DIMENSIONS
+                                    ))
                                     ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                         HeaderStore::MATERIALS_AND_DIMENSIONS,
@@ -367,6 +378,11 @@ class ProductResource extends Resource
                                     ))
                                     ->searchable()
                                     ->reactive()
+                                    ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                    ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                        $data,
+                                        HeaderStore::MATERIALS_AND_DIMENSIONS
+                                    ))
                                     ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                         if (!$record) {
                                             return;
@@ -377,6 +393,13 @@ class ProductResource extends Resource
                             Grid::make(2)->schema([
                                 Select::make('jewelry_material')
                                     ->label('Jewelry material')
+                                    ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                        $get,
+                                        $record,
+                                        'jewelry_material',
+                                        HeaderStore::JEWELRY_MATERIAL,
+                                        true
+                                    ))
                                     ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                         HeaderStore::JEWELRY_MATERIAL,
@@ -385,23 +408,11 @@ class ProductResource extends Resource
                                     ->multiple()
                                     ->searchable()
                                     ->reactive()
-                                    ->createOptionForm([
-                                        TextInput::make('value')->required()->maxLength(255),
-                                    ])
-                                    ->createOptionUsing(function (array $data) {
-                                        $value = trim((string) ($data['value'] ?? ''));
-                                        if ($value === '') {
-                                            return null;
-                                        }
-
-                                        DropdownOption::create([
-                                            'header' => HeaderStore::JEWELRY_MATERIAL,
-                                            'value' => $value,
-                                            'active' => true,
-                                        ]);
-
-                                        return $value;
-                                    })
+                                    ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                    ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                        $data,
+                                        HeaderStore::JEWELRY_MATERIAL
+                                    ))
                                     ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                         if (!$record) {
                                             return;
@@ -583,6 +594,12 @@ class ProductResource extends Resource
                         Grid::make(2)->schema([
                             Select::make('bracelet_design')
                                 ->label('Bracelet design')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'bracelet_design',
+                                    HeaderStore::BRACELET_DESIGN
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     HeaderStore::BRACELET_DESIGN,
@@ -590,6 +607,11 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    HeaderStore::BRACELET_DESIGN
+                                ))
                                 ->visible(fn (Get $get): bool => in_array('bracelets', self::filterTags($get), true))
                                 ->columnSpanFull()
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
@@ -642,6 +664,12 @@ class ProductResource extends Resource
                         Grid::make(1)->schema([
                             Select::make('necklace_design')
                                 ->label('Necklace design')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'necklace_design',
+                                    'Necklace design (product.metafields.shopify.necklace-design)'
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Necklace design (product.metafields.shopify.necklace-design)',
@@ -649,6 +677,11 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    'Necklace design (product.metafields.shopify.necklace-design)'
+                                ))
                                 ->visible(fn (Get $get): bool => in_array('necklaces', self::filterTags($get), true))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
@@ -661,6 +694,12 @@ class ProductResource extends Resource
                                 }),
                             Select::make('earring_design')
                                 ->label('Earring design')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'earring_design',
+                                    'Earring design (product.metafields.shopify.earring-design)'
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Earring design (product.metafields.shopify.earring-design)',
@@ -668,6 +707,11 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    'Earring design (product.metafields.shopify.earring-design)'
+                                ))
                                 ->visible(fn (Get $get): bool => in_array('earrings', self::filterTags($get), true))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
@@ -682,6 +726,12 @@ class ProductResource extends Resource
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
                                 ->label('Pattern category')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'pattern_category',
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Pattern Category (product.metafields.custom.pattern_category)',
@@ -689,6 +739,11 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
@@ -700,6 +755,12 @@ class ProductResource extends Resource
                                 }),
                             Select::make('product_metals')
                                 ->label('Product metals')
+                                ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
+                                    $get,
+                                    $record,
+                                    'product_metals',
+                                    HeaderStore::PRODUCT_METALS
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     'Product Metals (product.metafields.custom.product_metals)',
@@ -707,6 +768,11 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    HeaderStore::PRODUCT_METALS
+                                ))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
@@ -1993,17 +2059,311 @@ class ProductResource extends Resource
             ->all();
     }
 
+    private static function controlledDropdownCreateOptionForm(): array
+    {
+        return [
+            TextInput::make('value')->required()->maxLength(255),
+            Select::make('collection_style')
+                ->label('Collection')
+                ->options(fn (): array => self::collectionOptions())
+                ->default(fn (Get $get): ?string => self::defaultCollectionStyleForState($get))
+                ->searchable()
+                ->placeholder('Use current product collection by default')
+                ->helperText('Pick a collection only if you want to override the current one.'),
+        ];
+    }
+
+    private static function defaultCollectionStyleForState(Get $get): ?string
+    {
+        $selected = self::nullIfEmpty($get('collection_filter'));
+        if ($selected !== null) {
+            return $selected;
+        }
+
+        $tags = self::normalizeTagList($get('tags'));
+        if (empty($tags)) {
+            return null;
+        }
+
+        return self::collectionFromTags(implode(', ', $tags));
+    }
+
+    private static function invalidDropdownHint(
+        Get $get,
+        ?Product $record,
+        string $field,
+        string $header,
+        bool $multiple = false,
+        bool $isColor = false
+    ): ?HtmlString {
+        $invalid = self::invalidDropdownValuesForField($get, $record, $field, $header, $multiple, $isColor);
+        if (empty($invalid)) {
+            return null;
+        }
+
+        $values = implode(', ', $invalid);
+        $safe = e($values);
+        return new HtmlString(
+            "<span class='text-danger-600 font-medium'>Invalid value(s): {$safe}. ".
+            "Remove them or add them to dropdown options for a collection.</span>"
+        );
+    }
+
+    private static function invalidDropdownValuesForField(
+        Get $get,
+        ?Product $record,
+        string $field,
+        string $header,
+        bool $multiple,
+        bool $isColor
+    ): array {
+        $state = $get($field);
+        $values = self::normalizeDropdownStateValues($state, $multiple, $isColor);
+        if (empty($values)) {
+            return [];
+        }
+
+        $vendor = null;
+        $type = null;
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            $vendor = self::nullIfEmpty($get('vendor') ?? $record?->vendor);
+            $type = self::nullIfEmpty($get('type') ?? $record?->type);
+        }
+
+        $tags = self::filterTags($get, $vendor, $type);
+        $options = self::dropdownOptionsForHeader($header, $vendor, $type, $tags);
+        $known = array_fill_keys(array_map(
+            static fn (string $value): string => strtolower(trim($value)),
+            array_keys($options)
+        ), true);
+
+        $invalid = [];
+        foreach ($values as $value) {
+            $key = strtolower(trim($value));
+            if ($key === '' || isset($known[$key])) {
+                continue;
+            }
+            $invalid[] = $value;
+        }
+
+        return array_values(array_unique($invalid));
+    }
+
+    private static function normalizeDropdownStateValues(mixed $state, bool $multiple, bool $isColor): array
+    {
+        if ($state === null) {
+            return [];
+        }
+
+        if ($multiple) {
+            $raw = is_array($state) ? $state : explode(';', (string) $state);
+            $values = array_values(array_filter(array_map(
+                static fn ($value): string => trim((string) $value),
+                $raw
+            ), static fn (string $value): bool => $value !== ''));
+
+            if (!$isColor) {
+                return $values;
+            }
+
+            return self::normalizeColorTokens($values);
+        }
+
+        $value = trim((string) $state);
+        if ($value === '') {
+            return [];
+        }
+
+        if ($isColor) {
+            return self::normalizeColorTokens([$value]);
+        }
+
+        return [$value];
+    }
+
+    private static function normalizeColorTokens(array $values): array
+    {
+        $tokens = [];
+        $seen = [];
+
+        foreach ($values as $value) {
+            $normalized = strtolower(trim((string) $value));
+            if ($normalized === '') {
+                continue;
+            }
+            $normalized = str_replace('&', 'and', $normalized);
+            $normalized = preg_replace('/\s+/', '-', $normalized) ?? $normalized;
+            $normalized = preg_replace('/-+/', '-', $normalized) ?? $normalized;
+            $normalized = trim($normalized, '-');
+            if ($normalized === 'multi') {
+                $normalized = 'multicolour';
+            }
+            if ($normalized === '' || isset($seen[$normalized])) {
+                continue;
+            }
+            $seen[$normalized] = true;
+            $tokens[] = $normalized;
+        }
+
+        return $tokens;
+    }
+
+    private static function createControlledDropdownOption(
+        array $data,
+        string $header,
+        bool $isColor = false
+    ): ?string {
+        $value = trim((string) ($data['value'] ?? ''));
+        if ($value === '') {
+            return null;
+        }
+
+        if ($isColor) {
+            $tokens = self::normalizeColorTokens([$value]);
+            $value = $tokens[0] ?? $value;
+        }
+
+        $collectionStyle = self::nullIfEmpty($data['collection_style'] ?? null);
+        $context = self::contextForCreateOption($header, $collectionStyle);
+
+        $vendor = null;
+        $productType = null;
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            $vendor = self::nullIfEmpty($data['vendor'] ?? null);
+            $productType = self::nullIfEmpty($data['product_type'] ?? null);
+        }
+
+        $query = DropdownOption::query()
+            ->where('header', $header)
+            ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+
+        if ($context['tag_primary'] !== null) {
+            $query->where('collection_tag_primary', $context['tag_primary']);
+        } else {
+            $query->whereNull('collection_tag_primary');
+        }
+
+        if ($context['tag_secondary'] !== null) {
+            $query->where('collection_tag_secondary', $context['tag_secondary']);
+        } else {
+            $query->whereNull('collection_tag_secondary');
+        }
+
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            if ($vendor !== null) {
+                $query->where('vendor', $vendor);
+            } else {
+                $query->whereNull('vendor');
+            }
+            if ($productType !== null) {
+                $query->where('product_type', $productType);
+            } else {
+                $query->whereNull('product_type');
+            }
+        }
+
+        $existing = $query->first();
+        if ($existing) {
+            if (!$existing->active) {
+                $existing->update(['active' => true]);
+            }
+        } else {
+            DropdownOption::create([
+                'header' => $header,
+                'value' => $value,
+                'vendor' => $vendor,
+                'product_type' => $productType,
+                'collection_style' => $context['collection_style'],
+                'collection_tag_primary' => $context['tag_primary'],
+                'collection_tag_secondary' => $context['tag_secondary'],
+                'active' => true,
+                'sort_order' => 0,
+            ]);
+        }
+
+        self::recalculateAllProductErrors();
+
+        return $value;
+    }
+
+    private static function contextForCreateOption(string $header, ?string $collectionStyle): array
+    {
+        $contexts = self::applicableCollectionContexts($header);
+        if (empty($contexts)) {
+            return [
+                'collection_style' => null,
+                'tag_primary' => null,
+                'tag_secondary' => null,
+            ];
+        }
+
+        if ($collectionStyle !== null) {
+            foreach ($contexts as $ctx) {
+                if (strcasecmp((string) $ctx['collection_style'], $collectionStyle) === 0) {
+                    return $ctx;
+                }
+            }
+        }
+
+        return $contexts[0];
+    }
+
+    private static function recalculateAllProductErrors(): void
+    {
+        $normalizer = app(Normalizer::class);
+        Product::query()->chunkById(200, function ($products) use ($normalizer): void {
+            foreach ($products as $product) {
+                $normalizer->recalculateErrorsForProduct($product);
+            }
+        });
+    }
+
+    /**
+     * @return array<int, array{collection_style:string,tag_primary:string,tag_secondary:?string}>
+     */
+    private static function collectionContexts(): array
+    {
+        return app(DropdownCollectionCatalog::class)->contexts();
+    }
+
+    /**
+     * @return array<int, array{collection_style:string,tag_primary:string,tag_secondary:?string}>
+     */
+    private static function applicableCollectionContexts(string $header): array
+    {
+        $contexts = self::collectionContexts();
+
+        $needle = match ($header) {
+            HeaderStore::BRACELET_DESIGN => 'bracelet',
+            'Necklace design (product.metafields.shopify.necklace-design)' => 'necklace',
+            'Earring design (product.metafields.shopify.earring-design)' => 'earring',
+            default => null,
+        };
+
+        if ($needle === null) {
+            return $contexts;
+        }
+
+        return array_values(array_filter($contexts, function (array $ctx) use ($needle): bool {
+            $haystack = strtolower(implode(' ', array_filter([
+                $ctx['collection_style'] ?? '',
+                $ctx['tag_primary'] ?? '',
+                $ctx['tag_secondary'] ?? '',
+            ])));
+
+            return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
+        }));
+    }
+
     private static function collectionOptions(): array
     {
-        $collections = DropdownOption::query()
-            ->whereNotNull('collection_style')
-            ->where('collection_style', '!=', '')
-            ->distinct()
-            ->orderBy('collection_style')
-            ->pluck('collection_style')
-            ->all();
+        $collections = array_values(array_unique(array_filter(array_map(
+            static fn (array $ctx): ?string => self::nullIfEmpty($ctx['collection_style'] ?? null),
+            self::collectionContexts()
+        ))));
+        sort($collections);
 
-        return array_combine($collections, $collections);
+        return empty($collections) ? [] : array_combine($collections, $collections);
     }
 
     private static function collectionFromTags(?string $tags): ?string
@@ -2017,14 +2377,20 @@ class ProductResource extends Resource
             return null;
         }
 
-        return DropdownOption::query()
-            ->whereIn('collection_tag_primary', $normalized)
-            ->where(function ($query) use ($normalized): void {
-                $query->whereIn('collection_tag_secondary', $normalized)
-                    ->orWhereNull('collection_tag_secondary');
-            })
-            ->orderBy('collection_style')
-            ->value('collection_style');
+        $tokenSet = array_map('strtolower', $normalized);
+        foreach (self::collectionContexts() as $ctx) {
+            $primary = strtolower((string) ($ctx['tag_primary'] ?? ''));
+            $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
+            if ($primary === '' || !in_array($primary, $tokenSet, true)) {
+                continue;
+            }
+            if ($secondary !== '' && !in_array($secondary, $tokenSet, true)) {
+                continue;
+            }
+            return (string) $ctx['collection_style'];
+        }
+
+        return null;
     }
 
     private static function collectionTags(?string $collection): array
@@ -2033,41 +2399,35 @@ class ProductResource extends Resource
             return [];
         }
 
-        $row = DropdownOption::query()
-            ->where('collection_style', $collection)
-            ->whereNotNull('collection_tag_primary')
-            ->orderBy('collection_tag_primary')
-            ->first();
+        foreach (self::collectionContexts() as $ctx) {
+            if (strcasecmp((string) ($ctx['collection_style'] ?? ''), $collection) !== 0) {
+                continue;
+            }
 
-        if (!$row) {
-            return [];
+            return array_values(array_filter([
+                self::nullIfEmpty($ctx['tag_primary'] ?? null),
+                self::nullIfEmpty($ctx['tag_secondary'] ?? null),
+            ]));
         }
 
-        $tags = array_filter([
-            $row->collection_tag_primary,
-            $row->collection_tag_secondary,
-        ], fn (?string $tag): bool => $tag !== null && trim($tag) !== '');
-
-        return $tags === [] ? [] : $tags;
+        return [];
     }
 
     private static function allCollectionTags(): array
     {
-        $primary = DropdownOption::query()
-            ->whereNotNull('collection_tag_primary')
-            ->where('collection_tag_primary', '!=', '')
-            ->distinct()
-            ->pluck('collection_tag_primary')
-            ->all();
+        $tags = [];
+        foreach (self::collectionContexts() as $ctx) {
+            $primary = self::nullIfEmpty($ctx['tag_primary'] ?? null);
+            $secondary = self::nullIfEmpty($ctx['tag_secondary'] ?? null);
+            if ($primary !== null) {
+                $tags[] = $primary;
+            }
+            if ($secondary !== null) {
+                $tags[] = $secondary;
+            }
+        }
 
-        $secondary = DropdownOption::query()
-            ->whereNotNull('collection_tag_secondary')
-            ->where('collection_tag_secondary', '!=', '')
-            ->distinct()
-            ->pluck('collection_tag_secondary')
-            ->all();
-
-        return array_values(array_unique(array_merge($primary, $secondary)));
+        return array_values(array_unique($tags));
     }
 
     private static function normalizeTagList(mixed $value): array

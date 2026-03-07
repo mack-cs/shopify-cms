@@ -698,8 +698,7 @@ final class Normalizer
 
                 $option = $query->first();
                 if (!$option || !$option->active) {
-                    $errors[] = "inactive:dropdown:{$header}";
-                    break;
+                    $errors[] = "inactive:dropdown:{$header}:{$value}";
                 }
             }
         }
