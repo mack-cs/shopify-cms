@@ -24,7 +24,7 @@ final class ShopifyCollectionSeoImporter
         foreach ($csv->getRecords() as $row) {
             $total++;
 
-            $handle = trim((string) ($row[$map['handle']] ?? ''));
+            $handle = trim((string) $this->mappedValue($row, $map['handle']));
             if ($handle === '') {
                 $skippedMissingHandle++;
                 continue;
@@ -40,16 +40,19 @@ final class ShopifyCollectionSeoImporter
 
             $payload = [];
             if ($map['title'] !== null) {
-                $payload['draft_title'] = $this->nullIfEmpty($row[$map['title']] ?? null);
+                $payload['draft_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['title']));
             }
             if ($map['description_html'] !== null) {
-                $payload['draft_description_html'] = $this->nullIfEmpty($row[$map['description_html']] ?? null);
+                $payload['draft_description_html'] = $this->nullIfEmpty($this->mappedValue($row, $map['description_html']));
             }
             if ($map['seo_title'] !== null) {
-                $payload['draft_seo_title'] = $this->nullIfEmpty($row[$map['seo_title']] ?? null);
+                $payload['draft_seo_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['seo_title']));
             }
             if ($map['seo_description'] !== null) {
-                $payload['draft_seo_description'] = $this->nullIfEmpty($row[$map['seo_description']] ?? null);
+                $payload['draft_seo_description'] = $this->nullIfEmpty($this->mappedValue($row, $map['seo_description']));
+            }
+            if ($map['deindex'] !== null) {
+                $payload['deindex'] = $this->nullableBool($this->mappedValue($row, $map['deindex']));
             }
 
             if ($payload === []) {
@@ -94,6 +97,7 @@ final class ShopifyCollectionSeoImporter
             'description_html' => $find(['description_html', 'description html', 'description', 'body_html', 'body html']),
             'seo_title' => $find(['seo_title', 'seo title', 'meta title']),
             'seo_description' => $find(['seo_description', 'seo description', 'meta description']),
+            'deindex' => $find(['deindex', 'seo_deindex', 'hide_from_google', 'seo hidden']),
         ];
     }
 
@@ -105,5 +109,32 @@ final class ShopifyCollectionSeoImporter
 
         $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function nullableBool(mixed $value): ?bool
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = strtolower(trim((string) $value));
+        if ($trimmed === '') {
+            return null;
+        }
+
+        return match ($trimmed) {
+            'true', '1', 'yes' => true,
+            'false', '0', 'no' => false,
+            default => null,
+        };
+    }
+
+    private function mappedValue(array $row, ?string $header): mixed
+    {
+        if ($header === null || $header === '') {
+            return null;
+        }
+
+        return $row[$header] ?? null;
     }
 }

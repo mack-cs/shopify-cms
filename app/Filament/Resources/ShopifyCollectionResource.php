@@ -35,39 +35,59 @@ class ShopifyCollectionResource extends Resource
     public static function form(Form $form): Form
     {
         return $form
+            ->columns(2)
             ->schema([
                 Forms\Components\TextInput::make('title')
                     ->label('Shopify Title')
                     ->maxLength(255)
-                    ->disabled(),
+                    ->disabled()
+                    ->columnSpan(1),
                 Forms\Components\TextInput::make('handle')
                     ->label('Handle')
                     ->maxLength(255)
                     ->helperText('Controls the collection URL slug.')
-                    ->disabled(),
-                Forms\Components\Textarea::make('description_html')
-                    ->label('Shopify Description (HTML)')
-                    ->rows(6)
                     ->disabled()
+                    ->columnSpan(1),
+                Forms\Components\Section::make('Marketing Channels & Indexing')
+                    ->schema([
+                        Forms\Components\Placeholder::make('published_channel_names')
+                            ->label('Published Channels')
+                            ->content(fn (ShopifyCollection $record): string => $record->published_channel_names ?: 'Not published on any channel')
+                            ->columnSpan(1),
+                        Forms\Components\Placeholder::make('online_only_warning')
+                            ->label('Action Needed')
+                            ->content('This collection is published only to Online Store. Set Deindex to true or false before pushing to Shopify.')
+                            ->visible(fn (ShopifyCollection $record): bool => $record->published_on_online_store_only && $record->deindex === null)
+                            ->columnSpanFull(),
+                        Forms\Components\Select::make('deindex')
+                            ->label('Deindex')
+                            ->options([
+                                '1' => 'True (hide from search engines)',
+                                '0' => 'False (keep indexed)',
+                            ])
+                            ->native(false)
+                            ->nullable()
+                            ->placeholder('Not decided')
+                            ->columnSpan(1),
+                    ])
+                    ->columns(2)
                     ->columnSpanFull(),
                 Forms\Components\TextInput::make('seo_title')
                     ->label('Shopify SEO Title')
                     ->maxLength(255)
-                    ->disabled(),
+                    ->disabled()
+                    ->columnSpan(1),
                 Forms\Components\Textarea::make('seo_description')
                     ->label('Shopify SEO Description')
                     ->rows(3)
                     ->maxLength(512)
-                    ->disabled(),
-                Forms\Components\Section::make('Draft (Local)')
+                    ->disabled()
+                    ->columnSpan(1),
+                Forms\Components\Section::make('Draft SEO (make edits here)')
                     ->schema([
                         Forms\Components\TextInput::make('draft_title')
                             ->label('Draft Title')
                             ->maxLength(255),
-                        Forms\Components\Textarea::make('draft_description_html')
-                            ->label('Draft Description (HTML)')
-                            ->rows(6)
-                            ->columnSpanFull(),
                         Forms\Components\TextInput::make('draft_seo_title')
                             ->label('Draft SEO Title')
                             ->maxLength(255),
@@ -94,6 +114,34 @@ class ShopifyCollectionResource extends Resource
                     ->label('Handle')
                     ->searchable()
                     ->sortable(),
+                Tables\Columns\TextColumn::make('deindex')
+                    ->label('Deindex')
+                    ->state(function (ShopifyCollection $record): string {
+                        if ($record->deindex === null) {
+                            return 'Undecided';
+                        }
+
+                        return $record->deindex ? 'True' : 'False';
+                    })
+                    ->badge()
+                    ->color(function (string $state): string {
+                        return match ($state) {
+                            'True' => 'danger',
+                            'False' => 'success',
+                            default => 'warning',
+                        };
+                    }),
+                Tables\Columns\IconColumn::make('published_on_online_store_only')
+                    ->label('Online Only')
+                    ->boolean()
+                    ->trueColor('warning')
+                    ->falseColor('gray')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('published_channel_names')
+                    ->label('Published Channels')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('approvals_current')
                     ->label('Approvals')
                     ->state(fn (ShopifyCollection $record) => $record->approvalsForCurrentVersionCount())
@@ -169,10 +217,10 @@ class ShopifyCollectionResource extends Resource
                     ->icon('heroicon-o-check-badge')
                     ->requiresConfirmation()
                     ->action(function (ShopifyCollection $record): void {
-                        if (!self::draftSeoComplete($record)) {
+                        if (!self::canApprove($record)) {
                             Notification::make()
                                 ->title('Cannot approve')
-                                ->body('Draft title and SEO fields are required before approval.')
+                                ->body(self::approvalBlockMessage($record))
                                 ->warning()
                                 ->send();
                             return;
@@ -216,16 +264,25 @@ class ShopifyCollectionResource extends Resource
                             ->label('Fields to sync')
                             ->options([
                                 'title' => 'Title',
-                                'description_html' => 'Description',
                                 'seo_title' => 'SEO title',
                                 'seo_description' => 'SEO description',
+                                'deindex' => 'Deindex (seo.hide_from_google metafield)',
                             ])
                             ->columns(2)
-                            ->default(['title', 'description_html', 'seo_title', 'seo_description']),
+                            ->default(['title', 'seo_title', 'seo_description', 'deindex']),
                         Forms\Components\TextInput::make('handle_override')
                             ->label('Handle (URL) - optional')
                             ->maxLength(255)
                             ->helperText('Set a new handle to update the Shopify URL. This does not change the local record.'),
+                        Forms\Components\Select::make('deindex_override')
+                            ->label('Deindex Decision (optional)')
+                            ->options([
+                                '1' => 'True (hide from search engines)',
+                                '0' => 'False (keep indexed)',
+                            ])
+                            ->native(false)
+                            ->nullable()
+                            ->placeholder('Keep current decision'),
                     ])
                     ->action(function (ShopifyCollection $record, array $data, ShopifyCollectionUpdater $updater): void {
                         if (!$record->isApprovedByTwo()) {
@@ -241,6 +298,21 @@ class ShopifyCollectionResource extends Resource
                         if (empty($fields)) {
                             Notification::make()
                                 ->title('Choose at least one field')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        $deindexOverride = self::parseNullableBoolean($data['deindex_override'] ?? null);
+                        if ($deindexOverride !== null) {
+                            $record->forceFill(['deindex' => $deindexOverride])->save();
+                            $record->refresh();
+                        }
+
+                        if (self::requiresDeindexDecision($record)) {
+                            Notification::make()
+                                ->title('Action needed before Shopify push')
+                                ->body('This collection is only on Online Store. Set Deindex to true or false first.')
                                 ->warning()
                                 ->send();
                             return;
@@ -362,11 +434,11 @@ class ShopifyCollectionResource extends Resource
                         ->action(function ($records): void {
                             $approvedCount = 0;
                             $skippedCount = 0;
-                            $missingSeoCount = 0;
+                            $blockedCount = 0;
 
                             foreach ($records as $record) {
-                                if (!self::draftSeoComplete($record)) {
-                                    $missingSeoCount++;
+                                if (!self::canApprove($record)) {
+                                    $blockedCount++;
                                     continue;
                                 }
 
@@ -399,8 +471,8 @@ class ShopifyCollectionResource extends Resource
                             if ($skippedCount > 0) {
                                 $parts[] = "Skipped {$skippedCount} already approved by you.";
                             }
-                            if ($missingSeoCount > 0) {
-                                $parts[] = "Missing draft SEO on {$missingSeoCount}; cannot approve.";
+                            if ($blockedCount > 0) {
+                                $parts[] = "Blocked {$blockedCount}: set deindex=true or complete draft SEO.";
                             }
 
                             Notification::make()
@@ -419,12 +491,12 @@ class ShopifyCollectionResource extends Resource
                                 ->label('Fields to sync')
                                 ->options([
                                     'title' => 'Title',
-                                    'description_html' => 'Description',
                                     'seo_title' => 'SEO title',
                                     'seo_description' => 'SEO description',
+                                    'deindex' => 'Deindex (seo.hide_from_google metafield)',
                                 ])
                                 ->columns(2)
-                                ->default(['title', 'description_html', 'seo_title', 'seo_description']),
+                                ->default(['title', 'seo_title', 'seo_description', 'deindex']),
                         ])
                         ->action(function ($records, array $data, ShopifyCollectionUpdater $updater): void {
                             $fields = array_fill_keys($data['fields'] ?? [], true);
@@ -438,10 +510,15 @@ class ShopifyCollectionResource extends Resource
 
                             $synced = 0;
                             $skippedNotApproved = 0;
+                            $skippedActionRequired = 0;
                             $failed = 0;
                             foreach ($records as $record) {
                                 if (!$record->isApprovedByTwo()) {
                                     $skippedNotApproved++;
+                                    continue;
+                                }
+                                if (self::requiresDeindexDecision($record)) {
+                                    $skippedActionRequired++;
                                     continue;
                                 }
 
@@ -460,6 +537,9 @@ class ShopifyCollectionResource extends Resource
                             $message = "Synced {$synced} collection(s).";
                             if ($skippedNotApproved > 0) {
                                 $message .= " Skipped not approved: {$skippedNotApproved}.";
+                            }
+                            if ($skippedActionRequired > 0) {
+                                $message .= " Skipped action required (set Deindex true/false): {$skippedActionRequired}.";
                             }
                             if ($failed > 0) {
                                 $message .= " Failed: {$failed}.";
@@ -546,8 +626,25 @@ class ShopifyCollectionResource extends Resource
         if (!empty($fields['seo_description'])) {
             $payload['seo_description'] = $record->seo_description;
         }
+        if (!empty($fields['deindex']) && $record->deindex !== null) {
+            $payload['deindex'] = (bool) $record->deindex;
+        }
 
         return $payload;
+    }
+
+    private static function parseNullableBoolean(mixed $value): ?bool
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    }
+
+    private static function requiresDeindexDecision(ShopifyCollection $record): bool
+    {
+        return (bool) $record->published_on_online_store_only && $record->deindex === null;
     }
 
     private static function draftSeoComplete(ShopifyCollection $record): bool
@@ -555,6 +652,32 @@ class ShopifyCollectionResource extends Resource
         return trim((string) ($record->draft_title ?? '')) !== ''
             && trim((string) ($record->draft_seo_title ?? '')) !== ''
             && trim((string) ($record->draft_seo_description ?? '')) !== '';
+    }
+
+    private static function canApprove(ShopifyCollection $record): bool
+    {
+        if (self::requiresDeindexDecision($record)) {
+            return false;
+        }
+
+        if ($record->deindex === true) {
+            return true;
+        }
+
+        return self::draftSeoComplete($record);
+    }
+
+    private static function approvalBlockMessage(ShopifyCollection $record): string
+    {
+        if (self::requiresDeindexDecision($record)) {
+            return 'This collection is only on Online Store. Choose deindex true or false before approval.';
+        }
+
+        if ($record->deindex === true) {
+            return 'Approval is blocked unexpectedly. Please retry.';
+        }
+
+        return 'Approval requires either deindex=true or complete draft SEO fields (title, SEO title, SEO description).';
     }
 
     private static function applyApprovedDrafts(ShopifyCollection $record): void

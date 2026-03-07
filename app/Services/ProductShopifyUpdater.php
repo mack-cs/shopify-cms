@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
+use App\Models\Variant;
 use App\Services\TagNormalizer;
 use Illuminate\Support\Collection;
 
@@ -278,7 +279,9 @@ private function updateProduct(Product $product): array
     $primaryData = $primaryRow?->data ?? [];
 
     $title = $this->valueFromRow($primaryData, HeaderStore::TITLE, $product->title);
-    $vendor = $this->valueFromRow($primaryData, HeaderStore::VENDOR, $product->vendor);
+    // Prefer model value for vendor so UI edits are not overridden by stale imported row data.
+    $vendor = $this->nullIfEmpty($product->vendor)
+        ?? $this->valueFromRow($primaryData, HeaderStore::VENDOR, null);
     $productType = $this->valueFromRow($primaryData, HeaderStore::TYPE, $product->type);
     $bodyHtml = $this->valueFromRow($primaryData, HeaderStore::BODY_HTML, $product->body_html);
     $statusRaw = $this->valueFromRow($primaryData, HeaderStore::STATUS, $product->status ?? 'draft');
@@ -672,6 +675,7 @@ private function updateProduct(Product $product): array
         if (!is_array($variantNodes) || empty($variantNodes)) {
             return $warnings;
         }
+        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
 
         $shopifyVariants = collect($variantNodes)
             ->filter(fn ($node) => is_array($node) && !empty($node['id']))
@@ -680,19 +684,28 @@ private function updateProduct(Product $product): array
                 $key = $sku !== '' ? $sku : ($node['id'] ?? '');
                 return [$key => $node];
             });
+        $localVariantsOrdered = $product->variants()->orderBy('id')->get()->values();
+        $localVariantsBySku = $localVariantsOrdered
+            ->filter(fn (Variant $variant) => trim((string) ($variant->sku ?? '')) !== '')
+            ->keyBy(fn (Variant $variant) => trim((string) $variant->sku));
 
         $locationId = null;
         $variantInputs = [];
 
-        foreach ($rowDataList as $rowData) {
+        foreach ($rowDataList as $rowIndex => $rowData) {
             if (!is_array($rowData)) {
                 continue;
             }
 
             $rowSku = $this->valueFromRow($rowData, HeaderStore::VARIANT_SKU, null);
-            $variantNode = $rowSku !== null
-                ? $shopifyVariants->get($rowSku)
-                : $shopifyVariants->first();
+            $localVariant = $rowSku !== null
+                ? $localVariantsBySku->get($rowSku)
+                : ($localVariantsOrdered->get($rowIndex) ?? null);
+
+            $desiredSku = $this->nullIfEmpty((string) ($localVariant?->sku ?? '')) ?? $rowSku;
+            $variantNode = $desiredSku !== null
+                ? $shopifyVariants->get($desiredSku)
+                : ($variantNodesOrdered[$rowIndex] ?? $shopifyVariants->first());
 
             if (!$variantNode) {
                 continue;
@@ -704,22 +717,34 @@ private function updateProduct(Product $product): array
             if ($variantId) {
                 $input = ['id' => $variantId];
 
-                $price = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
-                $compareAt = $this->valueFromRow($rowData, HeaderStore::VARIANT_COMPARE_AT, null);
-                $weightUnit = $this->valueFromRow($rowData, HeaderStore::VARIANT_WEIGHT_UNIT, null);
-                $barcode = $this->valueFromRow($rowData, HeaderStore::VARIANT_BARCODE, null);
-                $grams = $this->normalizeNumeric($rowData[HeaderStore::VARIANT_GRAMS] ?? null);
+                // Prefer edited local variant values; use row data only as fallback.
+                $priceRaw = $localVariant?->price;
+                if ($priceRaw === null) {
+                    $priceRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
+                }
+                $price = $this->normalizeNumeric($priceRaw);
+
+                $compareAtRaw = $localVariant?->compare_at_price;
+                if ($compareAtRaw === null) {
+                    $compareAtRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_COMPARE_AT, null);
+                }
+                $compareAt = $this->normalizeNumeric($compareAtRaw);
+                $weightUnit = $this->valueFromRow($rowData, HeaderStore::VARIANT_WEIGHT_UNIT, $localVariant?->weight_unit);
+                $barcode = $this->valueFromRow($rowData, HeaderStore::VARIANT_BARCODE, $localVariant?->barcode);
+                $grams = $this->normalizeNumeric($this->valueFromRow($rowData, HeaderStore::VARIANT_GRAMS, $localVariant?->weight));
 
                 $optionValues = $this->variantOptionValuesFromRow($rowData, $variantNode);
 
-                if ($rowSku !== null) {
-                    $input['sku'] = $rowSku;
+                if ($desiredSku !== null) {
+                    $input['sku'] = $desiredSku;
+                    // Keep Shopify Variant Barcode aligned with Variant SKU.
+                    $barcode = $desiredSku;
                 }
                 if ($price !== null) {
-                    $input['price'] = (string) $price;
+                    $input['price'] = number_format($price, 2, '.', '');
                 }
                 if ($compareAt !== null) {
-                    $input['compareAtPrice'] = (string) $compareAt;
+                    $input['compareAtPrice'] = number_format($compareAt, 2, '.', '');
                 }
                 if ($barcode !== null) {
                     $input['barcode'] = (string) $barcode;
@@ -758,7 +783,9 @@ private function updateProduct(Product $product): array
                 }
             }
 
-            $inventoryQty = $this->normalizeNumeric($rowData[HeaderStore::VARIANT_INVENTORY_QTY] ?? null);
+            $inventoryQty = $this->normalizeNumeric(
+                $this->valueFromRow($rowData, HeaderStore::VARIANT_INVENTORY_QTY, $localVariant?->inventory_qty)
+            );
             if ($inventoryItemId && $inventoryQty !== null) {
                 $locationId = $locationId ?? $this->firstLocationId();
                 if ($locationId) {
@@ -850,7 +877,7 @@ query ProductByHandleDetails($handle: String!) {
       }
     }
     images(first: 50) {
-      nodes { url }
+      nodes { id url }
     }
   }
 }
@@ -2018,11 +2045,106 @@ GQL;
     private function updateImages(Product $product, string $productId, array $rowDataList, array $details): array
     {
         $warnings = [];
-        $existing = collect(data_get($details, 'images.nodes', []))
-            ->pluck('url')
-            ->filter()
-            ->map(fn ($url) => trim((string) $url))
+        $existingNodes = collect(data_get($details, 'images.nodes', []))
+            ->filter(fn ($node) => is_array($node))
+            ->map(function (array $node): array {
+                return [
+                    'id' => trim((string) ($node['id'] ?? '')),
+                    'url' => trim((string) ($node['url'] ?? '')),
+                ];
+            })
+            ->filter(fn (array $row) => $row['url'] !== '')
+            ->values();
+
+        $existingUrlToId = $existingNodes
+            ->filter(fn (array $row) => $row['id'] !== '')
+            ->mapWithKeys(fn (array $row) => [$row['url'] => $row['id']])
             ->all();
+        $existingUrls = array_keys($existingUrlToId);
+
+        $desiredUrls = collect($rowDataList)
+            ->filter(fn ($row) => is_array($row))
+            ->map(fn (array $row) => $this->nullIfEmpty($row[HeaderStore::IMAGE_SRC] ?? null))
+            ->filter()
+            ->map(fn (string $url) => trim($url))
+            ->unique()
+            ->values()
+            ->all();
+
+        // Remove stale images no longer present in desired input list.
+        $toDeleteIds = collect($existingUrls)
+            ->reject(fn (string $url) => in_array($url, $desiredUrls, true))
+            ->map(fn (string $url) => $existingUrlToId[$url] ?? null)
+            ->filter()
+            ->values()
+            ->all();
+
+        $toDeleteMediaIds = [];
+        $toDeleteProductImageIds = [];
+        foreach ($toDeleteIds as $deleteId) {
+            $id = trim((string) $deleteId);
+            if ($id === '') {
+                continue;
+            }
+
+            if (str_contains($id, 'gid://shopify/ProductImage/')) {
+                $toDeleteProductImageIds[] = $id;
+            } else {
+                $toDeleteMediaIds[] = $id;
+            }
+        }
+
+        if (!empty($toDeleteMediaIds)) {
+            try {
+                $deleteData = $this->client->graphql($this->productDeleteMediaMutation(), [
+                    'productId' => $productId,
+                    'mediaIds' => $toDeleteMediaIds,
+                ]);
+
+                $deleteErrors = data_get($deleteData, 'productDeleteMedia.mediaUserErrors', []);
+                if (is_array($deleteErrors) && !empty($deleteErrors)) {
+                    $messages = $this->formatUserErrors($deleteErrors, 'media');
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => $messages !== '' ? $messages : 'Shopify image delete failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify image delete failed: ' . $e->getMessage(),
+                ];
+            }
+        }
+        if (!empty($toDeleteProductImageIds)) {
+            $numericProductId = $this->extractNumericId($productId, 'Product');
+            if ($numericProductId === null) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify image delete failed: invalid Shopify Product GID for REST image delete.',
+                ];
+            } else {
+                foreach ($toDeleteProductImageIds as $imageGid) {
+                    $numericImageId = $this->extractNumericId($imageGid, 'ProductImage');
+                    if ($numericImageId === null) {
+                        $warnings[] = [
+                            'product_id' => $product->id,
+                            'warning' => "Shopify image delete failed: invalid ProductImage GID '{$imageGid}'.",
+                        ];
+                        continue;
+                    }
+
+                    try {
+                        $this->client->rest('DELETE', "products/{$numericProductId}/images/{$numericImageId}.json");
+                    } catch (\Throwable $e) {
+                        $warnings[] = [
+                            'product_id' => $product->id,
+                            'warning' => 'Shopify image delete failed: ' . $e->getMessage(),
+                        ];
+                    }
+                }
+            }
+        }
 
         foreach ($rowDataList as $rowData) {
             if (!is_array($rowData)) {
@@ -2034,7 +2156,7 @@ GQL;
                 continue;
             }
 
-            if (in_array($imageUrl, $existing, true)) {
+            if (in_array($imageUrl, $existingUrls, true)) {
                 continue;
             }
 
@@ -2068,6 +2190,21 @@ GQL;
         }
 
         return $warnings;
+    }
+
+    private function productDeleteMediaMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
+  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+    deletedMediaIds
+    mediaUserErrors {
+      field
+      message
+    }
+  }
+}
+GQL;
     }
 
     /**

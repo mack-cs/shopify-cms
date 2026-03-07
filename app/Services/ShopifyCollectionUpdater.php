@@ -43,17 +43,26 @@ final class ShopifyCollectionUpdater
             $input['seo'] = $seo;
         }
 
-        $data = $this->client->graphql($this->mutation(), [
-            'input' => $input,
-        ]);
+        $result = [];
+        if (count($input) > 1) {
+            $data = $this->client->graphql($this->mutation(), [
+                'input' => $input,
+            ]);
 
-        $errors = data_get($data, 'collectionUpdate.userErrors', []);
-        if (is_array($errors) && !empty($errors)) {
-            $messages = collect($errors)->pluck('message')->filter()->implode('; ');
-            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+            $errors = data_get($data, 'collectionUpdate.userErrors', []);
+            if (is_array($errors) && !empty($errors)) {
+                $messages = collect($errors)->pluck('message')->filter()->implode('; ');
+                throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+            }
+
+            $result = data_get($data, 'collectionUpdate.collection', []);
         }
 
-        return data_get($data, 'collectionUpdate.collection', []);
+        if (array_key_exists('deindex', $fields) && $fields['deindex'] !== null) {
+            $this->setDeindexMetafield($collection->shopify_id, (bool) $fields['deindex']);
+        }
+
+        return $result;
     }
 
     private function mutation(): string
@@ -68,6 +77,37 @@ mutation CollectionUpdate($input: CollectionInput!) {
       descriptionHtml
       seo { title description }
     }
+    userErrors { field message }
+  }
+}
+GQL;
+    }
+
+    private function setDeindexMetafield(string $ownerId, bool $deindex): void
+    {
+        $data = $this->client->graphql($this->metafieldsSetMutation(), [
+            'metafields' => [[
+                'ownerId' => $ownerId,
+                'namespace' => 'seo',
+                'key' => 'hide_from_google',
+                'type' => 'boolean',
+                'value' => $deindex ? 'true' : 'false',
+            ]],
+        ]);
+
+        $errors = data_get($data, 'metafieldsSet.userErrors', []);
+        if (is_array($errors) && !empty($errors)) {
+            $messages = collect($errors)->pluck('message')->filter()->implode('; ');
+            throw new \RuntimeException($messages !== '' ? $messages : 'Failed to update collection deindex metafield.');
+        }
+    }
+
+    private function metafieldsSetMutation(): string
+    {
+        return <<<'GQL'
+mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id }
     userErrors { field message }
   }
 }

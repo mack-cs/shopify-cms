@@ -22,6 +22,9 @@ class ShopifyCollectionExporter extends Exporter
             ExportColumn::make('description_html'),
             ExportColumn::make('seo_title'),
             ExportColumn::make('seo_description'),
+            ExportColumn::make('deindex'),
+            ExportColumn::make('published_on_online_store_only'),
+            ExportColumn::make('published_channel_names'),
             ExportColumn::make('created_at'),
             ExportColumn::make('updated_at'),
         ];

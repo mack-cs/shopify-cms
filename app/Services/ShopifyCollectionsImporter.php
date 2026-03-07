@@ -39,6 +39,7 @@ final class ShopifyCollectionsImporter
     public function importIntoExistingImport(Import $import): void
     {
         $seen = [];
+        $touchedIds = [];
         foreach ($this->fetchCollections() as $collection) {
             $shopifyId = trim((string) data_get($collection, 'id', ''));
             $handle = trim((string) data_get($collection, 'handle', ''));
@@ -50,7 +51,7 @@ final class ShopifyCollectionsImporter
             }
             $seen[$shopifyId] = true;
 
-            ShopifyCollection::updateOrCreate(
+            $saved = ShopifyCollection::withoutEvents(fn () => ShopifyCollection::updateOrCreate(
                 [
                     'import_id' => $import->id,
                     'shopify_id' => $shopifyId,
@@ -61,8 +62,20 @@ final class ShopifyCollectionsImporter
                     'description_html' => data_get($collection, 'descriptionHtml'),
                     'seo_title' => data_get($collection, 'seo.title'),
                     'seo_description' => data_get($collection, 'seo.description'),
+                    'deindex' => $this->boolFromMetafield(
+                        data_get($collection, 'deindex_metafield_hidden.value')
+                            ?? data_get($collection, 'deindex_metafield_hide_from_google.value')
+                    ),
+                    'published_on_online_store_only' => $this->isPublishedOnOnlineStoreOnly($collection),
+                    'published_channel_names' => $this->publishedChannelNames($collection),
                 ]
-            );
+            ));
+
+            $touchedIds[] = $saved->id;
+        }
+
+        if (!empty($touchedIds)) {
+            ShopifyCollection::whereIn('id', array_unique($touchedIds))->increment('approval_version');
         }
 
         $import->update(['status' => 'ready', 'is_valid' => true]);
@@ -78,13 +91,7 @@ final class ShopifyCollectionsImporter
     {
         $after = null;
         do {
-            $data = $this->client->graphql(
-                $this->customCollectionsQuery(),
-                [
-                    'first' => 100,
-                    'after' => $after,
-                ]
-            );
+            $data = $this->queryCollectionsPage($this->customCollectionsQuery(), $this->customCollectionsQueryBasic(), $after);
 
             $collections = data_get($data, 'customCollections.nodes', []);
             foreach ($collections as $collection) {
@@ -100,13 +107,7 @@ final class ShopifyCollectionsImporter
     {
         $after = null;
         do {
-            $data = $this->client->graphql(
-                $this->smartCollectionsQuery(),
-                [
-                    'first' => 100,
-                    'after' => $after,
-                ]
-            );
+            $data = $this->queryCollectionsPage($this->smartCollectionsQuery(), $this->smartCollectionsQueryBasic(), $after);
 
             $collections = data_get($data, 'smartCollections.nodes', []);
             foreach ($collections as $collection) {
@@ -119,6 +120,33 @@ final class ShopifyCollectionsImporter
     }
 
     private function customCollectionsQuery(): string
+    {
+        return <<<'GQL'
+query CustomCollections($first: Int!, $after: String) {
+  customCollections(first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      handle
+      title
+      descriptionHtml
+      seo { title description }
+      deindex_metafield_hidden: metafield(namespace: "seo", key: "hidden") { value }
+      deindex_metafield_hide_from_google: metafield(namespace: "seo", key: "hide_from_google") { value }
+      resourcePublications(first: 20, onlyPublished: true) {
+        nodes {
+          publication {
+            name
+          }
+        }
+      }
+    }
+  }
+}
+GQL;
+    }
+
+    private function customCollectionsQueryBasic(): string
     {
         return <<<'GQL'
 query CustomCollections($first: Int!, $after: String) {
@@ -148,9 +176,108 @@ query SmartCollections($first: Int!, $after: String) {
       title
       descriptionHtml
       seo { title description }
+      deindex_metafield_hidden: metafield(namespace: "seo", key: "hidden") { value }
+      deindex_metafield_hide_from_google: metafield(namespace: "seo", key: "hide_from_google") { value }
+      resourcePublications(first: 20, onlyPublished: true) {
+        nodes {
+          publication {
+            name
+          }
+        }
+      }
     }
   }
 }
 GQL;
+    }
+
+    private function smartCollectionsQueryBasic(): string
+    {
+        return <<<'GQL'
+query SmartCollections($first: Int!, $after: String) {
+  smartCollections(first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      handle
+      title
+      descriptionHtml
+      seo { title description }
+    }
+  }
+}
+GQL;
+    }
+
+    private function queryCollectionsPage(string $query, string $fallbackQuery, ?string $after): array
+    {
+        $variables = [
+            'first' => 100,
+            'after' => $after,
+        ];
+
+        try {
+            return $this->client->graphql($query, $variables);
+        } catch (\Throwable $e) {
+            if (!$this->isWorkflowFieldSchemaError($e)) {
+                throw $e;
+            }
+
+            return $this->client->graphql($fallbackQuery, $variables);
+        }
+    }
+
+    private function isWorkflowFieldSchemaError(\Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        return str_contains($message, 'cannot query field')
+            && (str_contains($message, 'resourcepublications') || str_contains($message, 'metafield'));
+    }
+
+    private function publishedChannelNames(array $collection): ?string
+    {
+        $names = collect(data_get($collection, 'resourcePublications.nodes', []))
+            ->pluck('publication.name')
+            ->filter(fn ($name) => trim((string) $name) !== '')
+            ->map(fn ($name) => trim((string) $name))
+            ->unique()
+            ->values();
+
+        if ($names->isEmpty()) {
+            return null;
+        }
+
+        return $names->implode(', ');
+    }
+
+    private function isPublishedOnOnlineStoreOnly(array $collection): bool
+    {
+        $names = collect(data_get($collection, 'resourcePublications.nodes', []))
+            ->pluck('publication.name')
+            ->filter(fn ($name) => trim((string) $name) !== '')
+            ->map(fn ($name) => strtolower(trim((string) $name)))
+            ->unique()
+            ->values();
+
+        return $names->count() === 1 && $names->first() === 'online store';
+    }
+
+    private function boolFromMetafield(mixed $value): ?bool
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $normalized = strtolower(trim((string) $value));
+        if ($normalized === '') {
+            return null;
+        }
+
+        return match ($normalized) {
+            'true', '1', 'yes' => true,
+            'false', '0', 'no' => false,
+            default => null,
+        };
     }
 }

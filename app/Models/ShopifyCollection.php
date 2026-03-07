@@ -18,11 +18,19 @@ class ShopifyCollection extends Model
         'description_html',
         'seo_title',
         'seo_description',
+        'deindex',
+        'published_on_online_store_only',
+        'published_channel_names',
         'approval_version',
         'draft_title',
         'draft_description_html',
         'draft_seo_title',
         'draft_seo_description',
+    ];
+
+    protected $casts = [
+        'deindex' => 'boolean',
+        'published_on_online_store_only' => 'boolean',
     ];
 
     public function import(): BelongsTo
