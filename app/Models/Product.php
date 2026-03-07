@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use App\Services\CategoryTypeMap;
 
 class Product extends Model
 {
@@ -12,7 +13,7 @@ class Product extends Model
         'import_id','handle','title','body_html','vendor','tags',
         'type','published',
         'product_category','google_product_category','status',
-        'seo_title','seo_description','color_string','approval_version',
+        'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
         'batch','is_bundle','you_save',
         'has_errors','error_fields',
     ];
@@ -23,6 +24,46 @@ class Product extends Model
         'has_errors' => 'boolean',
         'error_fields' => 'array',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (Product $product): void {
+            $current = is_string($product->google_product_category)
+                ? trim($product->google_product_category)
+                : '';
+            if ($current !== '') {
+                return;
+            }
+
+            $resolved = CategoryTypeMap::resolve(
+                is_string($product->product_category) ? $product->product_category : null,
+                is_string($product->type) ? $product->type : null,
+                null
+            );
+
+            $google = trim((string) ($resolved['google_product_category'] ?? ''));
+            if ($google !== '') {
+                $product->google_product_category = $google;
+            }
+        });
+    }
+
+    public function getGoogleProductCategoryAttribute($value): ?string
+    {
+        $current = is_string($value) ? trim($value) : '';
+        if ($current !== '') {
+            return $current;
+        }
+
+        $resolved = CategoryTypeMap::resolve(
+            is_string($this->attributes['product_category'] ?? null) ? $this->attributes['product_category'] : null,
+            is_string($this->attributes['type'] ?? null) ? $this->attributes['type'] : null,
+            null
+        );
+
+        $google = trim((string) ($resolved['google_product_category'] ?? ''));
+        return $google === '' ? null : $google;
+    }
 
     public function import(): BelongsTo
     {

@@ -2,8 +2,13 @@
 
 namespace App\Services;
 
+use App\Models\Category;
+
 final class CategoryTypeMap
 {
+    /** @var array<string, string>|null */
+    private static ?array $googleCategoryByNameCache = null;
+
     private const MAPPINGS = [
         [
             'category' => 'Apparel & Accessories > Jewelry > Bracelets',
@@ -151,13 +156,13 @@ final class CategoryTypeMap
 
         foreach (self::MAPPINGS as $row) {
             if (strcasecmp($row['category'], $normalized) === 0) {
-                return $row;
+                return self::applyCategoryTableOverride($row);
             }
         }
 
         foreach (self::EXTRA_CATEGORY_MAPPINGS as $row) {
             if (strcasecmp($row['category'], $normalized) === 0) {
-                return $row;
+                return self::applyCategoryTableOverride($row);
             }
         }
 
@@ -170,7 +175,7 @@ final class CategoryTypeMap
         if ($gid !== null) {
             foreach (self::categoryMappings() as $row) {
                 if (($row['shopify_taxonomy_gid'] ?? null) === $gid) {
-                    return $row;
+                    return self::applyCategoryTableOverride($row);
                 }
             }
         }
@@ -197,7 +202,7 @@ final class CategoryTypeMap
 
         foreach (self::MAPPINGS as $row) {
             if (strcasecmp($row['type'], $normalized) === 0) {
-                return $row;
+                return self::applyCategoryTableOverride($row);
             }
         }
 
@@ -323,5 +328,39 @@ final class CategoryTypeMap
     private static function categoryMappings(): array
     {
         return array_merge(self::MAPPINGS, self::EXTRA_CATEGORY_MAPPINGS);
+    }
+
+    private static function applyCategoryTableOverride(array $row): array
+    {
+        $categoryName = trim((string) ($row['category'] ?? ''));
+        if ($categoryName === '') {
+            return $row;
+        }
+
+        $override = self::googleCategoryByName()[$categoryName] ?? null;
+        if (is_string($override) && trim($override) !== '') {
+            $row['google_product_category'] = trim($override);
+        }
+
+        return $row;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function googleCategoryByName(): array
+    {
+        if (self::$googleCategoryByNameCache !== null) {
+            return self::$googleCategoryByNameCache;
+        }
+
+        self::$googleCategoryByNameCache = Category::query()
+            ->whereNotNull('google_product_category')
+            ->where('google_product_category', '!=', '')
+            ->pluck('google_product_category', 'name')
+            ->mapWithKeys(fn ($value, $key): array => [trim((string) $key) => trim((string) $value)])
+            ->all();
+
+        return self::$googleCategoryByNameCache;
     }
 }

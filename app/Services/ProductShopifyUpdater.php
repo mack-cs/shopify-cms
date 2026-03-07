@@ -262,7 +262,7 @@ final class ProductShopifyUpdater
     //     return $warnings;
     // }
 
-    
+
 /**
  * @return array<int, array{product_id:int, warning:string}>
  */
@@ -671,6 +671,25 @@ private function updateProduct(Product $product): array
     ): array
     {
         $warnings = [];
+        $primaryRow = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+        $primaryRowData = is_array($primaryRow?->data) ? $primaryRow->data : [];
+        $primaryCostPerItem = $this->valueFromRow($primaryRowData, HeaderStore::COST_PER_ITEM, null);
+        $primaryWeightUnit = $this->valueFromRow($primaryRowData, HeaderStore::VARIANT_WEIGHT_UNIT, null);
+        $primaryGrams = $this->valueFromRow($primaryRowData, HeaderStore::VARIANT_GRAMS, null);
+        logger()->info('Shopify variant/inventory update entry', [
+            'product_id' => $product->id,
+            'handle' => $product->handle,
+            'row_data_count' => count($rowDataList),
+            'has_primary_cost_per_item' => $primaryCostPerItem !== null,
+            'primary_cost_per_item' => $primaryCostPerItem,
+            'primary_weight_unit' => $primaryWeightUnit,
+            'primary_grams' => $primaryGrams,
+        ]);
+
         $variantNodes = data_get($details, 'variants.nodes', []);
         if (!is_array($variantNodes) || empty($variantNodes)) {
             return $warnings;
@@ -696,6 +715,16 @@ private function updateProduct(Product $product): array
             if (!is_array($rowData)) {
                 continue;
             }
+            logger()->info('Shopify variant row data keys', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'row_index' => $rowIndex,
+                'row_keys' => array_keys($rowData),
+                'expected_variant_price_key' => HeaderStore::VARIANT_PRICE,
+                'expected_weight_unit_key' => HeaderStore::VARIANT_WEIGHT_UNIT,
+                'expected_grams_key' => HeaderStore::VARIANT_GRAMS,
+                'expected_cost_key' => HeaderStore::COST_PER_ITEM,
+            ]);
 
             $rowSku = $this->valueFromRow($rowData, HeaderStore::VARIANT_SKU, null);
             $localVariant = $rowSku !== null
@@ -717,21 +746,52 @@ private function updateProduct(Product $product): array
             if ($variantId) {
                 $input = ['id' => $variantId];
 
-                // Prefer edited local variant values; use row data only as fallback.
-                $priceRaw = $localVariant?->price;
-                if ($priceRaw === null) {
-                    $priceRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
-                }
+                // Variant Price from row data is the source of truth for Shopify variant price.
+                $rowVariantPriceRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
+                $localVariantPriceRaw = $localVariant?->price;
+                $priceRaw = $rowVariantPriceRaw ?? $localVariantPriceRaw;
                 $price = $this->normalizeNumeric($priceRaw);
+                logger()->info('Shopify variant price resolution', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'row_index' => $rowIndex,
+                    'variant_id' => $variantId,
+                    'desired_sku' => $desiredSku,
+                    'local_variant_price' => $localVariantPriceRaw,
+                    'row_variant_price' => $rowVariantPriceRaw,
+                    'price_source' => $rowVariantPriceRaw !== null ? 'row.variant_price' : 'local.variant.price',
+                    'resolved_price_raw' => $priceRaw,
+                    'resolved_price_numeric' => $price,
+                ]);
 
                 $compareAtRaw = $localVariant?->compare_at_price;
                 if ($compareAtRaw === null) {
                     $compareAtRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_COMPARE_AT, null);
                 }
                 $compareAt = $this->normalizeNumeric($compareAtRaw);
-                $weightUnit = $this->valueFromRow($rowData, HeaderStore::VARIANT_WEIGHT_UNIT, $localVariant?->weight_unit);
+                $weightUnit = $this->valueFromRow(
+                    $rowData,
+                    HeaderStore::VARIANT_WEIGHT_UNIT,
+                    $localVariant?->weight_unit ?? $primaryWeightUnit
+                );
                 $barcode = $this->valueFromRow($rowData, HeaderStore::VARIANT_BARCODE, $localVariant?->barcode);
-                $grams = $this->normalizeNumeric($this->valueFromRow($rowData, HeaderStore::VARIANT_GRAMS, $localVariant?->weight));
+                $grams = $this->normalizeNumeric(
+                    $this->valueFromRow($rowData, HeaderStore::VARIANT_GRAMS, $localVariant?->weight ?? $primaryGrams)
+                );
+                logger()->info('Shopify variant weight resolution', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'row_index' => $rowIndex,
+                    'variant_id' => $variantId,
+                    'row_weight_unit' => $this->valueFromRow($rowData, HeaderStore::VARIANT_WEIGHT_UNIT, null),
+                    'local_weight_unit' => $localVariant?->weight_unit,
+                    'primary_weight_unit' => $primaryWeightUnit,
+                    'resolved_weight_unit' => $weightUnit,
+                    'row_grams' => $this->valueFromRow($rowData, HeaderStore::VARIANT_GRAMS, null),
+                    'local_grams' => $localVariant?->weight,
+                    'primary_grams' => $primaryGrams,
+                    'resolved_grams' => $grams,
+                ]);
 
                 $optionValues = $this->variantOptionValuesFromRow($rowData, $variantNode);
 
@@ -758,16 +818,55 @@ private function updateProduct(Product $product): array
                     $input['weight'] = $this->weightFromGrams($grams, $unit);
                 } elseif ($weightUnit !== null) {
                     $input['weightUnit'] = $this->mapWeightUnit($weightUnit);
+                } else {
+                    logger()->warning('Shopify variant weight skipped (no grams and no weight unit)', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'row_index' => $rowIndex,
+                        'variant_id' => $variantId,
+                    ]);
                 }
 
                 if (count($input) > 1) {
+                    logger()->info('Shopify variant payload queued', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'variant_id' => $variantId,
+                        'payload' => $input,
+                    ]);
                     $variantInputs[] = $input;
+                } else {
+                    logger()->warning('Shopify variant payload skipped (no mutable fields)', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'variant_id' => $variantId,
+                        'desired_sku' => $desiredSku,
+                    ]);
                 }
             }
 
             // Cost per item: InventoryItemInput.cost uses shop default currency.
-            $costPerItem = $this->normalizeNumeric($rowData[HeaderStore::COST_PER_ITEM] ?? null);
+            $costPerItemRaw = $this->valueFromRow($rowData, HeaderStore::COST_PER_ITEM, $primaryCostPerItem);
+            $costPerItem = $this->normalizeNumeric($costPerItemRaw);
+            logger()->info('Shopify cost per item resolution', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'row_index' => $rowIndex,
+                'variant_id' => $variantId,
+                'row_cost_per_item' => $rowData[HeaderStore::COST_PER_ITEM] ?? null,
+                'primary_cost_per_item' => $primaryCostPerItem,
+                'resolved_cost_per_item_raw' => $costPerItemRaw,
+                'resolved_cost_per_item_numeric' => $costPerItem,
+            ]);
             if ($inventoryItemId && $costPerItem !== null) {
+                logger()->info('Shopify cost per item mutation start', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'row_index' => $rowIndex,
+                    'variant_id' => $variantId,
+                    'inventory_item_id' => $inventoryItemId,
+                    'cost' => $costPerItem,
+                ]);
                 $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
                     'inventoryItemId' => $inventoryItemId,
                     'cost' => (string) $costPerItem,
@@ -775,12 +874,39 @@ private function updateProduct(Product $product): array
 
                 $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
                 if (is_array($errors) && !empty($errors)) {
+                    logger()->error('Shopify cost per item mutation errors', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'row_index' => $rowIndex,
+                        'variant_id' => $variantId,
+                        'inventory_item_id' => $inventoryItemId,
+                        'errors' => $errors,
+                    ]);
                     $messages = $this->formatUserErrors($errors);
                     $warnings[] = [
                         'product_id' => $product->id,
                         'warning' => $messages !== '' ? $messages : 'Shopify cost per item update failed.',
                     ];
+                } else {
+                    logger()->info('Shopify cost per item mutation success', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'row_index' => $rowIndex,
+                        'variant_id' => $variantId,
+                        'inventory_item_id' => $inventoryItemId,
+                        'cost' => $costPerItem,
+                    ]);
                 }
+            } else {
+                logger()->warning('Shopify cost per item mutation skipped', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'row_index' => $rowIndex,
+                    'variant_id' => $variantId,
+                    'inventory_item_id' => $inventoryItemId,
+                    'resolved_cost_per_item_numeric' => $costPerItem,
+                    'reason' => !$inventoryItemId ? 'missing_inventory_item_id' : 'missing_cost_per_item',
+                ]);
             }
 
             $inventoryQty = $this->normalizeNumeric(
@@ -814,6 +940,12 @@ private function updateProduct(Product $product): array
         }
 
         if (!empty($variantInputs)) {
+            logger()->info('Shopify variant bulk update start', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'variant_input_count' => count($variantInputs),
+                'variant_inputs' => $variantInputs,
+            ]);
             $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
                 'productId' => $productId,
                 'variants' => $variantInputs,
@@ -821,9 +953,24 @@ private function updateProduct(Product $product): array
 
             $errors = data_get($data, 'productVariantsBulkUpdate.userErrors', []);
             if (is_array($errors) && !empty($errors)) {
+                logger()->error('Shopify variant bulk update errors', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'errors' => $errors,
+                ]);
                 $messages = $this->formatUserErrors($errors);
                 throw new \RuntimeException($messages !== '' ? $messages : 'Shopify variant update failed.');
             }
+            logger()->info('Shopify variant bulk update success', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'updated_count' => count($variantInputs),
+            ]);
+        } else {
+            logger()->warning('Shopify variant bulk update skipped (no variant inputs)', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+            ]);
         }
 
         return $warnings;
@@ -1309,6 +1456,13 @@ GQL;
 
     private function metafieldIdentifierFromHeader(string $header): ?array
     {
+        if ($header === HeaderStore::UVP_SHORT_PARAGRAPH) {
+            return [
+                'namespace' => 'custom',
+                'key' => 'uvp_short_paragraph',
+            ];
+        }
+
         if (!preg_match('/\\(product\\.metafields\\.([^.]+)\\.([^)]+)\\)/', $header, $matches)) {
             return null;
         }
@@ -1333,6 +1487,9 @@ GQL;
     {
         if ($header === HeaderStore::SEO_DEINDEX) {
             return 'boolean';
+        }
+        if ($header === HeaderStore::UVP_SHORT_PARAGRAPH) {
+            return 'rich_text_field';
         }
 
         return 'single_line_text_field';
@@ -1364,6 +1521,24 @@ GQL;
         if ($type === 'number_decimal') {
             $number = $this->normalizeNumeric($trimmed);
             return $number === null ? null : rtrim(rtrim(number_format($number, 6, '.', ''), '0'), '.');
+        }
+
+        if ($type === 'rich_text_field') {
+            $decoded = json_decode($trimmed, true);
+            if (is_array($decoded) && (($decoded['type'] ?? null) === 'root')) {
+                return json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+
+            return json_encode([
+                'type' => 'root',
+                'children' => [[
+                    'type' => 'paragraph',
+                    'children' => [[
+                        'type' => 'text',
+                        'value' => $trimmed,
+                    ]],
+                ]],
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         }
 
         if (str_starts_with($type, 'list.') && str_ends_with($type, 'reference')) {
@@ -2378,5 +2553,3 @@ GQL;
         return $trimmed === '';
     }
 }
-
-

@@ -88,7 +88,17 @@ class NewProductDraftResource extends Resource
                                                 $draftQuery->where('id', '!=', $record->id);
                                             }
 
-                                            if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                            $variantQuery = Variant::query()->where('sku', $sku);
+                                            if ($record && $record->handle) {
+                                                $currentProductId = Product::query()
+                                                    ->where('handle', $record->handle)
+                                                    ->value('id');
+                                                if ($currentProductId) {
+                                                    $variantQuery->where('product_id', '!=', $currentProductId);
+                                                }
+                                            }
+
+                                            if ($draftQuery->exists() || $variantQuery->exists()) {
                                                 $fail('SKU must be unique across new products and existing products.');
                                             }
                                         };
@@ -238,7 +248,8 @@ class NewProductDraftResource extends Resource
                                 }),
                             TextInput::make('google_product_category')
                                 ->label('Google Product Category')
-                                ->disabled(),
+                                ->disabled()
+                                ->dehydrated(),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -430,15 +441,26 @@ class NewProductDraftResource extends Resource
                                     HeaderStore::PRODUCT_METALS
                                 ))
                                 ->searchable()
-                                ->reactive(),
+                                ->reactive()
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (self::normalizeDesignAliasValue($state) === null) {
+                                        $component->state(null);
+                                    }
+                                }),
                             Select::make('colour_style')
-                                ->label('Colour Style')
+                                ->label('Pattern category')
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PATTERN_CATEGORY
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PATTERN_CATEGORY,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
-                                ->reactive(),
+                                ->reactive()
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (self::normalizeDesignAliasValue($state) === null) {
+                                        $component->state(null);
+                                    }
+                                }),
                             Select::make('size')
                                 ->label('Size')
                                 ->placeholder('Select option')
@@ -446,7 +468,12 @@ class NewProductDraftResource extends Resource
                                     HeaderStore::SIZE
                                 ))
                                 ->searchable()
-                                ->reactive(),
+                                ->reactive()
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (self::normalizeDesignAliasValue($state) === null) {
+                                        $component->state(null);
+                                    }
+                                }),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -694,6 +721,25 @@ class NewProductDraftResource extends Resource
             ->all();
     }
 
+    private static function normalizeDesignAliasValue(mixed $value): ?string
+    {
+        if (!is_scalar($value)) {
+            return null;
+        }
+
+        $normalized = trim((string) $value);
+        if ($normalized === '') {
+            return null;
+        }
+
+        $lower = strtolower($normalized);
+        if (in_array($lower, ['non applicable', 'not applicable', 'n/a', 'na'], true)) {
+            return null;
+        }
+
+        return $normalized;
+    }
+
     private static function filterTags(Get $get, ?string $vendor = null, ?string $productType = null): array
     {
         $collection = $get('collection_filter');
@@ -758,7 +804,20 @@ class NewProductDraftResource extends Resource
                                     $draftQuery->where('id', '!=', $recordId);
                                 }
 
-                                if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                $variantQuery = Variant::query()->where('sku', $sku);
+                                if ($recordId) {
+                                    $record = NewProductDraft::query()->find($recordId);
+                                    if ($record?->handle) {
+                                        $currentProductId = Product::query()
+                                            ->where('handle', $record->handle)
+                                            ->value('id');
+                                        if ($currentProductId) {
+                                            $variantQuery->where('product_id', '!=', $currentProductId);
+                                        }
+                                    }
+                                }
+
+                                if ($draftQuery->exists() || $variantQuery->exists()) {
                                     $fail('SKU must be unique across new products and existing products.');
                                 }
                             };
@@ -820,12 +879,14 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_design')
                     ->label('Product design')
+                    ->formatStateUsing(fn ($state): string => self::normalizeDesignAliasValue($state) ?? '')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('metal')
                     ->label('Metal')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('colour_style')
-                    ->label('Colour Style')
+                    ->label('Pattern category')
+                    ->formatStateUsing(fn ($state): string => self::normalizeDesignAliasValue($state) ?? '')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('size')
                     ->label('Size')

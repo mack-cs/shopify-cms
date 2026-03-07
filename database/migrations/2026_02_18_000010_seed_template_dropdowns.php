@@ -31,18 +31,15 @@ return new class extends Migration
             HeaderStore::PRODUCT_METALS => [
                 'Gold',
                 'Silver',
-                'Not Applicable',
             ],
             HeaderStore::PATTERN_CATEGORY => [
                 'Solid',
                 'Multicolour',
-                'Not Applicable',
             ],
             HeaderStore::SIZE => [
                 'Small',
                 'Medium',
                 'Large',
-                'Not Applicable',
             ],
         ];
 

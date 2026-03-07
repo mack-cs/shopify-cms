@@ -9,6 +9,8 @@ use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Enums\RolesEnum;
 use App\Services\Normalizer;
+use App\Services\HeaderStore;
+use App\Services\DropdownCollectionCatalog;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -25,9 +27,12 @@ class PendingDropdownOptionResource extends Resource
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'Pending Dropdown Values';
     protected static ?int $navigationSort = 5;
+    private static bool $cleanedUnknownPendingRows = false;
 
     public static function table(Table $table): Table
     {
+        self::cleanupUnknownPendingRows();
+
         return $table
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
                 ->where('active', false)
@@ -36,7 +41,11 @@ class PendingDropdownOptionResource extends Resource
             ->columns([
                 TextColumn::make('header')->searchable()->wrap(),
                 TextColumn::make('value')->searchable()->wrap(),
-                TextColumn::make('collection_style')->label('Collection')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('collection_style')
+                    ->label('Collection')
+                    ->state(function (DropdownOption $record): string {
+                        return self::collectionLabel($record);
+                    }),
                 TextColumn::make('collection_tag_primary')->label('Tag 1')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('collection_tag_secondary')->label('Tag 2')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('usage_count')
@@ -69,12 +78,9 @@ class PendingDropdownOptionResource extends Resource
                     ->label('Approve')
                     ->icon('heroicon-o-check')
                     ->requiresConfirmation()
+                    ->disabled(fn (DropdownOption $record): bool => blank(self::resolvedCollectionStyle($record)) || blank($record->collection_tag_primary))
                     ->action(function (DropdownOption $record): void {
-                        if (!$record->active) {
-                            $record->update(['active' => true]);
-                            self::logChange($record, 'active', 'false', 'true');
-                            self::recalculateErrorsForOption($record);
-                        }
+                        self::approveForApplicableCollections($record);
                     }),
                 Tables\Actions\Action::make('reject')
                     ->label('Reject')
@@ -82,14 +88,7 @@ class PendingDropdownOptionResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->action(function (DropdownOption $record): void {
-                        $header = $record->header;
-                        $value = $record->value;
-                        $tagPrimary = $record->collection_tag_primary;
-                        $tagSecondary = $record->collection_tag_secondary;
-
-                        self::logChange($record, 'deleted', 'false', 'true');
-                        $record->delete();
-                        self::recalculateErrorsForOptionData($header, $value, $tagPrimary, $tagSecondary);
+                        self::rejectForApplicableCollections($record);
                     }),
             ])
             ->bulkActions([
@@ -98,13 +97,20 @@ class PendingDropdownOptionResource extends Resource
                     ->icon('heroicon-o-check-badge')
                     ->requiresConfirmation()
                     ->action(function ($records): void {
+                        $handled = [];
+
                         foreach ($records as $record) {
-                            if ($record->active) {
+                            if ($record->active || blank(self::resolvedCollectionStyle($record)) || blank($record->collection_tag_primary)) {
                                 continue;
                             }
-                            $record->update(['active' => true]);
-                            self::logChange($record, 'active', 'false', 'true');
-                            self::recalculateErrorsForOption($record);
+
+                            $key = strtolower($record->header . '|' . $record->value);
+                            if (isset($handled[$key])) {
+                                continue;
+                            }
+                            $handled[$key] = true;
+
+                            self::approveForApplicableCollections($record);
                         }
                     })
                     ->deselectRecordsAfterCompletion(),
@@ -114,15 +120,14 @@ class PendingDropdownOptionResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->action(function ($records): void {
+                        $handled = [];
                         foreach ($records as $record) {
-                            $header = $record->header;
-                            $value = $record->value;
-                            $tagPrimary = $record->collection_tag_primary;
-                            $tagSecondary = $record->collection_tag_secondary;
-
-                            self::logChange($record, 'deleted', 'false', 'true');
-                            $record->delete();
-                            self::recalculateErrorsForOptionData($header, $value, $tagPrimary, $tagSecondary);
+                            $key = strtolower($record->header . '|' . $record->value);
+                            if (isset($handled[$key])) {
+                                continue;
+                            }
+                            $handled[$key] = true;
+                            self::rejectForApplicableCollections($record);
                         }
                     })
                     ->deselectRecordsAfterCompletion(),
@@ -225,6 +230,16 @@ class PendingDropdownOptionResource extends Resource
         });
     }
 
+    private static function recalculateAllProductErrors(): void
+    {
+        $normalizer = app(Normalizer::class);
+        Product::query()->chunkById(200, function ($products) use ($normalizer): void {
+            foreach ($products as $product) {
+                $normalizer->recalculateErrorsForProduct($product);
+            }
+        });
+    }
+
     private static function recalculateErrorsForOptionData(
         string $header,
         string $value,
@@ -276,5 +291,212 @@ class PendingDropdownOptionResource extends Resource
         }
 
         return $query->pluck('products.id')->all();
+    }
+
+    private static function approveForApplicableCollections(DropdownOption $record): void
+    {
+        if (blank($record->collection_style)) {
+            $resolved = self::resolvedCollectionStyle($record);
+            if ($resolved !== null) {
+                $record->update(['collection_style' => $resolved]);
+                $record->refresh();
+            }
+        }
+
+        $contexts = self::applicableCollectionContexts($record->header);
+        if (empty($contexts)) {
+            return;
+        }
+
+        foreach ($contexts as $ctx) {
+            $existing = DropdownOption::query()
+                ->where('header', $record->header)
+                ->whereRaw('LOWER(value) = ?', [strtolower((string) $record->value)])
+                ->where('collection_tag_primary', $ctx['tag_primary'])
+                ->where(function ($query) use ($ctx): void {
+                    if ($ctx['tag_secondary'] !== null) {
+                        $query->where('collection_tag_secondary', $ctx['tag_secondary']);
+                    } else {
+                        $query->whereNull('collection_tag_secondary');
+                    }
+                })
+                ->first();
+
+            if ($existing) {
+                if (!$existing->active || $existing->collection_style !== $ctx['collection_style']) {
+                    $existing->update([
+                        'active' => true,
+                        'collection_style' => $ctx['collection_style'],
+                    ]);
+                }
+                continue;
+            }
+
+            DropdownOption::create([
+                'header' => $record->header,
+                'value' => $record->value,
+                'collection_style' => $ctx['collection_style'],
+                'collection_tag_primary' => $ctx['tag_primary'],
+                'collection_tag_secondary' => $ctx['tag_secondary'],
+                'active' => true,
+                'sort_order' => 0,
+            ]);
+        }
+
+        DropdownOption::query()
+            ->where('header', $record->header)
+            ->whereRaw('LOWER(value) = ?', [strtolower((string) $record->value)])
+            ->where('active', false)
+            ->delete();
+
+        self::logChange($record, 'active', 'false', 'true');
+        self::recalculateAllProductErrors();
+    }
+
+    private static function rejectForApplicableCollections(DropdownOption $record): void
+    {
+        DropdownOption::query()
+            ->where('header', $record->header)
+            ->whereRaw('LOWER(value) = ?', [strtolower((string) $record->value)])
+            ->where('active', false)
+            ->delete();
+
+        self::logChange($record, 'deleted', 'false', 'true');
+        self::recalculateAllProductErrors();
+    }
+
+    private static function resolvedCollectionStyle(DropdownOption $record): ?string
+    {
+        $current = trim((string) ($record->collection_style ?? ''));
+        if ($current !== '' && self::isKnownCollectionStyle($current)) {
+            return $current;
+        }
+
+        $primary = trim((string) ($record->collection_tag_primary ?? ''));
+        if ($primary === '') {
+            return null;
+        }
+        $secondary = trim((string) ($record->collection_tag_secondary ?? ''));
+        $contexts = app(DropdownCollectionCatalog::class)->contexts();
+        foreach ($contexts as $ctx) {
+            if (strcasecmp((string) $ctx['tag_primary'], $primary) !== 0) {
+                continue;
+            }
+            $ctxSecondary = (string) ($ctx['tag_secondary'] ?? '');
+            if ($secondary !== '' && strcasecmp($ctxSecondary, $secondary) !== 0) {
+                continue;
+            }
+            return (string) $ctx['collection_style'];
+        }
+
+        foreach ($contexts as $ctx) {
+            if (strcasecmp((string) $ctx['tag_primary'], $primary) === 0) {
+                return (string) $ctx['collection_style'];
+            }
+        }
+
+        return null;
+    }
+
+    private static function collectionLabel(DropdownOption $record): string
+    {
+        $resolved = self::resolvedCollectionStyle($record);
+        if ($resolved !== null) {
+            return $resolved;
+        }
+
+        $primary = trim((string) ($record->collection_tag_primary ?? ''));
+        $secondary = trim((string) ($record->collection_tag_secondary ?? ''));
+        if ($primary !== '' && $secondary !== '') {
+            return "{$primary} / {$secondary}";
+        }
+        if ($primary !== '') {
+            return $primary;
+        }
+
+        return 'Unmapped collection';
+    }
+
+    private static function isKnownCollectionStyle(string $style): bool
+    {
+        $style = strtolower(trim($style));
+        if ($style === '') {
+            return false;
+        }
+
+        foreach (app(DropdownCollectionCatalog::class)->contexts() as $ctx) {
+            if (strtolower((string) ($ctx['collection_style'] ?? '')) === $style) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function cleanupUnknownPendingRows(): void
+    {
+        if (self::$cleanedUnknownPendingRows) {
+            return;
+        }
+        self::$cleanedUnknownPendingRows = true;
+
+        $allowed = [];
+        foreach (app(DropdownCollectionCatalog::class)->contexts() as $ctx) {
+            $allowed[strtolower(implode('|', [
+                (string) ($ctx['collection_style'] ?? ''),
+                (string) ($ctx['tag_primary'] ?? ''),
+                (string) ($ctx['tag_secondary'] ?? ''),
+            ]))] = true;
+        }
+
+        DropdownOption::query()
+            ->where('active', false)
+            ->chunkById(200, function ($rows) use ($allowed): void {
+                foreach ($rows as $row) {
+                    $key = strtolower(implode('|', [
+                        trim((string) ($row->collection_style ?? '')),
+                        trim((string) ($row->collection_tag_primary ?? '')),
+                        trim((string) ($row->collection_tag_secondary ?? '')),
+                    ]));
+
+                    if ($key === '||') {
+                        $row->delete();
+                        continue;
+                    }
+
+                    if (!isset($allowed[$key])) {
+                        $row->delete();
+                    }
+                }
+            });
+    }
+
+    /**
+     * @return array<int, array{collection_style:string,tag_primary:string,tag_secondary:?string}>
+     */
+    private static function applicableCollectionContexts(string $header): array
+    {
+        $contexts = app(DropdownCollectionCatalog::class)->contexts();
+
+        $needle = match ($header) {
+            HeaderStore::BRACELET_DESIGN => 'bracelet',
+            'Necklace design (product.metafields.shopify.necklace-design)' => 'necklace',
+            'Earring design (product.metafields.shopify.earring-design)' => 'earring',
+            default => null,
+        };
+
+        if ($needle === null) {
+            return $contexts;
+        }
+
+        return array_values(array_filter($contexts, function (array $ctx) use ($needle): bool {
+            $haystack = strtolower(implode(' ', array_filter([
+                $ctx['collection_style'] ?? '',
+                $ctx['tag_primary'] ?? '',
+                $ctx['tag_secondary'] ?? '',
+            ])));
+
+            return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
+        }));
     }
 }

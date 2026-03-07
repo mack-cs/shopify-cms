@@ -20,12 +20,13 @@ class EditProduct extends EditRecord
         $headers = $this->record->import?->headers ?? [];
         $allowed = array_flip(HeaderStore::extraProductHeaders($headers));
 
-        $row = ShopifyRow::where('import_id', $this->record->import_id)
+        $rows = ShopifyRow::where('import_id', $this->record->import_id)
             ->where('handle', $this->record->handle)
             ->where('row_type', 'product_primary')
-            ->first();
+            ->orderByDesc('id')
+            ->get();
 
-        if (!$row) {
+        if ($rows->isEmpty()) {
             $rowIndex = (int) (ShopifyRow::where('import_id', $this->record->import_id)->max('row_index') ?? 0);
             $row = ShopifyRow::create([
                 'import_id' => $this->record->import_id,
@@ -47,10 +48,27 @@ class EditProduct extends EditRecord
                     HeaderStore::GOOGLE_PRODUCT_CATEGORY => $this->record->google_product_category,
                 ],
             ]);
+            $rows = collect([$row]);
         }
 
-        $data = $row->data ?? [];
+        $data = ($rows->first()->data ?? []);
         $formState = $this->form->getState();
+        if (array_key_exists('color_string', $formState)) {
+            $color = $formState['color_string'];
+            if (is_array($color)) {
+                $color = implode('; ', array_values(array_unique(array_filter(array_map(
+                    fn ($value) => trim((string) $value),
+                    $color
+                )))));
+            }
+            $data[HeaderStore::COLOR_METAFIELD] = $color ?? '';
+        }
+        if (array_key_exists('variant_price', $formState)) {
+            $data[HeaderStore::VARIANT_PRICE] = $formState['variant_price'] ?? '';
+        }
+        if (array_key_exists('uvp_short_paragraph', $formState)) {
+            $data[HeaderStore::UVP_SHORT_PARAGRAPH] = $formState['uvp_short_paragraph'] ?? '';
+        }
         if (array_key_exists('google_shopping_age_group', $formState)) {
             $value = trim((string) ($formState['google_shopping_age_group'] ?? ''));
             $data[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $value === '' ? '' : strtolower($value);
@@ -79,9 +97,15 @@ class EditProduct extends EditRecord
         if (array_key_exists('jewelry_type', $formState)) {
             $data[HeaderStore::JEWELRY_TYPE] = $formState['jewelry_type'] ?? '';
         }
-        if (array_key_exists('bracelet_design', $formState)) {
-            $data[HeaderStore::BRACELET_DESIGN] = $formState['bracelet_design'] ?? '';
+        $data[HeaderStore::BRACELET_DESIGN] = $formState['bracelet_design'] ?? '';
+        if (array_key_exists('necklace_design', $formState)) {
+            $data['Necklace design (product.metafields.shopify.necklace-design)'] = $formState['necklace_design'] ?? '';
         }
+        if (array_key_exists('earring_design', $formState)) {
+            $data['Earring design (product.metafields.shopify.earring-design)'] = $formState['earring_design'] ?? '';
+        }
+        $data[HeaderStore::PATTERN_CATEGORY] = $formState['pattern_category'] ?? '';
+        $data[HeaderStore::PRODUCT_METALS] = $formState['product_metals'] ?? '';
         if (array_key_exists('cost_per_item', $formState)) {
             $data['Cost per item'] = $formState['cost_per_item'] ?? '';
         }
@@ -93,14 +117,24 @@ class EditProduct extends EditRecord
             $data[$key] = $item['value'] ?? '';
         }
 
-        $row->data = $data;
-        $row->save();
+        foreach ($rows as $row) {
+            $row->data = $data;
+            $row->save();
+        }
 
         if (array_key_exists('variant_weight_unit', $formState)) {
             $normalized = trim((string) ($formState['variant_weight_unit'] ?? ''));
             $this->record->variants()->update([
                 'weight_unit' => $normalized === '' ? null : $normalized,
             ]);
+        }
+        if (array_key_exists('variant_price', $formState)) {
+            $raw = trim((string) ($formState['variant_price'] ?? ''));
+            if ($raw !== '') {
+                $this->record->variants()->update([
+                    'price' => $raw,
+                ]);
+            }
         }
 
         app(\App\Services\Normalizer::class)->recalculateErrorsForProduct($this->record);

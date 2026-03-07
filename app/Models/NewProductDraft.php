@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
+use App\Services\CategoryTypeMap;
 
 class NewProductDraft extends Model
 {
@@ -54,6 +55,46 @@ class NewProductDraft extends Model
         'variant_inventory_qty' => 'integer',
         'material_cost' => 'decimal:2',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (NewProductDraft $draft): void {
+            $current = is_string($draft->google_product_category)
+                ? trim($draft->google_product_category)
+                : '';
+            if ($current !== '') {
+                return;
+            }
+
+            $resolved = CategoryTypeMap::resolve(
+                is_string($draft->product_category) ? $draft->product_category : null,
+                is_string($draft->type) ? $draft->type : null,
+                null
+            );
+
+            $google = trim((string) ($resolved['google_product_category'] ?? ''));
+            if ($google !== '') {
+                $draft->google_product_category = $google;
+            }
+        });
+    }
+
+    public function getGoogleProductCategoryAttribute($value): ?string
+    {
+        $current = is_string($value) ? trim($value) : '';
+        if ($current !== '') {
+            return $current;
+        }
+
+        $resolved = CategoryTypeMap::resolve(
+            is_string($this->attributes['product_category'] ?? null) ? $this->attributes['product_category'] : null,
+            is_string($this->attributes['type'] ?? null) ? $this->attributes['type'] : null,
+            null
+        );
+
+        $google = trim((string) ($resolved['google_product_category'] ?? ''));
+        return $google === '' ? null : $google;
+    }
 
     public function imageUrl(): ?string
     {

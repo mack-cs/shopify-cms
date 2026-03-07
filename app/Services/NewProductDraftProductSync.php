@@ -8,10 +8,47 @@ use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
 use App\Services\HeaderStore;
+use App\Services\Normalizer;
 use Illuminate\Support\Collection;
 
 final class NewProductDraftProductSync
 {
+    public function syncToExistingProduct(NewProductDraft $draft, bool $ensureApprovalReset = true): bool
+    {
+        if (!$draft->handle) {
+            return false;
+        }
+
+        $product = Product::query()
+            ->where('handle', $draft->handle)
+            ->first();
+
+        if (!$product) {
+            return false;
+        }
+
+        $initialApprovalVersion = (int) ($product->approval_version ?? 1);
+        $data = $this->mapDraftToProduct($draft);
+
+        $product->fill($data)->save();
+        $this->syncVariantFromDraft($product, $draft);
+        $this->syncCostPerItemRow($product, $draft);
+        $this->syncShopifyRowFieldsFromDraft($product, $draft);
+
+        $product->refresh();
+        if ($ensureApprovalReset && (int) ($product->approval_version ?? 1) === $initialApprovalVersion) {
+            Product::withoutEvents(function () use ($product): void {
+                $product->forceFill([
+                    'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
+                ])->save();
+            });
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
+
+        return true;
+    }
+
     /**
      * @param Collection<int, NewProductDraft>|null $drafts
      * @return array{updated:int, created:int, skipped_unapproved:int, skipped_missing_handle:int, skipped_missing_import:int}
@@ -51,10 +88,7 @@ final class NewProductDraftProductSync
             $data = $this->mapDraftToProduct($draft);
 
             if ($product) {
-                $product->fill($data)->save();
-                $this->syncVariantFromDraft($product, $draft);
-                $this->syncCostPerItemRow($product, $draft);
-                $this->syncShopifyRowFieldsFromDraft($product, $draft);
+                $this->syncToExistingProduct($draft, ensureApprovalReset: false);
                 $updated++;
                 continue;
             }
@@ -97,6 +131,7 @@ final class NewProductDraftProductSync
             'status' => $draft->status,
             'published' => $draft->published,
             'color_string' => $draft->color_string,
+            'uvp_short_paragraph' => $draft->uvp_short_paragraph,
             'batch' => $draft->batch,
         ], static fn ($value) => $value !== null);
     }
@@ -129,7 +164,7 @@ final class NewProductDraftProductSync
 
     private function syncCostPerItemRow(Product $product, NewProductDraft $draft): void
     {
-        if ($draft->variant_price === null && $draft->variant_inventory_qty === null) {
+        if ($draft->material_cost === null && $draft->variant_inventory_qty === null) {
             return;
         }
 
@@ -142,8 +177,8 @@ final class NewProductDraftProductSync
             return;
         }
 
-        if ($draft->variant_price !== null) {
-            $row->set(HeaderStore::COST_PER_ITEM, (string) $draft->variant_price);
+        if ($draft->material_cost !== null) {
+            $row->set(HeaderStore::COST_PER_ITEM, (string) $draft->material_cost);
         }
         if ($draft->variant_inventory_qty !== null) {
             $row->set(HeaderStore::VARIANT_INVENTORY_QTY, (string) $draft->variant_inventory_qty);
@@ -169,11 +204,22 @@ final class NewProductDraftProductSync
         $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials);
         $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions);
         $this->addRowUpdate($updates, HeaderStore::BRACELET_DESIGN, $draft->product_design);
-        $this->addRowUpdate($updates, HeaderStore::PRODUCT_METALS, $draft->metal);
-        $this->addRowUpdate($updates, HeaderStore::PATTERN_CATEGORY, $draft->colour_style);
+        if ($draft->metal === null || trim((string) $draft->metal) === '') {
+            // Clearing in draft must clear the Shopify row value too.
+            $updates[HeaderStore::PRODUCT_METALS] = '';
+        } else {
+            $this->addRowUpdate($updates, HeaderStore::PRODUCT_METALS, $draft->metal);
+        }
+        if ($draft->colour_style === null || trim((string) $draft->colour_style) === '') {
+            // Clearing in draft must clear the Shopify row value too.
+            $updates[HeaderStore::PATTERN_CATEGORY] = '';
+        } else {
+            $this->addRowUpdate($updates, HeaderStore::PATTERN_CATEGORY, $draft->colour_style);
+        }
         $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size);
         $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings);
         $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name);
+        $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products);
 
         if (empty($updates)) {

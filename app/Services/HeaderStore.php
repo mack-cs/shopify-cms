@@ -83,6 +83,7 @@ final class HeaderStore
             self::TARGET_GENDER,
             self::AGE_GROUP,
             self::BRACELET_DESIGN,
+            self::UVP_SHORT_PARAGRAPH,
         ];
     }
 

@@ -137,9 +137,7 @@ class ProductObserver
         if ($imageUrl) {
             $payload['image_url'] = $imageUrl;
         }
-        if ($costPerItem !== null && $costPerItem !== '') {
-            $payload['variant_price'] = $costPerItem;
-        } elseif ($variant?->price !== null) {
+        if ($variant?->price !== null) {
             $payload['variant_price'] = $variant->price;
         }
         if ($variant?->compare_at_price !== null) {
@@ -160,6 +158,7 @@ class ProductObserver
             $payload['size'] = $row->get(HeaderStore::SIZE, null);
             $payload['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
             $payload['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
+            $payload['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
             $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
         }
 

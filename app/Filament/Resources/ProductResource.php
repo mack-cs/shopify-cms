@@ -158,7 +158,8 @@ class ProductResource extends Resource
                                     }),
                                 TextInput::make('google_product_category')
                                     ->label('Google Product Category')
-                                    ->disabled(),
+                                    ->disabled()
+                                    ->dehydrated(),
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                                 Select::make('product_category')
@@ -597,6 +598,20 @@ class ProductResource extends Resource
                                     }
                                     $component->state(self::shopifyRowValue($record, HeaderStore::BRACELET_DESIGN));
                                 }),
+                            TextInput::make('variant_price')
+                                ->label('Variant price')
+                                ->numeric()
+                                ->inputMode('decimal')
+                                ->afterStateHydrated(function (TextInput $component, ?Product $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+                                    $value = $record->variants()->orderBy('id')->value('price');
+                                    if ($value === null || trim((string) $value) === '') {
+                                        $value = self::shopifyRowValue($record, HeaderStore::VARIANT_PRICE);
+                                    }
+                                    $component->state($value);
+                                }),
                             TextInput::make('cost_per_item')
                                 ->label('Cost per item')
                                 ->numeric()
@@ -741,16 +756,20 @@ class ProductResource extends Resource
                             ->numeric()
                             ->inputMode('decimal')
                             ->helperText('Internal only. Not exported.'),
-                        TextInput::make('batch')
-                            ->label('Batch')
-                            ->datalist(fn () => Product::query()
-                                ->whereNotNull('batch')
-                                ->distinct()
-                                ->orderBy('batch')
-                                ->pluck('batch')
-                                ->all())
-                            ->placeholder('import_YYYYMMDDH')
-                            ->helperText('Internal only. Not exported.'),
+                            TextInput::make('batch')
+                                ->label('Batch')
+                                ->datalist(fn () => Product::query()
+                                    ->whereNotNull('batch')
+                                    ->distinct()
+                                    ->orderBy('batch')
+                                    ->pluck('batch')
+                                    ->all())
+                                ->placeholder('import_YYYYMMDDH')
+                                ->helperText('Internal only. Not exported.'),
+                            Textarea::make('uvp_short_paragraph')
+                                ->label('UVP Short Paragraph')
+                                ->rows(3)
+                                ->columnSpanFull(),
                         ])->columnSpan(1),
                     ]),
                 ]),
@@ -1492,7 +1511,11 @@ class ProductResource extends Resource
         $ageGroupRaw = trim(self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP));
         $data['google_shopping_age_group'] = $ageGroupRaw !== '' ? $ageGroupRaw : null;
         $data['target_gender'] = self::shopifyRowValue($record, HeaderStore::TARGET_GENDER);
+        $data['variant_price'] = $record->variants()->orderBy('id')->value('price')
+            ?? self::shopifyRowValue($record, HeaderStore::VARIANT_PRICE);
         $data['cost_per_item'] = self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM);
+        $data['uvp_short_paragraph'] = $record->uvp_short_paragraph
+            ?? self::shopifyRowValue($record, HeaderStore::UVP_SHORT_PARAGRAPH);
 
         return $data;
     }
@@ -1743,7 +1766,15 @@ class ProductResource extends Resource
         $targetGender = $data['target_gender'] ?? '';
         $ageGroup = $data['age_group'] ?? '';
         $seoDeindex = $data['seo_deindex'] ?? null;
+        $variantPrice = self::nullIfEmpty($data['variant_price'] ?? null);
         $costPerItem = $data['cost_per_item'] ?? '';
+        $colorString = $data['color_string'] ?? null;
+        if (is_array($colorString)) {
+            $colorString = implode('; ', array_values(array_unique(array_filter(array_map(
+                fn ($value) => trim((string) $value),
+                $colorString
+            )))));
+        }
         $materialsAndDimensions = $data['materials_and_dimensions'] ?? '';
         $jewelryMaterial = $data['jewelry_material'] ?? '';
         if (is_array($jewelryMaterial)) {
@@ -1766,6 +1797,7 @@ class ProductResource extends Resource
             'target_gender',
             'age_group',
             'seo_deindex',
+            'variant_price',
             'cost_per_item',
             'materials_and_dimensions',
             'jewelry_material',
@@ -1831,6 +1863,16 @@ class ProductResource extends Resource
             if ($seoDeindex !== null) {
                 $rowUpdates[HeaderStore::SEO_DEINDEX] = $seoDeindex ? 'true' : 'false';
             }
+            $uvpShortParagraph = self::nullIfEmpty($data['uvp_short_paragraph'] ?? null);
+            if ($uvpShortParagraph !== null) {
+                $rowUpdates[HeaderStore::UVP_SHORT_PARAGRAPH] = $uvpShortParagraph;
+            }
+            if ($colorString !== null) {
+                $rowUpdates[HeaderStore::COLOR_METAFIELD] = $colorString;
+            }
+            if ($variantPrice !== null) {
+                $rowUpdates[HeaderStore::VARIANT_PRICE] = $variantPrice;
+            }
             if ($costPerItem !== null) {
                 $rowUpdates['Cost per item'] = $costPerItem ?: '';
             }
@@ -1881,6 +1923,11 @@ class ProductResource extends Resource
             }
             $product->variants()->update([
                 'weight_unit' => $normalized,
+            ]);
+        }
+        if ($variantPrice !== null) {
+            $product->variants()->update([
+                'price' => $variantPrice,
             ]);
         }
 

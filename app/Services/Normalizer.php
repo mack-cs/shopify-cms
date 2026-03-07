@@ -17,6 +17,7 @@ use App\Models\Tag;
 use App\Models\DropdownOption;
 use Illuminate\Support\Facades\DB;
 use App\Services\TagNormalizer;
+use App\Services\DropdownCollectionCatalog;
 
 final class Normalizer
 {
@@ -608,36 +609,38 @@ final class Normalizer
                 continue;
             }
 
+            $targetContexts = $this->targetCollectionContextsForHeader($header);
+            if (empty($targetContexts)) {
+                continue;
+            }
+
             foreach ($values as $value) {
-                $query = DropdownOption::query()
-                    ->where('header', $header)
-                    ->where('value', $value);
+                foreach ($targetContexts as $ctx) {
+                    $query = DropdownOption::query()
+                        ->where('header', $header)
+                        ->whereRaw('LOWER(value) = ?', [strtolower($value)])
+                        ->where('collection_tag_primary', $ctx['tag_primary']);
 
-                if ($collectionContext['tag_primary'] !== null) {
-                    $query->where('collection_tag_primary', $collectionContext['tag_primary']);
-                } else {
-                    $query->whereNull('collection_tag_primary');
+                    if ($ctx['tag_secondary'] !== null) {
+                        $query->where('collection_tag_secondary', $ctx['tag_secondary']);
+                    } else {
+                        $query->whereNull('collection_tag_secondary');
+                    }
+
+                    if ($query->exists()) {
+                        continue;
+                    }
+
+                    DropdownOption::create([
+                        'header' => $header,
+                        'value' => $value,
+                        'collection_style' => $ctx['collection_style'],
+                        'collection_tag_primary' => $ctx['tag_primary'],
+                        'collection_tag_secondary' => $ctx['tag_secondary'],
+                        'active' => false,
+                        'sort_order' => 0,
+                    ]);
                 }
-
-                if ($collectionContext['tag_secondary'] !== null) {
-                    $query->where('collection_tag_secondary', $collectionContext['tag_secondary']);
-                } else {
-                    $query->whereNull('collection_tag_secondary');
-                }
-
-                if ($query->exists()) {
-                    continue;
-                }
-
-                DropdownOption::create([
-                    'header' => $header,
-                    'value' => $value,
-                    'collection_style' => $collectionContext['collection_style'],
-                    'collection_tag_primary' => $collectionContext['tag_primary'],
-                    'collection_tag_secondary' => $collectionContext['tag_secondary'],
-                    'active' => false,
-                    'sort_order' => 0,
-                ]);
             }
         }
     }
@@ -659,10 +662,27 @@ final class Normalizer
                 continue;
             }
 
+            // No configured options for this header/context means there is no rule
+            // to validate against yet, so don't mark inactive.
+            $contextQuery = DropdownOption::query()->where('header', $header);
+            if ($collectionContext['tag_primary'] !== null) {
+                $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
+            } else {
+                $contextQuery->whereNull('collection_tag_primary');
+            }
+            if ($collectionContext['tag_secondary'] !== null) {
+                $contextQuery->where('collection_tag_secondary', $collectionContext['tag_secondary']);
+            } else {
+                $contextQuery->whereNull('collection_tag_secondary');
+            }
+            if (!$contextQuery->exists()) {
+                continue;
+            }
+
             foreach ($values as $value) {
                 $query = DropdownOption::query()
                     ->where('header', $header)
-                    ->where('value', $value);
+                    ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
 
                 if ($collectionContext['tag_primary'] !== null) {
                     $query->where('collection_tag_primary', $collectionContext['tag_primary']);
@@ -701,6 +721,35 @@ final class Normalizer
         ];
     }
 
+    /**
+     * @return array<int, array{collection_style:string,tag_primary:string,tag_secondary:?string}>
+     */
+    private function targetCollectionContextsForHeader(string $header): array
+    {
+        $contexts = app(DropdownCollectionCatalog::class)->contexts();
+
+        $needle = match ($header) {
+            HeaderStore::BRACELET_DESIGN => 'bracelet',
+            'Necklace design (product.metafields.shopify.necklace-design)' => 'necklace',
+            'Earring design (product.metafields.shopify.earring-design)' => 'earring',
+            default => null,
+        };
+
+        if ($needle === null) {
+            return $contexts;
+        }
+
+        return array_values(array_filter($contexts, function (array $ctx) use ($needle): bool {
+            $haystack = strtolower(implode(' ', array_filter([
+                $ctx['collection_style'] ?? '',
+                $ctx['tag_primary'] ?? '',
+                $ctx['tag_secondary'] ?? '',
+            ])));
+
+            return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
+        }));
+    }
+
     private function parseDropdownValues(string $header, mixed $raw): array
     {
         $value = $this->normalizeValue(is_string($raw) ? $raw : null);
@@ -712,11 +761,8 @@ final class Normalizer
             return $this->parseColorTokens($value);
         }
 
-        if (!str_contains($value, ';')) {
-            return [$value];
-        }
-
-        $parts = array_map('trim', explode(';', $value));
+        $normalized = str_replace(',', ';', $value);
+        $parts = array_map('trim', explode(';', $normalized));
         return array_values(array_filter($parts, fn (string $part) => $part !== ''));
     }
 
@@ -731,27 +777,32 @@ final class Normalizer
             ];
         }
 
-        $match = DropdownOption::query()
-            ->whereIn('collection_tag_primary', $tokens)
-            ->where(function ($query) use ($tokens): void {
-                $query->whereIn('collection_tag_secondary', $tokens)
-                    ->orWhereNull('collection_tag_secondary');
-            })
-            ->orderBy('collection_style')
-            ->first();
+        $knownContexts = app(DropdownCollectionCatalog::class)->contexts();
+        foreach ($knownContexts as $ctx) {
+            $primary = strtolower((string) ($ctx['tag_primary'] ?? ''));
+            $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
+            $tokenSet = array_map('strtolower', $tokens);
 
-        if ($match) {
+            if ($primary === '' || !in_array($primary, $tokenSet, true)) {
+                continue;
+            }
+            if ($secondary !== '' && !in_array($secondary, $tokenSet, true)) {
+                continue;
+            }
+
             return [
-                'collection_style' => $match->collection_style,
-                'tag_primary' => $match->collection_tag_primary,
-                'tag_secondary' => $match->collection_tag_secondary,
+                'collection_style' => $ctx['collection_style'],
+                'tag_primary' => $ctx['tag_primary'],
+                'tag_secondary' => $ctx['tag_secondary'],
             ];
         }
 
+        // Do not invent collection context from arbitrary product tags.
+        // Pending dropdown logic must rely only on known dropdown collections.
         return [
             'collection_style' => null,
-            'tag_primary' => $tokens[0] ?? null,
-            'tag_secondary' => $tokens[1] ?? null,
+            'tag_primary' => null,
+            'tag_secondary' => null,
         ];
     }
 

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use App\Services\TagNormalizer;
+use App\Services\HeaderStore;
 
 class DropdownOption extends Model
 {
@@ -60,7 +61,7 @@ class DropdownOption extends Model
                         ->whereRaw('LOWER(product_type) = ?', [strtolower($productType)])
                         ->pluck('value');
                     if ($specific->isNotEmpty()) {
-                        return $specific;
+                        return self::normalizeOptions($specific, $header);
                     }
                 }
 
@@ -69,16 +70,17 @@ class DropdownOption extends Model
                     ->whereNull('product_type')
                     ->pluck('value');
                 if ($vendorOnly->isNotEmpty()) {
-                    return $vendorOnly;
+                    return self::normalizeOptions($vendorOnly, $header);
                 }
             }
 
-            return $query
-                ->whereNull('vendor')
-                ->pluck('value');
+            return self::normalizeOptions(
+                $query->whereNull('vendor')->pluck('value'),
+                $header
+            );
         }
 
-        return $query->pluck('value');
+        return self::normalizeOptions($query->pluck('value'), $header);
     }
 
     public static function activeHeaders(): Collection
@@ -118,5 +120,40 @@ class DropdownOption extends Model
         }
 
         return TagNormalizer::parseTokens((string) $tags);
+    }
+
+    private static function normalizeOptions(Collection $values, string $header): Collection
+    {
+        $splitHeaders = [
+            HeaderStore::PATTERN_CATEGORY,
+            HeaderStore::PRODUCT_METALS,
+            HeaderStore::SIZE,
+        ];
+
+        return $values
+            ->flatMap(function ($value) use ($header, $splitHeaders): array {
+                $normalized = trim((string) $value);
+                if ($normalized === '') {
+                    return [];
+                }
+
+                if (!in_array($header, $splitHeaders, true)) {
+                    return [$normalized];
+                }
+
+                $parts = preg_split('/[;,]+/', $normalized) ?: [];
+                $parts = array_map(static fn (string $part): string => trim($part), $parts);
+
+                return array_values(array_filter($parts, static fn (string $part): bool => $part !== ''));
+            })
+            ->filter(static fn ($value): bool => !self::isNotApplicable((string) $value))
+            ->unique(static fn ($value): string => strtolower((string) $value))
+            ->values();
+    }
+
+    private static function isNotApplicable(string $value): bool
+    {
+        $lower = strtolower(trim($value));
+        return in_array($lower, ['not applicable', 'non applicable', 'n/a', 'na'], true);
     }
 }

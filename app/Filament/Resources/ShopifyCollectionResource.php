@@ -28,7 +28,7 @@ class ShopifyCollectionResource extends Resource
 {
     protected static ?string $model = ShopifyCollection::class;
     protected static ?string $navigationGroup = 'Catalog';
-    protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
+    protected static ?string $navigationIcon = 'heroicon-o-squares-2x2';
     protected static ?string $navigationLabel = 'Collections';
     protected static ?int $navigationSort = 5;
 
