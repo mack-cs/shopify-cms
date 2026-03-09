@@ -92,6 +92,13 @@ final class ShopifyApiImporter
         $required = [
             HeaderStore::HANDLE,
             HeaderStore::UVP_SHORT_PARAGRAPH,
+            HeaderStore::MATERIALS_AND_DIMENSIONS,
+            HeaderStore::PRODUCT_MATERIALS,
+            HeaderStore::PRODUCT_METALS,
+            HeaderStore::PATTERN_CATEGORY,
+            HeaderStore::SIBLINGS,
+            HeaderStore::SIBLINGS_COLLECTION_NAME,
+            HeaderStore::VARIANT_INVENTORY_QTY,
         ];
 
         foreach ($required as $header) {
@@ -186,9 +193,18 @@ query Products($first: Int!, $after: String) {
           sku
           price
           compareAtPrice
+          inventoryQuantity
           barcode
           selectedOptions { name value }
-          inventoryItem { unitCost { amount currencyCode } }
+          inventoryItem {
+            unitCost { amount currencyCode }
+            measurement {
+              weight {
+                value
+                unit
+              }
+            }
+          }
         }
       }
       images(first: 250) {
@@ -593,6 +609,7 @@ GQL;
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_SKU, data_get($variant, 'sku'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_PRICE, data_get($variant, 'price'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_COMPARE_AT, data_get($variant, 'compareAtPrice'));
+        $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_INVENTORY_QTY, data_get($variant, 'inventoryQuantity'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_BARCODE, data_get($variant, 'barcode'));
 
         $selected = data_get($variant, 'selectedOptions', []);
@@ -609,8 +626,8 @@ GQL;
             $this->setIfHeaderExists($row, $headers, HeaderStore::OPTION3_VALUE, $opt3['value'] ?? null);
         }
 
-        $weight = data_get($variant, 'weight');
-        $unit = strtoupper((string) data_get($variant, 'weightUnit', ''));
+        $weight = data_get($variant, 'inventoryItem.measurement.weight.value');
+        $unit = strtoupper((string) data_get($variant, 'inventoryItem.measurement.weight.unit', ''));
         $grams = $this->toGrams($weight, $unit);
         if ($grams !== null) {
             $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_GRAMS, $grams);

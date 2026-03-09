@@ -14,54 +14,32 @@ use Filament\Tables\Table;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
-use App\Services\ShopifyCsvImporter;
-use App\Services\ShopifyCsvValidator;
 use App\Services\ShopifyApiImporter;
 use App\Jobs\ShopifySyncJob;
 use App\Services\Normalizer;
-use App\Services\HeaderStore;
-use Filament\Forms\Components\Hidden;
-use Filament\Forms\Components\Select;
 use Filament\Tables\Columns\TextColumn;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Filament\Notifications\Notification;
 use Filament\Notifications\Actions\Action as NotificationAction;
-use Filament\Forms\Components\FileUpload;
 use Illuminate\Database\Eloquent\Builder;
-use App\Models\ShopifyRow;
 use App\Filament\Resources\ImportResource\Pages;
-use Illuminate\Database\Eloquent\SoftDeletingScope;
-use App\Filament\Resources\ImportResource\RelationManagers;
 
 class ImportResource extends Resource
 {
     protected static ?string $model = Import::class;
-protected static ?string $navigationGroup = 'Product Data';
-protected static ?string $navigationLabel = 'Product Feed';
+    protected static ?string $navigationGroup = 'Product Data';
+    protected static ?string $navigationLabel = 'Product Feed';
     protected static ?string $navigationIcon = 'heroicon-o-arrows-right-left';
 
     public static function form(Form $form): Form
     {
-        return $form
-            ->schema([
-                 FileUpload::make('filename')
-                    ->label('CSV File')
-                    ->disk('public')
-                    ->directory('imports')
-                    ->acceptedFileTypes(['text/csv'])
-                    ->required()
-                    ->reactive(),
-            Select::make('mode')
-                ->options(['overwrite' => 'Overwrite', 'append' => 'Append'])
-                ->default('overwrite')
-                ->required(),
-            ]);
+        return $form->schema([]);
     }
 
     public static function table(Table $table): Table
     {
-        return $table->defaultSort('created_at', 'desc')->columns([
+        return $table->recordUrl(null)->defaultSort('created_at', 'desc')->columns([
             TextColumn::make('id'),
             TextColumn::make('filename'),
             TextColumn::make('mode'),
@@ -151,87 +129,6 @@ protected static ?string $navigationLabel = 'Product Feed';
             //                 ->danger()
             //         );
             //     }),
-            Action::make('runImport')
-    ->label('Process Import')
-    ->requiresConfirmation()
-    ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status === 'processing' || $record->status === 'ready')
-    ->action(function (Import $record, ShopifyCsvImporter $importer) {
-
-        // Your FileUpload uses disk('public'), so use the same disk here:
-        $disk = Storage::disk('public');
-
-        if (!$record->is_valid) {
-            self::sendNotification(
-                Notification::make()
-                    ->title('Import blocked')
-                    ->body('CSV is invalid. Run validation and upload a corrected file.')
-                    ->danger()
-            );
-            return;
-        }
-
-        if (!$record->filename) {
-            self::sendNotification(
-                Notification::make()
-                    ->title('Missing file path')
-                    ->danger()
-            );
-            return;
-        }
-
-        if (!$disk->exists($record->filename)) {
-            self::sendNotification(
-                Notification::make()
-                    ->title('File not found')
-                    ->body("Could not find: {$record->filename} on public disk")
-                    ->danger()
-            );
-            return;
-        }
-
-        $absolutePath = $disk->path($record->filename);
-        $templatePath = HeaderStore::latestTemplatePath();
-        if ($templatePath === null) {
-            self::sendNotification(
-                Notification::make()
-                    ->title('Template missing')
-                    ->body('No CSV template found in storage/app/public/template or legacy imports.')
-                    ->danger()
-            );
-            return;
-        }
-        $validator = app(ShopifyCsvValidator::class);
-        $validation = $validator->validateAgainstTemplate($absolutePath, $templatePath);
-        if (!$validation['valid']) {
-            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
-            $body = self::formatValidationErrors($validation['errors']);
-
-            self::sendNotification(
-                Notification::make()
-                    ->title('Import rejected: invalid CSV')
-                    ->body($body)
-                    ->danger()
-            );
-            return;
-        }
-
-        if ($record->mode === 'overwrite') {
-            ShopifyRow::where('import_id', '!=', $record->id)->delete();
-            Product::where('import_id', '!=', $record->id)->delete();
-        }
-
-        $record->update(['status' => 'processing']);
-
-        // ✅ IMPORTANT: process THIS Import record
-        $importer->importIntoExistingImport($record, $absolutePath);
-
-        self::sendNotification(
-            Notification::make()
-                ->title('Import processed')
-                ->body("Import #{$record->id} is ready")
-                ->success()
-        );
-    }),
             Action::make('exportAll')
             ->label('Export (All)')
             ->disabled(fn (Import $record) => !$record->is_current || !$record->is_valid || $record->status !== 'ready')
@@ -376,7 +273,7 @@ protected static ?string $navigationLabel = 'Product Feed';
 
     public static function canEdit($record): bool
     {
-        return Auth::user()?->can(PermissionEnum::ImportCreate->value) ?? false;
+        return false;
     }
 
     public static function canDelete($record): bool
@@ -387,49 +284,6 @@ protected static ?string $navigationLabel = 'Product Feed';
     public static function canDeleteAny(): bool
     {
         return Auth::user()?->can(PermissionEnum::ImportDelete->value) ?? false;
-    }
-
-    public static function validateImportRecord(Import $record, ShopifyCsvValidator $validator): array
-    {
-        $disk = Storage::disk('public');
-
-        if (!$record->filename || !$disk->exists($record->filename)) {
-            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
-            return [
-                'valid' => false,
-                'errors' => ['File not found.'],
-            ];
-        }
-
-        $absolutePath = $disk->path($record->filename);
-        $templatePath = HeaderStore::latestTemplatePath();
-        if ($templatePath === null) {
-            $record->forceFill(['is_valid' => false, 'status' => 'failed'])->save();
-            return [
-                'valid' => false,
-                'errors' => ['Template file missing.'],
-            ];
-        }
-
-        $result = $validator->validateAgainstTemplate($absolutePath, $templatePath);
-        $record->forceFill([
-            'is_valid' => (bool) $result['valid'],
-            'status' => $result['valid'] ? 'uploaded' : 'failed',
-        ])->save();
-
-        return $result;
-    }
-
-    public static function formatValidationErrors(array $errors): string
-    {
-        $preview = array_slice($errors, 0, 5);
-        $moreCount = max(0, count($errors) - count($preview));
-        $body = implode("\n", $preview);
-        if ($moreCount > 0) {
-            $body .= "\n...and {$moreCount} more.";
-        }
-
-        return $body;
     }
 
     public static function getRelations(): array
@@ -443,7 +297,6 @@ protected static ?string $navigationLabel = 'Product Feed';
     {
         return [
             'index' => Pages\ListImports::route('/'),
-            'edit' => Pages\EditImport::route('/{record}/edit'),
         ];
     }
 
@@ -455,3 +308,4 @@ protected static ?string $navigationLabel = 'Product Feed';
         $notification->send();
     }
 }
+

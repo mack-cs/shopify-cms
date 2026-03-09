@@ -30,7 +30,7 @@ class ShopifyCollectionResource extends Resource
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationIcon = 'heroicon-o-squares-2x2';
     protected static ?string $navigationLabel = 'Collections';
-    protected static ?int $navigationSort = 5;
+    protected static ?int $navigationSort = 4;
 
     public static function form(Form $form): Form
     {

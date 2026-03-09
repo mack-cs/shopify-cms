@@ -24,12 +24,31 @@ final class Normalizer
     public function buildNormalizedTables(Import $import): void
     {
         DB::transaction(function () use ($import) {
-            // wipe existing normalized records for this import (overwrite safe)
-            Product::where('import_id', $import->id)->delete();
-
             $rows = ShopifyRow::where('import_id', $import->id)
                 ->whereNotNull('handle')
                 ->orderBy('row_index')
+                ->get()
+                ->groupBy('handle');
+
+            $currentHandles = $rows->keys()
+                ->map(fn ($handle) => trim((string) $handle))
+                ->filter(fn (string $handle): bool => $handle !== '')
+                ->values();
+
+            // Keep normalized catalog as latest Shopify snapshot:
+            // - remove products no longer present in latest sync
+            // - deduplicate to a single row per handle
+            if ($currentHandles->isNotEmpty()) {
+                Product::query()
+                    ->whereNotIn('handle', $currentHandles->all())
+                    ->delete();
+            } else {
+                Product::query()->delete();
+            }
+
+            $existingByHandle = Product::query()
+                ->whereIn('handle', $currentHandles->all())
+                ->orderBy('id')
                 ->get()
                 ->groupBy('handle');
 
@@ -88,7 +107,7 @@ final class Normalizer
                 $this->syncStatus($primary->get(HeaderStore::STATUS, null));
                 $this->syncType($resolvedType, $resolvedGoogle);
 
-                $product = Product::create([
+                $payload = [
                     'import_id' => $import->id,
                     'handle' => $handle,
                     'title' => $primary->get(HeaderStore::TITLE, null),
@@ -106,7 +125,24 @@ final class Normalizer
                     'color_string' => $normalizedColor,
                     'batch' => $this->defaultBatchForImport($import),
                     'is_bundle' => $this->isBundleFromTags($normalizedTags),
-                ]);
+                ];
+
+                $existingForHandle = $existingByHandle->get($handle, collect());
+                $product = $existingForHandle->first();
+                if ($product) {
+                    // Drop duplicate legacy rows for this handle, keep first stable row.
+                    $duplicateIds = $existingForHandle->skip(1)->pluck('id')->all();
+                    if (!empty($duplicateIds)) {
+                        Product::query()->whereIn('id', $duplicateIds)->delete();
+                    }
+
+                    $product->fill($payload);
+                    $product->saveQuietly();
+                    $product->variants()->delete();
+                    $product->images()->delete();
+                } else {
+                    $product = Product::create($payload);
+                }
 
                 // Variants (include primary row if it contains variant data)
                 $variantRows = $handleRows->filter(function (ShopifyRow $r) {

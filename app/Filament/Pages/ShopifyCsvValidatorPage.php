@@ -22,12 +22,18 @@ class ShopifyCsvValidatorPage extends Page implements HasForms
 {
     use InteractsWithForms;
 
+    protected static bool $shouldRegisterNavigation = false;
     protected static ?string $navigationIcon = 'heroicon-o-shield-check';
     protected static ?string $navigationGroup = 'Product Data';
     protected static ?string $navigationLabel = 'CSV Validator';
     protected static string $view = 'filament.pages.shopify-csv-validator';
 
     public ?array $data = [];
+
+    public static function canAccess(): bool
+    {
+        return false;
+    }
 
     public function mount(): void
     {

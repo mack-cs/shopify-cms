@@ -24,7 +24,7 @@ class PendingDropdownOptionResource extends Resource
 {
     protected static ?string $model = DropdownOption::class;
     protected static ?string $navigationIcon = 'heroicon-o-exclamation-triangle';
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Configurations';
     protected static ?string $navigationLabel = 'Pending Dropdown Values';
     protected static ?int $navigationSort = 5;
     private static bool $cleanedUnknownPendingRows = false;

@@ -21,7 +21,7 @@ class ColorResource extends Resource
 {
     protected static ?string $model = Color::class;
 
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Configurations';
     protected static ?string $navigationIcon = 'heroicon-o-swatch';
     protected static ?int $navigationSort = 3;
 

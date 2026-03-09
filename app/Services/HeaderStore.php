@@ -50,8 +50,8 @@ final class HeaderStore
     public const PRODUCT_METALS = 'Product Metals (product.metafields.custom.product_metals)';
     public const PATTERN_CATEGORY = 'Pattern Category (product.metafields.custom.pattern_category)';
     public const SIZE = 'Size';
-    public const SIBLINGS = 'Siblings';
-    public const SIBLINGS_COLLECTION_NAME = 'Siblings Collection Name';
+    public const SIBLINGS = 'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)';
+    public const SIBLINGS_COLLECTION_NAME = 'Sibling Option Name (product.metafields.stiletto.sibling_option_name)';
     public const UVP_SHORT_PARAGRAPH = 'UVP Short Paragraph';
     public const COMPLEMENTARY_PRODUCTS = 'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
@@ -84,6 +84,8 @@ final class HeaderStore
             self::AGE_GROUP,
             self::BRACELET_DESIGN,
             self::UVP_SHORT_PARAGRAPH,
+            self::SIBLINGS,
+            self::SIBLINGS_COLLECTION_NAME,
         ];
     }
 
@@ -96,6 +98,7 @@ final class HeaderStore
             self::VARIANT_BARCODE,
             self::VARIANT_GRAMS,
             self::VARIANT_WEIGHT_UNIT,
+            self::VARIANT_INVENTORY_QTY,
             self::OPTION1_NAME,
             self::OPTION1_VALUE,
             self::OPTION2_NAME,
@@ -151,7 +154,7 @@ final class HeaderStore
             self::JEWELRY_TYPE,
             'Necklace design (product.metafields.shopify.necklace-design)',
             'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)',
-            'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)',
+            self::SIBLINGS,
             'Search product boosts (product.metafields.shopify--discovery--product_search_boost.queries)',
         ];
     }

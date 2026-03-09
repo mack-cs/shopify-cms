@@ -23,7 +23,7 @@ class RequiredFieldResource extends Resource
 {
     protected static ?string $model = RequiredField::class;
     protected static ?string $navigationIcon = 'heroicon-o-check-badge';
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Configurations';
     protected static ?string $navigationLabel = 'Required Fields';
 
     public static function form(Form $form): Form

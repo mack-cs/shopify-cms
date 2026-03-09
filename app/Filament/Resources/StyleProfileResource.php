@@ -38,10 +38,10 @@ class StyleProfileResource extends Resource
 {
     protected static ?string $model = StyleProfile::class;
 
-    protected static ?string $navigationIcon = 'heroicon-o-sparkles';
+    protected static ?string $navigationIcon = 'heroicon-o-paint-brush';
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'Style Profiles';
-    protected static ?int $navigationSort = 4;
+    protected static ?int $navigationSort = 3;
 
     public static function form(Forms\Form $form): Forms\Form
     {

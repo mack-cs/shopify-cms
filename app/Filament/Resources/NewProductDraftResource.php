@@ -8,6 +8,7 @@ use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
 use App\Models\Product;
 use App\Models\ShopifyRow;
+use App\Models\ShopifyCollection;
 use App\Models\StyleProfile;
 use App\Models\DropdownOption;
 use App\Models\Tag;
@@ -53,7 +54,7 @@ class NewProductDraftResource extends Resource
     protected static ?string $navigationIcon = 'heroicon-o-sparkles';
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'New Products';
-    protected static ?int $navigationSort = 3;
+    protected static ?int $navigationSort = 1;
 
     private static function defaultBatch(): string
     {
@@ -429,8 +430,9 @@ class NewProductDraftResource extends Resource
                             Select::make('product_materials')
                                 ->label('Product Materials')
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PRODUCT_MATERIALS
+                                ->options(fn (Get $get): array => self::withCurrentOption(
+                                    self::dropdownOptionsForHeader(HeaderStore::PRODUCT_MATERIALS),
+                                    $get('product_materials')
                                 ))
                                 ->searchable()
                                 ->reactive(),
@@ -441,8 +443,9 @@ class NewProductDraftResource extends Resource
                             Select::make('metal')
                                 ->label('Metal')
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PRODUCT_METALS
+                                ->options(fn (Get $get): array => self::withCurrentOption(
+                                    self::dropdownOptionsForHeader(HeaderStore::PRODUCT_METALS),
+                                    $get('metal')
                                 ))
                                 ->searchable()
                                 ->reactive()
@@ -454,9 +457,12 @@ class NewProductDraftResource extends Resource
                             Select::make('colour_style')
                                 ->label('Pattern category')
                                 ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PATTERN_CATEGORY,
-                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                ->options(fn (Get $get): array => self::withCurrentOption(
+                                    self::dropdownOptionsForHeader(
+                                        HeaderStore::PATTERN_CATEGORY,
+                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                    ),
+                                    $get('colour_style')
                                 ))
                                 ->searchable()
                                 ->reactive()
@@ -468,8 +474,9 @@ class NewProductDraftResource extends Resource
                             Select::make('size')
                                 ->label('Size')
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::SIZE
+                                ->options(fn (Get $get): array => self::withCurrentOption(
+                                    self::dropdownOptionsForHeader(HeaderStore::SIZE),
+                                    $get('size')
                                 ))
                                 ->searchable()
                                 ->reactive()
@@ -484,8 +491,13 @@ class NewProductDraftResource extends Resource
                         ->schema([
                             TextInput::make('siblings')
                                 ->label('Siblings'),
-                            TextInput::make('siblings_collection_name')
-                                ->label('Siblings Collection Name'),
+                            Select::make('siblings_collection_name')
+                                ->label('Siblings Collection Name')
+                                ->placeholder('Select option')
+                                ->searchable()
+                                ->options(fn (Get $get): array => self::siblingsCollectionNameOptions(
+                                    is_string($get('siblings_collection_name')) ? $get('siblings_collection_name') : null
+                                )),
                         ])
                         ->columnSpanFull(),
                             ])->columns(2),
@@ -736,6 +748,47 @@ class NewProductDraftResource extends Resource
             ->sort()
             ->mapWithKeys(fn (string $value): array => [$value => $value])
             ->all();
+    }
+
+    /**
+     * @param array<string, string> $options
+     */
+    private static function withCurrentOption(array $options, mixed $currentValue): array
+    {
+        $current = trim((string) ($currentValue ?? ''));
+        if ($current === '') {
+            return $options;
+        }
+
+        if (!array_key_exists($current, $options)) {
+            $options[$current] = $current;
+            ksort($options);
+        }
+
+        return $options;
+    }
+
+    private static function siblingsCollectionNameOptions(?string $currentValue = null): array
+    {
+        $titles = ShopifyCollection::query()
+            ->whereNotNull('title')
+            ->where('title', '!=', '')
+            ->orderBy('title')
+            ->pluck('title')
+            ->all();
+
+        $titles = array_values(array_unique(array_filter(array_map(
+            fn (mixed $value): string => trim((string) $value),
+            $titles
+        ))));
+
+        $current = trim((string) ($currentValue ?? ''));
+        if ($current !== '' && !in_array($current, $titles, true)) {
+            $titles[] = $current;
+            sort($titles);
+        }
+
+        return array_combine($titles, $titles) ?: [];
     }
 
     private static function normalizeDesignAliasValue(mixed $value): ?string

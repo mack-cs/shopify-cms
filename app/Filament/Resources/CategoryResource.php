@@ -18,7 +18,7 @@ use Filament\Tables\Columns\TextColumn;
 class CategoryResource extends Resource
 {
     protected static ?string $model = Category::class;
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Configurations';
     protected static ?int $navigationSort = 2;
 
     protected static ?string $navigationIcon = 'heroicon-o-adjustments-horizontal';

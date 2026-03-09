@@ -71,7 +71,7 @@ class ProductResource extends Resource
     protected static ?string $navigationIcon = 'heroicon-o-cube';
 
     protected static ?string $navigationGroup = 'Catalog';
-    protected static ?int $navigationSort = 1;
+    protected static ?int $navigationSort = 2;
 
     protected static function isDraftOwnedLocked(?Product $record): bool
     {
@@ -1287,7 +1287,6 @@ class ProductResource extends Resource
     {
         return [
             'index' => Pages\ListProducts::route('/'),
-            'create' => Pages\CreateProduct::route('/create'),
             'edit' => Pages\EditProduct::route('/{record}/edit'),
         ];
     }
@@ -1299,7 +1298,7 @@ class ProductResource extends Resource
 
     public static function canCreate(): bool
     {
-        return Auth::user()?->can(PermissionEnum::ProductCreate->value) ?? false;
+        return false;
     }
 
     public static function canEdit($record): bool
