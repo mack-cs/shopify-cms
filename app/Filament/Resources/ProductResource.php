@@ -31,6 +31,7 @@ use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Tabs;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\RichEditor;
 use Filament\Tables\Actions\EditAction;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Actions\BulkAction;
@@ -863,9 +864,11 @@ class ProductResource extends Resource
                                     ->all())
                                 ->placeholder('import_YYYYMMDDH')
                                 ->helperText('Internal only. Not exported.'),
-                            Textarea::make('uvp_short_paragraph')
+                            RichEditor::make('uvp_short_paragraph')
                                 ->label('UVP Short Paragraph')
-                                ->rows(3)
+                                ->toolbarButtons([
+                                    'bold',
+                                ])
                                 ->columnSpanFull(),
                         ])->columnSpan(1),
                     ]),

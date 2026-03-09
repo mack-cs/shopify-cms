@@ -84,13 +84,34 @@ final class ShopifyApiImporter
     {
         $templatePath = HeaderStore::latestTemplatePath();
         if ($templatePath === null || !is_file($templatePath)) {
-            return HeaderStore::knownHeaders();
+            return $this->withRequiredImportHeaders(HeaderStore::knownHeaders());
         }
 
         $csv = Reader::createFromPath($templatePath);
         $csv->setHeaderOffset(0);
         $headers = $csv->getHeader();
-        return empty($headers) ? HeaderStore::knownHeaders() : $headers;
+        $resolved = empty($headers) ? HeaderStore::knownHeaders() : $headers;
+        return $this->withRequiredImportHeaders($resolved);
+    }
+
+    /**
+     * @param array<int, string> $headers
+     * @return array<int, string>
+     */
+    private function withRequiredImportHeaders(array $headers): array
+    {
+        $required = [
+            HeaderStore::HANDLE,
+            HeaderStore::UVP_SHORT_PARAGRAPH,
+        ];
+
+        foreach ($required as $header) {
+            if (!in_array($header, $headers, true)) {
+                $headers[] = $header;
+            }
+        }
+
+        return $headers;
     }
 
     private function metafieldHeaders(array $headers): array
@@ -107,6 +128,13 @@ final class ShopifyApiImporter
 
     private function metafieldIdentifierFromHeader(string $header): ?array
     {
+        if ($header === HeaderStore::UVP_SHORT_PARAGRAPH) {
+            return [
+                'namespace' => 'custom',
+                'key' => 'uvp_short_paragraph',
+            ];
+        }
+
         if (!preg_match('/\\(product\\.metafields\\.([^.]+)\\.([^)]+)\\)/', $header, $matches)) {
             return null;
         }
@@ -483,7 +511,80 @@ GQL;
             return strtolower($value) === 'true' ? 'true' : 'false';
         }
 
+        if ($type === 'rich_text_field') {
+            return $this->richTextFieldToHtml($value);
+        }
+
         return $value;
+    }
+
+    private function richTextFieldToHtml(string $value): string
+    {
+        $decoded = json_decode($value, true);
+        if (!is_array($decoded) || ($decoded['type'] ?? null) !== 'root') {
+            return $value;
+        }
+
+        $html = '';
+        $children = $decoded['children'] ?? [];
+        if (!is_array($children)) {
+            return $value;
+        }
+
+        foreach ($children as $child) {
+            if (!is_array($child)) {
+                continue;
+            }
+
+            $type = (string) ($child['type'] ?? '');
+            if ($type === 'paragraph') {
+                $html .= '<p>' . $this->richTextInlineNodesToHtml($child['children'] ?? []) . '</p>';
+                continue;
+            }
+
+            $html .= $this->richTextInlineNodesToHtml([$child]);
+        }
+
+        return $html !== '' ? $html : $value;
+    }
+
+    /**
+     * @param mixed $nodes
+     */
+    private function richTextInlineNodesToHtml(mixed $nodes): string
+    {
+        if (!is_array($nodes)) {
+            return '';
+        }
+
+        $html = '';
+        foreach ($nodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            $type = (string) ($node['type'] ?? '');
+            if ($type === 'text') {
+                $text = htmlspecialchars((string) ($node['value'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                if ($text === '') {
+                    continue;
+                }
+                if (!empty($node['bold'])) {
+                    $text = '<strong>' . $text . '</strong>';
+                }
+                $html .= $text;
+                continue;
+            }
+
+            if ($type === 'paragraph') {
+                $html .= '<p>' . $this->richTextInlineNodesToHtml($node['children'] ?? []) . '</p>';
+                continue;
+            }
+
+            $html .= $this->richTextInlineNodesToHtml($node['children'] ?? []);
+        }
+
+        return $html;
     }
 
     private function applyCostPerItem(array &$row, array $product, array $headers): void

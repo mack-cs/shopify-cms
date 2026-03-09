@@ -1488,21 +1488,7 @@ GQL;
         }
 
         if ($type === 'rich_text_field') {
-            $decoded = json_decode($trimmed, true);
-            if (is_array($decoded) && (($decoded['type'] ?? null) === 'root')) {
-                return json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            }
-
-            return json_encode([
-                'type' => 'root',
-                'children' => [[
-                    'type' => 'paragraph',
-                    'children' => [[
-                        'type' => 'text',
-                        'value' => $trimmed,
-                    ]],
-                ]],
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return $this->richTextFieldValueFromInput($trimmed);
         }
 
         if (str_starts_with($type, 'list.') && str_ends_with($type, 'reference')) {
@@ -1569,6 +1555,183 @@ GQL;
         }
 
         return $trimmed;
+    }
+
+    private function richTextFieldValueFromInput(string $input): ?string
+    {
+        $trimmed = trim($input);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $decoded = json_decode($trimmed, true);
+        if (is_array($decoded) && (($decoded['type'] ?? null) === 'root')) {
+            return json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+
+        if (preg_match('/<[^>]+>/', $trimmed)) {
+            $root = $this->richTextRootFromHtml($trimmed);
+            if ($root !== null) {
+                return json_encode($root, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+        }
+
+        $paragraphs = preg_split('/\R+/', $trimmed) ?: [$trimmed];
+        $children = [];
+        foreach ($paragraphs as $paragraph) {
+            $text = trim((string) $paragraph);
+            if ($text === '') {
+                continue;
+            }
+
+            $children[] = [
+                'type' => 'paragraph',
+                'children' => [[
+                    'type' => 'text',
+                    'value' => $text,
+                ]],
+            ];
+        }
+
+        if (empty($children)) {
+            $children[] = [
+                'type' => 'paragraph',
+                'children' => [[
+                    'type' => 'text',
+                    'value' => $trimmed,
+                ]],
+            ];
+        }
+
+        return json_encode([
+            'type' => 'root',
+            'children' => $children,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+
+    private function richTextRootFromHtml(string $html): ?array
+    {
+        if (!class_exists(\DOMDocument::class)) {
+            return null;
+        }
+
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+        $prev = libxml_use_internal_errors(true);
+        $loaded = $dom->loadHTML('<?xml encoding="utf-8" ?><body>' . $html . '</body>');
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+        if (!$loaded) {
+            return null;
+        }
+
+        $bodyNodes = $dom->getElementsByTagName('body');
+        $body = $bodyNodes->length > 0 ? $bodyNodes->item(0) : null;
+        if (!$body instanceof \DOMNode) {
+            return null;
+        }
+
+        $paragraphs = [];
+        foreach ($body->childNodes as $node) {
+            if ($node instanceof \DOMText && trim((string) $node->textContent) !== '') {
+                $inline = $this->richTextInlineNodesFromDom([$node]);
+                if (!empty($inline)) {
+                    $paragraphs[] = [
+                        'type' => 'paragraph',
+                        'children' => $inline,
+                    ];
+                }
+                continue;
+            }
+
+            if (!$node instanceof \DOMElement) {
+                continue;
+            }
+
+            $tag = strtolower($node->tagName);
+            if (in_array($tag, ['p', 'div'], true)) {
+                $inline = $this->richTextInlineNodesFromDom(iterator_to_array($node->childNodes));
+                if (!empty($inline)) {
+                    $paragraphs[] = [
+                        'type' => 'paragraph',
+                        'children' => $inline,
+                    ];
+                }
+                continue;
+            }
+
+            $inline = $this->richTextInlineNodesFromDom([$node]);
+            if (!empty($inline)) {
+                $paragraphs[] = [
+                    'type' => 'paragraph',
+                    'children' => $inline,
+                ];
+            }
+        }
+
+        if (empty($paragraphs)) {
+            return null;
+        }
+
+        return [
+            'type' => 'root',
+            'children' => $paragraphs,
+        ];
+    }
+
+    /**
+     * @param array<int, \DOMNode> $nodes
+     * @return array<int, array<string, mixed>>
+     */
+    private function richTextInlineNodesFromDom(array $nodes): array
+    {
+        $result = [];
+        foreach ($nodes as $node) {
+            if ($node instanceof \DOMText) {
+                $text = preg_replace('/\s+/u', ' ', (string) $node->textContent) ?? '';
+                if (trim($text) === '') {
+                    continue;
+                }
+                $result[] = [
+                    'type' => 'text',
+                    'value' => $text,
+                ];
+                continue;
+            }
+
+            if (!$node instanceof \DOMElement) {
+                continue;
+            }
+
+            $tag = strtolower($node->tagName);
+            if ($tag === 'br') {
+                $result[] = [
+                    'type' => 'text',
+                    'value' => "\n",
+                ];
+                continue;
+            }
+
+            $children = $this->richTextInlineNodesFromDom(iterator_to_array($node->childNodes));
+            if (empty($children)) {
+                continue;
+            }
+
+            if (in_array($tag, ['strong', 'b'], true)) {
+                foreach ($children as $child) {
+                    if (($child['type'] ?? null) === 'text') {
+                        $child['bold'] = true;
+                    }
+                    $result[] = $child;
+                }
+                continue;
+            }
+
+            foreach ($children as $child) {
+                $result[] = $child;
+            }
+        }
+
+        return $result;
     }
 
     private function referenceFallbackFromExistingRaw(string $type, ?string $existingRawValue): ?string

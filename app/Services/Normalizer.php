@@ -102,6 +102,7 @@ final class Normalizer
                     'status' => $primary->get(HeaderStore::STATUS, null),
                     'seo_title' => $primary->get(HeaderStore::SEO_TITLE, null),
                     'seo_description' => $primary->get(HeaderStore::SEO_DESCRIPTION, null),
+                    'uvp_short_paragraph' => $primary->get(HeaderStore::UVP_SHORT_PARAGRAPH, null),
                     'color_string' => $normalizedColor,
                     'batch' => $this->defaultBatchForImport($import),
                     'is_bundle' => $this->isBundleFromTags($normalizedTags),

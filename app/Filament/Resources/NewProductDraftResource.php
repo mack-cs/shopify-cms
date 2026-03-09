@@ -21,6 +21,7 @@ use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\RichEditor;
 use Filament\Forms\Components\KeyValue;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Group;
@@ -258,9 +259,11 @@ class NewProductDraftResource extends Resource
                                 ->label('Description')
                                 ->rows(3)
                                 ->columnSpan(1),
-                            Textarea::make('uvp_short_paragraph')
+                            RichEditor::make('uvp_short_paragraph')
                                 ->label('UVP Short Paragraph')
-                                ->rows(3)
+                                ->toolbarButtons([
+                                    'bold',
+                                ])
                                 ->columnSpan(1),
                         ])
                         ->columnSpanFull(),
