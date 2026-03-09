@@ -1886,6 +1886,16 @@ GQL;
             return $trimmed;
         }
 
+        // Accept malformed flattened GIDs like "gidshopifyproduct8835945595016".
+        if (preg_match('#^gidshopifyproduct([0-9]+)$#i', $trimmed, $m)) {
+            return "gid://shopify/Product/{$m[1]}";
+        }
+
+        // Also accept mixed separators, e.g. "gid-shopify-product-8835945595016".
+        if (preg_match('#^gid[^0-9]*shopify[^0-9]*product[^0-9]*([0-9]+)$#i', $trimmed, $m)) {
+            return "gid://shopify/Product/{$m[1]}";
+        }
+
         if (preg_match('#^/?products/([0-9]+)$#i', $trimmed, $m)) {
             return "gid://shopify/Product/{$m[1]}";
         }
