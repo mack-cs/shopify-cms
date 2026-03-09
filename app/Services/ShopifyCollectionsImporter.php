@@ -51,24 +51,35 @@ final class ShopifyCollectionsImporter
             }
             $seen[$shopifyId] = true;
 
+            $updateData = [
+                'handle' => $handle,
+                'title' => data_get($collection, 'title'),
+                'description_html' => data_get($collection, 'descriptionHtml'),
+                'seo_title' => data_get($collection, 'seo.title'),
+                'seo_description' => data_get($collection, 'seo.description'),
+            ];
+
+            $hasDeindexMetafield = data_get($collection, 'deindex_metafield_hidden.value') !== null
+                || data_get($collection, 'deindex_metafield_hide_from_google.value') !== null;
+            if ($hasDeindexMetafield) {
+                $updateData['deindex'] = $this->boolFromMetafield(
+                    data_get($collection, 'deindex_metafield_hidden.value')
+                        ?? data_get($collection, 'deindex_metafield_hide_from_google.value')
+                );
+            }
+
+            $hasPublications = array_key_exists('resourcePublications', $collection);
+            if ($hasPublications) {
+                $updateData['published_on_online_store_only'] = $this->isPublishedOnOnlineStoreOnly($collection);
+                $updateData['published_channel_names'] = $this->publishedChannelNames($collection);
+            }
+
             $saved = ShopifyCollection::withoutEvents(fn () => ShopifyCollection::updateOrCreate(
                 [
                     'import_id' => $import->id,
                     'shopify_id' => $shopifyId,
                 ],
-                [
-                    'handle' => $handle,
-                    'title' => data_get($collection, 'title'),
-                    'description_html' => data_get($collection, 'descriptionHtml'),
-                    'seo_title' => data_get($collection, 'seo.title'),
-                    'seo_description' => data_get($collection, 'seo.description'),
-                    'deindex' => $this->boolFromMetafield(
-                        data_get($collection, 'deindex_metafield_hidden.value')
-                            ?? data_get($collection, 'deindex_metafield_hide_from_google.value')
-                    ),
-                    'published_on_online_store_only' => $this->isPublishedOnOnlineStoreOnly($collection),
-                    'published_channel_names' => $this->publishedChannelNames($collection),
-                ]
+                $updateData
             ));
 
             $touchedIds[] = $saved->id;
@@ -83,47 +94,25 @@ final class ShopifyCollectionsImporter
 
     private function fetchCollections(): \Generator
     {
-        yield from $this->fetchCustomCollections();
-        yield from $this->fetchSmartCollections();
-    }
-
-    private function fetchCustomCollections(): \Generator
-    {
         $after = null;
         do {
-            $data = $this->queryCollectionsPage($this->customCollectionsQuery(), $this->customCollectionsQueryBasic(), $after);
+            $data = $this->queryCollectionsPage($this->collectionsQuery(), $this->collectionsQueryBasic(), $after);
 
-            $collections = data_get($data, 'customCollections.nodes', []);
+            $collections = data_get($data, 'collections.nodes', []);
             foreach ($collections as $collection) {
                 yield $collection;
             }
 
-            $pageInfo = data_get($data, 'customCollections.pageInfo', []);
+            $pageInfo = data_get($data, 'collections.pageInfo', []);
             $after = ($pageInfo['hasNextPage'] ?? false) ? ($pageInfo['endCursor'] ?? null) : null;
         } while ($after);
     }
 
-    private function fetchSmartCollections(): \Generator
-    {
-        $after = null;
-        do {
-            $data = $this->queryCollectionsPage($this->smartCollectionsQuery(), $this->smartCollectionsQueryBasic(), $after);
-
-            $collections = data_get($data, 'smartCollections.nodes', []);
-            foreach ($collections as $collection) {
-                yield $collection;
-            }
-
-            $pageInfo = data_get($data, 'smartCollections.pageInfo', []);
-            $after = ($pageInfo['hasNextPage'] ?? false) ? ($pageInfo['endCursor'] ?? null) : null;
-        } while ($after);
-    }
-
-    private function customCollectionsQuery(): string
+    private function collectionsQuery(): string
     {
         return <<<'GQL'
-query CustomCollections($first: Int!, $after: String) {
-  customCollections(first: $first, after: $after) {
+query Collections($first: Int!, $after: String) {
+  collections(first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -146,29 +135,11 @@ query CustomCollections($first: Int!, $after: String) {
 GQL;
     }
 
-    private function customCollectionsQueryBasic(): string
+    private function collectionsQueryBasic(): string
     {
         return <<<'GQL'
-query CustomCollections($first: Int!, $after: String) {
-  customCollections(first: $first, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      handle
-      title
-      descriptionHtml
-      seo { title description }
-    }
-  }
-}
-GQL;
-    }
-
-    private function smartCollectionsQuery(): string
-    {
-        return <<<'GQL'
-query SmartCollections($first: Int!, $after: String) {
-  smartCollections(first: $first, after: $after) {
+query Collections($first: Int!, $after: String) {
+  collections(first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -178,31 +149,6 @@ query SmartCollections($first: Int!, $after: String) {
       seo { title description }
       deindex_metafield_hidden: metafield(namespace: "seo", key: "hidden") { value }
       deindex_metafield_hide_from_google: metafield(namespace: "seo", key: "hide_from_google") { value }
-      resourcePublications(first: 20, onlyPublished: true) {
-        nodes {
-          publication {
-            name
-          }
-        }
-      }
-    }
-  }
-}
-GQL;
-    }
-
-    private function smartCollectionsQueryBasic(): string
-    {
-        return <<<'GQL'
-query SmartCollections($first: Int!, $after: String) {
-  smartCollections(first: $first, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      handle
-      title
-      descriptionHtml
-      seo { title description }
     }
   }
 }
@@ -222,17 +168,52 @@ GQL;
             if (!$this->isWorkflowFieldSchemaError($e)) {
                 throw $e;
             }
+            try {
+                return $this->client->graphql($fallbackQuery, $variables);
+            } catch (\Throwable $fallbackException) {
+                if (!$this->isWorkflowFieldSchemaError($fallbackException)) {
+                    throw $fallbackException;
+                }
 
-            return $this->client->graphql($fallbackQuery, $variables);
+                // Final fallback when both publications and metafields are restricted.
+                return $this->client->graphql($this->collectionsQueryMinimal(), $variables);
+            }
         }
+    }
+
+    private function collectionsQueryMinimal(): string
+    {
+        return <<<'GQL'
+query Collections($first: Int!, $after: String) {
+  collections(first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      handle
+      title
+      descriptionHtml
+      seo { title description }
+    }
+  }
+}
+GQL;
     }
 
     private function isWorkflowFieldSchemaError(\Throwable $e): bool
     {
         $message = strtolower($e->getMessage());
 
-        return str_contains($message, 'cannot query field')
+        $isMissingField = str_contains($message, 'cannot query field')
             && (str_contains($message, 'resourcepublications') || str_contains($message, 'metafield'));
+
+        $isAccessDeniedOptional = str_contains($message, 'access denied')
+            && (
+                str_contains($message, 'resourcepublications')
+                || str_contains($message, 'read_publications')
+                || str_contains($message, 'metafield')
+            );
+
+        return $isMissingField || $isAccessDeniedOptional;
     }
 
     private function publishedChannelNames(array $collection): ?string

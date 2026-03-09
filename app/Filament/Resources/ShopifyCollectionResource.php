@@ -83,11 +83,18 @@ class ShopifyCollectionResource extends Resource
                     ->maxLength(512)
                     ->disabled()
                     ->columnSpan(1),
+                Forms\Components\RichEditor::make('description_html')
+                    ->label('Description')
+                    ->disabled()
+                    ->columnSpanFull(),
                 Forms\Components\Section::make('Draft SEO (make edits here)')
                     ->schema([
                         Forms\Components\TextInput::make('draft_title')
                             ->label('Draft Title')
                             ->maxLength(255),
+                        Forms\Components\Textarea::make('draft_description_html')
+                            ->label('Draft Description')
+                            ->rows(3),
                         Forms\Components\TextInput::make('draft_seo_title')
                             ->label('Draft SEO Title')
                             ->maxLength(255),
@@ -264,12 +271,13 @@ class ShopifyCollectionResource extends Resource
                             ->label('Fields to sync')
                             ->options([
                                 'title' => 'Title',
+                                'description_html' => 'Description',
                                 'seo_title' => 'SEO title',
                                 'seo_description' => 'SEO description',
                                 'deindex' => 'Deindex (seo.hide_from_google metafield)',
                             ])
                             ->columns(2)
-                            ->default(['title', 'seo_title', 'seo_description', 'deindex']),
+                            ->default(['title', 'description_html', 'seo_title', 'seo_description', 'deindex']),
                         Forms\Components\TextInput::make('handle_override')
                             ->label('Handle (URL) - optional')
                             ->maxLength(255)
@@ -491,12 +499,13 @@ class ShopifyCollectionResource extends Resource
                                 ->label('Fields to sync')
                                 ->options([
                                     'title' => 'Title',
+                                    'description_html' => 'Description',
                                     'seo_title' => 'SEO title',
                                     'seo_description' => 'SEO description',
                                     'deindex' => 'Deindex (seo.hide_from_google metafield)',
                                 ])
                                 ->columns(2)
-                                ->default(['title', 'seo_title', 'seo_description', 'deindex']),
+                                ->default(['title', 'description_html', 'seo_title', 'seo_description', 'deindex']),
                         ])
                         ->action(function ($records, array $data, ShopifyCollectionUpdater $updater): void {
                             $fields = array_fill_keys($data['fields'] ?? [], true);
