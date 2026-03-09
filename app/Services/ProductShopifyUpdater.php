@@ -12,6 +12,13 @@ use Illuminate\Support\Collection;
 
 final class ProductShopifyUpdater
 {
+    /** @var array<string, string> */
+    private const PATTERN_CATEGORY_METAOBJECT_GIDS = [
+        'multicolour' => 'gid://shopify/Metaobject/205977026696',
+        'multicolor' => 'gid://shopify/Metaobject/205977026696',
+        'solid' => 'gid://shopify/Metaobject/205977059464',
+    ];
+
     /** @var array<string, array<int, string>> */
     private const METAOBJECT_TYPE_OVERRIDES_BY_LOOKUP = [
         'custom.pattern_category' => ['colour_style'],
@@ -1563,14 +1570,13 @@ GQL;
                 return json_encode($items);
             }
 
-            $fallback = $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
-            if ($fallback !== null) {
-                return $fallback;
-            }
             if ($lookup !== null) {
-                return $this->resolveReferenceValueFromShopify($lookup, $type, $trimmed);
+                $resolved = $this->resolveReferenceValueFromShopify($lookup, $type, $trimmed);
+                if ($resolved !== null) {
+                    return $resolved;
+                }
             }
-            return null;
+            return $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
         }
 
         if (str_ends_with($type, 'reference')) {
@@ -1582,14 +1588,13 @@ GQL;
                 return $trimmed;
             }
 
-            $fallback = $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
-            if ($fallback !== null) {
-                return $fallback;
-            }
             if ($lookup !== null) {
-                return $this->resolveReferenceValueFromShopify($lookup, $type, $trimmed);
+                $resolved = $this->resolveReferenceValueFromShopify($lookup, $type, $trimmed);
+                if ($resolved !== null) {
+                    return $resolved;
+                }
             }
-            return null;
+            return $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
         }
 
         if (str_starts_with($type, 'list.')) {
@@ -1850,11 +1855,15 @@ GQL;
 
         $map = $this->referenceLookupMap($lookup);
         if (empty($map)) {
-            return null;
+            return $this->resolveHardcodedReferenceToken($lookup, $token);
         }
 
         $normalized = $this->normalizeReferenceLabel($token);
         $normalized = $this->applyLookupReferenceAlias($lookup, $normalized);
+        $hardcoded = $this->resolveHardcodedReferenceByNormalized($lookup, $normalized);
+        if ($hardcoded !== null) {
+            return $hardcoded;
+        }
         if (isset($map[$normalized])) {
             return $map[$normalized];
         }
@@ -2288,6 +2297,22 @@ GQL;
             'sold' => 'solid',
             default => $normalized,
         };
+    }
+
+    private function resolveHardcodedReferenceToken(string $lookup, string $token): ?string
+    {
+        $normalized = $this->normalizeReferenceLabel($token);
+        $normalized = $this->applyLookupReferenceAlias($lookup, $normalized);
+        return $this->resolveHardcodedReferenceByNormalized($lookup, $normalized);
+    }
+
+    private function resolveHardcodedReferenceByNormalized(string $lookup, string $normalized): ?string
+    {
+        if ($lookup !== 'custom.pattern_category') {
+            return null;
+        }
+
+        return self::PATTERN_CATEGORY_METAOBJECT_GIDS[$normalized] ?? null;
     }
 
     /**
