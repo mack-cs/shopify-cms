@@ -411,44 +411,111 @@ class NewProductDraftResource extends Resource
                             Textarea::make('materials_and_dimensions')
                                 ->label('Materials and Dimensions')
                                 ->rows(2),
-                            Textarea::make('complementary_products')
+                            Select::make('complementary_products')
                                 ->label('Complementary products')
-                                ->rows(2),
+                                ->placeholder('Select products')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->options(fn (Get $get): array => self::complementaryProductOptions(
+                                    $get('complementary_products')
+                                ))
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    $component->state(self::parseComplementaryProductState($state));
+                                })
+                                ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateComplementaryProductState($state)),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
                         ->schema([
                             Select::make('jewelry_material')
                                 ->label('Jewelry material')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'jewelry_material',
+                                    HeaderStore::JEWELRY_MATERIAL
+                                ))
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     HeaderStore::JEWELRY_MATERIAL,
                                     tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
-                                ->reactive(),
+                                ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::JEWELRY_MATERIAL,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ]),
                             Select::make('product_materials')
                                 ->label('Product Materials')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'product_materials',
+                                    HeaderStore::PRODUCT_MATERIALS
+                                ))
                                 ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::withCurrentOption(
-                                    self::dropdownOptionsForHeader(HeaderStore::PRODUCT_MATERIALS),
-                                    $get('product_materials')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PRODUCT_MATERIALS,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
-                                ->reactive(),
+                                ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::PRODUCT_MATERIALS,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ]),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(3)
                         ->schema([
                             Select::make('metal')
                                 ->label('Metal')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'metal',
+                                    HeaderStore::PRODUCT_METALS
+                                ))
                                 ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::withCurrentOption(
-                                    self::dropdownOptionsForHeader(HeaderStore::PRODUCT_METALS),
-                                    $get('metal')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PRODUCT_METALS,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::PRODUCT_METALS,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
                                 ->afterStateHydrated(function (Select $component, $state): void {
                                     if (self::normalizeDesignAliasValue($state) === null) {
                                         $component->state(null);
@@ -456,16 +523,32 @@ class NewProductDraftResource extends Resource
                                 }),
                             Select::make('colour_style')
                                 ->label('Pattern category')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'colour_style',
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
                                 ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::withCurrentOption(
-                                    self::dropdownOptionsForHeader(
-                                        HeaderStore::PATTERN_CATEGORY,
-                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                    ),
-                                    $get('colour_style')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PATTERN_CATEGORY,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::PATTERN_CATEGORY,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
                                 ->afterStateHydrated(function (Select $component, $state): void {
                                     if (self::normalizeDesignAliasValue($state) === null) {
                                         $component->state(null);
@@ -473,13 +556,32 @@ class NewProductDraftResource extends Resource
                                 }),
                             Select::make('size')
                                 ->label('Size')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'size',
+                                    HeaderStore::SIZE
+                                ))
                                 ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::withCurrentOption(
-                                    self::dropdownOptionsForHeader(HeaderStore::SIZE),
-                                    $get('size')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::SIZE,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
                                 ->searchable()
                                 ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::SIZE,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
                                 ->afterStateHydrated(function (Select $component, $state): void {
                                     if (self::normalizeDesignAliasValue($state) === null) {
                                         $component->state(null);
@@ -822,6 +924,183 @@ class NewProductDraftResource extends Resource
         return $options;
     }
 
+    /**
+     * @param array<string, string> $options
+     * @return array<int, string>
+     */
+    private static function invalidCollectionSelectionValues(mixed $value, array $options): array
+    {
+        $selected = self::normalizeSelectedOptionTokens($value);
+        if (empty($selected)) {
+            return [];
+        }
+
+        $allowed = [];
+        foreach (array_keys($options) as $key) {
+            $normalized = strtolower(trim((string) $key));
+            if ($normalized !== '') {
+                $allowed[$normalized] = true;
+            }
+        }
+
+        $invalid = [];
+        foreach ($selected as $token) {
+            $normalized = strtolower(trim($token));
+            if ($normalized === '') {
+                continue;
+            }
+            if (!isset($allowed[$normalized])) {
+                $invalid[] = $token;
+            }
+        }
+
+        return array_values(array_unique($invalid));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function normalizeSelectedOptionTokens(mixed $value): array
+    {
+        if (is_array($value)) {
+            return array_values(array_filter(array_map(
+                fn (mixed $item): string => trim((string) $item),
+                $value
+            ), fn (string $item): bool => $item !== ''));
+        }
+
+        $raw = trim((string) $value);
+        if ($raw === '') {
+            return [];
+        }
+
+        $separator = str_contains($raw, ';') ? ';' : ',';
+        return array_values(array_filter(array_map(
+            fn (string $item): string => trim($item),
+            explode($separator, $raw)
+        ), fn (string $item): bool => $item !== ''));
+    }
+
+    private static function invalidCollectionSelectionHint(Get $get, string $field, string $header): ?HtmlString
+    {
+        $value = $get($field);
+        $invalid = self::invalidCollectionSelectionValues(
+            $value,
+            self::dropdownOptionsForHeader(
+                $header,
+                tags: self::filterTags($get, $get('vendor'), $get('type'))
+            )
+        );
+
+        if (empty($invalid)) {
+            return null;
+        }
+
+        $message = 'Invalid value(s) for selected collection: ' . implode('; ', $invalid)
+            . '. Remove them or choose values available for this collection.';
+
+        return new HtmlString('<span class="text-danger-600">' . e($message) . '</span>');
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function complementaryProductOptions(mixed $currentValue = null): array
+    {
+        $products = Product::query()
+            ->whereNotNull('shopify_id')
+            ->where('shopify_id', '!=', '')
+            ->orderBy('title')
+            ->orderBy('handle')
+            ->get(['shopify_id', 'title', 'handle']);
+
+        $options = [];
+        foreach ($products as $product) {
+            $gid = trim((string) $product->shopify_id);
+            if ($gid === '') {
+                continue;
+            }
+
+            $title = trim((string) $product->title);
+            $handle = trim((string) $product->handle);
+            $label = $title !== '' ? $title : ($handle !== '' ? $handle : $gid);
+            if ($handle !== '' && strcasecmp($label, $handle) !== 0) {
+                $label .= " ({$handle})";
+            }
+            $options[$gid] = $label;
+        }
+
+        $selected = self::parseComplementaryProductState($currentValue);
+        foreach ($selected as $gid) {
+            if (!isset($options[$gid])) {
+                $options[$gid] = $gid;
+            }
+        }
+
+        return $options;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function parseComplementaryProductState(mixed $state): array
+    {
+        if (is_array($state)) {
+            return array_values(array_filter(array_map(
+                fn (mixed $item): string => trim((string) $item),
+                $state
+            ), fn (string $item): bool => $item !== ''));
+        }
+
+        $raw = trim((string) $state);
+        if ($raw === '') {
+            return [];
+        }
+
+        if (str_starts_with($raw, '[')) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                return self::parseComplementaryProductState($decoded);
+            }
+        }
+
+        $parts = str_contains($raw, ';')
+            ? explode(';', $raw)
+            : explode(',', $raw);
+
+        return array_values(array_filter(array_map(
+            fn (string $item): string => trim($item),
+            $parts
+        ), fn (string $item): bool => $item !== ''));
+    }
+
+    private static function dehydrateComplementaryProductState(mixed $state): ?string
+    {
+        $tokens = self::parseComplementaryProductState($state);
+        if (empty($tokens)) {
+            return null;
+        }
+
+        $tokens = array_values(array_unique($tokens));
+        return implode('; ', $tokens);
+    }
+
+    private static function complementaryProductsAsLabels(?string $value): string
+    {
+        $tokens = self::parseComplementaryProductState($value);
+        if (empty($tokens)) {
+            return '';
+        }
+
+        $labelsByGid = self::complementaryProductOptions();
+        $labels = array_map(
+            fn (string $gid): string => $labelsByGid[$gid] ?? $gid,
+            $tokens
+        );
+
+        return implode('; ', $labels);
+    }
+
     private static function siblingsCollectionNameOptions(?string $currentValue = null): array
     {
         $titles = ShopifyCollection::query()
@@ -1027,6 +1306,8 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('complementary_products')
                     ->label('Complementary products')
+                    ->formatStateUsing(fn (?string $state): string => self::complementaryProductsAsLabels($state))
+                    ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('approvals_current')
                     ->label('Approvals')

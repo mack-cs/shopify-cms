@@ -38,6 +38,7 @@ final class NewProductDraftSeeder
 
                     $data = [
                         'handle' => $product->handle,
+                        'shopify_id' => $product->shopify_id,
                         'title' => $product->title,
                         'body_html' => $product->body_html,
                         'vendor' => $product->vendor,

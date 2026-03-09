@@ -325,7 +325,11 @@ class PendingDropdownOptionResource extends Resource
         return $query->pluck('products.id')->all();
     }
 
-    public static function approveForApplicableCollections(DropdownOption $record, ?int $userId = null): void
+    public static function approveForApplicableCollections(
+        DropdownOption $record,
+        ?int $userId = null,
+        bool $recalculateErrors = true
+    ): void
     {
         if (blank($record->collection_style)) {
             $resolved = self::resolvedCollectionStyle($record);
@@ -382,10 +386,16 @@ class PendingDropdownOptionResource extends Resource
             ->delete();
 
         self::logChange($record, 'active', 'false', 'true', $userId);
-        self::recalculateAllProductErrors();
+        if ($recalculateErrors) {
+            self::recalculateErrorsForOptionData($record->header, $record->value, null, null);
+        }
     }
 
-    public static function rejectForApplicableCollections(DropdownOption $record, ?int $userId = null): void
+    public static function rejectForApplicableCollections(
+        DropdownOption $record,
+        ?int $userId = null,
+        bool $recalculateErrors = true
+    ): void
     {
         DropdownOption::query()
             ->where('header', $record->header)
@@ -394,7 +404,41 @@ class PendingDropdownOptionResource extends Resource
             ->delete();
 
         self::logChange($record, 'deleted', 'false', 'true', $userId);
-        self::recalculateAllProductErrors();
+        if ($recalculateErrors) {
+            self::recalculateErrorsForOptionData($record->header, $record->value, null, null);
+        }
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public static function affectedProductIdsForHeaderValue(string $header, string $value): array
+    {
+        return self::affectedProductIds($header, $value, null, null);
+    }
+
+    /**
+     * @param array<int, int> $productIds
+     */
+    public static function recalculateErrorsForProductIds(array $productIds): void
+    {
+        $productIds = array_values(array_unique(array_filter(array_map(
+            fn (mixed $id): int => (int) $id,
+            $productIds
+        ), fn (int $id): bool => $id > 0)));
+
+        if (empty($productIds)) {
+            return;
+        }
+
+        $normalizer = app(Normalizer::class);
+        Product::query()
+            ->whereIn('id', $productIds)
+            ->chunkById(200, function ($products) use ($normalizer): void {
+                foreach ($products as $product) {
+                    $normalizer->recalculateErrorsForProduct($product);
+                }
+            });
     }
 
     private static function resolvedCollectionStyle(DropdownOption $record): ?string

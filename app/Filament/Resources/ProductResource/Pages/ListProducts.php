@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductResource\Pages;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
 use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
+use App\Models\Import;
 use App\Models\Product;
 use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
@@ -19,6 +20,11 @@ class ListProducts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [];
+    }
+
+    protected function getTablePollingInterval(): ?string
+    {
+        return $this->isSyncRunning() ? '5s' : null;
     }
 
     protected function getHeaderWidgets(): array
@@ -57,5 +63,14 @@ class ListProducts extends ListRecords
         }
 
         return $tabs;
+    }
+
+    private function isSyncRunning(): bool
+    {
+        $status = Import::query()
+            ->where('is_current', true)
+            ->value('status');
+
+        return is_string($status) && strtolower(trim($status)) === 'processing';
     }
 }

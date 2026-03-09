@@ -41,6 +41,7 @@ class ProcessPendingDropdownOptionsJob implements ShouldQueue
 
         $handled = [];
         $processed = 0;
+        $affectedProductIdSet = [];
 
         foreach ($records as $record) {
             $key = strtolower(trim((string) $record->header) . '|' . trim((string) $record->value));
@@ -49,16 +50,28 @@ class ProcessPendingDropdownOptionsJob implements ShouldQueue
             }
             $handled[$key] = true;
 
+            $affectedIds = PendingDropdownOptionResource::affectedProductIdsForHeaderValue(
+                (string) $record->header,
+                (string) $record->value
+            );
+            foreach ($affectedIds as $productId) {
+                $affectedProductIdSet[(int) $productId] = true;
+            }
+
             if ($this->operation === 'approve') {
-                PendingDropdownOptionResource::approveForApplicableCollections($record, $this->userId);
+                PendingDropdownOptionResource::approveForApplicableCollections($record, $this->userId, false);
                 $processed++;
                 continue;
             }
 
             if ($this->operation === 'reject') {
-                PendingDropdownOptionResource::rejectForApplicableCollections($record, $this->userId);
+                PendingDropdownOptionResource::rejectForApplicableCollections($record, $this->userId, false);
                 $processed++;
             }
+        }
+
+        if (!empty($affectedProductIdSet)) {
+            PendingDropdownOptionResource::recalculateErrorsForProductIds(array_keys($affectedProductIdSet));
         }
 
         $label = $this->operation === 'approve' ? 'approved' : 'rejected';
@@ -88,4 +101,3 @@ class ProcessPendingDropdownOptionsJob implements ShouldQueue
         $notification->sendToDatabase($user);
     }
 }
-

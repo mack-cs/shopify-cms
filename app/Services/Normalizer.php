@@ -165,6 +165,7 @@ final class Normalizer
                         'barcode' => $barcode,
                         'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
                         'weight_unit' => $weightUnit,
+                        'inventory_qty' => $this->toInteger($vr->get(HeaderStore::VARIANT_INVENTORY_QTY, null)),
                         'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
                         'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
                         'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),
@@ -314,6 +315,20 @@ final class Normalizer
         $s = trim((string)$v);
         if ($s === '') return null;
         return (float)$s;
+    }
+
+    private function toInteger(mixed $v): ?int
+    {
+        if ($v === null) {
+            return null;
+        }
+
+        $s = trim((string) $v);
+        if ($s === '' || !is_numeric($s)) {
+            return null;
+        }
+
+        return (int) $s;
     }
 
     private function defaultBatchForImport(Import $import): string

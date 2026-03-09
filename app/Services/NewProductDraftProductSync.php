@@ -121,6 +121,7 @@ final class NewProductDraftProductSync
     private function mapDraftToProduct(NewProductDraft $draft): array
     {
         return array_filter([
+            'shopify_id' => $draft->shopify_id,
             'title' => $draft->title,
             'body_html' => $draft->body_html,
             'vendor' => $draft->vendor,

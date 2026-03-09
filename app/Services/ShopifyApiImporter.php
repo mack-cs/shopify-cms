@@ -39,6 +39,7 @@ final class ShopifyApiImporter
         Product::where('import_id', $import->id)->delete();
         ShopifyCollection::where('import_id', $import->id)->delete();
         ShopifyMetafield::where('import_id', $import->id)->delete();
+        $shopifyProductIdsByHandle = [];
 
         $headers = $this->loadHeaders();
         $import->forceFill(['headers' => $headers])->save();
@@ -47,6 +48,12 @@ final class ShopifyApiImporter
 
         $rowIndex = 0;
         foreach ($this->fetchProducts() as $product) {
+            $handle = trim((string) data_get($product, 'handle', ''));
+            $shopifyId = trim((string) data_get($product, 'id', ''));
+            if ($handle !== '' && $shopifyId !== '') {
+                $shopifyProductIdsByHandle[$handle] = $shopifyId;
+            }
+
             $metaobjectMap = $this->resolveMetaobjectValues($product);
             $rows = $this->rowsForProduct($product, $headers, $metafieldHeaders, $metaobjectMap);
             foreach ($rows as $row) {
@@ -66,7 +73,25 @@ final class ShopifyApiImporter
         $this->storeCollections($import);
 
         $this->normalizer->buildNormalizedTables($import);
+        $this->syncProductShopifyIds($import, $shopifyProductIdsByHandle);
         $import->update(['status' => 'ready', 'is_valid' => true]);
+    }
+
+    /**
+     * @param array<string, string> $shopifyProductIdsByHandle
+     */
+    private function syncProductShopifyIds(Import $import, array $shopifyProductIdsByHandle): void
+    {
+        if (empty($shopifyProductIdsByHandle)) {
+            return;
+        }
+
+        foreach ($shopifyProductIdsByHandle as $handle => $shopifyId) {
+            Product::query()
+                ->where('import_id', $import->id)
+                ->where('handle', $handle)
+                ->update(['shopify_id' => $shopifyId]);
+        }
     }
 
     private function loadHeaders(): array
@@ -170,6 +195,7 @@ query Products($first: Int!, $after: String) {
   products(first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
+      id
       handle
       title
       descriptionHtml

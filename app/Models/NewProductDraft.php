@@ -98,15 +98,31 @@ class NewProductDraft extends Model
 
     public function imageUrl(): ?string
     {
-        if ($this->image_url) {
-            return $this->image_url;
+        $imageUrl = is_string($this->image_url) ? trim($this->image_url) : '';
+        if ($imageUrl !== '') {
+            return $imageUrl;
         }
 
-        if ($this->image_path) {
-            return Storage::disk('public')->url($this->image_path);
+        $imagePath = is_string($this->image_path) ? trim($this->image_path) : '';
+        if ($imagePath !== '') {
+            if (str_starts_with($imagePath, 'http://') || str_starts_with($imagePath, 'https://')) {
+                return $imagePath;
+            }
+
+            return Storage::disk('public')->url($imagePath);
         }
 
         return null;
+    }
+
+    public function setImageUrlAttribute(mixed $value): void
+    {
+        $this->attributes['image_url'] = is_string($value) ? trim($value) : $value;
+    }
+
+    public function setImagePathAttribute(mixed $value): void
+    {
+        $this->attributes['image_path'] = is_string($value) ? trim($value) : $value;
     }
 
     public function approvals(): HasMany

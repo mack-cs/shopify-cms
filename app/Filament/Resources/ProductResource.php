@@ -237,6 +237,7 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                             Select::make('color_string')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Colors')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -351,41 +352,10 @@ class ProductResource extends Resource
                                         ))));
 
                                         return $clean ? implode('; ', $clean) : null;
-                                    })
+                                    }),
 
-                                    // Optional: allow creating new colors
-                                ->createOptionForm([
-                                    TextInput::make('value')
-                                        ->required()
-                                        ->maxLength(255)
-                                        ->default(fn (Get $get): ?string => self::defaultInvalidDropdownValue(
-                                            $get,
-                                            'color_string',
-                                            HeaderStore::COLOR_METAFIELD,
-                                            true,
-                                            true
-                                        )),
-                                    TextInput::make('vendor')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
-                                        ->label('Vendor')
-                                        ->helperText('Leave blank for global options.'),
-                                    TextInput::make('product_type')
-                                        ->label('Product type')
-                                        ->helperText('Optional; use to limit to a specific type.'),
-                                    Select::make('collection_style')
-                                        ->label('Collection')
-                                        ->options(fn (): array => self::collectionOptions())
-                                        ->default(fn (Get $get): ?string => self::defaultCollectionStyleForState($get))
-                                        ->searchable()
-                                        ->placeholder('Use current product collection by default')
-                                        ->helperText('Pick a collection only if you want to override the current one.'),
-                                ])
-                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                    $data,
-                                    HeaderStore::COLOR_METAFIELD,
-                                    true
-                                )),
                                 Select::make('materials_and_dimensions')
+                                    ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Materials and dimensions')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -400,14 +370,6 @@ class ProductResource extends Resource
                                     ))
                                     ->searchable()
                                     ->reactive()
-                                    ->createOptionForm(self::controlledDropdownCreateOptionForm(
-                                        'materials_and_dimensions',
-                                        HeaderStore::MATERIALS_AND_DIMENSIONS
-                                    ))
-                                    ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                        $data,
-                                        HeaderStore::MATERIALS_AND_DIMENSIONS
-                                    ))
                                     ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                         if (!$record) {
                                             return;
@@ -417,6 +379,7 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                                 Select::make('jewelry_material')
+                                    ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Jewelry material')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -433,15 +396,6 @@ class ProductResource extends Resource
                                     ->multiple()
                                     ->searchable()
                                     ->reactive()
-                                    ->createOptionForm(self::controlledDropdownCreateOptionForm(
-                                        'jewelry_material',
-                                        HeaderStore::JEWELRY_MATERIAL,
-                                        true
-                                    ))
-                                    ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                        $data,
-                                        HeaderStore::JEWELRY_MATERIAL
-                                    ))
                                     ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                         if (!$record) {
                                             return;
@@ -701,6 +655,7 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(1)->schema([
                             Select::make('necklace_design')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Necklace design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -715,14 +670,6 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
-                                    'necklace_design',
-                                    'Necklace design (product.metafields.shopify.necklace-design)'
-                                ))
-                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                    $data,
-                                    'Necklace design (product.metafields.shopify.necklace-design)'
-                                ))
                                 ->visible(fn (Get $get): bool => in_array('necklaces', self::filterTags($get), true))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
@@ -769,6 +716,7 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Pattern category')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -783,14 +731,6 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
-                                    'pattern_category',
-                                    HeaderStore::PATTERN_CATEGORY
-                                ))
-                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                    $data,
-                                    HeaderStore::PATTERN_CATEGORY
-                                ))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
@@ -801,6 +741,7 @@ class ProductResource extends Resource
                                     ));
                                 }),
                             Select::make('product_metals')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Product metals')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -815,14 +756,6 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
-                                    'product_metals',
-                                    HeaderStore::PRODUCT_METALS
-                                ))
-                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
-                                    $data,
-                                    HeaderStore::PRODUCT_METALS
-                                ))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;

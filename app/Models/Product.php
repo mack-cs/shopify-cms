@@ -10,7 +10,7 @@ use App\Services\CategoryTypeMap;
 class Product extends Model
 {
     protected $fillable = [
-        'import_id','handle','title','body_html','vendor','tags',
+        'import_id','shopify_id','handle','title','body_html','vendor','tags',
         'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
