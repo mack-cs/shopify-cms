@@ -236,6 +236,10 @@ final class Normalizer
 
     public function recalculateErrorsForProduct(Product $product, $handleRows = null, ?ShopifyRow $primary = null): void
     {
+        $product->refresh();
+        $product->unsetRelation('variants');
+        $product->unsetRelation('images');
+
         $handleRows = $handleRows
             ?? ShopifyRow::where('import_id', $product->import_id)
                 ->where('handle', $product->handle)
@@ -512,6 +516,19 @@ final class Normalizer
             if ($rowValue === null && $primary) {
                 $rowValue = $this->rowValueInsensitive($primary->data ?? [], $attribute);
             }
+
+            // Some required definitions may use Shopify variant headers (e.g. "Variant SKU")
+            // as row fields. If variant records already contain the value, don't raise false
+            // row-level missing errors.
+            if ($this->normalizeValue($rowValue) === null && $this->isVariantAttribute($attribute)) {
+                foreach ($product->variants as $variant) {
+                    $variantValue = $this->variantValueFromModel($variant, $attribute);
+                    if ($this->normalizeValue($variantValue) !== null) {
+                        continue 2;
+                    }
+                }
+            }
+
             if ($this->normalizeValue($rowValue) === null) {
                 $errors[] = "missing:{$label}";
             }
@@ -560,6 +577,8 @@ final class Normalizer
                 }
             }
         }
+
+        $errors = $this->suppressVariantSkuMissingWhenVariantHasSku($product, $errors);
 
         if ($variants->isNotEmpty()) {
             foreach ($variants as $variant) {
@@ -877,20 +896,70 @@ final class Normalizer
 
     private function variantValueFromModel(Variant $variant, string $attribute): mixed
     {
-        return match ($attribute) {
-            'sku' => $variant->sku,
-            'barcode' => $variant->barcode,
-            'price' => $variant->price,
-            'compare_at_price' => $variant->compare_at_price,
+        return match ($this->normalizeKey($attribute)) {
+            'sku', 'variant_sku' => $variant->sku,
+            'barcode', 'variant_barcode' => $variant->barcode,
+            'price', 'variant_price' => $variant->price,
+            'compare_at_price', 'variant_compare_at_price' => $variant->compare_at_price,
             'option1_name' => $variant->option1_name,
             'option1_value' => $variant->option1_value,
             'option2_name' => $variant->option2_name,
             'option2_value' => $variant->option2_value,
             'option3_name' => $variant->option3_name,
             'option3_value' => $variant->option3_value,
-            'weight_unit' => $variant->weight_unit,
+            'weight_unit', 'variant_weight_unit' => $variant->weight_unit,
             default => null,
         };
+    }
+
+    private function isVariantAttribute(string $attribute): bool
+    {
+        return in_array($this->normalizeKey($attribute), [
+            'sku',
+            'variant_sku',
+            'barcode',
+            'variant_barcode',
+            'price',
+            'variant_price',
+            'compare_at_price',
+            'variant_compare_at_price',
+            'option1_name',
+            'option1_value',
+            'option2_name',
+            'option2_value',
+            'option3_name',
+            'option3_value',
+            'weight_unit',
+            'variant_weight_unit',
+        ], true);
+    }
+
+    private function normalizeKey(string $value): string
+    {
+        $value = strtolower(trim($value));
+        $value = preg_replace('/[^a-z0-9]+/', '_', $value) ?? $value;
+        return trim($value, '_');
+    }
+
+    private function suppressVariantSkuMissingWhenVariantHasSku(Product $product, array $errors): array
+    {
+        $hasVariantSku = $product->variants->contains(function (Variant $variant): bool {
+            return $this->normalizeValue($variant->sku) !== null;
+        });
+
+        if (!$hasVariantSku) {
+            return $errors;
+        }
+
+        return array_values(array_filter($errors, function (string $error): bool {
+            if (!str_starts_with($error, 'missing:')) {
+                return true;
+            }
+
+            $label = substr($error, strlen('missing:'));
+            $normalized = $this->normalizeKey($label);
+            return !in_array($normalized, ['sku', 'variant_sku'], true);
+        }));
     }
 
     private function imageValueFromModel(Image $image, string $attribute): mixed

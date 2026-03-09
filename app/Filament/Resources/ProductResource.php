@@ -343,7 +343,16 @@ class ProductResource extends Resource
 
                                     // Optional: allow creating new colors
                                 ->createOptionForm([
-                                    TextInput::make('value')->required()->maxLength(255),
+                                    TextInput::make('value')
+                                        ->required()
+                                        ->maxLength(255)
+                                        ->default(fn (Get $get): ?string => self::defaultInvalidDropdownValue(
+                                            $get,
+                                            'color_string',
+                                            HeaderStore::COLOR_METAFIELD,
+                                            true,
+                                            true
+                                        )),
                                     TextInput::make('vendor')
                                         ->label('Vendor')
                                         ->helperText('Leave blank for global options.'),
@@ -378,7 +387,10 @@ class ProductResource extends Resource
                                     ))
                                     ->searchable()
                                     ->reactive()
-                                    ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                    ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                        'materials_and_dimensions',
+                                        HeaderStore::MATERIALS_AND_DIMENSIONS
+                                    ))
                                     ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                         $data,
                                         HeaderStore::MATERIALS_AND_DIMENSIONS
@@ -408,7 +420,11 @@ class ProductResource extends Resource
                                     ->multiple()
                                     ->searchable()
                                     ->reactive()
-                                    ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                    ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                        'jewelry_material',
+                                        HeaderStore::JEWELRY_MATERIAL,
+                                        true
+                                    ))
                                     ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                         $data,
                                         HeaderStore::JEWELRY_MATERIAL
@@ -607,7 +623,10 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                    'bracelet_design',
+                                    HeaderStore::BRACELET_DESIGN
+                                ))
                                 ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                     $data,
                                     HeaderStore::BRACELET_DESIGN
@@ -677,7 +696,10 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                    'necklace_design',
+                                    'Necklace design (product.metafields.shopify.necklace-design)'
+                                ))
                                 ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                     $data,
                                     'Necklace design (product.metafields.shopify.necklace-design)'
@@ -707,7 +729,10 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                    'earring_design',
+                                    'Earring design (product.metafields.shopify.earring-design)'
+                                ))
                                 ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                     $data,
                                     'Earring design (product.metafields.shopify.earring-design)'
@@ -739,7 +764,10 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                    'pattern_category',
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
                                 ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                     $data,
                                     HeaderStore::PATTERN_CATEGORY
@@ -768,7 +796,10 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm(
+                                    'product_metals',
+                                    HeaderStore::PRODUCT_METALS
+                                ))
                                 ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
                                     $data,
                                     HeaderStore::PRODUCT_METALS
@@ -2059,10 +2090,24 @@ class ProductResource extends Resource
             ->all();
     }
 
-    private static function controlledDropdownCreateOptionForm(): array
+    private static function controlledDropdownCreateOptionForm(
+        string $field,
+        string $header,
+        bool $multiple = false,
+        bool $isColor = false
+    ): array
     {
         return [
-            TextInput::make('value')->required()->maxLength(255),
+            TextInput::make('value')
+                ->required()
+                ->maxLength(255)
+                ->default(fn (Get $get): ?string => self::defaultInvalidDropdownValue(
+                    $get,
+                    $field,
+                    $header,
+                    $multiple,
+                    $isColor
+                )),
             Select::make('collection_style')
                 ->label('Collection')
                 ->options(fn (): array => self::collectionOptions())
@@ -2073,14 +2118,33 @@ class ProductResource extends Resource
         ];
     }
 
+    private static function defaultInvalidDropdownValue(
+        Get $get,
+        string $field,
+        string $header,
+        bool $multiple = false,
+        bool $isColor = false
+    ): ?string {
+        $invalid = self::invalidDropdownValuesForField(
+            $get,
+            null,
+            $field,
+            $header,
+            $multiple,
+            $isColor
+        );
+
+        return $invalid[0] ?? null;
+    }
+
     private static function defaultCollectionStyleForState(Get $get): ?string
     {
-        $selected = self::nullIfEmpty($get('collection_filter'));
+        $selected = self::nullIfEmpty(self::stateFromGet($get, 'collection_filter'));
         if ($selected !== null) {
             return $selected;
         }
 
-        $tags = self::normalizeTagList($get('tags'));
+        $tags = self::normalizeTagList(self::stateFromGet($get, 'tags'));
         if (empty($tags)) {
             return null;
         }
@@ -2117,7 +2181,7 @@ class ProductResource extends Resource
         bool $multiple,
         bool $isColor
     ): array {
-        $state = $get($field);
+        $state = self::stateFromGet($get, $field);
         $values = self::normalizeDropdownStateValues($state, $multiple, $isColor);
         if (empty($values)) {
             return [];
@@ -2126,8 +2190,8 @@ class ProductResource extends Resource
         $vendor = null;
         $type = null;
         if ($header === HeaderStore::COLOR_METAFIELD) {
-            $vendor = self::nullIfEmpty($get('vendor') ?? $record?->vendor);
-            $type = self::nullIfEmpty($get('type') ?? $record?->type);
+            $vendor = self::nullIfEmpty(self::stateFromGet($get, 'vendor') ?? $record?->vendor);
+            $type = self::nullIfEmpty(self::stateFromGet($get, 'type') ?? $record?->type);
         }
 
         $tags = self::filterTags($get, $vendor, $type);
@@ -2448,7 +2512,7 @@ class ProductResource extends Resource
 
     private static function filterTags(Get $get, ?string $vendor = null, ?string $productType = null): array
     {
-        $collection = $get('collection_filter');
+        $collection = self::stateFromGet($get, 'collection_filter');
         if ($collection) {
             $tags = self::collectionTags($collection);
             if (!empty($tags)) {
@@ -2456,7 +2520,7 @@ class ProductResource extends Resource
             }
         }
 
-        $rawTags = $get('tags');
+        $rawTags = self::stateFromGet($get, 'tags');
         if (is_array($rawTags)) {
             $tokens = [];
             foreach ($rawTags as $value) {
@@ -2469,5 +2533,35 @@ class ProductResource extends Resource
         }
 
         return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
+    }
+
+    private static function stateFromGet(Get $get, string $field): mixed
+    {
+        $paths = [
+            $field,
+            "../{$field}",
+            "../../{$field}",
+            "../../../{$field}",
+            "../../../../{$field}",
+            "data.{$field}",
+            "../data.{$field}",
+            "../../data.{$field}",
+            "../../../data.{$field}",
+            "../../../../data.{$field}",
+        ];
+
+        foreach ($paths as $path) {
+            try {
+                $value = $get($path);
+            } catch (\Throwable $e) {
+                continue;
+            }
+
+            if ($value !== null && !(is_string($value) && trim($value) === '')) {
+                return $value;
+            }
+        }
+
+        return null;
     }
 }

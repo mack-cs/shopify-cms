@@ -16,10 +16,9 @@ class VariantsRelationManager extends RelationManager
             Forms\Components\TextInput::make('sku')
                 ->label('SKU')
                 ->reactive()
-                ->afterStateUpdated(function ($state, callable $set, callable $get): void {
-                    if ($state && !$get('barcode')) {
-                        $set('barcode', $state);
-                    }
+                ->afterStateUpdated(function ($state, callable $set): void {
+                    $sku = trim((string) ($state ?? ''));
+                    $set('barcode', $sku === '' ? null : $sku);
                 }),
             Forms\Components\TextInput::make('barcode')->label('Barcode'),
 

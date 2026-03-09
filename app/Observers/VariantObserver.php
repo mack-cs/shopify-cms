@@ -21,7 +21,7 @@ class VariantObserver
 
     public function saved(Variant $variant): void
     {
-        $product = $variant->product;
+        $product = Product::find($variant->product_id);
         if (!$product) {
             return;
         }
@@ -31,7 +31,7 @@ class VariantObserver
 
     public function deleted(Variant $variant): void
     {
-        $product = $variant->product;
+        $product = Product::find($variant->product_id);
         if (!$product) {
             return;
         }

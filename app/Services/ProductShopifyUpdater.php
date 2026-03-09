@@ -731,10 +731,13 @@ private function updateProduct(Product $product): array
                 ? $localVariantsBySku->get($rowSku)
                 : ($localVariantsOrdered->get($rowIndex) ?? null);
 
-            $desiredSku = $this->nullIfEmpty((string) ($localVariant?->sku ?? '')) ?? $rowSku;
-            $variantNode = $desiredSku !== null
-                ? $shopifyVariants->get($desiredSku)
+            // Match against the current known SKU first, then fall back by row index.
+            $lookupSku = $this->nullIfEmpty((string) ($localVariant?->sku ?? '')) ?? $rowSku;
+            $variantNode = $lookupSku !== null
+                ? ($shopifyVariants->get($lookupSku) ?? ($variantNodesOrdered[$rowIndex] ?? $shopifyVariants->first()))
                 : ($variantNodesOrdered[$rowIndex] ?? $shopifyVariants->first());
+            // For updates, prefer incoming row SKU so sync can change SKU/barcode.
+            $desiredSku = $rowSku ?? $this->nullIfEmpty((string) ($localVariant?->sku ?? ''));
 
             if (!$variantNode) {
                 continue;
@@ -745,6 +748,7 @@ private function updateProduct(Product $product): array
 
             if ($variantId) {
                 $input = ['id' => $variantId];
+                $inventoryItemInput = [];
 
                 // Variant Price from row data is the source of truth for Shopify variant price.
                 $rowVariantPriceRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
@@ -756,6 +760,7 @@ private function updateProduct(Product $product): array
                     'handle' => $product->handle,
                     'row_index' => $rowIndex,
                     'variant_id' => $variantId,
+                    'lookup_sku' => $lookupSku,
                     'desired_sku' => $desiredSku,
                     'local_variant_price' => $localVariantPriceRaw,
                     'row_variant_price' => $rowVariantPriceRaw,
@@ -796,7 +801,7 @@ private function updateProduct(Product $product): array
                 $optionValues = $this->variantOptionValuesFromRow($rowData, $variantNode);
 
                 if ($desiredSku !== null) {
-                    $input['sku'] = $desiredSku;
+                    $inventoryItemInput['sku'] = $desiredSku;
                     // Keep Shopify Variant Barcode aligned with Variant SKU.
                     $barcode = $desiredSku;
                 }
@@ -812,12 +817,14 @@ private function updateProduct(Product $product): array
                 if (!empty($optionValues)) {
                     $input['optionValues'] = $optionValues;
                 }
-                if ($grams !== null) {
+                if ($grams !== null || $weightUnit !== null) {
                     $unit = $this->mapWeightUnit($weightUnit);
-                    $input['weightUnit'] = $unit;
-                    $input['weight'] = $this->weightFromGrams($grams, $unit);
-                } elseif ($weightUnit !== null) {
-                    $input['weightUnit'] = $this->mapWeightUnit($weightUnit);
+                    $inventoryItemInput['measurement'] = [
+                        'weight' => [
+                            'unit' => $unit,
+                            'value' => $grams !== null ? $this->weightFromGrams($grams, $unit) : 0.0,
+                        ],
+                    ];
                 } else {
                     logger()->warning('Shopify variant weight skipped (no grams and no weight unit)', [
                         'product_id' => $product->id,
@@ -825,6 +832,27 @@ private function updateProduct(Product $product): array
                         'row_index' => $rowIndex,
                         'variant_id' => $variantId,
                     ]);
+                }
+
+                // Cost per item now travels via ProductVariantsBulkInput.inventoryItem.cost.
+                $costPerItemRaw = $this->valueFromRow($rowData, HeaderStore::COST_PER_ITEM, $primaryCostPerItem);
+                $costPerItem = $this->normalizeNumeric($costPerItemRaw);
+                logger()->info('Shopify cost per item resolution', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'row_index' => $rowIndex,
+                    'variant_id' => $variantId,
+                    'row_cost_per_item' => $rowData[HeaderStore::COST_PER_ITEM] ?? null,
+                    'primary_cost_per_item' => $primaryCostPerItem,
+                    'resolved_cost_per_item_raw' => $costPerItemRaw,
+                    'resolved_cost_per_item_numeric' => $costPerItem,
+                ]);
+                if ($costPerItem !== null) {
+                    $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
+                }
+
+                if (!empty($inventoryItemInput)) {
+                    $input['inventoryItem'] = $inventoryItemInput;
                 }
 
                 if (count($input) > 1) {
@@ -843,70 +871,6 @@ private function updateProduct(Product $product): array
                         'desired_sku' => $desiredSku,
                     ]);
                 }
-            }
-
-            // Cost per item: InventoryItemInput.cost uses shop default currency.
-            $costPerItemRaw = $this->valueFromRow($rowData, HeaderStore::COST_PER_ITEM, $primaryCostPerItem);
-            $costPerItem = $this->normalizeNumeric($costPerItemRaw);
-            logger()->info('Shopify cost per item resolution', [
-                'product_id' => $product->id,
-                'handle' => $product->handle,
-                'row_index' => $rowIndex,
-                'variant_id' => $variantId,
-                'row_cost_per_item' => $rowData[HeaderStore::COST_PER_ITEM] ?? null,
-                'primary_cost_per_item' => $primaryCostPerItem,
-                'resolved_cost_per_item_raw' => $costPerItemRaw,
-                'resolved_cost_per_item_numeric' => $costPerItem,
-            ]);
-            if ($inventoryItemId && $costPerItem !== null) {
-                logger()->info('Shopify cost per item mutation start', [
-                    'product_id' => $product->id,
-                    'handle' => $product->handle,
-                    'row_index' => $rowIndex,
-                    'variant_id' => $variantId,
-                    'inventory_item_id' => $inventoryItemId,
-                    'cost' => $costPerItem,
-                ]);
-                $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
-                    'inventoryItemId' => $inventoryItemId,
-                    'cost' => (string) $costPerItem,
-                ]);
-
-                $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
-                if (is_array($errors) && !empty($errors)) {
-                    logger()->error('Shopify cost per item mutation errors', [
-                        'product_id' => $product->id,
-                        'handle' => $product->handle,
-                        'row_index' => $rowIndex,
-                        'variant_id' => $variantId,
-                        'inventory_item_id' => $inventoryItemId,
-                        'errors' => $errors,
-                    ]);
-                    $messages = $this->formatUserErrors($errors);
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify cost per item update failed.',
-                    ];
-                } else {
-                    logger()->info('Shopify cost per item mutation success', [
-                        'product_id' => $product->id,
-                        'handle' => $product->handle,
-                        'row_index' => $rowIndex,
-                        'variant_id' => $variantId,
-                        'inventory_item_id' => $inventoryItemId,
-                        'cost' => $costPerItem,
-                    ]);
-                }
-            } else {
-                logger()->warning('Shopify cost per item mutation skipped', [
-                    'product_id' => $product->id,
-                    'handle' => $product->handle,
-                    'row_index' => $rowIndex,
-                    'variant_id' => $variantId,
-                    'inventory_item_id' => $inventoryItemId,
-                    'resolved_cost_per_item_numeric' => $costPerItem,
-                    'reason' => !$inventoryItemId ? 'missing_inventory_item_id' : 'missing_cost_per_item',
-                ]);
             }
 
             $inventoryQty = $this->normalizeNumeric(
