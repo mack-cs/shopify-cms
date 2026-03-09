@@ -1543,7 +1543,7 @@ class NewProductDraftResource extends Resource
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Created: {$result['created']}, " .
-                                "Updated: {$result['updated']}, Missing title: {$result['skipped_missing_title']}, " .
+                                "Updated: {$result['updated']}, Missing handle: {$result['skipped_missing_handle']}, " .
                                 "Duplicate SKU: {$result['skipped_duplicate_sku']}"
                             )
                             ->success()

@@ -15,7 +15,7 @@ final class NewProductDraftCsvImporter
      *   total:int,
      *   created:int,
      *   updated:int,
-     *   skipped_missing_title:int,
+     *   skipped_missing_handle:int,
      *   skipped_duplicate_sku:int
      * }
      */
@@ -80,7 +80,7 @@ final class NewProductDraftCsvImporter
         $total = 0;
         $created = 0;
         $updated = 0;
-        $skippedMissingTitle = 0;
+        $skippedMissingHandle = 0;
         $skippedDuplicateSku = 0;
 
         DB::transaction(function () use (
@@ -90,7 +90,7 @@ final class NewProductDraftCsvImporter
             &$total,
             &$created,
             &$updated,
-            &$skippedMissingTitle,
+            &$skippedMissingHandle,
             &$skippedDuplicateSku
         ): void {
             foreach ($csv->getRecords() as $row) {
@@ -117,32 +117,22 @@ final class NewProductDraftCsvImporter
                     }
                 }
 
-                $title = $data['title'] ?? null;
-                if (!$title) {
-                    $skippedMissingTitle++;
+                $handle = $data['handle'] ?? null;
+                if (!$handle) {
+                    $skippedMissingHandle++;
                     continue;
                 }
-
-                $handle = $data['handle'] ?? null;
                 $sku = $data['sku'] ?? null;
+
+                $draft = NewProductDraft::where('handle', $handle)->first();
 
                 if ($sku) {
                     $draftQuery = NewProductDraft::query()->where('sku', $sku);
-                    if ($handle) {
-                        $draftQuery->where('handle', '!=', $handle);
-                    }
+                    $draftQuery->where('handle', '!=', $handle);
                     if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
                         $skippedDuplicateSku++;
                         continue;
                     }
-                }
-
-                $draft = null;
-                if ($handle) {
-                    $draft = NewProductDraft::where('handle', $handle)->first();
-                }
-                if (!$draft && $sku) {
-                    $draft = NewProductDraft::where('sku', $sku)->first();
                 }
 
                 if ($draft) {
@@ -165,6 +155,7 @@ final class NewProductDraftCsvImporter
 
                 $data['payload'] = $payload ?: null;
                 $data['created_by'] = Auth::id();
+                $data['title'] = $data['title'] ?? $handle;
                 $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
                 $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
                 $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
@@ -178,7 +169,7 @@ final class NewProductDraftCsvImporter
             'total' => $total,
             'created' => $created,
             'updated' => $updated,
-            'skipped_missing_title' => $skippedMissingTitle,
+            'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_duplicate_sku' => $skippedDuplicateSku,
         ];
     }
