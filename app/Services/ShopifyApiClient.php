@@ -49,11 +49,13 @@ final class ShopifyApiClient
             throw new \RuntimeException('Shopify API credentials are missing.');
         }
 
+        $variablesPayload = empty($variables) ? (object) [] : $variables;
+
         $url = "https://{$shop}/admin/api/{$version}/graphql.json";
         $this->logOutgoing('graphql', [
             'url' => $url,
             'query' => $query,
-            'variables' => $variables,
+            'variables' => $variablesPayload,
         ]);
 
         $response = Http::withHeaders([
@@ -61,7 +63,7 @@ final class ShopifyApiClient
             'Content-Type' => 'application/json',
         ])->post($url, [
             'query' => $query,
-            'variables' => $variables,
+            'variables' => $variablesPayload,
         ]);
 
         if (!$response->successful()) {

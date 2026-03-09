@@ -12,6 +12,11 @@ use Illuminate\Support\Collection;
 
 final class ProductShopifyUpdater
 {
+    /** @var array<string, array<int, string>> */
+    private const METAOBJECT_TYPE_OVERRIDES_BY_LOOKUP = [
+        'custom.pattern_category' => ['colour_style'],
+    ];
+
     /** @var array<string, array<string, string>> */
     private array $referenceLookupCache = [];
 
@@ -20,6 +25,10 @@ final class ProductShopifyUpdater
 
     /** @var array<string, array<int, array{id:string,displayName:string,handle:string,fields:array<int, array{key:string,value:string}>}>> */
     private array $metaobjectsByTypeCache = [];
+    /** @var array<string, string>|null */
+    private ?array $productReferenceLookupCache = null;
+    /** @var array<string, string|null> */
+    private array $productReferenceRemoteCache = [];
 
     /** @var array<string, array<string, string>>|null */
     private ?array $acceptedValuesByHeaderCache = null;
@@ -278,16 +287,23 @@ private function updateProduct(Product $product): array
     [$primaryRow, $variantRows, $imageRows] = $this->loadRows($product);
     $primaryData = $primaryRow?->data ?? [];
 
-    $title = $this->valueFromRow($primaryData, HeaderStore::TITLE, $product->title);
+    // Prefer current Product model values from the tool; row data is fallback only.
+    $title = $this->nullIfEmpty($product->title)
+        ?? $this->valueFromRow($primaryData, HeaderStore::TITLE, null);
     // Prefer model value for vendor so UI edits are not overridden by stale imported row data.
     $vendor = $this->nullIfEmpty($product->vendor)
         ?? $this->valueFromRow($primaryData, HeaderStore::VENDOR, null);
-    $productType = $this->valueFromRow($primaryData, HeaderStore::TYPE, $product->type);
-    $bodyHtml = $this->valueFromRow($primaryData, HeaderStore::BODY_HTML, $product->body_html);
-    $statusRaw = $this->valueFromRow($primaryData, HeaderStore::STATUS, $product->status ?? 'draft');
-    $tagsRaw = $this->valueFromRow($primaryData, HeaderStore::TAGS, $product->tags);
+    $productType = $this->nullIfEmpty($product->type)
+        ?? $this->valueFromRow($primaryData, HeaderStore::TYPE, null);
+    $bodyHtml = $this->nullIfEmpty($product->body_html)
+        ?? $this->valueFromRow($primaryData, HeaderStore::BODY_HTML, null);
+    $statusRaw = $this->nullIfEmpty($product->status)
+        ?? $this->valueFromRow($primaryData, HeaderStore::STATUS, 'draft');
+    $tagsRaw = $this->nullIfEmpty($product->tags)
+        ?? $this->valueFromRow($primaryData, HeaderStore::TAGS, null);
 
-    $productCategory = $this->valueFromRow($primaryData, HeaderStore::PRODUCT_CATEGORY, null);
+    $productCategory = $this->nullIfEmpty($product->product_category)
+        ?? $this->valueFromRow($primaryData, HeaderStore::PRODUCT_CATEGORY, null);
     if ($productCategory !== null) {
         $productCategory = $this->normalizeSingleAcceptedValue(HeaderStore::PRODUCT_CATEGORY, $productCategory) ?? $productCategory;
     }
@@ -327,8 +343,10 @@ private function updateProduct(Product $product): array
     }
 
     if ($primaryRow) {
-        $seoTitle = $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, ''));
-        $seoDescription = $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, ''));
+        $seoTitle = $this->nullIfEmpty($product->seo_title)
+            ?? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, ''));
+        $seoDescription = $this->nullIfEmpty($product->seo_description)
+            ?? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, ''));
         if ($seoTitle !== null || $seoDescription !== null) {
             $input['seo'] = [
                 'title' => $seoTitle,
@@ -753,7 +771,8 @@ private function updateProduct(Product $product): array
                 // Variant Price from row data is the source of truth for Shopify variant price.
                 $rowVariantPriceRaw = $this->valueFromRow($rowData, HeaderStore::VARIANT_PRICE, null);
                 $localVariantPriceRaw = $localVariant?->price;
-                $priceRaw = $rowVariantPriceRaw ?? $localVariantPriceRaw;
+                // Prefer local variant value from the editor; row value is fallback.
+                $priceRaw = $localVariantPriceRaw ?? $rowVariantPriceRaw;
                 $price = $this->normalizeNumeric($priceRaw);
                 logger()->info('Shopify variant price resolution', [
                     'product_id' => $product->id,
@@ -764,7 +783,7 @@ private function updateProduct(Product $product): array
                     'desired_sku' => $desiredSku,
                     'local_variant_price' => $localVariantPriceRaw,
                     'row_variant_price' => $rowVariantPriceRaw,
-                    'price_source' => $rowVariantPriceRaw !== null ? 'row.variant_price' : 'local.variant.price',
+                    'price_source' => $localVariantPriceRaw !== null ? 'local.variant.price' : 'row.variant_price',
                     'resolved_price_raw' => $priceRaw,
                     'resolved_price_numeric' => $price,
                 ]);
@@ -881,12 +900,22 @@ private function updateProduct(Product $product): array
                 if ($locationId) {
                     $data = $this->client->graphql($this->inventorySetMutation(), [
                         'input' => [
-                            'inventoryItemId' => $inventoryItemId,
-                            'locationId' => $locationId,
-                            'quantity' => (int) $inventoryQty,
+                            'name' => 'available',
+                            'reason' => 'correction',
+                            'ignoreCompareQuantity' => true,
+                            'referenceDocumentUri' => sprintf(
+                                'logistics://shopify-editor/product/%d/variant/%s',
+                                (int) $product->id,
+                                rawurlencode((string) $variantId)
+                            ),
+                            'quantities' => [[
+                                'inventoryItemId' => $inventoryItemId,
+                                'locationId' => $locationId,
+                                'quantity' => (int) $inventoryQty,
+                            ]],
                         ],
                     ]);
-                    $errors = data_get($data, 'inventorySetOnHand.userErrors', []);
+                    $errors = data_get($data, 'inventorySetQuantities.userErrors', []);
                     if (is_array($errors) && !empty($errors)) {
                         $messages = $this->formatUserErrors($errors);
                         $warnings[] = [
@@ -1084,10 +1113,9 @@ GQL;
     private function inventorySetMutation(): string
     {
         return <<<'GQL'
-mutation InventorySetOnHand($input: InventorySetOnHandInput!) {
-  inventorySetOnHand(input: $input) {
-    inventoryLevel { id }
-    userErrors { field message }
+mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+  inventorySetQuantities(input: $input) {
+    userErrors { field message code }
   }
 }
 GQL;
@@ -1157,6 +1185,19 @@ query MetaobjectsByType($type: String!) {
         key
         value
       }
+    }
+  }
+}
+GQL;
+    }
+
+    private function productsSearchQuery(): string
+    {
+        return <<<'GQL'
+query ProductsSearch($query: String!) {
+  products(first: 1, query: $query) {
+    nodes {
+      id
     }
   }
 }
@@ -1499,12 +1540,23 @@ GQL;
             $decoded = json_decode($trimmed, true);
             if (is_array($decoded)) {
                 $items = array_values(array_filter($decoded, fn ($item) => is_string($item) && str_starts_with($item, 'gid://')));
+                if (empty($items) && $lookup !== null) {
+                    $resolved = [];
+                    foreach ($decoded as $item) {
+                        if (!is_string($item)) {
+                            continue;
+                        }
+                        $gid = $this->resolveReferenceTokenFromShopify($lookup, trim($item));
+                        if ($gid !== null) {
+                            $resolved[] = $gid;
+                        }
+                    }
+                    $items = array_values(array_unique($resolved));
+                }
                 return empty($items) ? null : json_encode($items);
             }
 
-            $parts = str_contains($trimmed, ';')
-                ? array_map('trim', explode(';', $trimmed))
-                : array_map('trim', explode(',', $trimmed));
+            $parts = $this->referenceTokensFromRaw($trimmed);
 
             $items = array_values(array_filter($parts, fn ($item) => str_starts_with($item, 'gid://')));
             if (!empty($items)) {
@@ -1764,10 +1816,7 @@ GQL;
 
     private function resolveReferenceValueFromShopify(string $lookup, string $type, string $raw): ?string
     {
-        $tokens = str_contains($raw, ';')
-            ? array_map('trim', explode(';', $raw))
-            : array_map('trim', explode(',', $raw));
-        $tokens = array_values(array_filter($tokens, fn ($item) => $item !== ''));
+        $tokens = $this->referenceTokensFromRaw($raw);
 
         if (empty($tokens)) {
             return null;
@@ -1794,17 +1843,218 @@ GQL;
             return $token;
         }
 
+        $productGid = $this->resolveProductReferenceTokenFromShopify($lookup, $token);
+        if ($productGid !== null) {
+            return $productGid;
+        }
+
         $map = $this->referenceLookupMap($lookup);
         if (empty($map)) {
             return null;
         }
 
         $normalized = $this->normalizeReferenceLabel($token);
+        $normalized = $this->applyLookupReferenceAlias($lookup, $normalized);
         if (isset($map[$normalized])) {
             return $map[$normalized];
         }
 
         return $this->fuzzyReferenceMatch($map, $normalized);
+    }
+
+    private function resolveProductReferenceTokenFromShopify(string $lookup, string $token): ?string
+    {
+        if (!$this->isProductReferenceLookup($lookup)) {
+            return null;
+        }
+
+        $trimmed = trim($token);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        if (preg_match('#^gid://shopify/Product/[0-9]+$#', $trimmed)) {
+            return $trimmed;
+        }
+
+        if (preg_match('#^/?products/([0-9]+)$#i', $trimmed, $m)) {
+            return "gid://shopify/Product/{$m[1]}";
+        }
+
+        if (preg_match('#/products/([0-9]+)(?:[/?\\#].*)?$#i', $trimmed, $m)) {
+            return "gid://shopify/Product/{$m[1]}";
+        }
+
+        if (preg_match('#^[0-9]+$#', $trimmed)) {
+            return "gid://shopify/Product/{$trimmed}";
+        }
+
+        if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $trimmed, $m)) {
+            $trimmed = $m[1];
+        }
+
+        $map = $this->productReferenceLookupMap();
+
+        $normalized = $this->normalizeReferenceLabel($trimmed);
+        if ($normalized === '') {
+            return null;
+        }
+
+        if (isset($map[$normalized])) {
+            return $map[$normalized];
+        }
+
+        $fuzzy = $this->fuzzyReferenceMatch($map, $normalized);
+        if ($fuzzy !== null) {
+            return $fuzzy;
+        }
+
+        return $this->resolveProductReferenceTokenFromShopifyRemote($trimmed);
+    }
+
+    private function isProductReferenceLookup(string $lookup): bool
+    {
+        return in_array($lookup, [
+            'shopify--discovery--product_recommendation.complementary_products',
+            'shopify--discovery--product_recommendation.related_products',
+        ], true);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function productReferenceLookupMap(): array
+    {
+        if ($this->productReferenceLookupCache !== null) {
+            return $this->productReferenceLookupCache;
+        }
+
+        $map = [];
+
+        Product::query()
+            ->select(['id', 'shopify_id', 'handle', 'title'])
+            ->whereNotNull('shopify_id')
+            ->where('shopify_id', '!=', '')
+            ->chunkById(500, function ($products) use (&$map): void {
+                foreach ($products as $product) {
+                    $gid = trim((string) ($product->shopify_id ?? ''));
+                    if ($gid === '') {
+                        continue;
+                    }
+
+                    foreach ([
+                        trim((string) ($product->handle ?? '')),
+                        trim((string) ($product->title ?? '')),
+                    ] as $label) {
+                        $normalized = $this->normalizeReferenceLabel($label);
+                        if ($normalized !== '' && !isset($map[$normalized])) {
+                            $map[$normalized] = $gid;
+                        }
+                    }
+                }
+            });
+
+        Variant::query()
+            ->join('products', 'products.id', '=', 'variants.product_id')
+            ->select(['variants.sku as sku', 'products.shopify_id as shopify_id'])
+            ->whereNotNull('sku')
+            ->where('sku', '!=', '')
+            ->whereNotNull('products.shopify_id')
+            ->where('products.shopify_id', '!=', '')
+            ->orderBy('variants.id')
+            ->chunk(500, function ($variants) use (&$map): void {
+                foreach ($variants as $variant) {
+                    $sku = trim((string) ($variant->sku ?? ''));
+                    $gid = trim((string) ($variant->shopify_id ?? ''));
+                    if ($sku === '' || $gid === '') {
+                        continue;
+                    }
+
+                    $normalized = $this->normalizeReferenceLabel($sku);
+                    if ($normalized !== '' && !isset($map[$normalized])) {
+                        $map[$normalized] = $gid;
+                    }
+                }
+            });
+
+        $this->productReferenceLookupCache = $map;
+        return $map;
+    }
+
+    private function resolveProductReferenceTokenFromShopifyRemote(string $token): ?string
+    {
+        $normalized = $this->normalizeReferenceLabel($token);
+        if ($normalized === '') {
+            return null;
+        }
+
+        if (array_key_exists($normalized, $this->productReferenceRemoteCache)) {
+            return $this->productReferenceRemoteCache[$normalized];
+        }
+
+        $gid = $this->resolveShopifyProductGidByHandle($normalized);
+
+        if ($gid === null && str_contains($token, '/')) {
+            $segments = array_values(array_filter(explode('/', trim($token, '/'))));
+            $last = end($segments);
+            if (is_string($last) && $last !== '') {
+                $gid = $this->resolveShopifyProductGidByHandle($this->normalizeReferenceLabel($last));
+            }
+        }
+
+        if ($gid === null && str_contains($token, ' ')) {
+            $gid = $this->resolveShopifyProductGidByQuery($token);
+        }
+
+        $this->productReferenceRemoteCache[$normalized] = $gid;
+        if ($gid !== null) {
+            $this->productReferenceLookupCache = null;
+        }
+
+        return $gid;
+    }
+
+    private function resolveShopifyProductGidByHandle(string $handle): ?string
+    {
+        $trimmed = trim($handle);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        try {
+            $data = $this->client->graphql($this->productByHandleQuery(), [
+                'handle' => $trimmed,
+            ]);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        $gid = trim((string) data_get($data, 'productByHandle.id', ''));
+        return $gid !== '' ? $gid : null;
+    }
+
+    private function resolveShopifyProductGidByQuery(string $token): ?string
+    {
+        $query = trim($token);
+        if ($query === '') {
+            return null;
+        }
+
+        try {
+            $data = $this->client->graphql($this->productsSearchQuery(), [
+                'query' => $query,
+            ]);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        $nodes = data_get($data, 'products.nodes', []);
+        if (!is_array($nodes) || empty($nodes)) {
+            return null;
+        }
+
+        $gid = trim((string) data_get($nodes, '0.id', ''));
+        return $gid !== '' ? $gid : null;
     }
 
     /**
@@ -1893,12 +2143,24 @@ GQL;
                         if (is_string($item) && str_starts_with($item, 'gid://shopify/MetaobjectDefinition/')) {
                             $definitionIds[] = $item;
                         }
+                        if (is_array($item)) {
+                            foreach ($item as $nested) {
+                                if (is_string($nested) && str_starts_with($nested, 'gid://shopify/MetaobjectDefinition/')) {
+                                    $definitionIds[] = $nested;
+                                }
+                            }
+                        }
                     }
-                    continue;
                 }
 
                 if (str_starts_with($value, 'gid://shopify/MetaobjectDefinition/')) {
                     $definitionIds[] = $value;
+                }
+
+                if (preg_match_all('#gid://shopify/MetaobjectDefinition/[0-9]+#', $value, $matches)) {
+                    foreach (($matches[0] ?? []) as $matched) {
+                        $definitionIds[] = $matched;
+                    }
                 }
             }
         }
@@ -1925,7 +2187,16 @@ GQL;
 
         if (empty($types)) {
             $types[] = str_replace('-', '_', $key);
+            $types[] = str_replace('_', '-', $key);
             $types[] = "shopify--{$key}";
+            $types[] = "shopify--" . str_replace('_', '-', $key);
+            $types[] = "{$namespace}--{$key}";
+            $types[] = "{$namespace}--" . str_replace('_', '-', $key);
+        }
+
+        $overrideTypes = self::METAOBJECT_TYPE_OVERRIDES_BY_LOOKUP[$lookup] ?? [];
+        if (!empty($overrideTypes)) {
+            $types = array_merge($overrideTypes, $types);
         }
 
         $types = array_values(array_unique(array_filter($types)));
@@ -2004,6 +2275,29 @@ GQL;
         $normalized = preg_replace('/[^a-z0-9-]+/', '', $normalized) ?? '';
         $normalized = preg_replace('/-+/', '-', $normalized) ?? '';
         return trim($normalized, '-');
+    }
+
+    private function applyLookupReferenceAlias(string $lookup, string $normalized): string
+    {
+        if ($lookup !== 'custom.pattern_category' || $normalized === '') {
+            return $normalized;
+        }
+
+        return match ($normalized) {
+            'multicolor', 'multi-color', 'multi-colour', 'multicolot' => 'multicolour',
+            'sold' => 'solid',
+            default => $normalized,
+        };
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function referenceTokensFromRaw(string $raw): array
+    {
+        $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
+        $parts = array_map(static fn ($item) => trim((string) $item), $parts);
+        return array_values(array_filter($parts, static fn ($item) => $item !== ''));
     }
 
     /**
@@ -2518,6 +2812,7 @@ GQL;
             ->where('import_id', $product->import_id)
             ->where('handle', $product->handle)
             ->whereIn('row_type', ['product_primary', 'variant', 'image'])
+            ->orderByDesc('id')
             ->get();
 
         $primary = $rows->firstWhere('row_type', 'product_primary');

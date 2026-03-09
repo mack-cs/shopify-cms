@@ -9,6 +9,301 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Artisan::command(
+    'shopify:list-metaobjects-for-definition
+    {definitionId : MetaobjectDefinition GID (gid://shopify/MetaobjectDefinition/...)}
+    {--first=50 : Max number of entries}',
+    function (string $definitionId): int {
+        $first = (int) $this->option('first');
+        if ($first < 1) {
+            $first = 50;
+        }
+        if ($first > 250) {
+            $first = 250;
+        }
+
+        if (!str_starts_with($definitionId, 'gid://shopify/MetaobjectDefinition/')) {
+            $this->error('definitionId must be gid://shopify/MetaobjectDefinition/...');
+            return self::FAILURE;
+        }
+
+        try {
+            /** @var ShopifyApiClient $client */
+            $client = app(ShopifyApiClient::class);
+
+            $nodeData = $client->graphql(<<<'GQL'
+                query MetaobjectDefinitionNode($id: ID!) {
+                  node(id: $id) {
+                    ... on MetaobjectDefinition {
+                      id
+                      name
+                      type
+                    }
+                  }
+                }
+            GQL, [
+                'id' => $definitionId,
+            ]);
+
+            $type = trim((string) data_get($nodeData, 'node.type', ''));
+            $name = trim((string) data_get($nodeData, 'node.name', ''));
+            if ($type === '') {
+                $this->error('Could not resolve metaobject definition type from this definition ID.');
+                $this->line(json_encode($nodeData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+                return self::FAILURE;
+            }
+
+            $this->info("Definition: {$definitionId}");
+            $this->line("Name: {$name}");
+            $this->line("Type: {$type}");
+
+            $metaobjectsData = $client->graphql(<<<'GQL'
+                query MetaobjectsByType($type: String!, $first: Int!) {
+                  metaobjects(type: $type, first: $first) {
+                    nodes {
+                      id
+                      handle
+                      displayName
+                    }
+                  }
+                }
+            GQL, [
+                'type' => $type,
+                'first' => $first,
+            ]);
+
+            $nodes = data_get($metaobjectsData, 'metaobjects.nodes', []);
+            if (!is_array($nodes) || empty($nodes)) {
+                $this->warn("No metaobjects found for resolved type '{$type}'.");
+                return self::SUCCESS;
+            }
+
+            $this->info('Allowed metaobject entries:');
+            foreach ($nodes as $node) {
+                $this->line(implode(' | ', [
+                    (string) data_get($node, 'id', ''),
+                    (string) data_get($node, 'handle', ''),
+                    (string) data_get($node, 'displayName', ''),
+                ]));
+            }
+
+            return self::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Request failed: ' . $e->getMessage());
+            return self::FAILURE;
+        }
+    }
+)->purpose('Resolve a MetaobjectDefinition ID to its type, then list valid metaobject entry IDs.');
+
+Artisan::command(
+    'shopify:list-metaobjects-for-metafield
+    {namespace : Metafield namespace (e.g. custom)}
+    {key : Metafield key (e.g. pattern_category)}
+    {--first=50 : Max number of entries per resolved type}',
+    function (string $namespace, string $key): int {
+        $first = (int) $this->option('first');
+        if ($first < 1) {
+            $first = 50;
+        }
+        if ($first > 250) {
+            $first = 250;
+        }
+
+        try {
+            /** @var ShopifyApiClient $client */
+            $client = app(ShopifyApiClient::class);
+
+            $definitionData = $client->graphql(<<<'GQL'
+                query MetafieldDefinition($namespace: String!, $key: String!) {
+                  metafieldDefinition(ownerType: PRODUCT, namespace: $namespace, key: $key) {
+                    validations {
+                      name
+                      value
+                    }
+                  }
+                }
+            GQL, [
+                'namespace' => $namespace,
+                'key' => $key,
+            ]);
+
+            $validations = data_get($definitionData, 'metafieldDefinition.validations', []);
+            if (!is_array($validations) || empty($validations)) {
+                $this->warn("No validations found for {$namespace}.{$key}.");
+                return self::SUCCESS;
+            }
+
+            $definitionIds = [];
+            foreach ($validations as $validation) {
+                if (!is_array($validation)) {
+                    continue;
+                }
+                $name = strtolower(trim((string) ($validation['name'] ?? '')));
+                if (!str_contains($name, 'metaobject')) {
+                    continue;
+                }
+                $value = trim((string) ($validation['value'] ?? ''));
+                if ($value === '') {
+                    continue;
+                }
+
+                $decoded = json_decode($value, true);
+                if (is_array($decoded)) {
+                    foreach ($decoded as $item) {
+                        if (is_string($item) && str_starts_with($item, 'gid://shopify/MetaobjectDefinition/')) {
+                            $definitionIds[] = $item;
+                        }
+                        if (is_array($item)) {
+                            foreach ($item as $nested) {
+                                if (is_string($nested) && str_starts_with($nested, 'gid://shopify/MetaobjectDefinition/')) {
+                                    $definitionIds[] = $nested;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (str_starts_with($value, 'gid://shopify/MetaobjectDefinition/')) {
+                    $definitionIds[] = $value;
+                }
+
+                if (preg_match_all('#gid://shopify/MetaobjectDefinition/[0-9]+#', $value, $matches)) {
+                    foreach (($matches[0] ?? []) as $matched) {
+                        $definitionIds[] = $matched;
+                    }
+                }
+            }
+
+            $definitionIds = array_values(array_unique($definitionIds));
+            if (empty($definitionIds)) {
+                $this->warn("No MetaobjectDefinition IDs found in validations for {$namespace}.{$key}.");
+                $this->line('Validations:');
+                $this->line(json_encode($validations, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+                return self::SUCCESS;
+            }
+
+            $nodeData = $client->graphql(<<<'GQL'
+                query MetaobjectDefinitionTypes($ids: [ID!]!) {
+                  nodes(ids: $ids) {
+                    ... on MetaobjectDefinition {
+                      id
+                      type
+                      name
+                    }
+                  }
+                }
+            GQL, [
+                'ids' => $definitionIds,
+            ]);
+
+            $nodes = data_get($nodeData, 'nodes', []);
+            if (!is_array($nodes) || empty($nodes)) {
+                $this->warn('Could not resolve metaobject definition nodes.');
+                return self::SUCCESS;
+            }
+
+            foreach ($nodes as $node) {
+                $defId = (string) data_get($node, 'id', '');
+                $type = (string) data_get($node, 'type', '');
+                $name = (string) data_get($node, 'name', '');
+                $this->info("Definition: {$defId} | {$name} | type={$type}");
+
+                if ($type === '') {
+                    continue;
+                }
+
+                $metaobjectsData = $client->graphql(<<<'GQL'
+                    query MetaobjectsByType($type: String!, $first: Int!) {
+                      metaobjects(type: $type, first: $first) {
+                        nodes {
+                          id
+                          handle
+                          displayName
+                        }
+                      }
+                    }
+                GQL, [
+                    'type' => $type,
+                    'first' => $first,
+                ]);
+
+                $metaobjectNodes = data_get($metaobjectsData, 'metaobjects.nodes', []);
+                if (!is_array($metaobjectNodes) || empty($metaobjectNodes)) {
+                    $this->line("  No entries found for type '{$type}'.");
+                    continue;
+                }
+
+                foreach ($metaobjectNodes as $metaobjectNode) {
+                    $this->line('  - ' . implode(' | ', [
+                        (string) data_get($metaobjectNode, 'id', ''),
+                        (string) data_get($metaobjectNode, 'handle', ''),
+                        (string) data_get($metaobjectNode, 'displayName', ''),
+                    ]));
+                }
+            }
+
+            return self::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Request failed: ' . $e->getMessage());
+            return self::FAILURE;
+        }
+    }
+)->purpose('Resolve metaobject type(s) from a product metafield definition and list matching entries.');
+
+Artisan::command(
+    'shopify:list-metaobjects
+    {type : Metaobject type (e.g. pattern_category)}
+    {--first=50 : Max number of entries}',
+    function (string $type): int {
+        $first = (int) $this->option('first');
+        if ($first < 1) {
+            $first = 50;
+        }
+        if ($first > 250) {
+            $first = 250;
+        }
+
+        try {
+            /** @var ShopifyApiClient $client */
+            $client = app(ShopifyApiClient::class);
+
+            $result = $client->graphql(<<<'GQL'
+                query MetaobjectsByType($type: String!, $first: Int!) {
+                  metaobjects(type: $type, first: $first) {
+                    nodes {
+                      id
+                      handle
+                      displayName
+                    }
+                  }
+                }
+            GQL, [
+                'type' => $type,
+                'first' => $first,
+            ]);
+
+            $nodes = data_get($result, 'metaobjects.nodes', []);
+            if (!is_array($nodes) || empty($nodes)) {
+                $this->warn("No metaobjects found for type '{$type}'.");
+                return self::SUCCESS;
+            }
+
+            foreach ($nodes as $node) {
+                $this->line(implode(' | ', [
+                    (string) data_get($node, 'id', ''),
+                    (string) data_get($node, 'handle', ''),
+                    (string) data_get($node, 'displayName', ''),
+                ]));
+            }
+
+            return self::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Request failed: ' . $e->getMessage());
+            return self::FAILURE;
+        }
+    }
+)->purpose('List Shopify metaobjects by type (id, handle, displayName).');
+
+Artisan::command(
     'shopify:set-product-category {productId : Shopify Product GID} {categoryId : Shopify TaxonomyCategory/ProductTaxonomyNode GID}',
     function (string $productId, string $categoryId): int {
         try {
@@ -241,6 +536,236 @@ Artisan::command(
         }
     }
 )->purpose('Test setting a product UVP rich text metafield via Shopify GraphQL');
+
+Artisan::command(
+    'shopify:test-product-metafields
+    {ownerId : Shopify Product GID (gid://shopify/Product/...)}
+    {--pattern=solid : Pattern category value (solid|multicolor)}
+    {--pattern-type=single_line_text_field : Pattern metafield type (single_line_text_field|metaobject_reference)}
+    {--complementary= : Comma-separated product GIDs for complementary products}
+    {--pattern-namespace=$app : Namespace for pattern category metafield}
+    {--pattern-key=pattern_category : Key for pattern category metafield}
+    {--pattern-metaobject-id= : Metaobject GID for pattern category when --pattern-type=metaobject_reference}
+    {--app-comp-namespace=$app : Namespace for app complementary metafield}
+    {--app-comp-key=complementary_products : Key for app complementary metafield}
+    {--std-comp-namespace=shopify--discovery--product_recommendation : Namespace for standard complementary metafield}
+    {--std-comp-key=complementary_products : Key for standard complementary metafield}
+    {--skip-app-complementary : Skip writing app-owned complementary metafield}
+    {--skip-standard : Skip writing standard complementary metafield}',
+    function (string $ownerId): int {
+        $patternValue = strtolower(trim((string) ($this->option('pattern') ?? 'solid')));
+        $patternType = strtolower(trim((string) ($this->option('pattern-type') ?? 'single_line_text_field')));
+        $patternMetaobjectId = trim((string) ($this->option('pattern-metaobject-id') ?? ''));
+        $patternNamespace = trim((string) ($this->option('pattern-namespace') ?? '$app'));
+        $patternKey = trim((string) ($this->option('pattern-key') ?? 'pattern_category'));
+        $appCompNamespace = trim((string) ($this->option('app-comp-namespace') ?? '$app'));
+        $appCompKey = trim((string) ($this->option('app-comp-key') ?? 'complementary_products'));
+        $stdCompNamespace = trim((string) ($this->option('std-comp-namespace') ?? 'shopify--discovery--product_recommendation'));
+        $stdCompKey = trim((string) ($this->option('std-comp-key') ?? 'complementary_products'));
+        $skipAppComplementary = (bool) $this->option('skip-app-complementary');
+        $skipStandard = (bool) $this->option('skip-standard');
+
+        $rawComplementary = trim((string) ($this->option('complementary') ?? ''));
+        if ($rawComplementary === '') {
+            $this->error('Provide at least one complementary product GID via --complementary.');
+            $this->line('Example: --complementary="gid://shopify/Product/222222222,gid://shopify/Product/333333333"');
+            return self::FAILURE;
+        }
+
+        $complementaryIds = array_values(array_filter(array_map(
+            static fn (string $value): string => trim($value),
+            explode(',', $rawComplementary)
+        ), static fn (string $value): bool => $value !== ''));
+        $complementaryIds = array_values(array_unique($complementaryIds));
+
+        if (empty($complementaryIds)) {
+            $this->error('No valid complementary product IDs were provided.');
+            return self::FAILURE;
+        }
+
+        foreach ($complementaryIds as $id) {
+            if (!str_starts_with($id, 'gid://shopify/Product/')) {
+                $this->error("Invalid complementary product GID: {$id}");
+                return self::FAILURE;
+            }
+        }
+
+        if (
+            $patternNamespace === '' ||
+            $patternKey === '' ||
+            $appCompNamespace === '' ||
+            $appCompKey === '' ||
+            $stdCompNamespace === '' ||
+            $stdCompKey === ''
+        ) {
+            $this->error('Namespace and key options cannot be empty.');
+            return self::FAILURE;
+        }
+
+        if (!in_array($patternType, ['single_line_text_field', 'metaobject_reference'], true)) {
+            $this->error("Invalid --pattern-type '{$patternType}'. Allowed: single_line_text_field, metaobject_reference.");
+            return self::FAILURE;
+        }
+
+        if ($patternType === 'single_line_text_field' && !in_array($patternValue, ['solid', 'multicolor'], true)) {
+            $this->error("Invalid --pattern value '{$patternValue}'. Allowed for single_line_text_field: solid, multicolor.");
+            return self::FAILURE;
+        }
+
+        if ($patternType === 'metaobject_reference') {
+            if ($patternMetaobjectId === '' && str_starts_with($patternValue, 'gid://shopify/Metaobject/')) {
+                $patternMetaobjectId = $patternValue;
+            }
+            if (!str_starts_with($patternMetaobjectId, 'gid://shopify/Metaobject/')) {
+                $this->error('When --pattern-type=metaobject_reference, provide --pattern-metaobject-id=gid://shopify/Metaobject/...');
+                return self::FAILURE;
+            }
+        }
+
+        $complementaryJson = json_encode($complementaryIds, JSON_UNESCAPED_SLASHES);
+        if ($complementaryJson === false) {
+            $this->error('Failed to encode complementary product references.');
+            return self::FAILURE;
+        }
+
+        $metafields = [[
+            'ownerId' => $ownerId,
+            'namespace' => $patternNamespace,
+            'key' => $patternKey,
+            'type' => $patternType,
+            'value' => $patternType === 'metaobject_reference'
+                ? $patternMetaobjectId
+                : $patternValue,
+        ]];
+
+        if (!$skipAppComplementary) {
+            $metafields[] = [
+                'ownerId' => $ownerId,
+                'namespace' => $appCompNamespace,
+                'key' => $appCompKey,
+                'type' => 'list.product_reference',
+                'value' => $complementaryJson,
+            ];
+        }
+
+        if (!$skipStandard) {
+            $metafields[] = [
+                'ownerId' => $ownerId,
+                'namespace' => $stdCompNamespace,
+                'key' => $stdCompKey,
+                'type' => 'list.product_reference',
+                'value' => $complementaryJson,
+            ];
+        }
+
+        try {
+            /** @var ShopifyApiClient $client */
+            $client = app(ShopifyApiClient::class);
+
+            $setResult = $client->graphql(<<<'GQL'
+                mutation SetProductMetafields($metafields: [MetafieldsSetInput!]!) {
+                  metafieldsSet(metafields: $metafields) {
+                    metafields {
+                      namespace
+                      key
+                      type
+                      value
+                      createdAt
+                      updatedAt
+                    }
+                    userErrors {
+                      field
+                      message
+                      code
+                    }
+                  }
+                }
+            GQL, [
+                'metafields' => $metafields,
+            ]);
+
+            $setErrors = data_get($setResult, 'metafieldsSet.userErrors', []);
+            if (is_array($setErrors) && !empty($setErrors)) {
+                $this->error('Shopify returned userErrors during metafieldsSet:');
+                foreach ($setErrors as $error) {
+                    $field = is_array($error['field'] ?? null)
+                        ? implode('.', $error['field'])
+                        : ($error['field'] ?? 'unknown');
+                    $message = (string) ($error['message'] ?? 'Unknown error');
+                    $code = (string) ($error['code'] ?? '');
+                    $suffix = $code !== '' ? " ({$code})" : '';
+                    $this->line("- [{$field}] {$message}{$suffix}");
+                }
+
+                return self::FAILURE;
+            }
+
+            $this->info('metafieldsSet succeeded.');
+            $this->line('Written metafields:');
+            $this->line(json_encode(
+                data_get($setResult, 'metafieldsSet.metafields', []),
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            ));
+
+            $readResult = $client->graphql(<<<'GQL'
+                query ReadProductMetafields(
+                  $id: ID!,
+                  $patternNamespace: String!,
+                  $patternKey: String!,
+                  $appCompNamespace: String!,
+                  $appCompKey: String!,
+                  $stdCompNamespace: String!,
+                  $stdCompKey: String!
+                ) {
+                  product(id: $id) {
+                    id
+                    handle
+                    patternCategory: metafield(namespace: $patternNamespace, key: $patternKey) {
+                      namespace
+                      key
+                      type
+                      value
+                      jsonValue
+                    }
+                    appComplementary: metafield(namespace: $appCompNamespace, key: $appCompKey) {
+                      namespace
+                      key
+                      type
+                      value
+                      jsonValue
+                    }
+                    standardComplementary: metafield(namespace: $stdCompNamespace, key: $stdCompKey) {
+                      namespace
+                      key
+                      type
+                      value
+                      jsonValue
+                    }
+                  }
+                }
+            GQL, [
+                'id' => $ownerId,
+                'patternNamespace' => $patternNamespace,
+                'patternKey' => $patternKey,
+                'appCompNamespace' => $appCompNamespace,
+                'appCompKey' => $appCompKey,
+                'stdCompNamespace' => $stdCompNamespace,
+                'stdCompKey' => $stdCompKey,
+            ]);
+
+            $this->info('Read-back result:');
+            $this->line(json_encode(
+                data_get($readResult, 'product'),
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            ));
+
+            return self::SUCCESS;
+        } catch (\Throwable $e) {
+            $this->error('Request failed: ' . $e->getMessage());
+            return self::FAILURE;
+        }
+    }
+)->purpose('Test Shopify pattern category + complementary products metafields via metafieldsSet and read-back query.');
 
 Artisan::command(
     'shopify:update-variant-price
