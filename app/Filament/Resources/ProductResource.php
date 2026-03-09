@@ -237,7 +237,6 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                             Select::make('color_string')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Colors')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -387,7 +386,6 @@ class ProductResource extends Resource
                                     true
                                 )),
                                 Select::make('materials_and_dimensions')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Materials and dimensions')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -419,7 +417,6 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                                 Select::make('jewelry_material')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Jewelry material')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -629,7 +626,6 @@ class ProductResource extends Resource
                             ->dehydrated(false),
                         Grid::make(2)->schema([
                             Select::make('bracelet_design')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Bracelet design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -705,7 +701,6 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(1)->schema([
                             Select::make('necklace_design')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Necklace design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -739,7 +734,6 @@ class ProductResource extends Resource
                                     ));
                                 }),
                             Select::make('earring_design')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Earring design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -775,7 +769,6 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Pattern category')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -808,7 +801,6 @@ class ProductResource extends Resource
                                     ));
                                 }),
                             Select::make('product_metals')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Product metals')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,

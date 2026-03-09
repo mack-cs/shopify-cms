@@ -3,6 +3,7 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\PendingDropdownOptionResource\Pages;
+use App\Jobs\ProcessPendingDropdownOptionsJob;
 use App\Models\ChangeLog;
 use App\Models\DropdownOption;
 use App\Models\Product;
@@ -17,6 +18,7 @@ use Filament\Tables\Table;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
 use Filament\Tables\Filters\SelectFilter;
+use Filament\Notifications\Notification;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 
@@ -65,13 +67,51 @@ class PendingDropdownOptionResource extends Resource
                         ->all()),
                 SelectFilter::make('collection_style')
                     ->label('Collection')
-                    ->options(fn () => DropdownOption::query()
-                        ->whereNotNull('collection_style')
-                        ->where('collection_style', '!=', '')
-                        ->distinct()
-                        ->orderBy('collection_style')
-                        ->pluck('collection_style', 'collection_style')
-                        ->all()),
+                    ->options(function (): array {
+                        $styles = collect(app(DropdownCollectionCatalog::class)->contexts())
+                            ->pluck('collection_style')
+                            ->filter(fn ($value) => is_string($value) && trim($value) !== '')
+                            ->map(fn (string $value): string => trim($value))
+                            ->unique()
+                            ->sort()
+                            ->values()
+                            ->all();
+
+                        return array_combine($styles, $styles) ?: [];
+                    })
+                    ->query(function (Builder $query, array $data): Builder {
+                        $selected = trim((string) ($data['value'] ?? ''));
+                        if ($selected === '') {
+                            return $query;
+                        }
+
+                        $contexts = collect(app(DropdownCollectionCatalog::class)->contexts())
+                            ->filter(fn (array $ctx): bool => strcasecmp((string) ($ctx['collection_style'] ?? ''), $selected) === 0)
+                            ->values();
+
+                        return $query->where(function (Builder $inner) use ($selected, $contexts): void {
+                            $inner->whereRaw('LOWER(collection_style) = ?', [strtolower($selected)]);
+
+                            foreach ($contexts as $ctx) {
+                                $primary = trim((string) ($ctx['tag_primary'] ?? ''));
+                                if ($primary === '') {
+                                    continue;
+                                }
+                                $secondary = trim((string) ($ctx['tag_secondary'] ?? ''));
+
+                                $inner->orWhere(function (Builder $branch) use ($primary, $secondary): void {
+                                    $branch->where(function (Builder $style): void {
+                                        $style->whereNull('collection_style')
+                                            ->orWhere('collection_style', '');
+                                    });
+                                    $branch->whereRaw('LOWER(collection_tag_primary) = ?', [strtolower($primary)]);
+                                    if ($secondary !== '') {
+                                        $branch->whereRaw('LOWER(collection_tag_secondary) = ?', [strtolower($secondary)]);
+                                    }
+                                });
+                            }
+                        });
+                    }),
             ])
             ->actions([
                 Tables\Actions\Action::make('approve')
@@ -80,7 +120,8 @@ class PendingDropdownOptionResource extends Resource
                     ->requiresConfirmation()
                     ->disabled(fn (DropdownOption $record): bool => blank(self::resolvedCollectionStyle($record)) || blank($record->collection_tag_primary))
                     ->action(function (DropdownOption $record): void {
-                        self::approveForApplicableCollections($record);
+                        ProcessPendingDropdownOptionsJob::dispatch([$record->id], 'approve', Auth::id());
+                        self::sendQueuedNotification('Approve queued', 'Pending dropdown approval is running in background.');
                     }),
                 Tables\Actions\Action::make('reject')
                     ->label('Reject')
@@ -88,7 +129,8 @@ class PendingDropdownOptionResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->action(function (DropdownOption $record): void {
-                        self::rejectForApplicableCollections($record);
+                        ProcessPendingDropdownOptionsJob::dispatch([$record->id], 'reject', Auth::id());
+                        self::sendQueuedNotification('Reject queued', 'Pending dropdown rejection is running in background.');
                     }),
             ])
             ->bulkActions([
@@ -97,21 +139,13 @@ class PendingDropdownOptionResource extends Resource
                     ->icon('heroicon-o-check-badge')
                     ->requiresConfirmation()
                     ->action(function ($records): void {
-                        $handled = [];
-
-                        foreach ($records as $record) {
-                            if ($record->active || blank(self::resolvedCollectionStyle($record)) || blank($record->collection_tag_primary)) {
-                                continue;
-                            }
-
-                            $key = strtolower($record->header . '|' . $record->value);
-                            if (isset($handled[$key])) {
-                                continue;
-                            }
-                            $handled[$key] = true;
-
-                            self::approveForApplicableCollections($record);
+                        $ids = collect($records)->pluck('id')->filter()->map(fn ($id): int => (int) $id)->values()->all();
+                        if (empty($ids)) {
+                            return;
                         }
+
+                        ProcessPendingDropdownOptionsJob::dispatch($ids, 'approve', Auth::id());
+                        self::sendQueuedNotification('Bulk approve queued', 'Pending dropdown approvals are running in background.');
                     })
                     ->deselectRecordsAfterCompletion(),
                 Tables\Actions\BulkAction::make('bulkReject')
@@ -120,15 +154,13 @@ class PendingDropdownOptionResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->action(function ($records): void {
-                        $handled = [];
-                        foreach ($records as $record) {
-                            $key = strtolower($record->header . '|' . $record->value);
-                            if (isset($handled[$key])) {
-                                continue;
-                            }
-                            $handled[$key] = true;
-                            self::rejectForApplicableCollections($record);
+                        $ids = collect($records)->pluck('id')->filter()->map(fn ($id): int => (int) $id)->values()->all();
+                        if (empty($ids)) {
+                            return;
                         }
+
+                        ProcessPendingDropdownOptionsJob::dispatch($ids, 'reject', Auth::id());
+                        self::sendQueuedNotification('Bulk reject queued', 'Pending dropdown rejections are running in background.');
                     })
                     ->deselectRecordsAfterCompletion(),
             ]);
@@ -164,10 +196,10 @@ class PendingDropdownOptionResource extends Resource
         ]) ?? false;
     }
 
-    private static function logChange(DropdownOption $record, string $field, string $old, string $new): void
+    private static function logChange(DropdownOption $record, string $field, string $old, string $new, ?int $userId = null): void
     {
         ChangeLog::create([
-            'changed_by' => Auth::id(),
+            'changed_by' => $userId ?? Auth::id(),
             'model_type' => DropdownOption::class,
             'model_id' => $record->id,
             'field' => $field,
@@ -293,7 +325,7 @@ class PendingDropdownOptionResource extends Resource
         return $query->pluck('products.id')->all();
     }
 
-    private static function approveForApplicableCollections(DropdownOption $record): void
+    public static function approveForApplicableCollections(DropdownOption $record, ?int $userId = null): void
     {
         if (blank($record->collection_style)) {
             $resolved = self::resolvedCollectionStyle($record);
@@ -349,11 +381,11 @@ class PendingDropdownOptionResource extends Resource
             ->where('active', false)
             ->delete();
 
-        self::logChange($record, 'active', 'false', 'true');
+        self::logChange($record, 'active', 'false', 'true', $userId);
         self::recalculateAllProductErrors();
     }
 
-    private static function rejectForApplicableCollections(DropdownOption $record): void
+    public static function rejectForApplicableCollections(DropdownOption $record, ?int $userId = null): void
     {
         DropdownOption::query()
             ->where('header', $record->header)
@@ -361,7 +393,7 @@ class PendingDropdownOptionResource extends Resource
             ->where('active', false)
             ->delete();
 
-        self::logChange($record, 'deleted', 'false', 'true');
+        self::logChange($record, 'deleted', 'false', 'true', $userId);
         self::recalculateAllProductErrors();
     }
 
@@ -498,5 +530,18 @@ class PendingDropdownOptionResource extends Resource
 
             return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
         }));
+    }
+
+    private static function sendQueuedNotification(string $title, string $body): void
+    {
+        $notification = Notification::make()
+            ->title($title)
+            ->body($body)
+            ->success();
+
+        if ($user = Auth::user()) {
+            $notification->sendToDatabase($user);
+        }
+        $notification->send();
     }
 }

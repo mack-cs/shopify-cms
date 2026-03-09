@@ -505,9 +505,42 @@ class NewProductDraftResource extends Resource
                             ->schema([
                                 Forms\Components\Grid::make(3)
                                     ->schema([
-                                        TextInput::make('variant_price')->label('Price')->numeric(),
-                                        TextInput::make('variant_compare_at_price')->label('Compare-at price')->numeric(),
-                                        TextInput::make('variant_inventory_qty')->label('Inventory')->numeric(),
+                                        TextInput::make('variant_price')
+                                            ->label('Price')
+                                            ->numeric()
+                                            ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if ($record === null || $state !== null) {
+                                                    return;
+                                                }
+                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
+                                                if ($defaults['variant_price'] !== null) {
+                                                    $component->state($defaults['variant_price']);
+                                                }
+                                            }),
+                                        TextInput::make('variant_compare_at_price')
+                                            ->label('Compare-at price')
+                                            ->numeric()
+                                            ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if ($record === null || $state !== null) {
+                                                    return;
+                                                }
+                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
+                                                if ($defaults['variant_compare_at_price'] !== null) {
+                                                    $component->state($defaults['variant_compare_at_price']);
+                                                }
+                                            }),
+                                        TextInput::make('variant_inventory_qty')
+                                            ->label('Inventory')
+                                            ->numeric()
+                                            ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if ($record === null || $state !== null) {
+                                                    return;
+                                                }
+                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
+                                                if ($defaults['variant_inventory_qty'] !== null) {
+                                                    $component->state($defaults['variant_inventory_qty']);
+                                                }
+                                            }),
                                     ])
                                     ->columnSpanFull(),
                             ]),
@@ -735,6 +768,27 @@ class NewProductDraftResource extends Resource
 
         $resolved = trim((string) ($variantSku ?? $record->sku ?? ''));
         return $resolved === '' ? null : $resolved;
+    }
+
+    /**
+     * @return array{variant_price:?string,variant_compare_at_price:?string,variant_inventory_qty:?int}
+     */
+    private static function resolvedVariantDefaultsForDraft(NewProductDraft $record): array
+    {
+        $variant = null;
+        if ($record->handle) {
+            $variant = Product::query()
+                ->where('handle', $record->handle)
+                ->first()?->variants()
+                ->orderBy('id')
+                ->first();
+        }
+
+        return [
+            'variant_price' => $variant?->price !== null ? (string) $variant->price : null,
+            'variant_compare_at_price' => $variant?->compare_at_price !== null ? (string) $variant->compare_at_price : null,
+            'variant_inventory_qty' => $variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null,
+        ];
     }
 
     private static function dropdownOptionsForHeader(
