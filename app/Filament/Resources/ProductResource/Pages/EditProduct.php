@@ -12,6 +12,51 @@ class EditProduct extends EditRecord
 {
     protected static string $resource = ProductResource::class;
 
+    /**
+     * Fields owned by New Product Draft workflow; Product edit page must not persist them.
+     *
+     * @return array<int, string>
+     */
+    private function draftOwnedFormKeys(): array
+    {
+        return [
+            'title',
+            'body_html',
+            'vendor',
+            'tags',
+            'type',
+            'published',
+            'product_category',
+            'google_product_category',
+            'status',
+            'color_string',
+            'variant_price',
+            'uvp_short_paragraph',
+            'google_shopping_age_group',
+            'target_gender',
+            'age_group',
+            'materials_and_dimensions',
+            'jewelry_material',
+            'jewelry_type',
+            'bracelet_design',
+            'necklace_design',
+            'earring_design',
+            'pattern_category',
+            'product_metals',
+            'cost_per_item',
+            'batch',
+        ];
+    }
+
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        foreach ($this->draftOwnedFormKeys() as $key) {
+            unset($data[$key]);
+        }
+
+        return $data;
+    }
+
     protected function afterSave(): void
     {
         $data = $this->form->getState();
@@ -53,6 +98,9 @@ class EditProduct extends EditRecord
 
         $data = ($rows->first()->data ?? []);
         $formState = $this->form->getState();
+        foreach ($this->draftOwnedFormKeys() as $key) {
+            unset($formState[$key]);
+        }
         if (array_key_exists('color_string', $formState)) {
             $color = $formState['color_string'];
             if (is_array($color)) {
@@ -97,15 +145,21 @@ class EditProduct extends EditRecord
         if (array_key_exists('jewelry_type', $formState)) {
             $data[HeaderStore::JEWELRY_TYPE] = $formState['jewelry_type'] ?? '';
         }
-        $data[HeaderStore::BRACELET_DESIGN] = $formState['bracelet_design'] ?? '';
+        if (array_key_exists('bracelet_design', $formState)) {
+            $data[HeaderStore::BRACELET_DESIGN] = $formState['bracelet_design'] ?? '';
+        }
         if (array_key_exists('necklace_design', $formState)) {
             $data['Necklace design (product.metafields.shopify.necklace-design)'] = $formState['necklace_design'] ?? '';
         }
         if (array_key_exists('earring_design', $formState)) {
             $data['Earring design (product.metafields.shopify.earring-design)'] = $formState['earring_design'] ?? '';
         }
-        $data[HeaderStore::PATTERN_CATEGORY] = $formState['pattern_category'] ?? '';
-        $data[HeaderStore::PRODUCT_METALS] = $formState['product_metals'] ?? '';
+        if (array_key_exists('pattern_category', $formState)) {
+            $data[HeaderStore::PATTERN_CATEGORY] = $formState['pattern_category'] ?? '';
+        }
+        if (array_key_exists('product_metals', $formState)) {
+            $data[HeaderStore::PRODUCT_METALS] = $formState['product_metals'] ?? '';
+        }
         if (array_key_exists('cost_per_item', $formState)) {
             $data['Cost per item'] = $formState['cost_per_item'] ?? '';
         }

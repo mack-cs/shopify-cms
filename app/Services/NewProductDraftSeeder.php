@@ -49,6 +49,7 @@ final class NewProductDraftSeeder
                         'google_product_category' => $product->google_product_category,
                         'status' => $product->status,
                         'color_string' => $product->color_string,
+                        'uvp_short_paragraph' => $product->uvp_short_paragraph,
                         'batch' => $product->batch,
                         'image_url' => $imageUrl,
                         'created_by' => $userId,
@@ -65,6 +66,9 @@ final class NewProductDraftSeeder
                         $data['size'] = $row->get(HeaderStore::SIZE, null);
                         $data['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
                         $data['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
+                        if ($data['uvp_short_paragraph'] === null || trim((string) $data['uvp_short_paragraph']) === '') {
+                            $data['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
+                        }
                         $data['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
                     }
 

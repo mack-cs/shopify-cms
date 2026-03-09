@@ -361,11 +361,7 @@ protected static ?string $navigationLabel = 'Product Feed';
             return $query->whereRaw('1 = 0');
         }
 
-        if ($user->can(PermissionEnum::ImportViewAll->value)) {
-            return $query;
-        }
-
-        return $query->where('is_current', true);
+        return $query;
     }
 
     public static function canViewAny(): bool
@@ -375,7 +371,7 @@ protected static ?string $navigationLabel = 'Product Feed';
 
     public static function canCreate(): bool
     {
-        return Auth::user()?->can(PermissionEnum::ImportCreate->value) ?? false;
+        return false;
     }
 
     public static function canEdit($record): bool
@@ -447,7 +443,6 @@ protected static ?string $navigationLabel = 'Product Feed';
     {
         return [
             'index' => Pages\ListImports::route('/'),
-            'create' => Pages\CreateImport::route('/create'),
             'edit' => Pages\EditImport::route('/{record}/edit'),
         ];
     }

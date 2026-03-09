@@ -105,6 +105,13 @@ class NewProductDraftResource extends Resource
                                         };
                                     },
                                 ])
+                                ->afterStateHydrated(function (TextInput $component, ?NewProductDraft $record): void {
+                                    if (!$record) {
+                                        return;
+                                    }
+
+                                    $component->state(self::resolvedSkuForDraft($record));
+                                })
                                 ->columnSpan(1),
                             TextInput::make('handle')
                                 ->maxLength(255)
@@ -258,13 +265,7 @@ class NewProductDraftResource extends Resource
                             Textarea::make('body_html')
                                 ->label('Description')
                                 ->rows(3)
-                                ->columnSpan(1),
-                            RichEditor::make('uvp_short_paragraph')
-                                ->label('UVP Short Paragraph')
-                                ->toolbarButtons([
-                                    'bold',
-                                ])
-                                ->columnSpan(1),
+                                ->columnSpan(2),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -606,6 +607,11 @@ class NewProductDraftResource extends Resource
                         ])
                         ->default('false')
                         ->required(),
+                    RichEditor::make('uvp_short_paragraph')
+                        ->label('UVP Short Paragraph')
+                        ->toolbarButtons([
+                            'bold',
+                        ]),
                     TextInput::make('batch')
                         ->label('Batch')
                         ->default(fn () => self::defaultBatch()),
@@ -613,13 +619,6 @@ class NewProductDraftResource extends Resource
                 ->columnSpan(1),
                 ])
                 ->columnSpanFull(),
-            Section::make('Additional Fields')
-                ->schema([
-                    KeyValue::make('payload')
-                        ->keyLabel('Header')
-                        ->valueLabel('Value')
-                        ->addActionLabel('Add field'),
-                ]),
         ]);
     }
 
@@ -711,6 +710,21 @@ class NewProductDraftResource extends Resource
         return [];
     }
 
+    private static function resolvedSkuForDraft(NewProductDraft $record): ?string
+    {
+        $variantSku = null;
+        if ($record->handle) {
+            $variantSku = Product::query()
+                ->where('handle', $record->handle)
+                ->first()?->variants()
+                ->orderBy('id')
+                ->value('sku');
+        }
+
+        $resolved = trim((string) ($variantSku ?? $record->sku ?? ''));
+        return $resolved === '' ? null : $resolved;
+    }
+
     private static function dropdownOptionsForHeader(
         string $header,
         ?string $vendor = null,
@@ -790,6 +804,7 @@ class NewProductDraftResource extends Resource
                     ->sortable()
                     ->toggleable(),
                 TextInputColumn::make('sku')
+                    ->state(fn (NewProductDraft $record): ?string => self::resolvedSkuForDraft($record))
                     ->rules([
                         function () {
                             return function (string $attribute, $value, $fail): void {

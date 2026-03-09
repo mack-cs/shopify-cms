@@ -163,11 +163,59 @@ class ProductObserver
         }
 
         NewProductDraft::withoutEvents(function () use ($product, $payload): void {
-            NewProductDraft::updateOrCreate(
-                ['handle' => $product->handle],
-                $payload
-            );
+            $draft = NewProductDraft::query()
+                ->where('handle', $product->handle)
+                ->first();
+
+            if (!$draft) {
+                NewProductDraft::create($payload);
+                return;
+            }
+
+            $updates = [];
+            foreach ($payload as $key => $incomingValue) {
+                if ($key === 'handle') {
+                    continue;
+                }
+                if ($this->isEmptyDraftValue($incomingValue)) {
+                    continue;
+                }
+
+                $currentValue = $draft->getAttribute($key);
+                // SKU should always mirror the current product variant SKU.
+                if ($key === 'sku') {
+                    if ((string) $currentValue !== (string) $incomingValue) {
+                        $updates[$key] = $incomingValue;
+                    }
+                    continue;
+                }
+
+                if ($this->isEmptyDraftValue($currentValue)) {
+                    $updates[$key] = $incomingValue;
+                }
+            }
+
+            if (!empty($updates)) {
+                $draft->fill($updates)->save();
+            }
         });
+    }
+
+    private function isEmptyDraftValue(mixed $value): bool
+    {
+        if ($value === null) {
+            return true;
+        }
+
+        if (is_string($value)) {
+            return trim($value) === '';
+        }
+
+        if (is_array($value)) {
+            return empty($value);
+        }
+
+        return false;
     }
 
     private function syncTagsForProduct(Product $product): void

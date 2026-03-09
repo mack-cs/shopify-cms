@@ -20,18 +20,7 @@ final class ShopifyApiImporter
 
     public function createOrReuseCurrentImport(int $userId, string $mode = 'overwrite'): Import
     {
-        $current = Import::where('is_current', true)->first();
-        if ($current) {
-            $current->update([
-                'filename' => 'shopify-api',
-                'mode' => $mode,
-                'status' => 'processing',
-                'created_by' => $userId,
-                'is_valid' => true,
-            ]);
-            return $current;
-        }
-
+        // API sync should always create a fresh import row so history is preserved.
         Import::query()->update(['is_current' => false]);
 
         return Import::create([

@@ -3,7 +3,6 @@
 namespace App\Filament\Resources\ImportResource\Pages;
 
 use App\Filament\Resources\ImportResource;
-use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
 
 class ListImports extends ListRecords
@@ -12,9 +11,6 @@ class ListImports extends ListRecords
 
     protected function getHeaderActions(): array
     {
-        return [
-            Actions\CreateAction::make()
-                ->visible(fn (): bool => ImportResource::canCreate()),
-        ];
+        return [];
     }
 }

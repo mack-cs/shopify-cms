@@ -73,6 +73,11 @@ class ProductResource extends Resource
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?int $navigationSort = 1;
 
+    protected static function isDraftOwnedLocked(?Product $record): bool
+    {
+        return (bool) $record;
+    }
+
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
@@ -100,10 +105,13 @@ class ProductResource extends Resource
                                         Rule::unique('products', 'handle')->where('import_id', $importId),
                                     ];
                                 }),
-                            TextInput::make('title'),
-                            Textarea::make('body_html')->rows(5)->columnSpanFull(),
+                            TextInput::make('title')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record)),
+                            Textarea::make('body_html')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))->rows(5)->columnSpanFull(),
                             Grid::make(3)->schema([
                             Select::make('target_gender')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Target gender')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
                                     HeaderStore::TARGET_GENDER,
@@ -137,6 +145,7 @@ class ProductResource extends Resource
                                     $component->state(self::shopifyRowValue($record, HeaderStore::TARGET_GENDER));
                                 }),
                                 Select::make('type')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Type')
                                     ->options(function (): array {
                                         $types = CategoryTypeMap::types();
@@ -165,6 +174,7 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                                 Select::make('product_category')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Category')
                                     ->options(fn (): array => CategoryTypeMap::categoryOptions())
                                     ->searchable()
@@ -194,6 +204,7 @@ class ProductResource extends Resource
                                         }
                                     }),
                             Select::make('tags')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Tags')
                                 ->multiple()
                                 ->searchable()
@@ -226,6 +237,7 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                             Select::make('color_string')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Colors')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -355,6 +367,7 @@ class ProductResource extends Resource
                                             true
                                         )),
                                     TextInput::make('vendor')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                         ->label('Vendor')
                                         ->helperText('Leave blank for global options.'),
                                     TextInput::make('product_type')
@@ -374,6 +387,7 @@ class ProductResource extends Resource
                                     true
                                 )),
                                 Select::make('materials_and_dimensions')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Materials and dimensions')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -405,6 +419,7 @@ class ProductResource extends Resource
                             ])->columnSpanFull(),
                             Grid::make(2)->schema([
                                 Select::make('jewelry_material')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Jewelry material')
                                     ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                         $get,
@@ -455,6 +470,7 @@ class ProductResource extends Resource
                                         return $clean ? implode('; ', $clean) : null;
                                     }),
                                 Select::make('jewelry_type')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                     ->label('Jewelry type')
                                     ->placeholder('Select option')
                                     ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
@@ -538,6 +554,7 @@ class ProductResource extends Resource
                         ])->columnSpan(2)->columns(2),
                         Section::make()->schema([
                             Select::make('vendor')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Vendor')
                                 ->placeholder('Select option')
                                 ->options(fn () => Product::query()
@@ -551,6 +568,7 @@ class ProductResource extends Resource
                                 ->preload(),
                             Select::make('collection_filter')
                                 ->label('Collection')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->placeholder('Select option')
                                 ->options(fn (): array => self::collectionOptions())
                                 ->searchable()
@@ -582,6 +600,7 @@ class ProductResource extends Resource
                                 }),
 
                         Select::make('google_shopping_age_group')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                             ->label('Google Shopping / Age Group')
                             ->placeholder('Select option')
                             ->options([
@@ -610,6 +629,7 @@ class ProductResource extends Resource
                             ->dehydrated(false),
                         Grid::make(2)->schema([
                             Select::make('bracelet_design')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Bracelet design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -641,6 +661,7 @@ class ProductResource extends Resource
                                     $component->state(self::shopifyRowValue($record, HeaderStore::BRACELET_DESIGN));
                                 }),
                             TextInput::make('variant_price')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Variant price')
                                 ->numeric()
                                 ->inputMode('decimal')
@@ -655,6 +676,7 @@ class ProductResource extends Resource
                                     $component->state($value);
                                 }),
                             TextInput::make('cost_per_item')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Cost per item')
                                 ->numeric()
                                 ->inputMode('decimal')
@@ -683,6 +705,7 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(1)->schema([
                             Select::make('necklace_design')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Necklace design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -716,6 +739,7 @@ class ProductResource extends Resource
                                     ));
                                 }),
                             Select::make('earring_design')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Earring design')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -751,6 +775,7 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Pattern category')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -783,6 +808,7 @@ class ProductResource extends Resource
                                     ));
                                 }),
                             Select::make('product_metals')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Product metals')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
@@ -817,6 +843,7 @@ class ProductResource extends Resource
                         ])->columnSpanFull(),
                         Grid::make(2)->schema([
                             Select::make('age_group')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Age group')
                                 ->placeholder('Select option')
                                 ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
@@ -833,6 +860,7 @@ class ProductResource extends Resource
                                     $component->state(self::shopifyRowValue($record, HeaderStore::AGE_GROUP));
                                 }),
                             Select::make('status')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Status')
                                 ->placeholder('Select option')
                                 ->searchable()
@@ -843,6 +871,7 @@ class ProductResource extends Resource
                                     ->all()),
                         ])->columnSpanFull(),
                         Toggle::make('published')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                             ->label('Published')
                             ->helperText('Exported as true/false.')
                             ->afterStateHydrated(function (Toggle $component, $state): void {
@@ -855,6 +884,7 @@ class ProductResource extends Resource
                             ->inputMode('decimal')
                             ->helperText('Internal only. Not exported.'),
                             TextInput::make('batch')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Batch')
                                 ->datalist(fn () => Product::query()
                                     ->whereNotNull('batch')
@@ -865,6 +895,7 @@ class ProductResource extends Resource
                                 ->placeholder('import_YYYYMMDDH')
                                 ->helperText('Internal only. Not exported.'),
                             RichEditor::make('uvp_short_paragraph')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('UVP Short Paragraph')
                                 ->toolbarButtons([
                                     'bold',
@@ -2568,3 +2599,4 @@ class ProductResource extends Resource
         return null;
     }
 }
+
