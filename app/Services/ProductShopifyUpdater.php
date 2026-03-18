@@ -715,31 +715,41 @@ private function updateProduct(Product $product): array
             'primary_grams' => $primaryGrams,
         ]);
 
+        $localVariantsOrdered = $product->variants()->orderBy('id')->get()->values();
+        $variantSources = $this->buildVariantSources($rowDataList, $localVariantsOrdered);
+        if (empty($variantSources)) {
+            return $warnings;
+        }
+
+        $details = $this->syncShopifyProductOptionsForVariants($product, $productId, $variantSources, $details, $warnings);
+        $details = $this->createMissingShopifyVariants($product, $productId, $variantSources, $details, $primaryCostPerItem, $primaryWeightUnit, $primaryGrams, $warnings);
+
         $variantNodes = data_get($details, 'variants.nodes', []);
         if (!is_array($variantNodes) || empty($variantNodes)) {
             return $warnings;
         }
-        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
 
-        $shopifyVariants = collect($variantNodes)
-            ->filter(fn ($node) => is_array($node) && !empty($node['id']))
-            ->mapWithKeys(function (array $node): array {
-                $sku = trim((string) ($node['sku'] ?? ''));
-                $key = $sku !== '' ? $sku : ($node['id'] ?? '');
-                return [$key => $node];
-            });
-        $localVariantsOrdered = $product->variants()->orderBy('id')->get()->values();
-        $localVariantsBySku = $localVariantsOrdered
-            ->filter(fn (Variant $variant) => trim((string) ($variant->sku ?? '')) !== '')
-            ->keyBy(fn (Variant $variant) => trim((string) $variant->sku));
+        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
+        $shopifyVariantsBySku = [];
+        $shopifyVariantsBySignature = [];
+        foreach ($variantNodesOrdered as $variantNode) {
+            $sku = trim((string) ($variantNode['sku'] ?? ''));
+            if ($sku !== '') {
+                $shopifyVariantsBySku[$sku] = $variantNode;
+            }
+
+            $signature = $this->variantOptionSignatureFromNode($variantNode);
+            if ($signature !== '') {
+                $shopifyVariantsBySignature[$signature] = $variantNode;
+            }
+        }
 
         $locationId = null;
         $variantInputs = [];
 
-        foreach ($rowDataList as $rowIndex => $rowData) {
-            if (!is_array($rowData)) {
-                continue;
-            }
+        foreach ($variantSources as $rowIndex => $variantSource) {
+            $rowData = $variantSource['row'];
+            $localVariant = $variantSource['local'];
             logger()->info('Shopify variant row data keys', [
                 'product_id' => $product->id,
                 'handle' => $product->handle,
@@ -751,18 +761,21 @@ private function updateProduct(Product $product): array
                 'expected_cost_key' => HeaderStore::COST_PER_ITEM,
             ]);
 
-            $rowSku = $this->valueFromRow($rowData, HeaderStore::VARIANT_SKU, null);
-            $localVariant = $rowSku !== null
-                ? $localVariantsBySku->get($rowSku)
-                : ($localVariantsOrdered->get($rowIndex) ?? null);
+            $desiredSku = $this->variantDesiredValue($localVariant, $rowData, 'sku', HeaderStore::VARIANT_SKU);
+            $desiredOptionValues = $this->variantOptionValuesFromSource($rowData, $localVariant);
+            $desiredSignature = $this->variantOptionSignature($desiredOptionValues);
 
-            // Match against the current known SKU first, then fall back by row index.
-            $lookupSku = $this->nullIfEmpty((string) ($localVariant?->sku ?? '')) ?? $rowSku;
-            $variantNode = $lookupSku !== null
-                ? ($shopifyVariants->get($lookupSku) ?? ($variantNodesOrdered[$rowIndex] ?? $shopifyVariants->first()))
-                : ($variantNodesOrdered[$rowIndex] ?? $shopifyVariants->first());
-            // For updates, prefer incoming row SKU so sync can change SKU/barcode.
-            $desiredSku = $rowSku ?? $this->nullIfEmpty((string) ($localVariant?->sku ?? ''));
+            $variantNode = $desiredSku !== null
+                ? ($shopifyVariantsBySku[$desiredSku] ?? null)
+                : null;
+
+            if ($variantNode === null && $desiredSignature !== '') {
+                $variantNode = $shopifyVariantsBySignature[$desiredSignature] ?? null;
+            }
+
+            if ($variantNode === null) {
+                $variantNode = $variantNodesOrdered[$rowIndex] ?? null;
+            }
 
             if (!$variantNode) {
                 continue;
@@ -786,7 +799,7 @@ private function updateProduct(Product $product): array
                     'handle' => $product->handle,
                     'row_index' => $rowIndex,
                     'variant_id' => $variantId,
-                    'lookup_sku' => $lookupSku,
+                    'lookup_sku' => $desiredSku,
                     'desired_sku' => $desiredSku,
                     'local_variant_price' => $localVariantPriceRaw,
                     'row_variant_price' => $rowVariantPriceRaw,
@@ -824,7 +837,7 @@ private function updateProduct(Product $product): array
                     'resolved_grams' => $grams,
                 ]);
 
-                $optionValues = $this->variantOptionValuesFromRow($rowData, $variantNode);
+                $optionValues = $this->variantOptionValuesFromSource($rowData, $localVariant, $variantNode);
 
                 if ($desiredSku !== null) {
                     $inventoryItemInput['sku'] = $desiredSku;
@@ -999,6 +1012,17 @@ GQL;
 query ProductByHandleDetails($handle: String!) {
   productByHandle(handle: $handle) {
     id
+    options {
+      id
+      name
+      position
+      values
+      optionValues {
+        id
+        name
+        hasVariants
+      }
+    }
     category {
       id
       name
@@ -1012,6 +1036,7 @@ query ProductByHandleDetails($handle: String!) {
     variants(first: 250) {
       nodes {
         id
+        title
         sku
         selectedOptions {
           name
@@ -1077,6 +1102,87 @@ mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsB
   productVariantsBulkUpdate(productId: $productId, variants: $variants) {
     productVariants { id }
     userErrors { field message }
+  }
+}
+GQL;
+    }
+
+    private function variantsBulkCreateMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkCreate(productId: $productId, variants: $variants) {
+    productVariants {
+      id
+      title
+      selectedOptions {
+        name
+        value
+      }
+    }
+    userErrors { field message }
+  }
+}
+GQL;
+    }
+
+    private function productOptionsCreateMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductOptionsCreate($productId: ID!, $options: [OptionCreateInput!]!, $variantStrategy: ProductOptionCreateVariantStrategy) {
+  productOptionsCreate(productId: $productId, options: $options, variantStrategy: $variantStrategy) {
+    product {
+      id
+      options {
+        id
+        name
+        position
+        values
+        optionValues {
+          id
+          name
+          hasVariants
+        }
+      }
+    }
+    userErrors { field message code }
+  }
+}
+GQL;
+    }
+
+    private function productOptionUpdateMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductOptionUpdate(
+  $productId: ID!,
+  $option: OptionUpdateInput!,
+  $optionValuesToAdd: [OptionValueCreateInput!],
+  $optionValuesToUpdate: [OptionValueUpdateInput!],
+  $variantStrategy: ProductOptionUpdateVariantStrategy
+) {
+  productOptionUpdate(
+    productId: $productId,
+    option: $option,
+    optionValuesToAdd: $optionValuesToAdd,
+    optionValuesToUpdate: $optionValuesToUpdate,
+    variantStrategy: $variantStrategy
+  ) {
+    product {
+      id
+      options {
+        id
+        name
+        position
+        values
+        optionValues {
+          id
+          name
+          hasVariants
+        }
+      }
+    }
+    userErrors { field message code }
   }
 }
 GQL;
@@ -3082,22 +3188,22 @@ GQL;
     /**
      * @return array<int, array{optionName:string,name:string}>
      */
-    private function variantOptionValuesFromRow(array $rowData, array $variantNode): array
+    private function variantOptionValuesFromSource(array $rowData, ?Variant $localVariant = null, ?array $variantNode = null): array
     {
         $optionValues = [];
         $pairs = [
-            [HeaderStore::OPTION1_NAME, HeaderStore::OPTION1_VALUE, 0],
-            [HeaderStore::OPTION2_NAME, HeaderStore::OPTION2_VALUE, 1],
-            [HeaderStore::OPTION3_NAME, HeaderStore::OPTION3_VALUE, 2],
+            [0, 'option1_name', HeaderStore::OPTION1_NAME, 'option1_value', HeaderStore::OPTION1_VALUE],
+            [1, 'option2_name', HeaderStore::OPTION2_NAME, 'option2_value', HeaderStore::OPTION2_VALUE],
+            [2, 'option3_name', HeaderStore::OPTION3_NAME, 'option3_value', HeaderStore::OPTION3_VALUE],
         ];
 
-        foreach ($pairs as [$nameHeader, $valueHeader, $index]) {
-            $value = $this->valueFromRow($rowData, $valueHeader, null);
+        foreach ($pairs as [$index, $nameField, $nameHeader, $valueField, $valueHeader]) {
+            $value = $this->variantDesiredValue($localVariant, $rowData, $valueField, $valueHeader);
             if ($value === null) {
                 continue;
             }
 
-            $name = $this->valueFromRow($rowData, $nameHeader, null)
+            $name = $this->variantDesiredValue($localVariant, $rowData, $nameField, $nameHeader)
                 ?? $this->nullIfEmpty((string) data_get($variantNode, "selectedOptions.{$index}.name"));
             if ($name === null) {
                 continue;
@@ -3110,6 +3216,443 @@ GQL;
         }
 
         return $optionValues;
+    }
+
+    /**
+     * @param Collection<int, Variant> $localVariantsOrdered
+     * @return array<int, array{row:array, local:?Variant}>
+     */
+    private function buildVariantSources(array $rowDataList, Collection $localVariantsOrdered): array
+    {
+        $variantSources = [];
+        $max = max(count($rowDataList), $localVariantsOrdered->count());
+
+        for ($index = 0; $index < $max; $index++) {
+            $rowData = $rowDataList[$index] ?? [];
+            if (!is_array($rowData)) {
+                $rowData = [];
+            }
+
+            $localVariant = $localVariantsOrdered->get($index);
+            if ($localVariant === null && $rowData === []) {
+                continue;
+            }
+
+            $variantSources[] = [
+                'row' => $rowData,
+                'local' => $localVariant,
+            ];
+        }
+
+        return $variantSources;
+    }
+
+    private function variantDesiredValue(
+        ?Variant $localVariant,
+        array $rowData,
+        string $localField,
+        string $header,
+        mixed $fallback = null
+    ): ?string {
+        $localValue = $localVariant?->{$localField};
+        if ($localValue !== null) {
+            $trimmed = trim((string) $localValue);
+            if ($trimmed !== '') {
+                return $trimmed;
+            }
+        }
+
+        return $this->valueFromRow($rowData, $header, $fallback);
+    }
+
+    /**
+     * @param array<int, array{row:array, local:?Variant}> $variantSources
+     * @param array<int, array{product_id:int, warning:string}> $warnings
+     */
+    private function syncShopifyProductOptionsForVariants(
+        Product $product,
+        string $productId,
+        array $variantSources,
+        array $details,
+        array &$warnings
+    ): array {
+        $desiredOptions = $this->desiredProductOptionsFromVariantSources($variantSources);
+        if (empty($desiredOptions)) {
+            return $details;
+        }
+
+        $currentOptions = data_get($details, 'options', []);
+        if (!is_array($currentOptions)) {
+            $currentOptions = [];
+        }
+
+        $optionsChanged = false;
+
+        foreach ($desiredOptions as $position => $desiredOption) {
+            $currentOption = $currentOptions[$position] ?? null;
+            if (!is_array($currentOption) || empty($currentOption['id'])) {
+                $data = $this->client->graphql($this->productOptionsCreateMutation(), [
+                    'productId' => $productId,
+                    'options' => [[
+                        'name' => $desiredOption['name'],
+                        'position' => $position + 1,
+                        'values' => array_map(
+                            static fn (string $value): array => ['name' => $value],
+                            $desiredOption['values']
+                        ),
+                    ]],
+                    'variantStrategy' => 'LEAVE_AS_IS',
+                ]);
+
+                $errors = data_get($data, 'productOptionsCreate.userErrors', []);
+                if (is_array($errors) && !empty($errors)) {
+                    $messages = $this->formatUserErrors($errors, 'productOptionsCreate');
+                    throw new \RuntimeException($messages !== '' ? $messages : 'Shopify product option creation failed.');
+                }
+
+                $optionsChanged = true;
+                $details = $this->productByHandleDetails($product->handle);
+                $currentOptions = data_get($details, 'options', []);
+                if (!is_array($currentOptions)) {
+                    $currentOptions = [];
+                }
+                continue;
+            }
+
+            $optionInput = [
+                'id' => $currentOption['id'],
+                'position' => $position + 1,
+            ];
+
+            $currentOptionName = trim((string) ($currentOption['name'] ?? ''));
+            if ($currentOptionName !== $desiredOption['name']) {
+                $optionInput['name'] = $desiredOption['name'];
+            }
+
+            $optionValuesToUpdate = [];
+            $optionValuesToAdd = [];
+            $currentOptionValues = is_array($currentOption['optionValues'] ?? null) ? $currentOption['optionValues'] : [];
+            $currentValueNames = [];
+
+            foreach ($currentOptionValues as $currentValue) {
+                if (!is_array($currentValue)) {
+                    continue;
+                }
+
+                $currentName = trim((string) ($currentValue['name'] ?? ''));
+                if ($currentName !== '') {
+                    $currentValueNames[] = $currentName;
+                }
+            }
+
+            if (
+                strcasecmp($currentOptionName, 'Title') === 0
+                && count($currentOptionValues) === 1
+                && !empty($desiredOption['values'])
+            ) {
+                $currentValueId = trim((string) ($currentOptionValues[0]['id'] ?? ''));
+                $firstDesiredValue = $desiredOption['values'][0];
+                if ($currentValueId !== '') {
+                    $currentValueName = trim((string) ($currentOptionValues[0]['name'] ?? ''));
+                    if ($currentValueName !== $firstDesiredValue) {
+                        $optionValuesToUpdate[] = [
+                            'id' => $currentValueId,
+                            'name' => $firstDesiredValue,
+                        ];
+                    }
+                }
+
+                $currentValueNames = [$firstDesiredValue];
+            }
+
+            foreach ($desiredOption['values'] as $desiredValue) {
+                if (in_array($desiredValue, $currentValueNames, true)) {
+                    continue;
+                }
+
+                $optionValuesToAdd[] = ['name' => $desiredValue];
+            }
+
+            if (count($optionInput) === 2 && empty($optionValuesToAdd) && empty($optionValuesToUpdate)) {
+                continue;
+            }
+
+            $variables = [
+                'productId' => $productId,
+                'option' => $optionInput,
+                'variantStrategy' => 'LEAVE_AS_IS',
+            ];
+            if (!empty($optionValuesToAdd)) {
+                $variables['optionValuesToAdd'] = $optionValuesToAdd;
+            }
+            if (!empty($optionValuesToUpdate)) {
+                $variables['optionValuesToUpdate'] = $optionValuesToUpdate;
+            }
+
+            $data = $this->client->graphql($this->productOptionUpdateMutation(), $variables);
+            $errors = data_get($data, 'productOptionUpdate.userErrors', []);
+            if (is_array($errors) && !empty($errors)) {
+                $messages = $this->formatUserErrors($errors, 'productOptionUpdate');
+                throw new \RuntimeException($messages !== '' ? $messages : 'Shopify product option update failed.');
+            }
+
+            $optionsChanged = true;
+            $details = $this->productByHandleDetails($product->handle);
+            $currentOptions = data_get($details, 'options', []);
+            if (!is_array($currentOptions)) {
+                $currentOptions = [];
+            }
+        }
+
+        if (!$optionsChanged) {
+            return $details;
+        }
+
+        return $this->productByHandleDetails($product->handle);
+    }
+
+    /**
+     * @param array<int, array{row:array, local:?Variant}> $variantSources
+     * @param array<int, array{product_id:int, warning:string}> $warnings
+     */
+    private function createMissingShopifyVariants(
+        Product $product,
+        string $productId,
+        array $variantSources,
+        array $details,
+        ?string $primaryCostPerItem,
+        ?string $primaryWeightUnit,
+        ?string $primaryGrams,
+        array &$warnings
+    ): array {
+        $variantNodes = data_get($details, 'variants.nodes', []);
+        if (!is_array($variantNodes)) {
+            $variantNodes = [];
+        }
+
+        $shopifyVariantsBySku = [];
+        $shopifyVariantsBySignature = [];
+        foreach ($variantNodes as $variantNode) {
+            if (!is_array($variantNode)) {
+                continue;
+            }
+
+            $sku = trim((string) ($variantNode['sku'] ?? ''));
+            if ($sku !== '') {
+                $shopifyVariantsBySku[$sku] = $variantNode;
+            }
+
+            $signature = $this->variantOptionSignatureFromNode($variantNode);
+            if ($signature !== '') {
+                $shopifyVariantsBySignature[$signature] = $variantNode;
+            }
+        }
+
+        $createInputs = [];
+
+        foreach ($variantSources as $variantSource) {
+            $rowData = $variantSource['row'];
+            $localVariant = $variantSource['local'];
+
+            $desiredSku = $this->variantDesiredValue($localVariant, $rowData, 'sku', HeaderStore::VARIANT_SKU);
+            if ($desiredSku !== null && isset($shopifyVariantsBySku[$desiredSku])) {
+                continue;
+            }
+
+            $optionValues = $this->variantOptionValuesFromSource($rowData, $localVariant);
+            $signature = $this->variantOptionSignature($optionValues);
+            if ($signature !== '' && isset($shopifyVariantsBySignature[$signature])) {
+                continue;
+            }
+
+            if (empty($optionValues)) {
+                continue;
+            }
+
+            $input = [
+                'optionValues' => $optionValues,
+            ];
+
+            $priceRaw = $this->variantDesiredValue($localVariant, $rowData, 'price', HeaderStore::VARIANT_PRICE);
+            $price = $this->normalizeNumeric($priceRaw);
+            if ($price !== null) {
+                $input['price'] = (float) number_format($price, 2, '.', '');
+            }
+
+            $compareAtRaw = $this->variantDesiredValue($localVariant, $rowData, 'compare_at_price', HeaderStore::VARIANT_COMPARE_AT);
+            $compareAt = $this->normalizeNumeric($compareAtRaw);
+            if ($compareAt !== null) {
+                $input['compareAtPrice'] = (float) number_format($compareAt, 2, '.', '');
+            }
+
+            $barcode = $this->variantDesiredValue($localVariant, $rowData, 'barcode', HeaderStore::VARIANT_BARCODE);
+            $inventoryItemInput = [];
+
+            if ($desiredSku !== null) {
+                $inventoryItemInput['sku'] = $desiredSku;
+                $barcode = $desiredSku;
+            }
+
+            if ($barcode !== null) {
+                $input['barcode'] = $barcode;
+            }
+
+            $weightUnit = $this->variantDesiredValue($localVariant, $rowData, 'weight_unit', HeaderStore::VARIANT_WEIGHT_UNIT, $primaryWeightUnit);
+            $grams = $this->normalizeNumeric(
+                $this->variantDesiredValue($localVariant, $rowData, 'weight', HeaderStore::VARIANT_GRAMS, $primaryGrams)
+            );
+            if ($grams !== null || $weightUnit !== null) {
+                $unit = $this->mapWeightUnit($weightUnit);
+                $inventoryItemInput['measurement'] = [
+                    'weight' => [
+                        'unit' => $unit,
+                        'value' => $grams !== null ? $this->weightFromGrams($grams, $unit) : 0.0,
+                    ],
+                ];
+            }
+
+            $costPerItemRaw = $this->valueFromRow($rowData, HeaderStore::COST_PER_ITEM, $primaryCostPerItem);
+            $costPerItem = $this->normalizeNumeric($costPerItemRaw);
+            if ($costPerItem !== null) {
+                $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
+            }
+
+            if (!empty($inventoryItemInput)) {
+                $input['inventoryItem'] = $inventoryItemInput;
+            }
+
+            $createInputs[] = $input;
+        }
+
+        if (empty($createInputs)) {
+            return $details;
+        }
+
+        logger()->info('Shopify variant bulk create start', [
+            'product_id' => $product->id,
+            'handle' => $product->handle,
+            'variant_input_count' => count($createInputs),
+            'variant_inputs' => $createInputs,
+        ]);
+
+        $data = $this->client->graphql($this->variantsBulkCreateMutation(), [
+            'productId' => $productId,
+            'variants' => $createInputs,
+        ]);
+
+        $errors = data_get($data, 'productVariantsBulkCreate.userErrors', []);
+        if (is_array($errors) && !empty($errors)) {
+            logger()->error('Shopify variant bulk create errors', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'errors' => $errors,
+            ]);
+            $messages = $this->formatUserErrors($errors, 'productVariantsBulkCreate');
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify variant creation failed.');
+        }
+
+        return $this->productByHandleDetails($product->handle);
+    }
+
+    /**
+     * @param array<int, array{row:array, local:?Variant}> $variantSources
+     * @return array<int, array{name:string, values:array<int, string>}>
+     */
+    private function desiredProductOptionsFromVariantSources(array $variantSources): array
+    {
+        $slots = [
+            ['name' => null, 'values' => []],
+            ['name' => null, 'values' => []],
+            ['name' => null, 'values' => []],
+        ];
+
+        foreach ($variantSources as $variantSource) {
+            $rowData = $variantSource['row'];
+            $localVariant = $variantSource['local'];
+
+            foreach ([1, 2, 3] as $slotNumber) {
+                $slotIndex = $slotNumber - 1;
+                $name = $this->variantDesiredValue(
+                    $localVariant,
+                    $rowData,
+                    "option{$slotNumber}_name",
+                    constant(HeaderStore::class . "::OPTION{$slotNumber}_NAME")
+                );
+                $value = $this->variantDesiredValue(
+                    $localVariant,
+                    $rowData,
+                    "option{$slotNumber}_value",
+                    constant(HeaderStore::class . "::OPTION{$slotNumber}_VALUE")
+                );
+
+                if ($name === null || $value === null) {
+                    continue;
+                }
+
+                if ($slots[$slotIndex]['name'] === null) {
+                    $slots[$slotIndex]['name'] = $name;
+                }
+
+                if (!in_array($value, $slots[$slotIndex]['values'], true)) {
+                    $slots[$slotIndex]['values'][] = $value;
+                }
+            }
+        }
+
+        $desiredOptions = [];
+        foreach ($slots as $slot) {
+            if (!is_string($slot['name']) || $slot['name'] === '' || empty($slot['values'])) {
+                continue;
+            }
+
+            $desiredOptions[] = [
+                'name' => $slot['name'],
+                'values' => $slot['values'],
+            ];
+        }
+
+        return $desiredOptions;
+    }
+
+    /**
+     * @param array<int, array{optionName:string,name:string}> $optionValues
+     */
+    private function variantOptionSignature(array $optionValues): string
+    {
+        if (empty($optionValues)) {
+            return '';
+        }
+
+        $parts = [];
+        foreach ($optionValues as $optionValue) {
+            $optionName = strtolower(trim((string) ($optionValue['optionName'] ?? '')));
+            $name = strtolower(trim((string) ($optionValue['name'] ?? '')));
+            if ($optionName === '' || $name === '') {
+                continue;
+            }
+
+            $parts[] = "{$optionName}:{$name}";
+        }
+
+        return implode('|', $parts);
+    }
+
+    private function variantOptionSignatureFromNode(array $variantNode): string
+    {
+        $optionValues = [];
+        $selectedOptions = is_array($variantNode['selectedOptions'] ?? null) ? $variantNode['selectedOptions'] : [];
+        foreach ($selectedOptions as $selectedOption) {
+            if (!is_array($selectedOption)) {
+                continue;
+            }
+
+            $optionValues[] = [
+                'optionName' => (string) ($selectedOption['name'] ?? ''),
+                'name' => (string) ($selectedOption['value'] ?? ''),
+            ];
+        }
+
+        return $this->variantOptionSignature($optionValues);
     }
 
     private function mapWeightUnit(?string $value): string
