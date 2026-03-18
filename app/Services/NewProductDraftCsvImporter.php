@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\NewProductDraft;
+use App\Models\Product;
+use App\Models\StyleProfile;
 use App\Models\Variant;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +17,7 @@ final class NewProductDraftCsvImporter
      *   total:int,
      *   created:int,
      *   updated:int,
+     *   seo_drafts_upserted:int,
      *   skipped_missing_handle:int,
      *   skipped_duplicate_sku:int
      * }
@@ -29,7 +32,7 @@ final class NewProductDraftCsvImporter
             $headerMap[$this->normalizeHeader($header)] = $header;
         }
 
-        $map = [
+        $draftMap = [
             'handle' => 'handle',
             'sku' => 'sku',
             'title' => 'title',
@@ -77,19 +80,37 @@ final class NewProductDraftCsvImporter
             'complementary products finish the set and get one free' => 'complementary_products',
         ];
 
+        $seoDraftMap = [
+            'style' => 'style_type',
+            'materials' => 'materials',
+            'components' => 'components',
+            'colour prompt' => 'colour_prompt',
+            'color prompt' => 'colour_prompt',
+            'seo title' => 'draft_seo_title',
+            'seo title 60 chars' => 'draft_seo_title',
+            'seo title 70 chars' => 'draft_seo_title',
+            'seo description 160 chars' => 'draft_seo_description',
+            'seo description' => 'draft_seo_description',
+            'image alt text 125 chars' => 'draft_image_alt_text',
+            'image alt text' => 'draft_image_alt_text',
+        ];
+
         $total = 0;
         $created = 0;
         $updated = 0;
+        $seoDraftsUpserted = 0;
         $skippedMissingHandle = 0;
         $skippedDuplicateSku = 0;
 
         DB::transaction(function () use (
             $csv,
             $headerMap,
-            $map,
+            $draftMap,
+            $seoDraftMap,
             &$total,
             &$created,
             &$updated,
+            &$seoDraftsUpserted,
             &$skippedMissingHandle,
             &$skippedDuplicateSku
         ): void {
@@ -97,6 +118,7 @@ final class NewProductDraftCsvImporter
                 $total++;
 
                 $data = [];
+                $seoDraftData = [];
                 $payload = [];
 
                 foreach ($row as $header => $value) {
@@ -106,12 +128,14 @@ final class NewProductDraftCsvImporter
                         continue;
                     }
 
-                    $field = $map[$normalized] ?? null;
+                    $field = $draftMap[$normalized] ?? null;
                     if ($field) {
                         if ($field === 'material_cost') {
                             $value = $this->normalizeNumeric($value);
                         }
                         $data[$field] = $value;
+                    } elseif (isset($seoDraftMap[$normalized])) {
+                        $seoDraftData[$seoDraftMap[$normalized]] = $value;
                     } else {
                         $payload[$header] = $value;
                     }
@@ -150,18 +174,47 @@ final class NewProductDraftCsvImporter
                     $draft->payload = $mergedPayload;
                     $draft->save();
                     $updated++;
-                    continue;
+                } else {
+                    $data['payload'] = $payload ?: null;
+                    $data['created_by'] = Auth::id();
+                    $data['title'] = $data['title'] ?? $handle;
+                    $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
+                    $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
+                    $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
+
+                    NewProductDraft::create($data);
+                    $created++;
                 }
 
-                $data['payload'] = $payload ?: null;
-                $data['created_by'] = Auth::id();
-                $data['title'] = $data['title'] ?? $handle;
-                $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
-                $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
-                $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
+                if (!empty($seoDraftData)) {
+                    $product = Product::query()
+                        ->where('handle', $handle)
+                        ->with('variants')
+                        ->first();
 
-                NewProductDraft::create($data);
-                $created++;
+                    $styleProfile = StyleProfile::where('handle', $handle)->first();
+                    $styleProfileData = array_merge(
+                        $seoDraftData,
+                        [
+                            'handle' => $handle,
+                            'product_id' => $product?->id,
+                            'sku' => trim((string) (
+                                $styleProfile?->sku
+                                ?? $data['sku']
+                                ?? $product?->variants->first()?->sku
+                                ?? $handle
+                            )),
+                        ]
+                    );
+
+                    if ($styleProfile) {
+                        $styleProfile->update($styleProfileData);
+                    } else {
+                        StyleProfile::create($styleProfileData);
+                    }
+
+                    $seoDraftsUpserted++;
+                }
             }
         });
 
@@ -169,6 +222,7 @@ final class NewProductDraftCsvImporter
             'total' => $total,
             'created' => $created,
             'updated' => $updated,
+            'seo_drafts_upserted' => $seoDraftsUpserted,
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_duplicate_sku' => $skippedDuplicateSku,
         ];

@@ -3,13 +3,12 @@
 namespace App\Filament\Resources;
 
 use App\Enums\RolesEnum;
+use App\Filament\Resources\NewProductDraftResource\RelationManagers;
 use App\Filament\Resources\NewProductDraftResource\Pages;
+use App\Models\Color;
 use App\Models\NewProductDraft;
-use App\Models\NewProductDraftApproval;
 use App\Models\Product;
-use App\Models\ShopifyRow;
 use App\Models\ShopifyCollection;
-use App\Models\StyleProfile;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\Variant;
@@ -40,11 +39,12 @@ use Filament\Tables\Actions\DeleteBulkAction;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
-use Filament\Tables\Columns\TextInputColumn;
-use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
 use App\Jobs\SendNewProductDraftAssignmentEmailJob;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
@@ -655,17 +655,7 @@ class NewProductDraftResource extends Resource
                     Placeholder::make('image_preview')
                         ->label('Preview')
                         ->content(function (Get $get, ?NewProductDraft $record): HtmlString {
-                            $url = null;
-                            $imagePath = $get('image_path');
-                            $imageUrl = $get('image_url');
-
-                                    if (is_string($imageUrl) && trim($imageUrl) !== '') {
-                                        $url = trim($imageUrl);
-                                    } elseif (is_string($imagePath) && trim($imagePath) !== '') {
-                                        $url = Storage::disk('public')->url($imagePath);
-                                    } elseif ($record) {
-                                        $url = $record->imageUrl();
-                                    }
+                            $url = self::resolvedDraftPreviewImageUrl($get, $record);
 
                             if (!$url) {
                                 return new HtmlString('<div class="text-sm text-gray-500">No image selected.</div>');
@@ -690,6 +680,7 @@ class NewProductDraftResource extends Resource
                         }),
                     Forms\Components\FileUpload::make('image_path')
                         ->label('Primary Image')
+                                ->dehydrated(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record))
                                 ->disk('public')
                                 ->directory('new-product-images')
                                 ->preserveFilenames()
@@ -722,17 +713,28 @@ class NewProductDraftResource extends Resource
                                         $set('image_url', null);
                                     }
                                 })
-                                ->visible(fn (Get $get): bool => blank($get('image_url'))),
+                                ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_url'))),
                     TextInput::make('image_url')
                         ->label('Product Image URL')
                         ->placeholder('https://...')
+                        ->dehydrated(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record))
                         ->helperText('Use a direct image URL (not a product page).')
                         ->afterStateUpdated(function ($state, callable $set): void {
                             if (is_string($state) && trim($state) !== '') {
                                 $set('image_path', null);
                             }
                         })
-                        ->visible(fn (Get $get): bool => blank($get('image_path'))),
+                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_path'))),
+                    Placeholder::make('image_locked_notice')
+                        ->label('')
+                        ->content(function (Get $get, ?NewProductDraft $record): ?string {
+                            if (!self::draftImageLocked($get, $record)) {
+                                return null;
+                            }
+
+                            return 'This product already exists. Image is read-only here and synced product images take priority.';
+                        })
+                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::draftImageLocked($get, $record)),
                     Select::make('product_design')
                         ->label('Product design')
                         ->placeholder('Select option')
@@ -1175,70 +1177,67 @@ class NewProductDraftResource extends Resource
     {
         return $table
             ->defaultSort('created_at', 'desc')
+            ->modifyQueryUsing(fn ($query) => $query->with([
+                'product:id,handle,has_errors,error_fields',
+                'product.images:id,product_id,src,position',
+            ]))
             ->columns([
-                ImageColumn::make('image_thumb')
+                ImageColumn::make('thumbnail')
                     ->label('')
-                    ->circular()
-                    ->size(32)
-                    ->state(fn (NewProductDraft $record) => $record->imageUrl())
-                    ->toggleable(),
-                TextInputColumn::make('title')
-                    ->rules(['required'])
-                    ->searchable()
-                    ->sortable()
-                    ->placeholder('Title')
+                    ->square()
+                    ->size(40)
+                    ->state(fn (NewProductDraft $record) => self::draftDisplayImageUrl($record))
                     ->toggleable(),
                 TextColumn::make('handle')
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->where('handle', 'like', "%{$search}%")
+                            ->orWhere('title', 'like', "%{$search}%")
+                            ->orWhere('sku', 'like', "%{$search}%")
+                            ->orWhereHas('product.variants', fn (Builder $variantQuery) => $variantQuery->where('sku', 'like', "%{$search}%"));
+                    })
+                    ->sortable()
+                    ->toggleable(),
+                TextColumn::make('title')
                     ->searchable()
                     ->sortable()
                     ->toggleable(),
-                TextInputColumn::make('sku')
+                TextColumn::make('color_string')
+                    ->label('Colors')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('jewelry_material')
+                    ->label('Jewelry material')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('material_cost')
+                    ->label('Cost per item')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                IconColumn::make('linked_product_errors')
+                    ->label('Errors')
+                    ->icon(fn (bool $state): string => $state ? 'heroicon-o-x-circle' : 'heroicon-o-check-circle')
+                    ->color(fn (bool $state): string => $state ? 'danger' : 'success')
+                    ->state(fn (NewProductDraft $record): bool => self::draftHasLinkedProductErrors($record))
+                    ->toggleable(),
+                TextColumn::make('linked_product_error_fields')
+                    ->label('Error fields')
+                    ->color(fn (NewProductDraft $record): string => self::draftHasLinkedProductErrors($record) ? 'danger' : 'gray')
+                    ->state(fn (NewProductDraft $record): string => self::draftErrorFieldsSummary($record))
+                    ->wrap()
+                    ->toggleable(),
+                TextColumn::make('type')->label('Type')->toggleable(),
+                TextColumn::make('vendor')->toggleable(),
+                IconColumn::make('published')
+                    ->label('Published')
+                    ->boolean()
+                    ->state(fn (NewProductDraft $record): bool => filter_var($record->published, FILTER_VALIDATE_BOOLEAN))
+                    ->toggleable(),
+                TextColumn::make('batch')
+                    ->label('Batch')
+                    ->toggleable(),
+                TextColumn::make('sku')
                     ->state(fn (NewProductDraft $record): ?string => self::resolvedSkuForDraft($record))
-                    ->rules([
-                        function () {
-                            return function (string $attribute, $value, $fail): void {
-                                $sku = trim((string) $value);
-                                if ($sku === '') {
-                                    return;
-                                }
-
-                                $recordId = request()->input('componentData.0.id')
-                                    ?? request()->input('componentData.0.recordId');
-                                $recordId = is_numeric($recordId) ? (int) $recordId : null;
-
-                                $draftQuery = NewProductDraft::query()->where('sku', $sku);
-                                if ($recordId) {
-                                    $draftQuery->where('id', '!=', $recordId);
-                                }
-
-                                $variantQuery = Variant::query()->where('sku', $sku);
-                                if ($recordId) {
-                                    $record = NewProductDraft::query()->find($recordId);
-                                    if ($record?->handle) {
-                                        $currentProductId = Product::query()
-                                            ->where('handle', $record->handle)
-                                            ->value('id');
-                                        if ($currentProductId) {
-                                            $variantQuery->where('product_id', '!=', $currentProductId);
-                                        }
-                                    }
-                                }
-
-                                if ($draftQuery->exists() || $variantQuery->exists()) {
-                                    $fail('SKU must be unique across new products and existing products.');
-                                }
-                            };
-                        },
-                    ])
-                    ->toggleable(),
-                TextColumn::make('type')
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextInputColumn::make('batch')
-                    ->placeholder('batchYYYYMMDD')
+                TextColumn::make('status')
+                    ->badge()
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('vendor')
-                    ->searchable()
-                    ->toggleable(),
                 TextColumn::make('product_category')
                     ->label('Product Category')
                     ->formatStateUsing(fn ($state): string => (string) (
@@ -1250,18 +1249,10 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('tags')
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('color_string')
-                    ->label('Colors')
-                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('body_html')
                     ->label('Description')
                     ->limit(60)
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('status')
-                    ->badge()
-                    ->toggleable(),
-                TextColumn::make('published')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_price')
                     ->label('Price')
@@ -1271,12 +1262,6 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_inventory_qty')
                     ->label('Inventory')
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('material_cost')
-                    ->label('Material Cost')
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('jewelry_material')
-                    ->label('Jewelry material')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_materials')
                     ->label('Product Materials')
@@ -1312,14 +1297,6 @@ class NewProductDraftResource extends Resource
                     ->formatStateUsing(fn (?string $state): string => self::complementaryProductsAsLabels($state))
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('approvals_current')
-                    ->label('Approvals')
-                    ->state(fn (NewProductDraft $record) => $record->approvalsForCurrentVersionCount())
-                    ->toggleable(),
-                IconColumn::make('approved')
-                    ->label('Approved')
-                    ->boolean(fn (NewProductDraft $record) => $record->isApprovedByTwo())
-                    ->toggleable(),
                 TextColumn::make('updated_at')
                     ->dateTime()
                     ->toggleable(isToggledHiddenByDefault: true),
@@ -1328,172 +1305,6 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->actions([
-                Action::make('approve')
-                    ->label('Approve')
-                    ->icon('heroicon-o-check-badge')
-                    ->color('success')
-                    ->requiresConfirmation()
-                    ->disabled(function (NewProductDraft $record): bool {
-                        return NewProductDraftApproval::where('new_product_draft_id', $record->id)
-                            ->where('user_id', Auth::id())
-                            ->where('approval_version', $record->approval_version)
-                            ->exists();
-                    })
-                    ->tooltip(function (NewProductDraft $record): ?string {
-                        $approved = NewProductDraftApproval::where('new_product_draft_id', $record->id)
-                            ->where('user_id', Auth::id())
-                            ->where('approval_version', $record->approval_version)
-                            ->exists();
-                        return $approved ? 'Already approved by you' : 'Approve this draft';
-                    })
-                    ->extraAttributes(function (NewProductDraft $record): array {
-                        $approved = NewProductDraftApproval::where('new_product_draft_id', $record->id)
-                            ->where('user_id', Auth::id())
-                            ->where('approval_version', $record->approval_version)
-                            ->exists();
-                        return ['title' => $approved ? 'Already approved by you' : 'Approve this draft'];
-                    })
-                    ->action(function (NewProductDraft $record): void {
-                        NewProductDraftApproval::firstOrCreate([
-                            'new_product_draft_id' => $record->id,
-                            'user_id' => Auth::id(),
-                            'approval_version' => $record->approval_version,
-                        ]);
-
-                        Notification::make()
-                            ->title('Draft approved')
-                            ->body("Approved \"{$record->title}\"")
-                            ->success()
-                            ->send();
-                    }),
-                Action::make('editStyle')
-                    ->label('Style')
-                    ->icon('heroicon-o-swatch')
-                    ->color('info')
-                    ->tooltip('Edit style profile')
-                    ->extraAttributes(['title' => 'Edit style profile'])
-                    ->visible(function (NewProductDraft $record): bool {
-                        if (!$record->handle) {
-                            return false;
-                        }
-                        return Product::where('handle', $record->handle)->exists();
-                    })
-                    ->modalHeading(function (NewProductDraft $record) {
-                        return $record->title ? "Edit style for {$record->title}" : 'Edit style';
-                    })
-                    ->form([
-                        Forms\Components\Grid::make(2)
-                            ->schema([
-                                Forms\Components\TextInput::make('sku')
-                                    ->maxLength(80)
-                                    ->disabled()
-                                    ->dehydrated(false),
-                                Forms\Components\TextInput::make('style_type')
-                                    ->label('Style')
-                                    ->maxLength(120)
-                                    ->disabled()
-                                    ->dehydrated(false),
-                            ])
-                            ->columnSpanFull(),
-                        Forms\Components\Grid::make(2)
-                            ->schema([
-                                Forms\Components\TextInput::make('product_colors')
-                                    ->label('Colors')
-                                    ->disabled()
-                                    ->dehydrated(false),
-                                Forms\Components\TextInput::make('jewelry_material_display')
-                                    ->label('Jewelry material')
-                                    ->disabled()
-                                    ->dehydrated(false),
-                            ])
-                            ->columnSpanFull(),
-                        Forms\Components\TextInput::make('materials')->maxLength(255),
-                        Forms\Components\TextInput::make('components')->maxLength(255),
-                        Forms\Components\Grid::make(2)
-                            ->schema([
-                                Forms\Components\Textarea::make('colour_prompt')
-                                    ->rows(4),
-                                Forms\Components\Textarea::make('product_description')
-                                    ->label('Description')
-                                    ->rows(4)
-                                    ->disabled()
-                                    ->dehydrated(false),
-                            ])
-                            ->columnSpanFull(),
-                        Forms\Components\TextInput::make('draft_seo_title')
-                            ->label('SEO Title')
-                            ->maxLength(255)
-                            ->columnSpanFull(),
-                        Forms\Components\Textarea::make('draft_seo_description')
-                            ->label('SEO Description (160 chars)')
-                            ->rows(2)
-                            ->maxLength(160)
-                            ->columnSpanFull(),
-                    ])
-                    ->fillForm(function (NewProductDraft $record): array {
-                        $product = Product::where('handle', $record->handle)->with(['variants', 'images'])->first();
-                        if (!$product) {
-                            return [];
-                        }
-
-                        $styleProfile = StyleProfile::where('product_id', $product->id)->first();
-                        $row = ShopifyRow::where('import_id', $product->import_id)
-                            ->where('handle', $product->handle)
-                            ->where('row_type', 'product_primary')
-                            ->first();
-
-                        $sku = trim((string) ($product->variants->first()?->sku ?? ''));
-                        if ($sku === '') {
-                            $sku = $product->handle;
-                        }
-
-                        $description = trim(strip_tags((string) ($product->body_html ?? '')));
-
-                        return [
-                            'sku' => $sku,
-                            'style_type' => $product->type,
-                            'product_colors' => $product->color_string,
-                            'jewelry_material_display' => (string) ($row?->get(HeaderStore::JEWELRY_MATERIAL, '') ?? ''),
-                            'materials' => $styleProfile?->materials,
-                            'components' => $styleProfile?->components,
-                            'colour_prompt' => $styleProfile?->colour_prompt,
-                            'product_description' => $description,
-                            'draft_seo_title' => $styleProfile?->draft_seo_title,
-                            'draft_seo_description' => $styleProfile?->draft_seo_description,
-                        ];
-                    })
-                    ->action(function (NewProductDraft $record, array $data): void {
-                        $product = Product::where('handle', $record->handle)->with(['variants', 'images'])->first();
-                        if (!$product) {
-                            Notification::make()
-                                ->title('Product not found')
-                                ->body('Sync products before editing styles.')
-                                ->danger()
-                                ->send();
-                            return;
-                        }
-
-                        $styleProfile = StyleProfile::firstOrCreate(
-                            ['product_id' => $product->id],
-                            [
-                                'handle' => $product->handle,
-                                'sku' => trim((string) ($product->variants->first()?->sku ?? $product->handle)),
-                            ]
-                        );
-
-                        $styleProfile->update([
-                            'materials' => $data['materials'] ?? null,
-                            'components' => $data['components'] ?? null,
-                            'colour_prompt' => $data['colour_prompt'] ?? null,
-                            'draft_seo_title' => $data['draft_seo_title'] ?? null,
-                            'draft_seo_description' => $data['draft_seo_description'] ?? null,
-                        ]);
-
-                        Notification::make()
-                            ->title('Style saved')
-                            ->success()
-                            ->send();
-                    }),
                 Tables\Actions\EditAction::make()->color('warning'),
                 Tables\Actions\DeleteAction::make()->color('danger'),
             ])
@@ -1546,7 +1357,8 @@ class NewProductDraftResource extends Resource
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Created: {$result['created']}, " .
-                                "Updated: {$result['updated']}, Missing handle: {$result['skipped_missing_handle']}, " .
+                                "Updated: {$result['updated']}, SEO Drafts: {$result['seo_drafts_upserted']}, " .
+                                "Missing handle: {$result['skipped_missing_handle']}, " .
                                 "Duplicate SKU: {$result['skipped_duplicate_sku']}"
                             )
                             ->success()
@@ -1556,48 +1368,6 @@ class NewProductDraftResource extends Resource
             ->bulkActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make(),
-                    BulkAction::make('bulkApprove')
-                        ->label('Bulk Approve')
-                        ->icon('heroicon-o-check-badge')
-                        ->requiresConfirmation()
-                        ->action(function ($records): void {
-                            $approvedCount = 0;
-                            $skippedCount = 0;
-
-                            foreach ($records as $record) {
-                                $exists = NewProductDraftApproval::where('new_product_draft_id', $record->id)
-                                    ->where('user_id', Auth::id())
-                                    ->where('approval_version', $record->approval_version)
-                                    ->exists();
-
-                                if ($exists) {
-                                    $skippedCount++;
-                                    continue;
-                                }
-
-                                NewProductDraftApproval::create([
-                                    'new_product_draft_id' => $record->id,
-                                    'user_id' => Auth::id(),
-                                    'approval_version' => $record->approval_version,
-                                ]);
-                                $approvedCount++;
-                            }
-
-                            $parts = [];
-                            if ($approvedCount > 0) {
-                                $parts[] = "Approved {$approvedCount}.";
-                            }
-                            if ($skippedCount > 0) {
-                                $parts[] = "Skipped {$skippedCount} already approved by you.";
-                            }
-
-                            Notification::make()
-                                ->title('Bulk approval complete')
-                                ->body($parts ? implode(' ', $parts) : 'No drafts were approved.')
-                                ->success()
-                                ->send();
-                        })
-                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('mergeToProducts')
                         ->label('Create In Shopify')
                         ->icon('heroicon-o-cloud-arrow-up')
@@ -1688,30 +1458,126 @@ class NewProductDraftResource extends Resource
                 ]),
             ])
             ->filters([
-                Filter::make('title_filter')
-                    ->form([
-                        TextInput::make('title')
-                            ->label('Title'),
-                    ])
-                    ->query(function ($query, array $data) {
-                        $title = trim((string) ($data['title'] ?? ''));
-                        if ($title === '') {
+                SelectFilter::make('type')
+                    ->label('Type')
+                    ->options(fn () => NewProductDraft::query()
+                        ->whereNotNull('type')
+                        ->where('type', '!=', '')
+                        ->distinct()
+                        ->orderBy('type')
+                        ->pluck('type', 'type')
+                        ->all())
+                    ->searchable()
+                    ->preload(),
+                SelectFilter::make('vendor')
+                    ->label('Vendor')
+                    ->options(fn () => NewProductDraft::query()
+                        ->whereNotNull('vendor')
+                        ->where('vendor', '!=', '')
+                        ->distinct()
+                        ->orderBy('vendor')
+                        ->pluck('vendor', 'vendor')
+                        ->all())
+                    ->searchable()
+                    ->preload(),
+                SelectFilter::make('tags')
+                    ->label('Tags')
+                    ->multiple()
+                    ->searchable()
+                    ->preload()
+                    ->options(fn () => Tag::query()
+                        ->orderBy('name')
+                        ->pluck('name', 'name')
+                        ->all())
+                    ->query(function (Builder $query, array $data): Builder {
+                        $values = $data['values'] ?? [];
+                        if (!is_array($values) || empty($values)) {
                             return $query;
                         }
-                        return $query->where('title', 'like', "%{$title}%");
+
+                        return $query->where(function (Builder $sub) use ($values): void {
+                            foreach ($values as $tag) {
+                                $sub->orWhereRaw(
+                                    "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
+                                    [$tag]
+                                );
+                            }
+                        });
                     }),
-                Filter::make('sku_filter')
-                    ->form([
-                        TextInput::make('sku')
-                            ->label('SKU'),
-                    ])
-                    ->query(function ($query, array $data) {
-                        $sku = trim((string) ($data['sku'] ?? ''));
-                        if ($sku === '') {
+                SelectFilter::make('collection')
+                    ->label('Collection')
+                    ->searchable()
+                    ->preload()
+                    ->options(fn () => DropdownOption::query()
+                        ->whereNotNull('collection_style')
+                        ->where('collection_style', '!=', '')
+                        ->distinct()
+                        ->orderBy('collection_style')
+                        ->pluck('collection_style', 'collection_style')
+                        ->all())
+                    ->query(function (Builder $query, array $data): Builder {
+                        $collection = $data['value'] ?? null;
+                        if (!is_string($collection) || trim($collection) === '') {
                             return $query;
                         }
-                        return $query->where('sku', 'like', "%{$sku}%");
+
+                        $tagsRow = DropdownOption::query()
+                            ->where('collection_style', $collection)
+                            ->whereNotNull('collection_tag_primary')
+                            ->select(['collection_tag_primary', 'collection_tag_secondary'])
+                            ->first();
+
+                        if (!$tagsRow) {
+                            return $query;
+                        }
+
+                        $tags = array_filter([
+                            $tagsRow->collection_tag_primary,
+                            $tagsRow->collection_tag_secondary,
+                        ], fn (?string $tag): bool => $tag !== null && trim($tag) !== '');
+
+                        foreach ($tags as $tag) {
+                            $query->whereRaw(
+                                "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
+                                [$tag]
+                            );
+                        }
+
+                        return $query;
                     }),
+                SelectFilter::make('color_string')
+                    ->label('Colors')
+                    ->multiple()
+                    ->searchable()
+                    ->preload()
+                    ->options(fn () => Color::query()
+                        ->orderBy('name')
+                        ->pluck('name', 'name')
+                        ->all())
+                    ->query(function (Builder $query, array $data): Builder {
+                        $values = $data['values'] ?? [];
+                        if (!is_array($values) || empty($values)) {
+                            return $query;
+                        }
+
+                        return $query->where(function (Builder $sub) use ($values): void {
+                            foreach ($values as $color) {
+                                $sub->orWhereRaw(
+                                    "FIND_IN_SET(?, REPLACE(REPLACE(color_string, '; ', ','), ';', ','))",
+                                    [$color]
+                                );
+                            }
+                        });
+                    }),
+                TernaryFilter::make('has_errors')
+                    ->label('Errors')
+                    ->queries(
+                        true: fn ($query) => $query->whereHas('product', fn ($productQuery) => $productQuery->where('has_errors', true)),
+                        false: fn ($query) => $query->where(function ($subQuery) {
+                            $subQuery->whereHas('product', fn ($productQuery) => $productQuery->where('has_errors', false))
+                                ->orWhereDoesntHave('product');
+                        }),
+                    ),
             ]);
     }
 
@@ -1747,6 +1613,100 @@ class NewProductDraftResource extends Resource
             'create' => Pages\CreateNewProductDraft::route('/create'),
             'edit' => Pages\EditNewProductDraft::route('/{record}/edit'),
         ];
+    }
+
+    public static function getRelations(): array
+    {
+        return [
+            RelationManagers\StyleProfileRelationManager::class,
+        ];
+    }
+
+    private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
+    {
+        return (bool) ($record->product?->has_errors ?? false);
+    }
+
+    private static function draftDisplayImageUrl(NewProductDraft $record): ?string
+    {
+        $product = $record->relationLoaded('product') ? $record->product : $record->product()->with('images')->first();
+        $productImage = $product?->images
+            ?->sortBy(fn ($image) => $image->position ?? PHP_INT_MAX)
+            ->first()?->src;
+
+        return $productImage ?: $record->imageUrl();
+    }
+
+    private static function draftErrorFieldsSummary(NewProductDraft $record): string
+    {
+        $fields = $record->product?->error_fields;
+
+        if (is_array($fields)) {
+            return empty($fields) ? 'All required fields are good.' : implode(', ', $fields);
+        }
+
+        $value = trim((string) $fields);
+        return $value === '' ? 'All required fields are good.' : $value;
+    }
+
+    private static function draftImageLocked(Get $get, ?NewProductDraft $record): bool
+    {
+        return self::linkedProductExists($get, $record);
+    }
+
+    private static function resolvedDraftPreviewImageUrl(Get $get, ?NewProductDraft $record): ?string
+    {
+        $productImage = self::linkedProductFirstImageUrl($get, $record);
+        if ($productImage) {
+            return $productImage;
+        }
+
+        $imageUrl = $get('image_url');
+        if (is_string($imageUrl) && trim($imageUrl) !== '') {
+            return trim($imageUrl);
+        }
+
+        $imagePath = $get('image_path');
+        if (is_string($imagePath) && trim($imagePath) !== '') {
+            return Storage::disk('public')->url($imagePath);
+        }
+
+        return $record?->imageUrl();
+    }
+
+    private static function linkedProductHasImages(Get $get, ?NewProductDraft $record): bool
+    {
+        return self::linkedProductFirstImageUrl($get, $record) !== null;
+    }
+
+    private static function linkedProductExists(Get $get, ?NewProductDraft $record): bool
+    {
+        $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
+        if ($handle === '') {
+            return false;
+        }
+
+        return Product::query()
+            ->where('handle', $handle)
+            ->exists();
+    }
+
+    private static function linkedProductFirstImageUrl(Get $get, ?NewProductDraft $record): ?string
+    {
+        $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $product = Product::query()
+            ->where('handle', $handle)
+            ->with(['images' => fn ($query) => $query->orderBy('position')])
+            ->first();
+
+        $src = $product?->images->first()?->src;
+        $src = is_string($src) ? trim($src) : '';
+
+        return $src !== '' ? $src : null;
     }
 
     private static function templateHeaders(): array

@@ -4,8 +4,11 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
+use App\Models\StyleProfile;
+use App\Models\Product;
 
 class NewProductDraft extends Model
 {
@@ -128,6 +131,16 @@ class NewProductDraft extends Model
     public function approvals(): HasMany
     {
         return $this->hasMany(NewProductDraftApproval::class);
+    }
+
+    public function product(): HasOne
+    {
+        return $this->hasOne(Product::class, 'handle', 'handle');
+    }
+
+    public function styleProfiles(): HasMany
+    {
+        return $this->hasMany(StyleProfile::class, 'handle', 'handle');
     }
 
     public function approvalsForCurrentVersion(): HasMany
