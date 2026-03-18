@@ -1182,11 +1182,12 @@ class ProductResource extends Resource
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $ids = $records->pluck('id')->all();
+                        $selectedCount = count($ids);
                         \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id());
 
                         Notification::make()
                             ->title('Shopify sync queued')
-                            ->body('Only approved products will be synced.')
+                            ->body("Queued {$selectedCount} selected product(s). Only approved products will be synced.")
                             ->success()
                             ->send();
                     })

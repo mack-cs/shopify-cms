@@ -9,6 +9,7 @@ use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
 use App\Services\Normalizer;
 use App\Services\RowKey;
+use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
 
 class ImageObserver
@@ -30,12 +31,21 @@ class ImageObserver
             return;
         }
 
+        if ($image->isDirty('image_path')) {
+            $previousPath = $image->getOriginal('image_path');
+            if (is_string($previousPath) && trim($previousPath) !== '' && $previousPath !== $image->image_path) {
+                $this->deleteStoredImage($previousPath);
+            }
+        }
+
         $this->bumpProductApprovalVersion($image->product_id);
         $this->syncShopifyRow($image, $image->getOriginal());
     }
 
     public function deleted(Image $image): void
     {
+        $this->deleteStoredImage($image->getOriginal('image_path'));
+
         $product = $image->product_id ? Product::find($image->product_id) : null;
         if (!$product) {
             return;
@@ -179,5 +189,15 @@ class ImageObserver
         $csv = Reader::createFromPath($templatePath);
         $csv->setHeaderOffset(0);
         return $csv->getHeader();
+    }
+
+    private function deleteStoredImage(?string $path): void
+    {
+        $trimmed = is_string($path) ? trim($path) : '';
+        if ($trimmed === '') {
+            return;
+        }
+
+        Storage::disk('public')->delete($trimmed);
     }
 }

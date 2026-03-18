@@ -1023,6 +1023,16 @@ query ProductByHandleDetails($handle: String!) {
         }
       }
     }
+    media(first: 50) {
+      nodes {
+        ... on MediaImage {
+          id
+          image {
+            url
+          }
+        }
+      }
+    }
     images(first: 50) {
       nodes { id url }
     }
@@ -2676,128 +2686,152 @@ GQL;
     private function updateImages(Product $product, string $productId, array $rowDataList, array $details): array
     {
         $warnings = [];
-        $existingNodes = collect(data_get($details, 'images.nodes', []))
+        $existingEntriesByUrl = [];
+
+        $existingMediaNodes = collect(data_get($details, 'media.nodes', []))
+            ->filter(fn ($node) => is_array($node))
+            ->map(function (array $node): array {
+                return [
+                    'id' => trim((string) ($node['id'] ?? '')),
+                    'url' => trim((string) data_get($node, 'image.url', '')),
+                    'mode' => 'file_reference',
+                ];
+            })
+            ->filter(fn (array $row) => $row['url'] !== '')
+            ->values()
+            ->all();
+
+        foreach ($existingMediaNodes as $row) {
+            if (($row['id'] ?? '') === '') {
+                continue;
+            }
+
+            $existingEntriesByUrl[$row['url']] = $row;
+        }
+
+        $legacyImageNodes = collect(data_get($details, 'images.nodes', []))
             ->filter(fn ($node) => is_array($node))
             ->map(function (array $node): array {
                 return [
                     'id' => trim((string) ($node['id'] ?? '')),
                     'url' => trim((string) ($node['url'] ?? '')),
+                    'mode' => 'legacy_image',
                 ];
             })
             ->filter(fn (array $row) => $row['url'] !== '')
-            ->values();
-
-        $existingUrlToId = $existingNodes
-            ->filter(fn (array $row) => $row['id'] !== '')
-            ->mapWithKeys(fn (array $row) => [$row['url'] => $row['id']])
-            ->all();
-        $existingUrls = array_keys($existingUrlToId);
-
-        $desiredUrls = collect($rowDataList)
-            ->filter(fn ($row) => is_array($row))
-            ->map(fn (array $row) => $this->nullIfEmpty($row[HeaderStore::IMAGE_SRC] ?? null))
-            ->filter()
-            ->map(fn (string $url) => trim($url))
-            ->unique()
             ->values()
             ->all();
 
-        // Remove stale images no longer present in desired input list.
-        $toDeleteIds = collect($existingUrls)
-            ->reject(fn (string $url) => in_array($url, $desiredUrls, true))
-            ->map(fn (string $url) => $existingUrlToId[$url] ?? null)
-            ->filter()
-            ->values()
-            ->all();
-
-        $toDeleteMediaIds = [];
-        $toDeleteProductImageIds = [];
-        foreach ($toDeleteIds as $deleteId) {
-            $id = trim((string) $deleteId);
-            if ($id === '') {
+        foreach ($legacyImageNodes as $row) {
+            if (isset($existingEntriesByUrl[$row['url']])) {
                 continue;
             }
 
-            if (str_contains($id, 'gid://shopify/ProductImage/')) {
-                $toDeleteProductImageIds[] = $id;
-            } else {
-                $toDeleteMediaIds[] = $id;
-            }
+            $existingEntriesByUrl[$row['url']] = $row;
         }
 
-        if (!empty($toDeleteMediaIds)) {
+        $existingUrls = array_keys($existingEntriesByUrl);
+
+        $desiredImages = collect($rowDataList)
+            ->filter(fn ($row) => is_array($row))
+            ->values()
+            ->map(function (array $row, int $index): array {
+                return [
+                    'url' => $this->nullIfEmpty($row[HeaderStore::IMAGE_SRC] ?? null),
+                    'alt' => $this->nullIfEmpty($row[HeaderStore::IMAGE_ALT_TEXT] ?? null),
+                    'position' => $this->normalizeImagePosition($row[HeaderStore::IMAGE_POSITION] ?? null),
+                    'index' => $index,
+                ];
+            })
+            ->filter(fn (array $row) => $row['url'] !== null)
+            ->sortBy(fn (array $row): string => sprintf(
+                '%010d-%010d',
+                $row['position'] ?? 2147483647,
+                $row['index']
+            ))
+            ->unique('url')
+            ->values();
+
+        $desiredUrls = $desiredImages
+            ->pluck('url')
+            ->all();
+
+        // Non-destructive cleanup: remove product references for shared media files,
+        // and never delete the underlying Shopify CDN asset from this sync path.
+        $staleEntries = collect($existingEntriesByUrl)
+            ->reject(fn (array $row, string $url) => in_array($url, $desiredUrls, true))
+            ->values()
+            ->all();
+
+        $fileDetachInputs = collect($staleEntries)
+            ->filter(fn (array $row) => ($row['mode'] ?? null) === 'file_reference')
+            ->map(function (array $row) use ($productId): ?array {
+                $id = trim((string) ($row['id'] ?? ''));
+                if ($id === '') {
+                    return null;
+                }
+
+                return [
+                    'id' => $id,
+                    'referencesToRemove' => [$productId],
+                ];
+            })
+            ->filter()
+            ->unique('id')
+            ->values()
+            ->all();
+
+        if (!empty($fileDetachInputs)) {
             try {
-                $deleteData = $this->client->graphql($this->productDeleteMediaMutation(), [
-                    'productId' => $productId,
-                    'mediaIds' => $toDeleteMediaIds,
+                $detachData = $this->client->graphql($this->fileUpdateMutation(), [
+                    'files' => $fileDetachInputs,
                 ]);
 
-                $deleteErrors = data_get($deleteData, 'productDeleteMedia.mediaUserErrors', []);
-                if (is_array($deleteErrors) && !empty($deleteErrors)) {
-                    $messages = $this->formatUserErrors($deleteErrors, 'media');
+                $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
+                if (is_array($detachErrors) && !empty($detachErrors)) {
+                    $messages = $this->formatUserErrors($detachErrors, 'files');
                     $warnings[] = [
                         'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify image delete failed.',
+                        'warning' => $messages !== '' ? $messages : 'Shopify image detach failed.',
                     ];
                 }
             } catch (\Throwable $e) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify image delete failed: ' . $e->getMessage(),
+                    'warning' => 'Shopify image detach failed: ' . $e->getMessage(),
                 ];
             }
         }
-        if (!empty($toDeleteProductImageIds)) {
-            $numericProductId = $this->extractNumericId($productId, 'Product');
-            if ($numericProductId === null) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => 'Shopify image delete failed: invalid Shopify Product GID for REST image delete.',
-                ];
-            } else {
-                foreach ($toDeleteProductImageIds as $imageGid) {
-                    $numericImageId = $this->extractNumericId($imageGid, 'ProductImage');
-                    if ($numericImageId === null) {
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => "Shopify image delete failed: invalid ProductImage GID '{$imageGid}'.",
-                        ];
-                        continue;
-                    }
 
-                    try {
-                        $this->client->rest('DELETE', "products/{$numericProductId}/images/{$numericImageId}.json");
-                    } catch (\Throwable $e) {
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => 'Shopify image delete failed: ' . $e->getMessage(),
-                        ];
-                    }
-                }
-            }
+        $legacyStaleCount = collect($staleEntries)
+            ->filter(fn (array $row) => ($row['mode'] ?? null) === 'legacy_image')
+            ->count();
+
+        if ($legacyStaleCount > 0) {
+            $warnings[] = [
+                'product_id' => $product->id,
+                'warning' => "Skipped {$legacyStaleCount} stale legacy Shopify product image(s) to avoid destructive deletion.",
+            ];
         }
 
-        foreach ($rowDataList as $rowData) {
-            if (!is_array($rowData)) {
-                continue;
-            }
-
-            $imageUrl = $this->nullIfEmpty($rowData[HeaderStore::IMAGE_SRC] ?? null);
-            if ($imageUrl === null) {
-                continue;
-            }
-
+        foreach ($desiredImages as $desiredImage) {
+            $imageUrl = $desiredImage['url'];
             if (in_array($imageUrl, $existingUrls, true)) {
                 continue;
+            }
+
+            $mediaInput = [
+                'originalSource' => $imageUrl,
+                'mediaContentType' => 'IMAGE',
+            ];
+            if ($desiredImage['alt'] !== null) {
+                $mediaInput['alt'] = $desiredImage['alt'];
             }
 
             $data = $this->client->graphql($this->productCreateMediaMutation(), [
                 'productId' => $productId,
                 'media' => [
-                    [
-                        'originalSource' => $imageUrl,
-                        'mediaContentType' => 'IMAGE',
-                    ],
+                    $mediaInput,
                 ],
             ]);
 
@@ -2817,18 +2851,156 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => $messages !== '' ? $messages : 'Unknown media error.',
                 ];
+                continue;
             }
+
+            $existingUrls[] = $imageUrl;
+        }
+
+        $warnings = array_merge(
+            $warnings,
+            $this->reorderProductImages($product, $productId, $desiredImages)
+        );
+
+        return $warnings;
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, array{url:string, alt:?string, position:?int, index:int}> $desiredImages
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function reorderProductImages(Product $product, string $productId, Collection $desiredImages): array
+    {
+        $warnings = [];
+
+        if ($desiredImages->count() <= 1) {
+            return $warnings;
+        }
+
+        $details = $this->productByHandleDetails($product->handle);
+        $mediaNodes = collect(data_get($details, 'media.nodes', []))
+            ->filter(fn ($node) => is_array($node))
+            ->map(function (array $node): array {
+                return [
+                    'id' => trim((string) ($node['id'] ?? '')),
+                    'url' => trim((string) data_get($node, 'image.url', '')),
+                ];
+            })
+            ->filter(fn (array $row) => $row['id'] !== '' && $row['url'] !== '')
+            ->values();
+
+        if ($mediaNodes->count() <= 1) {
+            return $warnings;
+        }
+
+        $mediaIdByUrl = $mediaNodes
+            ->mapWithKeys(fn (array $row): array => [$row['url'] => $row['id']])
+            ->all();
+        $currentMediaIds = $mediaNodes
+            ->pluck('id')
+            ->all();
+
+        $desiredMediaIds = [];
+        foreach ($desiredImages as $desiredImage) {
+            $mediaId = $mediaIdByUrl[$desiredImage['url']] ?? null;
+            if ($mediaId === null) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Shopify image reorder skipped for '{$desiredImage['url']}' because the product media ID is not available yet.",
+                ];
+                continue;
+            }
+
+            $desiredMediaIds[] = $mediaId;
+        }
+
+        if (count($desiredMediaIds) <= 1) {
+            return $warnings;
+        }
+
+        $currentDesiredOrder = array_values(array_filter(
+            $currentMediaIds,
+            fn (string $id): bool => in_array($id, $desiredMediaIds, true)
+        ));
+
+        if ($currentDesiredOrder === $desiredMediaIds) {
+            return $warnings;
+        }
+
+        $moves = [];
+        foreach ($desiredMediaIds as $position => $mediaId) {
+            $moves[] = [
+                'id' => $mediaId,
+                'newPosition' => (string) $position,
+            ];
+        }
+
+        try {
+            $reorderData = $this->client->graphql($this->productReorderMediaMutation(), [
+                'id' => $productId,
+                'moves' => $moves,
+            ]);
+
+            $reorderErrors = data_get($reorderData, 'productReorderMedia.mediaUserErrors', []);
+            if (is_array($reorderErrors) && !empty($reorderErrors)) {
+                $messages = $this->formatUserErrors($reorderErrors, 'media');
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => $messages !== '' ? $messages : 'Shopify image reorder failed.',
+                ];
+            }
+        } catch (\Throwable $e) {
+            $warnings[] = [
+                'product_id' => $product->id,
+                'warning' => 'Shopify image reorder failed: ' . $e->getMessage(),
+            ];
         }
 
         return $warnings;
     }
 
-    private function productDeleteMediaMutation(): string
+    private function normalizeImagePosition(mixed $value): ?int
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim((string) $value);
+        if ($trimmed === '' || !is_numeric($trimmed)) {
+            return null;
+        }
+
+        $position = (int) $trimmed;
+        return $position > 0 ? $position : null;
+    }
+
+    private function fileUpdateMutation(): string
     {
         return <<<'GQL'
-mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
-  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
-    deletedMediaIds
+mutation FileUpdate($files: [FileUpdateInput!]!) {
+  fileUpdate(files: $files) {
+    files {
+      ... on MediaImage {
+        id
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+GQL;
+    }
+
+    private function productReorderMediaMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
+  productReorderMedia(id: $id, moves: $moves) {
+    job {
+      id
+    }
     mediaUserErrors {
       field
       message
@@ -2837,6 +3009,7 @@ mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
 }
 GQL;
     }
+
 
     /**
      * @return array{0:?ShopifyRow,1:array<int, array>,2:array<int, array>}

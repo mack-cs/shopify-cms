@@ -13,11 +13,13 @@ use App\Models\StyleProfile;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\Variant;
+use App\Services\NewProductDraftAssignmentService;
 use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
 use Filament\Forms;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -42,6 +44,7 @@ use Filament\Tables\Columns\TextInputColumn;
 use Filament\Tables\Filters\Filter;
 use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
+use App\Jobs\SendNewProductDraftAssignmentEmailJob;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
@@ -1617,6 +1620,69 @@ class NewProductDraftResource extends Resource
                                 ->body('The background job has been queued. You will be notified when it finishes.')
                                 ->success()
                                 ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('sendAssignmentEmail')
+                        ->label('Send Columns by Email')
+                        ->icon('heroicon-o-envelope')
+                        ->color('info')
+                        ->form([
+                            Textarea::make('to_emails')
+                                ->label('To')
+                                ->required()
+                                ->rows(2)
+                                ->helperText('Separate multiple email addresses with commas, semicolons, or new lines.'),
+                            Textarea::make('cc_emails')
+                                ->label('CC')
+                                ->rows(2)
+                                ->helperText('Optional. Separate multiple email addresses with commas, semicolons, or new lines.'),
+                            TextInput::make('from_name')
+                                ->label('From Name')
+                                ->default(fn (): ?string => Auth::user()?->name),
+                            TextInput::make('from_email')
+                                ->label('From Email')
+                                ->email()
+                                ->required()
+                                ->default(fn (): ?string => Auth::user()?->email),
+                            TextInput::make('subject')
+                                ->label('Subject')
+                                ->required()
+                                ->maxLength(255)
+                                ->default('New product draft assignment'),
+                            Textarea::make('body')
+                                ->label('Message')
+                                ->rows(4)
+                                ->helperText('Optional note shown in the email body.'),
+                            CheckboxList::make('context_columns')
+                                ->label('Reference Columns')
+                                ->options(fn (): array => app(NewProductDraftAssignmentService::class)->contextColumnOptions())
+                                ->columns(2)
+                                ->default(['title', 'sku', 'vendor', 'type'])
+                                ->helperText('Handle is always included as the identifier.'),
+                            CheckboxList::make('selected_columns')
+                                ->label('Work Columns')
+                                ->required()
+                                ->options(fn (): array => app(NewProductDraftAssignmentService::class)->workColumnOptions())
+                                ->columns(2)
+                                ->helperText('Choose the columns the recipient should work on.'),
+                        ])
+                        ->action(function ($records, array $data, NewProductDraftAssignmentService $service): void {
+                            try {
+                                $assignment = $service->createAssignment($records, $data, Auth::user());
+                                SendNewProductDraftAssignmentEmailJob::dispatch($assignment->id);
+
+                                Notification::make()
+                                    ->title('Assignment queued')
+                                    ->body("Assignment #{$assignment->id} was recorded and the email has been queued.")
+                                    ->success()
+                                    ->send();
+                            } catch (\Throwable $e) {
+                                Notification::make()
+                                    ->title('Assignment failed')
+                                    ->body($e->getMessage())
+                                    ->danger()
+                                    ->send();
+                            }
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),
