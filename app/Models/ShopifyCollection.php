@@ -8,6 +8,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ShopifyCollection extends Model
 {
+    public const SYNC_STATUS_PENDING = 'pending';
+    public const SYNC_STATUS_SYNCED = 'synced';
+
     protected $table = 'collections';
 
     protected $fillable = [
@@ -21,6 +24,9 @@ class ShopifyCollection extends Model
         'deindex',
         'published_on_online_store_only',
         'published_channel_names',
+        'batch',
+        'sync_status',
+        'last_synced_at',
         'approval_version',
         'draft_title',
         'draft_description_html',
@@ -31,6 +37,7 @@ class ShopifyCollection extends Model
     protected $casts = [
         'deindex' => 'boolean',
         'published_on_online_store_only' => 'boolean',
+        'last_synced_at' => 'datetime',
     ];
 
     public function import(): BelongsTo

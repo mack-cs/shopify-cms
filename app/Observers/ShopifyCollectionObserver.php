@@ -16,6 +16,9 @@ class ShopifyCollectionObserver
         $ignoreForApprovalReset = [
             'updated_at',
             'created_at',
+            'batch',
+            'sync_status',
+            'last_synced_at',
         ];
 
         $dirtyKeys = array_keys($dirty);
@@ -24,6 +27,7 @@ class ShopifyCollectionObserver
 
         if (!empty($meaningful)) {
             $collection->approval_version = ($collection->approval_version ?? 1) + 1;
+            $collection->sync_status = ShopifyCollection::SYNC_STATUS_PENDING;
         }
     }
 }

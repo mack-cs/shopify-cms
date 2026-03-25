@@ -5,10 +5,11 @@ namespace App\Filament\Resources;
 use App\Enums\RolesEnum;
 use App\Filament\Exports\ShopifyCollectionExporter;
 use App\Filament\Resources\ShopifyCollectionResource\Pages;
+use App\Jobs\ShopifyCollectionUpdateJob;
+use App\Jobs\ShopifyCollectionsSyncJob;
 use App\Models\CollectionApproval;
 use App\Models\ShopifyCollection;
 use App\Services\ShopifyCollectionsImporter;
-use App\Services\ShopifyCollectionUpdater;
 use App\Services\ShopifyCollectionSeoImporter;
 use Filament\Forms;
 use Filament\Forms\Form;
@@ -19,9 +20,13 @@ use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
-use App\Jobs\ShopifyCollectionsSyncJob;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 class ShopifyCollectionResource extends Resource
@@ -48,6 +53,18 @@ class ShopifyCollectionResource extends Resource
                     ->helperText('Controls the collection URL slug.')
                     ->disabled()
                     ->columnSpan(1),
+                Forms\Components\Placeholder::make('batch')
+                    ->label('Batch')
+                    ->content(fn (ShopifyCollection $record): string => trim((string) ($record->batch ?? '')) ?: 'Not set')
+                    ->columnSpan(1),
+                Forms\Components\Placeholder::make('sync_status')
+                    ->label('Sync Status')
+                    ->content(fn (ShopifyCollection $record): string => $record->sync_status === ShopifyCollection::SYNC_STATUS_SYNCED ? 'Synced' : 'Pending')
+                    ->columnSpan(1),
+                Forms\Components\Placeholder::make('last_synced_at')
+                    ->label('Last Synced')
+                    ->content(fn (ShopifyCollection $record): string => $record->last_synced_at?->format('Y-m-d H:i:s') ?? 'Never synced')
+                    ->columnSpan(1),
                 Forms\Components\Section::make('Marketing Channels & Indexing')
                     ->schema([
                         Forms\Components\Placeholder::make('published_channel_names')
@@ -55,8 +72,8 @@ class ShopifyCollectionResource extends Resource
                             ->content(fn (ShopifyCollection $record): string => $record->published_channel_names ?: 'Not published on any channel')
                             ->columnSpan(1),
                         Forms\Components\Placeholder::make('online_only_warning')
-                            ->label('Action Needed')
-                            ->content('This collection is published only to Online Store. Set Deindex to true or false before pushing to Shopify.')
+                            ->label('Channel Info')
+                            ->content('This collection is published only to Online Store. Indexing can still be decided manually by your team.')
                             ->visible(fn (ShopifyCollection $record): bool => $record->published_on_online_store_only && $record->deindex === null)
                             ->columnSpanFull(),
                         Forms\Components\Select::make('deindex')
@@ -121,6 +138,27 @@ class ShopifyCollectionResource extends Resource
                     ->label('Handle')
                     ->searchable()
                     ->sortable(),
+                Tables\Columns\TextColumn::make('batch')
+                    ->label('Batch')
+                    ->searchable()
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('sync_status')
+                    ->label('Sync Status')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): string => $state === ShopifyCollection::SYNC_STATUS_SYNCED ? 'Synced' : 'Pending')
+                    ->color(fn (?string $state): string => $state === ShopifyCollection::SYNC_STATUS_SYNCED ? 'success' : 'warning')
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('last_synced_at')
+                    ->label('Last Synced')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('updated_at')
+                    ->label('Updated')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(),
                 Tables\Columns\TextColumn::make('deindex')
                     ->label('Deindex')
                     ->state(function (ShopifyCollection $record): string {
@@ -188,6 +226,25 @@ class ShopifyCollectionResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
+                SelectFilter::make('batch')
+                    ->label('Batch')
+                    ->options(function (): array {
+                        $importId = self::currentImportId();
+                        if (!$importId) {
+                            return [];
+                        }
+
+                        return ShopifyCollection::query()
+                            ->where('import_id', $importId)
+                            ->whereNotNull('batch')
+                            ->where('batch', '!=', '')
+                            ->distinct()
+                            ->orderByDesc('batch')
+                            ->pluck('batch', 'batch')
+                            ->all();
+                    })
+                    ->searchable()
+                    ->preload(),
                 TernaryFilter::make('approved')
                     ->label('Approved')
                     ->queries(
@@ -216,6 +273,33 @@ class ShopifyCollectionResource extends Resource
                             ->whereNotNull('draft_seo_description')
                             ->where('draft_seo_description', '!=', '')
                     ),
+                TernaryFilter::make('synced')
+                    ->label('Synced')
+                    ->queries(
+                        true: fn (Builder $query) => $query->where('sync_status', ShopifyCollection::SYNC_STATUS_SYNCED),
+                        false: fn (Builder $query) => $query->where(function (Builder $sub): void {
+                            $sub->whereNull('sync_status')
+                                ->orWhere('sync_status', '!=', ShopifyCollection::SYNC_STATUS_SYNCED);
+                        }),
+                    ),
+                Filter::make('updated_date')
+                    ->label('Updated Date')
+                    ->form([
+                        Forms\Components\DatePicker::make('from')->label('Updated From'),
+                        Forms\Components\DatePicker::make('to')->label('Updated To'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query
+                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('updated_at', '<=', $to))),
+                Filter::make('synced_date')
+                    ->label('Sync Date')
+                    ->form([
+                        Forms\Components\DatePicker::make('from')->label('Synced From'),
+                        Forms\Components\DatePicker::make('to')->label('Synced To'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query
+                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('last_synced_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('last_synced_at', '<=', $to))),
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
@@ -225,11 +309,12 @@ class ShopifyCollectionResource extends Resource
                     ->requiresConfirmation()
                     ->action(function (ShopifyCollection $record): void {
                         if (!self::canApprove($record)) {
-                            Notification::make()
+                            self::sendNotification(
+                                Notification::make()
                                 ->title('Cannot approve')
                                 ->body(self::approvalBlockMessage($record))
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
@@ -239,28 +324,40 @@ class ShopifyCollectionResource extends Resource
                             ->exists();
 
                         if ($exists) {
-                            Notification::make()
+                            self::sendNotification(
+                                Notification::make()
                                 ->title('Already approved')
                                 ->body('You have already approved this version.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
-                        CollectionApproval::create([
-                            'collection_id' => $record->id,
-                            'user_id' => Auth::id(),
-                            'approval_version' => $record->approval_version,
-                        ]);
+                        try {
+                            self::storeApproval($record);
+                        } catch (\Throwable $e) {
+                            Log::error('Collection approval failed.', [
+                                'collection_id' => $record->id,
+                                'user_id' => Auth::id(),
+                                'approval_version' => $record->approval_version,
+                                'message' => $e->getMessage(),
+                            ]);
 
-                        if ($record->approvalsForCurrentVersionCount() >= 2) {
-                            self::applyApprovedDrafts($record);
+                            self::sendNotification(
+                                Notification::make()
+                                ->title('Approval failed')
+                                ->body('The collection could not be approved. Check the logs for the underlying error.')
+                                ->danger()
+                            );
+
+                            return;
                         }
 
-                        Notification::make()
+                        self::sendNotification(
+                            Notification::make()
                             ->title('Approval recorded')
                             ->success()
-                            ->send();
+                        );
                     }),
                 Tables\Actions\Action::make('pushToShopify')
                     ->label('Push to Shopify')
@@ -292,63 +389,43 @@ class ShopifyCollectionResource extends Resource
                             ->nullable()
                             ->placeholder('Keep current decision'),
                     ])
-                    ->action(function (ShopifyCollection $record, array $data, ShopifyCollectionUpdater $updater): void {
+                    ->action(function (ShopifyCollection $record, array $data): void {
                         if (!$record->isApprovedByTwo()) {
-                            Notification::make()
+                            self::sendNotification(
+                                Notification::make()
                                 ->title('Approval required')
                                 ->body('This collection needs 2 approvals before syncing to Shopify.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
-                        $fields = array_fill_keys($data['fields'] ?? [], true);
-                        if (empty($fields)) {
-                            Notification::make()
+                        $fieldNames = array_values($data['fields'] ?? []);
+                        if ($fieldNames === []) {
+                            self::sendNotification(
+                                Notification::make()
                                 ->title('Choose at least one field')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
                         $deindexOverride = self::parseNullableBoolean($data['deindex_override'] ?? null);
-                        if ($deindexOverride !== null) {
-                            $record->forceFill(['deindex' => $deindexOverride])->save();
-                            $record->refresh();
-                        }
+                        ShopifyCollectionUpdateJob::dispatch(
+                            [$record->id],
+                            $fieldNames,
+                            Auth::id(),
+                            trim((string) ($data['handle_override'] ?? '')) ?: null,
+                            $deindexOverride !== null,
+                            $deindexOverride,
+                        );
 
-                        if (self::requiresDeindexDecision($record)) {
+                        self::sendNotification(
                             Notification::make()
-                                ->title('Action needed before Shopify push')
-                                ->body('This collection is only on Online Store. Set Deindex to true or false first.')
-                                ->warning()
-                                ->send();
-                            return;
-                        }
-
-                        try {
-                            $payload = self::collectionPayload($record, $fields, $data);
-                            if ($payload === []) {
-                                Notification::make()
-                                    ->title('No fields to update')
-                                    ->warning()
-                                    ->send();
-                                return;
-                            }
-
-                            $updater->update($record, $payload);
-
-                            Notification::make()
-                                ->title('Collection pushed to Shopify')
+                                ->title('Collection sync queued')
+                                ->body('This collection will be pushed to Shopify in the background.')
                                 ->success()
-                                ->send();
-                        } catch (\Throwable $e) {
-                            Notification::make()
-                                ->title('Shopify update failed')
-                                ->body($e->getMessage())
-                                ->danger()
-                                ->send();
-                        }
+                        );
                     }),
             ])
             ->headerActions([
@@ -425,7 +502,8 @@ class ShopifyCollectionResource extends Resource
                             ->body(
                                 "Total: {$result['total']}, Updated: {$result['updated']}, " .
                                 "Missing Handle: {$result['skipped_missing_handle']}, " .
-                                "Not Found: {$result['skipped_not_found']}"
+                                "Not Found: {$result['skipped_not_found']}, " .
+                                "Batch: {$result['batch']}"
                             )
                             ->success()
                             ->send();
@@ -439,14 +517,30 @@ class ShopifyCollectionResource extends Resource
                         ->label('Bulk Approve')
                         ->icon('heroicon-o-check-badge')
                         ->requiresConfirmation()
-                        ->action(function ($records): void {
+                        ->action(function (Collection $records): void {
                             $approvedCount = 0;
                             $skippedCount = 0;
                             $blockedCount = 0;
+                            $failedCount = 0;
+                            $missingDraftTitleCount = 0;
+                            $missingDraftSeoTitleCount = 0;
+                            $missingDraftSeoDescriptionCount = 0;
 
                             foreach ($records as $record) {
                                 if (!self::canApprove($record)) {
                                     $blockedCount++;
+
+                                    $missingFields = self::missingDraftSeoFields($record);
+                                    if (in_array('draft_title', $missingFields, true)) {
+                                        $missingDraftTitleCount++;
+                                    }
+                                    if (in_array('draft_seo_title', $missingFields, true)) {
+                                        $missingDraftSeoTitleCount++;
+                                    }
+                                    if (in_array('draft_seo_description', $missingFields, true)) {
+                                        $missingDraftSeoDescriptionCount++;
+                                    }
+
                                     continue;
                                 }
 
@@ -460,15 +554,18 @@ class ShopifyCollectionResource extends Resource
                                     continue;
                                 }
 
-                                CollectionApproval::create([
-                                    'collection_id' => $record->id,
-                                    'user_id' => Auth::id(),
-                                    'approval_version' => $record->approval_version,
-                                ]);
-                                $approvedCount++;
+                                try {
+                                    self::storeApproval($record);
+                                    $approvedCount++;
+                                } catch (\Throwable $e) {
+                                    $failedCount++;
 
-                                if ($record->approvalsForCurrentVersionCount() >= 2) {
-                                    self::applyApprovedDrafts($record);
+                                    Log::error('Bulk collection approval failed.', [
+                                        'collection_id' => $record->id,
+                                        'user_id' => Auth::id(),
+                                        'approval_version' => $record->approval_version,
+                                        'message' => $e->getMessage(),
+                                    ]);
                                 }
                             }
 
@@ -480,14 +577,35 @@ class ShopifyCollectionResource extends Resource
                                 $parts[] = "Skipped {$skippedCount} already approved by you.";
                             }
                             if ($blockedCount > 0) {
-                                $parts[] = "Blocked {$blockedCount}: set deindex=true or complete draft SEO.";
+                                $parts[] = "Blocked {$blockedCount}.";
+                                if ($missingDraftTitleCount > 0) {
+                                    $parts[] = "Missing draft title: {$missingDraftTitleCount}.";
+                                }
+                                if ($missingDraftSeoTitleCount > 0) {
+                                    $parts[] = "Missing draft SEO title: {$missingDraftSeoTitleCount}.";
+                                }
+                                if ($missingDraftSeoDescriptionCount > 0) {
+                                    $parts[] = "Missing draft SEO description: {$missingDraftSeoDescriptionCount}.";
+                                }
+                                $parts[] = 'Set Deindex to true if you want approval without draft SEO.';
+                            }
+                            if ($failedCount > 0) {
+                                $parts[] = "Failed {$failedCount}; check logs for the underlying error.";
                             }
 
-                            Notification::make()
+                            $notification = Notification::make()
                                 ->title('Bulk approval complete')
-                                ->body($parts ? implode(' ', $parts) : 'No collections were approved.')
-                                ->success()
-                                ->send();
+                                ->body($parts ? implode(' ', $parts) : 'No collections were approved.');
+
+                            if ($failedCount > 0) {
+                                $notification->danger();
+                            } elseif ($blockedCount > 0) {
+                                $notification->warning();
+                            } else {
+                                $notification->success();
+                            }
+
+                            self::sendNotification($notification);
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('pushToShopify')
@@ -507,58 +625,26 @@ class ShopifyCollectionResource extends Resource
                                 ->columns(2)
                                 ->default(['title', 'description_html', 'seo_title', 'seo_description', 'deindex']),
                         ])
-                        ->action(function ($records, array $data, ShopifyCollectionUpdater $updater): void {
-                            $fields = array_fill_keys($data['fields'] ?? [], true);
-                            if (empty($fields)) {
-                                Notification::make()
+                        ->action(function (Collection $records, array $data): void {
+                            $fieldNames = array_values($data['fields'] ?? []);
+                            if ($fieldNames === []) {
+                                self::sendNotification(
+                                    Notification::make()
                                     ->title('Choose at least one field')
                                     ->warning()
-                                    ->send();
+                                );
                                 return;
                             }
 
-                            $synced = 0;
-                            $skippedNotApproved = 0;
-                            $skippedActionRequired = 0;
-                            $failed = 0;
-                            foreach ($records as $record) {
-                                if (!$record->isApprovedByTwo()) {
-                                    $skippedNotApproved++;
-                                    continue;
-                                }
-                                if (self::requiresDeindexDecision($record)) {
-                                    $skippedActionRequired++;
-                                    continue;
-                                }
+                            $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
+                            ShopifyCollectionUpdateJob::dispatch($ids, $fieldNames, Auth::id());
 
-                                try {
-                                    $payload = self::collectionPayload($record, $fields);
-                                    if ($payload === []) {
-                                        continue;
-                                    }
-                                    $updater->update($record, $payload);
-                                    $synced++;
-                                } catch (\Throwable $e) {
-                                    $failed++;
-                                }
-                            }
-
-                            $message = "Synced {$synced} collection(s).";
-                            if ($skippedNotApproved > 0) {
-                                $message .= " Skipped not approved: {$skippedNotApproved}.";
-                            }
-                            if ($skippedActionRequired > 0) {
-                                $message .= " Skipped action required (set Deindex true/false): {$skippedActionRequired}.";
-                            }
-                            if ($failed > 0) {
-                                $message .= " Failed: {$failed}.";
-                            }
-
-                            Notification::make()
-                                ->title('Collection sync complete')
-                                ->body($message)
-                                ->success()
-                                ->send();
+                            self::sendNotification(
+                                Notification::make()
+                                    ->title('Collection sync queued')
+                                    ->body('Selected collections will be pushed to Shopify in the background.')
+                                    ->success()
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),
@@ -606,40 +692,12 @@ class ShopifyCollectionResource extends Resource
     public static function getEloquentQuery(): \Illuminate\Database\Eloquent\Builder
     {
         $query = parent::getEloquentQuery();
-        $importId = \App\Models\Import::where('filename', 'shopify-collections')
-            ->orderByDesc('id')
-            ->value('id');
+        $importId = self::currentImportId();
         if (!$importId) {
             return $query->whereRaw('1 = 0');
         }
 
         return $query->where('import_id', $importId);
-    }
-
-    private static function collectionPayload(ShopifyCollection $record, array $fields, array $data = []): array
-    {
-        $payload = [];
-        if (!empty($fields['title'])) {
-            $payload['title'] = $record->title;
-        }
-        if (!empty($fields['description_html'])) {
-            $payload['description_html'] = $record->description_html;
-        }
-        $handleOverride = trim((string) ($data['handle_override'] ?? ''));
-        if ($handleOverride !== '') {
-            $payload['handle'] = $handleOverride;
-        }
-        if (!empty($fields['seo_title'])) {
-            $payload['seo_title'] = $record->seo_title;
-        }
-        if (!empty($fields['seo_description'])) {
-            $payload['seo_description'] = $record->seo_description;
-        }
-        if (!empty($fields['deindex']) && $record->deindex !== null) {
-            $payload['deindex'] = (bool) $record->deindex;
-        }
-
-        return $payload;
     }
 
     private static function parseNullableBoolean(mixed $value): ?bool
@@ -651,24 +709,13 @@ class ShopifyCollectionResource extends Resource
         return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
     }
 
-    private static function requiresDeindexDecision(ShopifyCollection $record): bool
-    {
-        return (bool) $record->published_on_online_store_only && $record->deindex === null;
-    }
-
     private static function draftSeoComplete(ShopifyCollection $record): bool
     {
-        return trim((string) ($record->draft_title ?? '')) !== ''
-            && trim((string) ($record->draft_seo_title ?? '')) !== ''
-            && trim((string) ($record->draft_seo_description ?? '')) !== '';
+        return self::missingDraftSeoFields($record) === [];
     }
 
     private static function canApprove(ShopifyCollection $record): bool
     {
-        if (self::requiresDeindexDecision($record)) {
-            return false;
-        }
-
         if ($record->deindex === true) {
             return true;
         }
@@ -678,26 +725,103 @@ class ShopifyCollectionResource extends Resource
 
     private static function approvalBlockMessage(ShopifyCollection $record): string
     {
-        if (self::requiresDeindexDecision($record)) {
-            return 'This collection is only on Online Store. Choose deindex true or false before approval.';
-        }
-
         if ($record->deindex === true) {
             return 'Approval is blocked unexpectedly. Please retry.';
         }
 
-        return 'Approval requires either deindex=true or complete draft SEO fields (title, SEO title, SEO description).';
+        $missingFields = self::missingDraftSeoFields($record);
+
+        if ($missingFields === []) {
+            return 'Approval is blocked unexpectedly. Please retry.';
+        }
+
+        $labels = array_map(
+            fn (string $field): string => match ($field) {
+                'draft_title' => 'draft title',
+                'draft_seo_title' => 'draft SEO title',
+                'draft_seo_description' => 'draft SEO description',
+                default => $field,
+            },
+            $missingFields,
+        );
+
+        return 'Missing ' . implode(', ', $labels) . '. Set Deindex to true if you want approval without draft SEO.';
     }
 
     private static function applyApprovedDrafts(ShopifyCollection $record): void
     {
         ShopifyCollection::withoutEvents(function () use ($record): void {
             $record->forceFill([
-                'title' => $record->draft_title,
-                'description_html' => $record->draft_description_html,
-                'seo_title' => $record->draft_seo_title,
-                'seo_description' => $record->draft_seo_description,
-            ])->save();
+                'title' => self::preferredDraftValue($record->draft_title, $record->title),
+                'description_html' => self::preferredDraftValue($record->draft_description_html, $record->description_html),
+                'seo_title' => self::preferredDraftValue($record->draft_seo_title, $record->seo_title),
+                'seo_description' => self::preferredDraftValue($record->draft_seo_description, $record->seo_description),
+                'sync_status' => ShopifyCollection::SYNC_STATUS_PENDING,
+            ]);
+
+            if ($record->isDirty()) {
+                $record->save();
+            }
         });
+    }
+
+    private static function preferredDraftValue(mixed $draftValue, mixed $currentValue): mixed
+    {
+        if (is_string($draftValue)) {
+            return trim($draftValue) === '' ? $currentValue : $draftValue;
+        }
+
+        return $draftValue ?? $currentValue;
+    }
+
+    private static function storeApproval(ShopifyCollection $record): void
+    {
+        CollectionApproval::create([
+            'collection_id' => $record->id,
+            'user_id' => Auth::id(),
+            'approval_version' => $record->approval_version,
+        ]);
+
+        if ($record->approvalsForCurrentVersionCount() >= 2) {
+            self::applyApprovedDrafts($record);
+        }
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function missingDraftSeoFields(ShopifyCollection $record): array
+    {
+        $missing = [];
+
+        if (trim((string) ($record->draft_title ?? '')) === '') {
+            $missing[] = 'draft_title';
+        }
+
+        if (trim((string) ($record->draft_seo_title ?? '')) === '') {
+            $missing[] = 'draft_seo_title';
+        }
+
+        if (trim((string) ($record->draft_seo_description ?? '')) === '') {
+            $missing[] = 'draft_seo_description';
+        }
+
+        return $missing;
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        if ($user = Auth::user()) {
+            $notification->sendToDatabase($user);
+        }
+
+        $notification->send();
+    }
+
+    private static function currentImportId(): ?int
+    {
+        return \App\Models\Import::where('filename', 'shopify-collections')
+            ->orderByDesc('id')
+            ->value('id');
     }
 }

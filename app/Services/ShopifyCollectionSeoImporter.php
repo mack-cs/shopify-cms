@@ -15,6 +15,7 @@ final class ShopifyCollectionSeoImporter
         $headers = $csv->getHeader();
 
         $map = $this->headerMap($headers);
+        $importBatch = 'batch' . now()->format('YmdHis');
 
         $total = 0;
         $updated = 0;
@@ -54,6 +55,7 @@ final class ShopifyCollectionSeoImporter
             if ($map['deindex'] !== null) {
                 $payload['deindex'] = $this->nullableBool($this->mappedValue($row, $map['deindex']));
             }
+            $payload['batch'] = $this->nullIfEmpty($this->mappedValue($row, $map['batch'])) ?? $importBatch;
 
             if ($payload === []) {
                 continue;
@@ -71,6 +73,7 @@ final class ShopifyCollectionSeoImporter
             'updated' => $updated,
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_not_found' => $skippedNotFound,
+            'batch' => $importBatch,
         ];
     }
 
@@ -98,6 +101,7 @@ final class ShopifyCollectionSeoImporter
             'seo_title' => $find(['seo_title', 'seo title', 'meta title']),
             'seo_description' => $find(['seo_description', 'seo description', 'meta description']),
             'deindex' => $find(['deindex', 'seo_deindex', 'hide_from_google', 'seo hidden']),
+            'batch' => $find(['batch']),
         ];
     }
 
