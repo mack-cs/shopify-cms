@@ -138,8 +138,6 @@ final class Normalizer
 
                     $product->fill($payload);
                     $product->saveQuietly();
-                    $product->variants()->delete();
-                    $product->images()->delete();
                 } else {
                     $product = Product::create($payload);
                 }
@@ -148,35 +146,7 @@ final class Normalizer
                 $variantRows = $handleRows->filter(function (ShopifyRow $r) {
                     return $r->variant_key !== null;
                 });
-                $firstSku = null;
-                foreach ($variantRows as $vr) {
-                    $sku = $this->normalizeValue($vr->get(HeaderStore::VARIANT_SKU, null));
-                    $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
-                    $weightUnit = $this->normalizeValue($vr->get(HeaderStore::VARIANT_WEIGHT_UNIT, null));
-                    if ($weightUnit === null) {
-                        $weightUnit = 'g';
-                    }
-                    if ($firstSku === null && $sku !== null) {
-                        $firstSku = $sku;
-                    }
-                    Variant::create([
-                        'product_id' => $product->id,
-                        'sku' => $sku,
-                        'barcode' => $barcode,
-                        'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
-                        'weight_unit' => $weightUnit,
-                        'inventory_qty' => $this->toInteger($vr->get(HeaderStore::VARIANT_INVENTORY_QTY, null)),
-                        'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
-                        'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
-                        'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),
-                        'option2_value' => $vr->get(HeaderStore::OPTION2_VALUE, null),
-                        'option3_name' => $vr->get(HeaderStore::OPTION3_NAME, null),
-                        'option3_value' => $vr->get(HeaderStore::OPTION3_VALUE, null),
-                        'price' => $this->toDecimal($vr->get(HeaderStore::VARIANT_PRICE, null)),
-                        'compare_at_price' => $this->toDecimal($vr->get(HeaderStore::VARIANT_COMPARE_AT, null)),
-                        // add more variant columns if you care
-                    ]);
-                }
+                $firstSku = $this->reconcileVariants($product, $variantRows);
 
                 // Images
                 $imageRows = $handleRows->filter(function (ShopifyRow $r) {
@@ -188,14 +158,7 @@ final class Normalizer
                 $imageUrl = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_SRC, null));
                 $imageAlt = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_ALT_TEXT, null));
 
-                foreach ($imageRows as $ir) {
-                    Image::create([
-                        'product_id' => $product->id,
-                        'src' => $ir->get(HeaderStore::IMAGE_SRC, null),
-                        'position' => (int)($ir->get(HeaderStore::IMAGE_POSITION, 0) ?: 0) ?: null,
-                        'alt_text' => $ir->get(HeaderStore::IMAGE_ALT_TEXT, null),
-                    ]);
-                }
+                $this->reconcileImages($product, $imageRows);
 
                 $existingStyleProfile = StyleProfile::where('handle', $handle)->first();
                 if ($existingStyleProfile) {
@@ -241,6 +204,358 @@ final class Normalizer
                 });
             }
         });
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, ShopifyRow> $variantRows
+     */
+    private function reconcileVariants(Product $product, $variantRows): ?string
+    {
+        $existingVariants = $product->allVariants()
+            ->orderBy('id')
+            ->get();
+
+        $seenVariantIds = [];
+        $firstSku = null;
+        $syncedAt = now();
+
+        foreach ($variantRows->values() as $index => $vr) {
+            $sku = $this->normalizeValue($vr->get(HeaderStore::VARIANT_SKU, null));
+            $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
+            $weightUnit = $this->normalizeValue($vr->get(HeaderStore::VARIANT_WEIGHT_UNIT, null)) ?? 'g';
+            $shopifyId = $this->normalizeValue($vr->get(HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID, null));
+
+            if ($firstSku === null && $sku !== null) {
+                $firstSku = $sku;
+            }
+
+            $payload = [
+                'product_id' => $product->id,
+                'shopify_id' => $shopifyId,
+                'sku' => $sku,
+                'barcode' => $barcode,
+                'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
+                'weight_unit' => $weightUnit,
+                'inventory_qty' => $this->toInteger($vr->get(HeaderStore::VARIANT_INVENTORY_QTY, null)),
+                'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
+                'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
+                'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),
+                'option2_value' => $vr->get(HeaderStore::OPTION2_VALUE, null),
+                'option3_name' => $vr->get(HeaderStore::OPTION3_NAME, null),
+                'option3_value' => $vr->get(HeaderStore::OPTION3_VALUE, null),
+                'price' => $this->toDecimal($vr->get(HeaderStore::VARIANT_PRICE, null)),
+                'compare_at_price' => $this->toDecimal($vr->get(HeaderStore::VARIANT_COMPARE_AT, null)),
+                'position' => $index + 1,
+            ];
+
+            $existingVariant = $this->resolveExistingVariant($existingVariants, $vr, $shopifyId, $seenVariantIds);
+
+            if ($existingVariant) {
+                $this->syncInboundVariant($existingVariant, $payload, $syncedAt);
+                $seenVariantIds[] = $existingVariant->id;
+                continue;
+            }
+
+            $createdVariant = null;
+            Variant::withoutEvents(function () use ($payload, $syncedAt, &$createdVariant): void {
+                $createdVariant = Variant::create(array_merge($payload, [
+                    'sync_state' => Variant::SYNC_STATE_SYNCED,
+                    'local_dirty' => false,
+                    'last_shopify_seen_at' => $syncedAt,
+                    'last_synced_at' => $syncedAt,
+                ]));
+            });
+
+            if ($createdVariant) {
+                $seenVariantIds[] = $createdVariant->id;
+                $existingVariants->push($createdVariant);
+            }
+        }
+
+        $existingVariants
+            ->whereNotIn('id', $seenVariantIds)
+            ->each(function (Variant $variant) use ($syncedAt): void {
+                $this->markVariantMissingFromShopify($variant, $syncedAt);
+            });
+
+        return $firstSku;
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, ShopifyRow> $imageRows
+     */
+    private function reconcileImages(Product $product, $imageRows): void
+    {
+        $existingImages = $product->allImages()
+            ->orderBy('id')
+            ->get();
+
+        $seenImageIds = [];
+        $syncedAt = now();
+
+        foreach ($imageRows as $ir) {
+            $shopifyId = $this->normalizeValue($ir->get(HeaderStore::INTERNAL_IMAGE_SHOPIFY_ID, null));
+            $payload = [
+                'product_id' => $product->id,
+                'shopify_id' => $shopifyId,
+                'src' => $ir->get(HeaderStore::IMAGE_SRC, null),
+                'position' => (int) ($ir->get(HeaderStore::IMAGE_POSITION, 0) ?: 0) ?: null,
+                'alt_text' => $ir->get(HeaderStore::IMAGE_ALT_TEXT, null),
+            ];
+
+            $existingImage = $this->resolveExistingImage($existingImages, $ir, $shopifyId, $seenImageIds);
+
+            if ($existingImage) {
+                $this->syncInboundImage($existingImage, $payload, $syncedAt);
+                $seenImageIds[] = $existingImage->id;
+                continue;
+            }
+
+            $createdImage = null;
+            Image::withoutEvents(function () use ($payload, $syncedAt, &$createdImage): void {
+                $createdImage = Image::create(array_merge($payload, [
+                    'sync_state' => Image::SYNC_STATE_SYNCED,
+                    'local_dirty' => false,
+                    'last_shopify_seen_at' => $syncedAt,
+                    'last_synced_at' => $syncedAt,
+                ]));
+            });
+
+            if ($createdImage) {
+                $seenImageIds[] = $createdImage->id;
+                $existingImages->push($createdImage);
+            }
+        }
+
+        $existingImages
+            ->whereNotIn('id', $seenImageIds)
+            ->each(function (Image $image) use ($syncedAt): void {
+                $this->markImageMissingFromShopify($image, $syncedAt);
+            });
+    }
+
+    /**
+     * Preserve tool-owned edits when a synced row is already locally dirty.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function syncInboundVariant(Variant $variant, array $payload, $syncedAt): void
+    {
+        Variant::withoutEvents(function () use ($variant, $payload, $syncedAt): void {
+            if ($variant->local_dirty) {
+                $updates = [
+                    'product_id' => $payload['product_id'],
+                    'shopify_id' => $payload['shopify_id'] ?? $variant->shopify_id,
+                    'last_shopify_seen_at' => $syncedAt,
+                ];
+
+                if (
+                    $variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED
+                    && $this->variantPayloadDiffers($variant, $payload)
+                ) {
+                    $updates['sync_state'] = Variant::SYNC_STATE_CONFLICT;
+                }
+
+                $variant->fill($updates)->save();
+                return;
+            }
+
+            $variant->fill(array_merge($payload, [
+                'sync_state' => Variant::SYNC_STATE_SYNCED,
+                'local_dirty' => false,
+                'last_shopify_seen_at' => $syncedAt,
+                'last_synced_at' => $syncedAt,
+            ]))->save();
+        });
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function syncInboundImage(Image $image, array $payload, $syncedAt): void
+    {
+        Image::withoutEvents(function () use ($image, $payload, $syncedAt): void {
+            if ($image->local_dirty) {
+                $updates = [
+                    'product_id' => $payload['product_id'],
+                    'shopify_id' => $payload['shopify_id'] ?? $image->shopify_id,
+                    'last_shopify_seen_at' => $syncedAt,
+                ];
+
+                if (
+                    $image->sync_state !== Image::SYNC_STATE_LOCAL_DELETED
+                    && $this->imagePayloadDiffers($image, $payload)
+                ) {
+                    $updates['sync_state'] = Image::SYNC_STATE_CONFLICT;
+                }
+
+                $image->fill($updates)->save();
+                return;
+            }
+
+            $image->fill(array_merge($payload, [
+                'sync_state' => Image::SYNC_STATE_SYNCED,
+                'local_dirty' => false,
+                'last_shopify_seen_at' => $syncedAt,
+                'last_synced_at' => $syncedAt,
+            ]))->save();
+        });
+    }
+
+    private function markVariantMissingFromShopify(Variant $variant, $syncedAt): void
+    {
+        if ($this->normalizeValue($variant->shopify_id) === null) {
+            return;
+        }
+
+        Variant::withoutEvents(function () use ($variant, $syncedAt): void {
+            if ($variant->local_dirty) {
+                if ($variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED) {
+                    $variant->sync_state = Variant::SYNC_STATE_CONFLICT;
+                }
+                $variant->save();
+                return;
+            }
+
+            $variant->forceFill([
+                'sync_state' => Variant::SYNC_STATE_REMOTE_DELETED,
+                'local_dirty' => false,
+                'last_synced_at' => $syncedAt,
+            ])->save();
+        });
+    }
+
+    private function markImageMissingFromShopify(Image $image, $syncedAt): void
+    {
+        if ($this->normalizeValue($image->shopify_id) === null) {
+            return;
+        }
+
+        Image::withoutEvents(function () use ($image, $syncedAt): void {
+            if ($image->local_dirty) {
+                if ($image->sync_state !== Image::SYNC_STATE_LOCAL_DELETED) {
+                    $image->sync_state = Image::SYNC_STATE_CONFLICT;
+                }
+                $image->save();
+                return;
+            }
+
+            $image->forceFill([
+                'sync_state' => Image::SYNC_STATE_REMOTE_DELETED,
+                'local_dirty' => false,
+                'last_synced_at' => $syncedAt,
+            ])->save();
+        });
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function variantPayloadDiffers(Variant $variant, array $payload): bool
+    {
+        foreach ($payload as $key => $value) {
+            if ($key === 'product_id') {
+                continue;
+            }
+
+            if ($this->normalizeComparableValue($variant->getAttribute($key)) !== $this->normalizeComparableValue($value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function imagePayloadDiffers(Image $image, array $payload): bool
+    {
+        foreach ($payload as $key => $value) {
+            if ($key === 'product_id') {
+                continue;
+            }
+
+            if ($this->normalizeComparableValue($image->getAttribute($key)) !== $this->normalizeComparableValue($value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, Variant> $existingVariants
+     * @param array<int, int> $seenVariantIds
+     */
+    private function resolveExistingVariant($existingVariants, ShopifyRow $row, ?string $shopifyId, array $seenVariantIds): ?Variant
+    {
+        if ($shopifyId !== null) {
+            $match = $existingVariants->first(function (Variant $variant) use ($shopifyId, $seenVariantIds): bool {
+                return !in_array($variant->id, $seenVariantIds, true)
+                    && trim((string) $variant->shopify_id) === $shopifyId;
+            });
+
+            if ($match) {
+                return $match;
+            }
+        }
+
+        $variantKey = trim((string) ($row->variant_key ?? ''));
+        if ($variantKey === '') {
+            return null;
+        }
+
+        return $existingVariants->first(function (Variant $variant) use ($variantKey, $seenVariantIds): bool {
+            return !in_array($variant->id, $seenVariantIds, true)
+                && $this->variantKeyFromModel($variant) === $variantKey;
+        });
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, Image> $existingImages
+     * @param array<int, int> $seenImageIds
+     */
+    private function resolveExistingImage($existingImages, ShopifyRow $row, ?string $shopifyId, array $seenImageIds): ?Image
+    {
+        if ($shopifyId !== null) {
+            $match = $existingImages->first(function (Image $image) use ($shopifyId, $seenImageIds): bool {
+                return !in_array($image->id, $seenImageIds, true)
+                    && trim((string) $image->shopify_id) === $shopifyId;
+            });
+
+            if ($match) {
+                return $match;
+            }
+        }
+
+        $imageKey = trim((string) ($row->image_key ?? ''));
+        if ($imageKey === '') {
+            return null;
+        }
+
+        return $existingImages->first(function (Image $image) use ($imageKey, $seenImageIds): bool {
+            return !in_array($image->id, $seenImageIds, true)
+                && $this->imageKeyFromModel($image) === $imageKey;
+        });
+    }
+
+    private function variantKeyFromModel(Variant $variant): ?string
+    {
+        return RowKey::variantKey([
+            HeaderStore::VARIANT_SKU => $variant->sku,
+            HeaderStore::OPTION1_VALUE => $variant->option1_value,
+            HeaderStore::OPTION2_VALUE => $variant->option2_value,
+            HeaderStore::OPTION3_VALUE => $variant->option3_value,
+        ]);
+    }
+
+    private function imageKeyFromModel(Image $image): ?string
+    {
+        return RowKey::imageKey([
+            HeaderStore::IMAGE_SRC => $image->src,
+            HeaderStore::IMAGE_POSITION => $image->position,
+        ]);
     }
 
     public function recalculateErrors(Import $import): void
@@ -315,6 +630,28 @@ final class Normalizer
         $s = trim((string)$v);
         if ($s === '') return null;
         return (float)$s;
+    }
+
+    private function normalizeComparableValue(mixed $value): mixed
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+
+        if (is_string($value)) {
+            $trimmed = trim($value);
+            return $trimmed === '' ? null : $trimmed;
+        }
+
+        return $value;
     }
 
     private function toInteger(mixed $v): ?int

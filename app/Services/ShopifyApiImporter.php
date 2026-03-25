@@ -216,6 +216,7 @@ query Products($first: Int!, $after: String) {
       }
       variants(first: 250) {
         nodes {
+          id
           sku
           price
           compareAtPrice
@@ -235,6 +236,7 @@ query Products($first: Int!, $after: String) {
       }
       images(first: 250) {
         nodes {
+          id
           url
           altText
         }
@@ -632,6 +634,7 @@ GQL;
 
     private function applyVariantFields(array &$row, array $variant, array $headers): void
     {
+        $row[HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID] = data_get($variant, 'id');
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_SKU, data_get($variant, 'sku'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_PRICE, data_get($variant, 'price'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_COMPARE_AT, data_get($variant, 'compareAtPrice'));
@@ -663,6 +666,7 @@ GQL;
 
     private function applyImageFields(array &$row, array $image, int $position, array $headers): void
     {
+        $row[HeaderStore::INTERNAL_IMAGE_SHOPIFY_ID] = data_get($image, 'id');
         $src = data_get($image, 'url') ?? data_get($image, 'src');
         $this->setIfHeaderExists($row, $headers, HeaderStore::IMAGE_SRC, $src);
         $this->setIfHeaderExists($row, $headers, HeaderStore::IMAGE_POSITION, (string) $position);

@@ -72,10 +72,20 @@ class Product extends Model
 
     public function variants(): HasMany
     {
+        return $this->hasMany(Variant::class)->active();
+    }
+
+    public function allVariants(): HasMany
+    {
         return $this->hasMany(Variant::class);
     }
 
     public function images(): HasMany
+    {
+        return $this->hasMany(Image::class)->active();
+    }
+
+    public function allImages(): HasMany
     {
         return $this->hasMany(Image::class);
     }

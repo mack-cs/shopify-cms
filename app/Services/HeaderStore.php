@@ -60,6 +60,8 @@ final class HeaderStore
     public const TARGET_GENDER = 'Target gender (product.metafields.shopify.target-gender)';
     public const AGE_GROUP = 'Age group (product.metafields.shopify.age-group)';
     public const BRACELET_DESIGN = 'Bracelet design (product.metafields.shopify.bracelet-design)';
+    public const INTERNAL_VARIANT_SHOPIFY_ID = '__shopify_variant_id';
+    public const INTERNAL_IMAGE_SHOPIFY_ID = '__shopify_image_id';
 
     public static function productHeaders(): array
     {

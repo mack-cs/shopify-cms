@@ -14,6 +14,11 @@ use League\Csv\Reader;
 
 class ImageObserver
 {
+    public function creating(Image $image): void
+    {
+        $this->applyLocalSyncState($image, isCreating: true);
+    }
+
     public function created(Image $image): void
     {
         $this->syncShopifyRow($image, null);
@@ -31,15 +36,27 @@ class ImageObserver
             return;
         }
 
-        if ($image->isDirty('image_path')) {
+        $contentDirty = $this->contentDirty($image);
+        $isLocalDelete = $image->isDirty('sync_state') && $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED;
+
+        if (in_array('image_path', $contentDirty, true)) {
             $previousPath = $image->getOriginal('image_path');
             if (is_string($previousPath) && trim($previousPath) !== '' && $previousPath !== $image->image_path) {
                 $this->deleteStoredImage($previousPath);
             }
         }
 
+        $this->applyLocalSyncState($image);
         $this->bumpProductApprovalVersion($image->product_id);
-        $this->syncShopifyRow($image, $image->getOriginal());
+
+        if ($isLocalDelete) {
+            $this->deleteShopifyRow($image, $image->getOriginal());
+            return;
+        }
+
+        if (!empty($contentDirty)) {
+            $this->syncShopifyRow($image, $image->getOriginal());
+        }
     }
 
     public function deleted(Image $image): void
@@ -199,5 +216,75 @@ class ImageObserver
         }
 
         Storage::disk('public')->delete($trimmed);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function contentDirty(Image $image): array
+    {
+        return array_values(array_diff(array_keys($image->getDirty()), [
+            'updated_at',
+            'created_at',
+            'sync_state',
+            'local_dirty',
+            'last_shopify_seen_at',
+            'last_synced_at',
+        ]));
+    }
+
+    private function applyLocalSyncState(Image $image, bool $isCreating = false): void
+    {
+        $contentDirty = $this->contentDirty($image);
+
+        if (!$isCreating && empty($contentDirty)) {
+            if ($image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
+                $image->local_dirty = true;
+            }
+            return;
+        }
+
+        if ($image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
+            $image->local_dirty = true;
+            return;
+        }
+
+        if (blank($image->shopify_id)) {
+            $image->sync_state = Image::SYNC_STATE_LOCAL_NEW;
+            $image->local_dirty = true;
+            return;
+        }
+
+        $image->sync_state = Image::SYNC_STATE_LOCAL_UPDATED;
+        $image->local_dirty = true;
+    }
+
+    private function deleteShopifyRow(Image $image, ?array $original = null): void
+    {
+        $product = $image->product_id ? Product::find($image->product_id) : null;
+        if (!$product) {
+            return;
+        }
+
+        $headers = $this->headersForProduct($product);
+        if (empty($headers)) {
+            return;
+        }
+
+        $oldRow = [
+            HeaderStore::HANDLE => $product->handle,
+            HeaderStore::IMAGE_SRC => $original['src'] ?? $image->getOriginal('src'),
+            HeaderStore::IMAGE_POSITION => $original['position'] ?? $image->getOriginal('position'),
+        ];
+        $oldKey = RowKey::imageKey($oldRow);
+        if (!$oldKey) {
+            return;
+        }
+
+        ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'image')
+            ->where('image_key', $oldKey)
+            ->delete();
     }
 }

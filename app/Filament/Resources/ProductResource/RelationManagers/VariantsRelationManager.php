@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductResource\RelationManagers;
 
+use App\Models\Variant;
 use Filament\Forms;
 use Filament\Tables;
 use Filament\Resources\RelationManagers\RelationManager;
@@ -45,14 +46,46 @@ class VariantsRelationManager extends RelationManager
     public function table(Tables\Table $table): Tables\Table
     {
         return $table->columns([
-            Tables\Columns\TextColumn::make('sku')->searchable(),
+            Tables\Columns\TextColumn::make('sku')
+                ->label('SKU')
+                ->searchable(),
+            Tables\Columns\TextColumn::make('shopify_id')
+                ->label('Shopify ID')
+                ->wrap()
+                ->searchable(),
+            Tables\Columns\TextColumn::make('sync_state')
+                ->label('Sync State')
+                ->badge(),
+            Tables\Columns\IconColumn::make('local_dirty')
+                ->label('Local Dirty')
+                ->boolean(),
+            Tables\Columns\TextColumn::make('last_shopify_seen_at')
+                ->label('Last Shopify Seen')
+                ->since()
+                ->sortable(),
+            Tables\Columns\TextColumn::make('last_synced_at')
+                ->label('Last Synced')
+                ->since()
+                ->sortable(),
             Tables\Columns\TextColumn::make('price'),
-            Tables\Columns\TextColumn::make('option1_value'),
+            Tables\Columns\TextColumn::make('option1_value')
+                ->label('Option 1'),
         ])->headerActions([
             Tables\Actions\CreateAction::make(),
         ])->actions([
             Tables\Actions\EditAction::make(),
-            Tables\Actions\DeleteAction::make(),
+            Tables\Actions\DeleteAction::make()
+                ->action(function (Variant $record): void {
+                    if (blank($record->shopify_id)) {
+                        $record->delete();
+                        return;
+                    }
+
+                    $record->update([
+                        'sync_state' => Variant::SYNC_STATE_LOCAL_DELETED,
+                        'local_dirty' => true,
+                    ]);
+                }),
         ]);
     }
 }

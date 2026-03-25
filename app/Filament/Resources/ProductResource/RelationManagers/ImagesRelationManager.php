@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductResource\RelationManagers;
 
+use App\Models\Image;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Get;
@@ -84,22 +85,24 @@ class ImagesRelationManager extends RelationManager
                 ->size(50)
                 ->checkFileExistence(false)
                 ->getStateUsing(fn ($record) => $this->normalizeImageUrl($record->src)),
-            Tables\Columns\TextColumn::make('source_name')
-                ->label('Filename')
-                ->getStateUsing(function ($record): ?string {
-                    $path = is_string($record->image_path ?? null) ? trim($record->image_path) : '';
-                    if ($path !== '') {
-                        return basename($path);
-                    }
-
-                    $src = is_string($record->src ?? null) ? trim($record->src) : '';
-                    if ($src === '') {
-                        return null;
-                    }
-
-                    $parsed = parse_url($src, PHP_URL_PATH);
-                    return is_string($parsed) && $parsed !== '' ? basename($parsed) : $src;
-                }),
+            Tables\Columns\TextColumn::make('shopify_id')
+                ->label('Shopify ID')
+                ->wrap()
+                ->searchable(),
+            Tables\Columns\TextColumn::make('sync_state')
+                ->label('Sync State')
+                ->badge(),
+            Tables\Columns\IconColumn::make('local_dirty')
+                ->label('Local Dirty')
+                ->boolean(),
+            Tables\Columns\TextColumn::make('last_shopify_seen_at')
+                ->label('Last Shopify Seen')
+                ->since()
+                ->sortable(),
+            Tables\Columns\TextColumn::make('last_synced_at')
+                ->label('Last Synced')
+                ->since()
+                ->sortable(),
             Tables\Columns\TextColumn::make('alt_text')->wrap(),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
@@ -107,7 +110,18 @@ class ImagesRelationManager extends RelationManager
         ])->actions([
             Tables\Actions\EditAction::make()
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),
-            Tables\Actions\DeleteAction::make(),
+            Tables\Actions\DeleteAction::make()
+                ->action(function (Image $record): void {
+                    if (blank($record->shopify_id)) {
+                        $record->delete();
+                        return;
+                    }
+
+                    $record->update([
+                        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+                        'local_dirty' => true,
+                    ]);
+                }),
         ]);
     }
 
