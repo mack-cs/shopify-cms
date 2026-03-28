@@ -2,8 +2,10 @@
 
 namespace App\Filament\Resources\ProductResource\RelationManagers;
 
+use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Models\Image;
+use Filament\Notifications\Notification;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Get;
@@ -11,6 +13,7 @@ use Filament\Tables;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Resources\RelationManagers\RelationManager;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -80,7 +83,8 @@ class ImagesRelationManager extends RelationManager
     public function table(Tables\Table $table): Tables\Table
     {
         return $table->columns([
-            Tables\Columns\TextColumn::make('position'),
+            Tables\Columns\TextColumn::make('position')
+                ->sortable(),
             ImageColumn::make('thumbnail')
                 ->label('Thumbnail')
                 ->square()
@@ -90,44 +94,73 @@ class ImagesRelationManager extends RelationManager
             Tables\Columns\TextColumn::make('shopify_id')
                 ->label('Shopify ID')
                 ->wrap()
-                ->searchable(),
+                ->searchable()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('sync_state')
                 ->label('Sync State')
-                ->badge(),
+                ->badge()
+                ->formatStateUsing(fn (?string $state): string => str_replace('_', ' ', (string) $state))
+                ->color(fn (?string $state): string => match ($state) {
+                    Image::SYNC_STATE_SYNCED => 'success',
+                    Image::SYNC_STATE_LOCAL_NEW,
+                    Image::SYNC_STATE_LOCAL_UPDATED => 'warning',
+                    Image::SYNC_STATE_CONFLICT,
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED => 'danger',
+                    default => 'gray',
+                }),
             Tables\Columns\TextColumn::make('backup_status')
                 ->label('Backup')
-                ->badge(),
+                ->badge()
+                ->formatStateUsing(fn (?string $state): string => str_replace('_', ' ', (string) $state))
+                ->color(fn (?string $state): string => match ($state) {
+                    Image::BACKUP_STATUS_BACKED_UP => 'success',
+                    Image::BACKUP_STATUS_PENDING => 'warning',
+                    Image::BACKUP_STATUS_FAILED,
+                    Image::BACKUP_STATUS_MISSING_SOURCE => 'danger',
+                    default => 'gray',
+                }),
             Tables\Columns\IconColumn::make('local_dirty')
                 ->label('Local Dirty')
-                ->boolean(),
+                ->boolean()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('last_shopify_seen_at')
                 ->label('Last Shopify Seen')
                 ->since()
-                ->sortable(),
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('last_synced_at')
                 ->label('Last Synced')
                 ->since()
-                ->sortable(),
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('backup_completed_at')
                 ->label('Backed Up')
                 ->since()
-                ->sortable(),
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('backup_filename')
                 ->label('Backup Filename')
                 ->getStateUsing(fn (Image $record): string => $record->backupFilename())
-                ->wrap(),
+                ->wrap()
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('approved_filename')
                 ->label('Approved Filename')
                 ->placeholder('Not set')
-                ->wrap(),
+                ->wrap()
+                ->toggleable(),
             Tables\Columns\IconColumn::make('needs_shopify_image_sync')
                 ->label('Needs Shopify Sync')
-                ->boolean(),
+                ->boolean()
+                ->toggleable(),
             Tables\Columns\TextColumn::make('last_shopify_image_synced_at')
                 ->label('Image Synced')
                 ->since()
-                ->sortable(),
-            Tables\Columns\TextColumn::make('alt_text')->wrap(),
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
+            Tables\Columns\TextColumn::make('alt_text')
+                ->wrap()
+                ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
             Tables\Filters\SelectFilter::make('backup_status')
                 ->options([
@@ -147,6 +180,51 @@ class ImagesRelationManager extends RelationManager
                 ->visible(fn (): bool => $this->getOwnerRecord()->allImages()->exists())
                 ->action(function (): void {
                     ProductResource::queueProductImageBackup($this->getOwnerRecord());
+                }),
+            Tables\Actions\Action::make('logShopifyImageLinks')
+                ->label('Log Shopify Image Links')
+                ->icon('heroicon-o-bug-ant')
+                ->color('gray')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                ->action(function (): void {
+                    $product = $this->getOwnerRecord();
+                    $images = $product->allImages()
+                        ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+                        ->with('imageAsset')
+                        ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+                        ->orderBy('position')
+                        ->orderBy('id')
+                        ->get();
+
+                    $payload = $images->map(function (Image $image): array {
+                        return [
+                            'image_id' => $image->id,
+                            'position' => $image->position,
+                            'sync_state' => $image->sync_state,
+                            'backup_status' => $image->backup_status,
+                            'backup_ready' => $image->backupReady(),
+                            'needs_shopify_image_sync' => (bool) $image->needs_shopify_image_sync,
+                            'approved_filename' => $image->approved_filename,
+                            'preferred_filename' => $image->preferredFilename(),
+                            'current_src' => $image->src,
+                            'backup_public_url' => $image->backupPublicUrl(),
+                            'desired_sync_source_url' => $image->desiredSyncSourceUrl(),
+                        ];
+                    })->values()->all();
+
+                    logger()->info('Debug Shopify image links prepared for product.', [
+                        'product_id' => $product->id,
+                        'handle' => $product->handle,
+                        'title' => $product->title,
+                        'images' => $payload,
+                    ]);
+
+                    Notification::make()
+                        ->title('Shopify image links logged')
+                        ->body('The current product image URLs were written to the Laravel log.')
+                        ->success()
+                        ->send();
                 }),
         ])->actions([
             Tables\Actions\EditAction::make()
