@@ -31,10 +31,18 @@ class ProductShopifyUpdateJob implements ShouldQueue
 
         $result = $updater->updateApprovedProducts($products);
 
+        $updatedProductIds = array_values(array_unique(array_map('intval', $result['updated_product_ids'] ?? [])));
+        foreach (array_chunk($updatedProductIds, 100) as $chunk) {
+            ProductImageBackupJob::dispatch($chunk, $this->userId, 'Post-product sync image backup');
+        }
+
         if ($this->userId) {
             $parts = [];
             if ($result['updated'] > 0) {
                 $parts[] = "Updated {$result['updated']}.";
+                if (!empty($updatedProductIds)) {
+                    $parts[] = 'Image backup queued.';
+                }
             }
             if ($result['skipped_not_approved'] > 0) {
                 $parts[] = "Skipped {$result['skipped_not_approved']} not approved.";

@@ -92,6 +92,9 @@ class ImagesRelationManager extends RelationManager
             Tables\Columns\TextColumn::make('sync_state')
                 ->label('Sync State')
                 ->badge(),
+            Tables\Columns\TextColumn::make('backup_status')
+                ->label('Backup')
+                ->badge(),
             Tables\Columns\IconColumn::make('local_dirty')
                 ->label('Local Dirty')
                 ->boolean(),
@@ -103,7 +106,34 @@ class ImagesRelationManager extends RelationManager
                 ->label('Last Synced')
                 ->since()
                 ->sortable(),
+            Tables\Columns\TextColumn::make('backup_completed_at')
+                ->label('Backed Up')
+                ->since()
+                ->sortable(),
+            Tables\Columns\TextColumn::make('backup_filename')
+                ->label('Backup Filename')
+                ->getStateUsing(fn (Image $record): string => $record->backupFilename())
+                ->wrap(),
+            Tables\Columns\TextColumn::make('approved_filename')
+                ->label('Approved Filename')
+                ->placeholder('Not set')
+                ->wrap(),
+            Tables\Columns\IconColumn::make('needs_shopify_image_sync')
+                ->label('Needs Shopify Sync')
+                ->boolean(),
+            Tables\Columns\TextColumn::make('last_shopify_image_synced_at')
+                ->label('Image Synced')
+                ->since()
+                ->sortable(),
             Tables\Columns\TextColumn::make('alt_text')->wrap(),
+        ])->filters([
+            Tables\Filters\SelectFilter::make('backup_status')
+                ->options([
+                    Image::BACKUP_STATUS_PENDING => 'Pending',
+                    Image::BACKUP_STATUS_BACKED_UP => 'Backed Up',
+                    Image::BACKUP_STATUS_FAILED => 'Failed',
+                    Image::BACKUP_STATUS_MISSING_SOURCE => 'Missing Source',
+                ]),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),

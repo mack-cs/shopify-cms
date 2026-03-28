@@ -2,12 +2,14 @@
 
 namespace App\Providers;
 
+use App\Models\Approval;
 use App\Models\Image;
 use App\Models\Product;
 use App\Models\RequiredField;
 use App\Models\Variant;
 use App\Models\ShopifyCollection;
 use App\Models\NewProductDraft;
+use App\Observers\ApprovalObserver;
 use App\Observers\ImageObserver;
 use App\Observers\ProductObserver;
 use App\Observers\RequiredFieldObserver;
@@ -31,6 +33,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Approval::observe(ApprovalObserver::class);
         Product::observe(ProductObserver::class);
         Variant::observe(VariantObserver::class);
         Image::observe(ImageObserver::class);

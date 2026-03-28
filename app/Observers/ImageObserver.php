@@ -16,6 +16,8 @@ class ImageObserver
 {
     public function creating(Image $image): void
     {
+        $image->needs_shopify_image_sync = true;
+        $image->shopify_image_sync_error = null;
         $this->applyLocalSyncState($image, isCreating: true);
     }
 
@@ -31,13 +33,25 @@ class ImageObserver
     public function updating(Image $image): void
     {
         $dirty = array_keys($image->getDirty());
-        $meaningful = array_diff($dirty, ['updated_at', 'created_at']);
+        $meaningful = array_diff($dirty, $this->nonContentFields());
         if (empty($meaningful)) {
             return;
         }
 
         $contentDirty = $this->contentDirty($image);
         $isLocalDelete = $image->isDirty('sync_state') && $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED;
+
+        if (!empty(array_intersect(['src', 'image_path'], $contentDirty))) {
+            $image->image_asset_id = null;
+            $image->backup_status = Image::BACKUP_STATUS_PENDING;
+            $image->backup_completed_at = null;
+            $image->backup_error = null;
+        }
+
+        if (!empty(array_intersect(['src', 'image_path', 'position'], $contentDirty))) {
+            $image->needs_shopify_image_sync = true;
+            $image->shopify_image_sync_error = null;
+        }
 
         if (in_array('image_path', $contentDirty, true)) {
             $previousPath = $image->getOriginal('image_path');
@@ -223,14 +237,7 @@ class ImageObserver
      */
     private function contentDirty(Image $image): array
     {
-        return array_values(array_diff(array_keys($image->getDirty()), [
-            'updated_at',
-            'created_at',
-            'sync_state',
-            'local_dirty',
-            'last_shopify_seen_at',
-            'last_synced_at',
-        ]));
+        return array_values(array_diff(array_keys($image->getDirty()), $this->nonContentFields()));
     }
 
     private function applyLocalSyncState(Image $image, bool $isCreating = false): void
@@ -257,6 +264,32 @@ class ImageObserver
 
         $image->sync_state = Image::SYNC_STATE_LOCAL_UPDATED;
         $image->local_dirty = true;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function nonContentFields(): array
+    {
+        return [
+            'updated_at',
+            'created_at',
+            'sync_state',
+            'local_dirty',
+            'last_shopify_seen_at',
+            'last_synced_at',
+            'image_asset_id',
+            'backup_status',
+            'backup_completed_at',
+            'backup_error',
+            'approved_filename',
+            'filename_mode',
+            'last_shopify_synced_image_asset_id',
+            'last_shopify_synced_filename',
+            'last_shopify_image_synced_at',
+            'needs_shopify_image_sync',
+            'shopify_image_sync_error',
+        ];
     }
 
     private function deleteShopifyRow(Image $image, ?array $original = null): void

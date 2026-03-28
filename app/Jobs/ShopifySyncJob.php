@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Import;
+use App\Models\Product;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\ShopifyApiImporter;
@@ -45,11 +46,24 @@ class ShopifySyncJob implements ShouldQueue
             $draftSeeder->seedMissingFromProducts($import->id, $import->created_by);
             $draftSync->syncApprovedDrafts();
             Setting::putValue('shopify_last_sync_at', now()->toISOString());
+
+            Product::query()
+                ->where('import_id', $import->id)
+                ->pluck('id')
+                ->chunk(100)
+                ->each(function ($chunk) use ($import): void {
+                    ProductImageBackupJob::dispatch(
+                        $chunk->map(fn ($id): int => (int) $id)->all(),
+                        $import->created_by,
+                        'Post-import image backup'
+                    );
+                });
+
             $user = User::find($import->created_by);
             if ($user) {
                 Notification::make()
                     ->title('Shopify sync complete')
-                    ->body("Import #{$import->id} is ready")
+                    ->body("Import #{$import->id} is ready. Image backup queued.")
                     ->success()
                     ->sendToDatabase($user);
             }

@@ -197,6 +197,39 @@ class EditProduct extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('approve')
+                ->label('Approve')
+                ->icon('heroicon-o-check-badge')
+                ->requiresConfirmation()
+                ->disabled(fn (): bool => $this->getRecord()->has_errors || $this->getRecord()->isApprovedByTwo())
+                ->action(function (): void {
+                    ProductResource::approveRecord($this->getRecord());
+                }),
+            Actions\Action::make('renameImages')
+                ->label('Rename Images')
+                ->icon('heroicon-o-tag')
+                ->requiresConfirmation()
+                ->disabled(fn (): bool => !$this->getRecord()->images()->exists())
+                ->action(function (): void {
+                    $count = app(\App\Services\ProductImageFilenameService::class)
+                        ->assignFromCurrentTitle($this->getRecord(), manual: true);
+
+                    \Filament\Notifications\Notification::make()
+                        ->title('Image filenames updated')
+                        ->body($count > 0
+                            ? "Updated {$count} image filename(s)."
+                            : 'No image filenames needed updating.')
+                        ->success()
+                        ->send();
+                }),
+            Actions\Action::make('syncImages')
+                ->label('Sync Images')
+                ->icon('heroicon-o-photo')
+                ->requiresConfirmation()
+                ->disabled(fn (): bool => !$this->getRecord()->isApprovedByTwo() || !$this->getRecord()->handle)
+                ->action(function (): void {
+                    ProductResource::queueImageSync($this->getRecord());
+                }),
             Actions\DeleteAction::make()
                 ->visible(fn () => ProductResource::canDelete($this->getRecord())),
         ];

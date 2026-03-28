@@ -14,6 +14,7 @@ class Product extends Model
         'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
+        'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
         'batch','is_bundle','you_save',
         'has_errors','error_fields',
     ];
@@ -23,6 +24,7 @@ class Product extends Model
         'you_save' => 'decimal:2',
         'has_errors' => 'boolean',
         'error_fields' => 'array',
+        'first_image_auto_rename_completed_at' => 'datetime',
     ];
 
     protected static function booted(): void

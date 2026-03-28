@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Category;
+use App\Models\Image;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
@@ -57,6 +58,7 @@ final class ProductShopifyUpdater
      * @param Collection<int, Product> $products
      * @return array{
      *   updated:int,
+     *   updated_product_ids:array<int, int>,
      *   skipped_not_approved:int,
      *   skipped_missing_handle:int,
      *   failed:int,
@@ -67,6 +69,7 @@ final class ProductShopifyUpdater
     public function updateApprovedProducts(Collection $products): array
     {
         $updated = 0;
+        $updatedProductIds = [];
         $skippedNotApproved = 0;
         $skippedMissingHandle = 0;
         $failed = 0;
@@ -91,6 +94,7 @@ final class ProductShopifyUpdater
             try {
                 $warnings = array_merge($warnings, $this->updateProduct($product));
                 $updated++;
+                $updatedProductIds[] = $product->id;
             } catch (\Throwable $e) {
                 $failed++;
                 $failures[] = [
@@ -108,6 +112,80 @@ final class ProductShopifyUpdater
 
         return [
             'updated' => $updated,
+            'updated_product_ids' => $updatedProductIds,
+            'skipped_not_approved' => $skippedNotApproved,
+            'skipped_missing_handle' => $skippedMissingHandle,
+            'failed' => $failed,
+            'warnings' => $warnings,
+            'failures' => $failures,
+        ];
+    }
+
+    /**
+     * @param Collection<int, Product> $products
+     * @return array{
+     *   synced:int,
+     *   synced_product_ids:array<int, int>,
+     *   skipped_not_approved:int,
+     *   skipped_missing_handle:int,
+     *   failed:int,
+     *   warnings:array<int, array{product_id:int, warning:string}>,
+     *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
+     * }
+     */
+    public function syncProductImages(Collection $products): array
+    {
+        $synced = 0;
+        $syncedProductIds = [];
+        $skippedNotApproved = 0;
+        $skippedMissingHandle = 0;
+        $failed = 0;
+        $warnings = [];
+        $failures = [];
+
+        foreach ($products as $product) {
+            if (!$product instanceof Product) {
+                continue;
+            }
+
+            if (!$product->handle) {
+                $skippedMissingHandle++;
+                continue;
+            }
+
+            if (!$product->isApprovedByTwo()) {
+                $skippedNotApproved++;
+                continue;
+            }
+
+            try {
+                $productId = $this->resolveShopifyId($product->handle);
+                if (!$productId) {
+                    throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+                }
+
+                $details = $this->productByHandleDetails($product->handle);
+                $warnings = array_merge($warnings, $this->updateImages($product, $productId, [], $details));
+                $synced++;
+                $syncedProductIds[] = $product->id;
+            } catch (\Throwable $e) {
+                $failed++;
+                $failures[] = [
+                    'product_id' => $product->id,
+                    'reason' => 'exception',
+                    'details' => $e->getMessage(),
+                ];
+                logger()->error('Shopify product image sync failed.', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return [
+            'synced' => $synced,
+            'synced_product_ids' => $syncedProductIds,
             'skipped_not_approved' => $skippedNotApproved,
             'skipped_missing_handle' => $skippedMissingHandle,
             'failed' => $failed,
@@ -2789,9 +2867,10 @@ GQL;
         return null;
     }
 
-    private function updateImages(Product $product, string $productId, array $rowDataList, array $details): array
+    private function updateImages(Product $product, string $productId, array $_rowDataList, array $details): array
     {
         $warnings = [];
+        $existingEntriesById = [];
         $existingEntriesByUrl = [];
 
         $existingMediaNodes = collect(data_get($details, 'media.nodes', []))
@@ -2808,11 +2887,14 @@ GQL;
             ->all();
 
         foreach ($existingMediaNodes as $row) {
-            if (($row['id'] ?? '') === '') {
+            $id = trim((string) ($row['id'] ?? ''));
+            $url = trim((string) ($row['url'] ?? ''));
+            if ($id === '' || $url === '') {
                 continue;
             }
 
-            $existingEntriesByUrl[$row['url']] = $row;
+            $existingEntriesById[$id] = $row;
+            $existingEntriesByUrl[$url] = $row;
         }
 
         $legacyImageNodes = collect(data_get($details, 'images.nodes', []))
@@ -2829,43 +2911,104 @@ GQL;
             ->all();
 
         foreach ($legacyImageNodes as $row) {
-            if (isset($existingEntriesByUrl[$row['url']])) {
+            $id = trim((string) ($row['id'] ?? ''));
+            $url = trim((string) ($row['url'] ?? ''));
+            if ($url === '' || isset($existingEntriesByUrl[$url])) {
                 continue;
             }
 
-            $existingEntriesByUrl[$row['url']] = $row;
+            if ($id !== '') {
+                $existingEntriesById[$id] = $row;
+            }
+            $existingEntriesByUrl[$url] = $row;
         }
 
-        $existingUrls = array_keys($existingEntriesByUrl);
+        $matchedExistingIds = [];
 
-        $desiredImages = collect($rowDataList)
-            ->filter(fn ($row) => is_array($row))
+        $desiredImages = $product->allImages()
+            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+            ->with('imageAsset')
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
             ->values()
-            ->map(function (array $row, int $index): array {
+            ->map(function (Image $image, int $index): array {
                 return [
-                    'url' => $this->nullIfEmpty($row[HeaderStore::IMAGE_SRC] ?? null),
-                    'alt' => $this->nullIfEmpty($row[HeaderStore::IMAGE_ALT_TEXT] ?? null),
-                    'position' => $this->normalizeImagePosition($row[HeaderStore::IMAGE_POSITION] ?? null),
+                    'image' => $image,
+                    'shopify_id' => $this->nullIfEmpty($image->shopify_id),
+                    'current_url' => $this->normalizeMediaUrl($image->src),
+                    'sync_url' => $this->nullIfEmpty($image->desiredSyncSourceUrl()),
+                    'preferred_filename' => $image->preferredFilename(),
+                    'alt' => $this->nullIfEmpty($image->alt_text),
+                    'position' => $this->normalizeImagePosition($image->position),
                     'index' => $index,
+                    'matched_media_id' => null,
+                    'requires_republish' => $image->needsShopifyRepublish(),
                 ];
             })
-            ->filter(fn (array $row) => $row['url'] !== null)
+            ->filter(function (array $row) use (&$warnings, $product): bool {
+                if ($row['sync_url'] !== null) {
+                    return true;
+                }
+
+                /** @var Image $image */
+                $image = $row['image'];
+
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Skipped image {$image->id} because it has no usable backup or source URL.",
+                ];
+
+                return false;
+            })
             ->sortBy(fn (array $row): string => sprintf(
                 '%010d-%010d',
                 $row['position'] ?? 2147483647,
                 $row['index']
             ))
-            ->unique('url')
+            ->unique(function (array $row): string {
+                return (string) ($row['shopify_id'] ?: $row['sync_url'] ?: $row['current_url'] ?: $row['index']);
+            })
             ->values();
 
-        $desiredUrls = $desiredImages
-            ->pluck('url')
-            ->all();
+        $desiredImages = $desiredImages->map(function (array $desiredImage) use (&$matchedExistingIds, $existingEntriesById, $existingEntriesByUrl): array {
+            $shopifyId = $desiredImage['shopify_id'];
+            $currentUrl = $desiredImage['current_url'];
+            $syncUrl = $desiredImage['sync_url'];
+            $match = null;
+
+            if ($desiredImage['requires_republish']) {
+                return $desiredImage;
+            }
+
+            if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
+                $match = $existingEntriesById[$shopifyId];
+            } elseif ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
+                $match = $existingEntriesByUrl[$currentUrl];
+            } elseif ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
+                $match = $existingEntriesByUrl[$syncUrl];
+            }
+
+            if ($match !== null) {
+                $matchedId = trim((string) ($match['id'] ?? ''));
+                if ($matchedId !== '') {
+                    $matchedExistingIds[] = $matchedId;
+                    $desiredImage['matched_media_id'] = $matchedId;
+                    $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
+                }
+            }
+
+            return $desiredImage;
+        });
 
         // Non-destructive cleanup: remove product references for shared media files,
         // and never delete the underlying Shopify CDN asset from this sync path.
         $staleEntries = collect($existingEntriesByUrl)
-            ->reject(fn (array $row, string $url) => in_array($url, $desiredUrls, true))
+            ->reject(function (array $row) use ($matchedExistingIds): bool {
+                $id = trim((string) ($row['id'] ?? ''));
+                return $id !== '' && in_array($id, $matchedExistingIds, true);
+            })
             ->values()
             ->all();
 
@@ -2920,10 +3063,16 @@ GQL;
             ];
         }
 
-        foreach ($desiredImages as $desiredImage) {
-            $imageUrl = $desiredImage['url'];
-            if (in_array($imageUrl, $existingUrls, true)) {
-                continue;
+        $desiredImages = $desiredImages->map(function (array $desiredImage) use ($product, $productId, &$warnings): array {
+            if ($desiredImage['matched_media_id'] !== null) {
+                return $desiredImage;
+            }
+
+            /** @var Image $image */
+            $image = $desiredImage['image'];
+            $imageUrl = $desiredImage['sync_url'];
+            if ($imageUrl === null) {
+                return $desiredImage;
             }
 
             $mediaInput = [
@@ -2943,25 +3092,36 @@ GQL;
 
             $payload = $data['productCreateMedia'] ?? null;
             if (!$payload) {
+                $this->markImageSyncFailed($image, "Missing productCreateMedia payload for image {$image->id}.");
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Missing productCreateMedia payload.',
+                    'warning' => "Missing productCreateMedia payload for image {$image->id}.",
                 ];
-                continue;
+                return $desiredImage;
             }
 
             $errors = $payload['mediaUserErrors'] ?? [];
             if (!empty($errors)) {
                 $messages = $this->formatUserErrors($errors, 'media');
+                $this->markImageSyncFailed(
+                    $image,
+                    $messages !== '' ? $messages : "Unknown media error for image {$image->id}."
+                );
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => $messages !== '' ? $messages : 'Unknown media error.',
+                    'warning' => $messages !== '' ? $messages : "Unknown media error for image {$image->id}.",
                 ];
-                continue;
+                return $desiredImage;
             }
 
-            $existingUrls[] = $imageUrl;
-        }
+            $createdMediaId = trim((string) data_get($payload, 'media.0.id', ''));
+            if ($createdMediaId !== '') {
+                $desiredImage['matched_media_id'] = $createdMediaId;
+                $this->markImageSynced($image, $createdMediaId, $desiredImage['preferred_filename']);
+            }
+
+            return $desiredImage;
+        });
 
         $warnings = array_merge(
             $warnings,
@@ -2972,7 +3132,7 @@ GQL;
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, array{url:string, alt:?string, position:?int, index:int}> $desiredImages
+     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool}> $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function reorderProductImages(Product $product, string $productId, Collection $desiredImages): array
@@ -2992,7 +3152,7 @@ GQL;
                     'url' => trim((string) data_get($node, 'image.url', '')),
                 ];
             })
-            ->filter(fn (array $row) => $row['id'] !== '' && $row['url'] !== '')
+            ->filter(fn (array $row) => $row['id'] !== '')
             ->values();
 
         if ($mediaNodes->count() <= 1) {
@@ -3000,6 +3160,7 @@ GQL;
         }
 
         $mediaIdByUrl = $mediaNodes
+            ->filter(fn (array $row) => $row['url'] !== '')
             ->mapWithKeys(fn (array $row): array => [$row['url'] => $row['id']])
             ->all();
         $currentMediaIds = $mediaNodes
@@ -3008,11 +3169,16 @@ GQL;
 
         $desiredMediaIds = [];
         foreach ($desiredImages as $desiredImage) {
-            $mediaId = $mediaIdByUrl[$desiredImage['url']] ?? null;
+            $mediaId = $desiredImage['matched_media_id']
+                ?? ($desiredImage['current_url'] ? ($mediaIdByUrl[$desiredImage['current_url']] ?? null) : null)
+                ?? ($desiredImage['sync_url'] ? ($mediaIdByUrl[$desiredImage['sync_url']] ?? null) : null);
+
             if ($mediaId === null) {
+                /** @var Image $image */
+                $image = $desiredImage['image'];
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => "Shopify image reorder skipped for '{$desiredImage['url']}' because the product media ID is not available yet.",
+                    'warning' => "Shopify image reorder skipped for image {$image->id} because the product media ID is not available yet.",
                 ];
                 continue;
             }
@@ -3063,6 +3229,53 @@ GQL;
         }
 
         return $warnings;
+    }
+
+    private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null): void
+    {
+        Image::withoutEvents(function () use ($image, $shopifyId, $filename): void {
+            $updates = [
+                'sync_state' => Image::SYNC_STATE_SYNCED,
+                'local_dirty' => false,
+                'last_shopify_seen_at' => now(),
+                'last_synced_at' => now(),
+                'last_shopify_synced_image_asset_id' => $image->image_asset_id,
+                'last_shopify_synced_filename' => $filename ?: $image->preferredFilename(),
+                'last_shopify_image_synced_at' => now(),
+                'needs_shopify_image_sync' => false,
+                'shopify_image_sync_error' => null,
+            ];
+
+            if ($shopifyId !== null && trim($shopifyId) !== '') {
+                $updates['shopify_id'] = $shopifyId;
+            }
+
+            $image->forceFill($updates)->save();
+        });
+    }
+
+    private function markImageSyncFailed(Image $image, string $message): void
+    {
+        Image::withoutEvents(function () use ($image, $message): void {
+            $image->forceFill([
+                'needs_shopify_image_sync' => true,
+                'shopify_image_sync_error' => $message,
+            ])->save();
+        });
+    }
+
+    private function normalizeMediaUrl(?string $value): ?string
+    {
+        $trimmed = trim((string) $value);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        if (str_starts_with($trimmed, '//')) {
+            return 'https:' . $trimmed;
+        }
+
+        return $trimmed;
     }
 
     private function normalizeImagePosition(mixed $value): ?int

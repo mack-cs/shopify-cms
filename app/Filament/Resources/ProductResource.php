@@ -1086,6 +1086,39 @@ class ProductResource extends Resource
             TernaryFilter::make('has_errors')
                 ->label('Errors'),
         ])->actions([
+            Action::make('approve')
+                ->label('Approve')
+                ->icon('heroicon-o-check-badge')
+                ->requiresConfirmation()
+                ->disabled(fn (Product $record): bool => $record->has_errors || $record->isApprovedByTwo())
+                ->action(function (Product $record): void {
+                    self::approveRecord($record);
+                }),
+            Action::make('renameImages')
+                ->label('Rename Images')
+                ->icon('heroicon-o-tag')
+                ->requiresConfirmation()
+                ->disabled(fn (Product $record): bool => !$record->images()->exists())
+                ->action(function (Product $record): void {
+                    $count = app(\App\Services\ProductImageFilenameService::class)
+                        ->assignFromCurrentTitle($record, manual: true);
+
+                    Notification::make()
+                        ->title('Image filenames updated')
+                        ->body($count > 0
+                            ? "Updated {$count} image filename(s)."
+                            : 'No image filenames needed updating.')
+                        ->success()
+                        ->send();
+                }),
+            Action::make('syncImages')
+                ->label('Sync Images')
+                ->icon('heroicon-o-photo')
+                ->requiresConfirmation()
+                ->disabled(fn (Product $record): bool => !$record->isApprovedByTwo() || !$record->handle)
+                ->action(function (Product $record): void {
+                    self::queueImageSync($record);
+                }),
             EditAction::make()
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Action::make('quickEdit')
@@ -1137,6 +1170,11 @@ class ProductResource extends Resource
 
                         foreach ($records as $record) {
                             if ($record->has_errors) {
+                                continue;
+                            }
+
+                            if ($record->isApprovedByTwo()) {
+                                $skippedCount++;
                                 continue;
                             }
 
@@ -1207,6 +1245,88 @@ class ProductResource extends Resource
             RelationManagers\VariantsRelationManager::class,
             RelationManagers\ChangeLogsRelationManager::class,
         ];
+    }
+
+    public static function approveRecord(Product $record): void
+    {
+        if ($record->has_errors) {
+            Notification::make()
+                ->title('Approval blocked')
+                ->body('Fix product errors before approval.')
+                ->warning()
+                ->send();
+            return;
+        }
+
+        if ($record->isApprovedByTwo()) {
+            Notification::make()
+                ->title('Already fully approved')
+                ->body('This version already has 2 approvals.')
+                ->warning()
+                ->send();
+            return;
+        }
+
+        $exists = Approval::where('product_id', $record->id)
+            ->where('user_id', Auth::id())
+            ->where('approval_version', $record->approval_version)
+            ->exists();
+
+        if ($exists) {
+            Notification::make()
+                ->title('Already approved')
+                ->body('You have already approved this version.')
+                ->warning()
+                ->send();
+            return;
+        }
+
+        Approval::create([
+            'product_id' => $record->id,
+            'user_id' => Auth::id(),
+            'approval_version' => $record->approval_version,
+        ]);
+
+        $record->refresh();
+
+        Notification::make()
+            ->title('Product approved')
+            ->body("Approvals: {$record->approvalsForCurrentVersionCount()}/2.")
+            ->success()
+            ->send();
+    }
+
+    public static function queueImageSync(Product $record): void
+    {
+        if (!$record->isApprovedByTwo()) {
+            Notification::make()
+                ->title('Approval required')
+                ->body('This product needs 2 approvals before image sync.')
+                ->warning()
+                ->send();
+            return;
+        }
+
+        if (!$record->handle) {
+            Notification::make()
+                ->title('Missing handle')
+                ->body('This product must have a handle before image sync.')
+                ->warning()
+                ->send();
+            return;
+        }
+
+        \App\Jobs\ProductImageShopifySyncJob::dispatch(
+            [$record->id],
+            Auth::id(),
+            'Manual product image sync'
+        );
+
+        Notification::make()
+            ->title('Image sync queued')
+            ->body('Shopify image sync has been queued for this product.')
+            ->success()
+            ->send();
     }
 
     public static function getPages(): array
