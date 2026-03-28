@@ -15,6 +15,7 @@ use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyApiImporter;
+use App\Services\ShopifySyncSnapshotService;
 use App\Jobs\ShopifySyncJob;
 use App\Services\Normalizer;
 use Filament\Tables\Columns\TextColumn;
@@ -44,6 +45,12 @@ class ImportResource extends Resource
             TextColumn::make('filename'),
             TextColumn::make('mode'),
             TextColumn::make('status'),
+            TextColumn::make('syncSnapshot.generated_at')
+                ->label('Shopify Snapshot')
+                ->state(fn (Import $record): string => $record->syncSnapshot?->generated_at ? 'Ready' : 'Missing')
+                ->badge()
+                ->color(fn (Import $record): string => $record->syncSnapshot?->generated_at ? 'success' : 'gray')
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('state')
                 ->label('State')
                 ->state(fn (Import $record) => $record->is_current ? 'Current' : 'Archived')
@@ -245,13 +252,44 @@ class ImportResource extends Resource
                                 ->url($url, shouldOpenInNewTab: true),
                         ])
                 );
-            })
+            }),
+        Action::make('downloadShopifySnapshot')
+            ->label('Shopify Snapshot')
+            ->icon('heroicon-o-document-arrow-down')
+            ->color('gray')
+            ->disabled(fn (Import $record) => $record->status !== 'ready')
+            ->action(function (Import $record, ShopifySyncSnapshotService $snapshotService): void {
+                $snapshot = $record->syncSnapshot;
+
+                if (
+                    !$snapshot
+                    || !filled($snapshot->storage_path)
+                    || !Storage::disk($snapshot->storage_disk ?: 'public')->exists($snapshot->storage_path)
+                ) {
+                    $snapshot = $snapshotService->generateForImport($record->fresh());
+                }
+
+                $disk = Storage::disk($snapshot->storage_disk ?: 'public');
+                $url = $disk->url($snapshot->storage_path);
+
+                self::sendNotification(
+                    Notification::make()
+                        ->title('Shopify snapshot ready')
+                        ->body("Snapshot CSV saved to {$snapshot->storage_path}")
+                        ->success()
+                        ->actions([
+                            NotificationAction::make('downloadSnapshot')
+                                ->label('Download')
+                                ->url($url, shouldOpenInNewTab: true),
+                        ])
+                );
+            }),
         ]);
     }
 
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery();
+        $query = parent::getEloquentQuery()->with('syncSnapshot');
         $user = Auth::user();
 
         if (!$user) {

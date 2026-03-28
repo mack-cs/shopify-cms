@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\ShopifyApiImporter;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftSeeder;
+use App\Services\ShopifySyncSnapshotService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -29,7 +30,8 @@ class ShopifySyncJob implements ShouldQueue
     public function handle(
         ShopifyApiImporter $importer,
         NewProductDraftProductSync $draftSync,
-        NewProductDraftSeeder $draftSeeder
+        NewProductDraftSeeder $draftSeeder,
+        ShopifySyncSnapshotService $snapshotService
     ): void
     {
         set_time_limit(0);
@@ -43,6 +45,7 @@ class ShopifySyncJob implements ShouldQueue
 
         try {
             $importer->importIntoExistingImport($import);
+            $snapshotService->generateForImport($import->fresh());
             $draftSeeder->seedMissingFromProducts($import->id, $import->created_by);
             $draftSync->syncApprovedDrafts();
             Setting::putValue('shopify_last_sync_at', now()->toISOString());
@@ -63,7 +66,7 @@ class ShopifySyncJob implements ShouldQueue
             if ($user) {
                 Notification::make()
                     ->title('Shopify sync complete')
-                    ->body("Import #{$import->id} is ready. Image backup queued.")
+                    ->body("Import #{$import->id} is ready. Image backup is queued and the Shopify snapshot CSV is ready.")
                     ->success()
                     ->sendToDatabase($user);
             }

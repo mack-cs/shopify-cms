@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Import extends Model
 {
@@ -35,5 +36,10 @@ class Import extends Model
     public function collections(): HasMany
     {
         return $this->hasMany(ShopifyCollection::class);
+    }
+
+    public function syncSnapshot(): HasOne
+    {
+        return $this->hasOne(ShopifySyncSnapshot::class);
     }
 }

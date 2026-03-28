@@ -172,6 +172,16 @@ Processing uses `ShopifyCsvImporter`:
 - Stores every row in `shopify_rows` as JSON (exact header/value pairs).
 - Builds normalized tables via `Normalizer`.
 
+### Shopify sync snapshot history
+
+Every `Sync from Shopify` run now also writes a downloadable CSV snapshot of the raw inbound Shopify state for that import.
+
+- The raw row history remains in `shopify_rows`.
+- A downloadable copy is stored in `storage/app/public/shopify-sync-snapshots`.
+- Snapshot metadata is stored in `shopify_sync_snapshots`.
+- Users can open **Product Feed** and use the `Shopify Snapshot` action on any historical import row to download the state of Shopify for that sync.
+- If the snapshot file is missing, the action regenerates it from the stored `shopify_rows` for that import without changing products or the current workflow.
+
 3) Normalization
 `Normalizer`:
 - Creates a Product per handle.
@@ -627,6 +637,7 @@ Schema is defined in `database/migrations/`.
 
 - Imports: `storage/app/public/imports`
 - Exports: `storage/app/public/exports`
+- Shopify sync snapshots: `storage/app/public/shopify-sync-snapshots`
 
 Run `php artisan storage:link` so `public/storage` serves files.
 
