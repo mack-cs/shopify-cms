@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Models\Image;
 use App\Models\Product;
 use App\Models\User;
 use App\Services\ProductImageBackupService;
@@ -13,17 +14,18 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class ProductImageShopifySyncJob implements ShouldQueue
+class SelectedProductImageShopifySyncJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 1800;
 
     /**
-     * @param array<int, int> $productIds
+     * @param array<int, int> $imageIds
      */
     public function __construct(
-        public array $productIds,
+        public int $productId,
+        public array $imageIds,
         public ?int $userId = null,
         public ?string $reason = null,
     ) {}
@@ -32,12 +34,19 @@ class ProductImageShopifySyncJob implements ShouldQueue
         ProductImageBackupService $backupService,
         ProductShopifyUpdater $updater,
     ): void {
-        $products = Product::query()
-            ->whereIn('id', $this->productIds)
+        $product = Product::query()->find($this->productId);
+        if (!$product) {
+            return;
+        }
+
+        $imageIds = array_values(array_unique(array_map('intval', $this->imageIds)));
+        $images = Image::query()
+            ->where('product_id', $product->id)
+            ->whereIn('id', $imageIds)
             ->get();
 
-        $backupResult = $backupService->backupProducts($products);
-        $result = $updater->syncProductImages($products);
+        $backupResult = $backupService->backupImages($images);
+        $result = $updater->syncSelectedProductImages($product->fresh(), $imageIds);
 
         if (!$this->userId) {
             return;
@@ -52,17 +61,9 @@ class ProductImageShopifySyncJob implements ShouldQueue
         if ($this->reason) {
             $parts[] = $this->reason . '.';
         }
-        $parts[] = "Products {$products->count()}.";
-        $parts[] = "Images processed {$backupResult['processed']}.";
-        if ($result['synced'] > 0) {
-            $parts[] = "Shopify image sync {$result['synced']}.";
-        }
-        if ($result['skipped_not_approved'] > 0) {
-            $parts[] = "Skipped not approved {$result['skipped_not_approved']}.";
-        }
-        if ($result['skipped_missing_handle'] > 0) {
-            $parts[] = "Skipped missing handle {$result['skipped_missing_handle']}.";
-        }
+        $parts[] = "Selected images {$images->count()}.";
+        $parts[] = "Backups processed {$backupResult['processed']}.";
+
         if ($backupResult['backed_up'] > 0) {
             $parts[] = "Backed up {$backupResult['backed_up']}.";
         }
@@ -72,14 +73,23 @@ class ProductImageShopifySyncJob implements ShouldQueue
         if ($backupResult['missing_source'] > 0) {
             $parts[] = "Missing source {$backupResult['missing_source']}.";
         }
+        if ($result['synced'] > 0) {
+            $parts[] = 'Shopify selected image sync complete.';
+        }
+        if ($result['skipped_not_approved'] > 0) {
+            $parts[] = 'Skipped because product is not approved.';
+        }
+        if ($result['skipped_missing_handle'] > 0) {
+            $parts[] = 'Skipped because product handle is missing.';
+        }
         if ($result['failed'] > 0) {
             $parts[] = "Failed {$result['failed']}.";
         }
 
         if (!empty($result['warnings'])) {
             $warnings = collect($result['warnings'])
-                ->take(3)
-                ->map(fn (array $warning): string => "Product {$warning['product_id']}: {$warning['warning']}")
+                ->take(4)
+                ->map(fn (array $warning): string => $warning['warning'])
                 ->implode(' | ');
             if ($warnings !== '') {
                 $parts[] = "Warnings: {$warnings}";
@@ -87,10 +97,10 @@ class ProductImageShopifySyncJob implements ShouldQueue
         }
 
         $notification = Notification::make()
-            ->title('Shopify image sync complete')
+            ->title('Selected image sync complete')
             ->body(implode(' ', $parts));
 
-        if ($result['failed'] > 0) {
+        if ($result['failed'] > 0 || $backupResult['failed'] > 0) {
             $notification->warning();
         } else {
             $notification->success();

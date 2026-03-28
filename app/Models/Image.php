@@ -88,16 +88,7 @@ class Image extends Model
 
     public function desiredSyncSourceUrl(): ?string
     {
-        if ($this->backupReady()) {
-            return $this->backupPublicUrl();
-        }
-
-        $imagePath = trim((string) $this->image_path);
-        if ($imagePath !== '') {
-            return Storage::disk('public')->url($imagePath);
-        }
-
-        return $this->normalizeSourceUrl($this->src);
+        return $this->backupReady() ? $this->backupPublicUrl() : null;
     }
 
     public function backupPublicUrl(): ?string
@@ -170,6 +161,20 @@ class Image extends Model
         }
 
         return trim((string) $this->preferredFilename()) !== trim((string) $this->last_shopify_synced_filename);
+    }
+
+    public function hasManagedSource(): bool
+    {
+        if ($this->backupReady()) {
+            return true;
+        }
+
+        $imagePath = trim((string) $this->image_path);
+        if ($imagePath !== '' && Storage::disk('public')->exists($imagePath)) {
+            return true;
+        }
+
+        return $this->normalizeSourceUrl($this->src) !== null;
     }
 
     private function normalizeSourceUrl(?string $value): ?string

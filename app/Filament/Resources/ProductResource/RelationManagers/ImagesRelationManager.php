@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductResource\RelationManagers;
 
+use App\Filament\Resources\ProductResource;
 use App\Models\Image;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
@@ -9,6 +10,7 @@ use Filament\Forms\Get;
 use Filament\Tables;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Resources\RelationManagers\RelationManager;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -137,6 +139,15 @@ class ImagesRelationManager extends RelationManager
         ])->headerActions([
             Tables\Actions\CreateAction::make()
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),
+            Tables\Actions\Action::make('backupImages')
+                ->label('Queue Image Backup')
+                ->icon('heroicon-o-arrow-down-tray')
+                ->color('gray')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => $this->getOwnerRecord()->allImages()->exists())
+                ->action(function (): void {
+                    ProductResource::queueProductImageBackup($this->getOwnerRecord());
+                }),
         ])->actions([
             Tables\Actions\EditAction::make()
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),
@@ -152,6 +163,20 @@ class ImagesRelationManager extends RelationManager
                         'local_dirty' => true,
                     ]);
                 }),
+        ])->bulkActions([
+            Tables\Actions\BulkAction::make('syncSelectedImages')
+                ->label('Sync Selected Images to Shopify')
+                ->icon('heroicon-o-photo')
+                ->color('primary')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => $this->getOwnerRecord()->isApprovedByTwo() && filled($this->getOwnerRecord()->handle))
+                ->action(function (Collection $records): void {
+                    ProductResource::queueSelectedImageSync(
+                        $this->getOwnerRecord(),
+                        $records->pluck('id')->map(fn ($id): int => (int) $id)->all()
+                    );
+                })
+                ->deselectRecordsAfterCompletion(),
         ]);
     }
 

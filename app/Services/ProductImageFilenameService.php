@@ -39,6 +39,10 @@ class ProductImageFilenameService
                 continue;
             }
 
+            if (!$image->hasManagedSource()) {
+                continue;
+            }
+
             $position++;
             $filename = $this->generateForImage($image, $product->title, $position);
             $mode = $manual ? Image::FILENAME_MODE_MANUAL : Image::FILENAME_MODE_AUTO;

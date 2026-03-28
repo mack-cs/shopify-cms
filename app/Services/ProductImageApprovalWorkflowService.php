@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Jobs\ProductImageShopifySyncJob;
 use App\Models\Approval;
 use App\Models\Product;
 use Illuminate\Support\Facades\DB;
@@ -20,10 +19,9 @@ class ProductImageApprovalWorkflowService
             return false;
         }
 
-        $shouldQueue = false;
-        $userId = (int) ($approval->user_id ?? 0) ?: null;
+        $renamed = false;
 
-        DB::transaction(function () use ($productId, &$shouldQueue): void {
+        DB::transaction(function () use ($productId, &$renamed): void {
             $product = Product::query()
                 ->lockForUpdate()
                 ->find($productId);
@@ -48,17 +46,9 @@ class ProductImageApprovalWorkflowService
             });
 
             $this->filenameService->assignFromCurrentTitle($product, manual: false);
-            $shouldQueue = true;
+            $renamed = true;
         });
 
-        if ($shouldQueue) {
-            ProductImageShopifySyncJob::dispatch(
-                [$productId],
-                $userId,
-                'First full approval image sync'
-            );
-        }
-
-        return $shouldQueue;
+        return $renamed;
     }
 }

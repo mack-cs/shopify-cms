@@ -195,6 +195,81 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * @param array<int, int> $selectedImageIds
+     * @return array{
+     *   synced:int,
+     *   processed_images:int,
+     *   skipped_not_approved:int,
+     *   skipped_missing_handle:int,
+     *   failed:int,
+     *   warnings:array<int, array{product_id:int, warning:string}>,
+     *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
+     * }
+     */
+    public function syncSelectedProductImages(Product $product, array $selectedImageIds): array
+    {
+        $selectedImageIds = array_values(array_unique(array_map('intval', $selectedImageIds)));
+
+        $result = [
+            'synced' => 0,
+            'processed_images' => count($selectedImageIds),
+            'skipped_not_approved' => 0,
+            'skipped_missing_handle' => 0,
+            'failed' => 0,
+            'warnings' => [],
+            'failures' => [],
+        ];
+
+        if (empty($selectedImageIds)) {
+            $result['failed'] = 1;
+            $result['failures'][] = [
+                'product_id' => $product->id,
+                'reason' => 'no_selection',
+                'details' => 'No image IDs were provided for selected image sync.',
+            ];
+
+            return $result;
+        }
+
+        if (!$product->handle) {
+            $result['skipped_missing_handle'] = 1;
+            return $result;
+        }
+
+        if (!$product->isApprovedByTwo()) {
+            $result['skipped_not_approved'] = 1;
+            return $result;
+        }
+
+        try {
+            $productId = $this->resolveShopifyId($product->handle);
+            if (!$productId) {
+                throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+            }
+
+            $details = $this->productByHandleDetails($product->handle);
+            $result['warnings'] = $this->updateImages($product, $productId, [], $details, $selectedImageIds);
+            $result['synced'] = 1;
+        } catch (\Throwable $e) {
+            $result['failed'] = 1;
+            $result['failures'][] = [
+                'product_id' => $product->id,
+                'reason' => 'exception',
+                'details' => $e->getMessage(),
+            ];
+
+            logger()->error('Selected Shopify product image sync failed.', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'image_ids' => $selectedImageIds,
+                'message' => $e->getMessage(),
+            ]);
+        }
+
+        return $result;
+    }
+
+    /**
      * @return array<int, array{product_id:int, warning:string}>
      */
     // private function updateProduct(Product $product): array
@@ -2867,9 +2942,22 @@ GQL;
         return null;
     }
 
-    private function updateImages(Product $product, string $productId, array $_rowDataList, array $details): array
+    private function updateImages(
+        Product $product,
+        string $productId,
+        array $_rowDataList,
+        array $details,
+        ?array $selectedImageIds = null,
+    ): array
     {
         $warnings = [];
+        $selectedImageIds = $selectedImageIds !== null
+            ? array_values(array_unique(array_map('intval', $selectedImageIds)))
+            : null;
+        $selectedImageIdMap = $selectedImageIds !== null
+            ? array_fill_keys($selectedImageIds, true)
+            : null;
+        $selectedSync = $selectedImageIdMap !== null;
         $existingEntriesById = [];
         $existingEntriesByUrl = [];
 
@@ -2925,15 +3013,29 @@ GQL;
 
         $matchedExistingIds = [];
 
-        $desiredImages = $product->allImages()
-            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+        $imageQuery = $product->allImages()
+            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED);
+
+        if ($selectedImageIdMap !== null) {
+            $imageQuery->whereIn('id', array_keys($selectedImageIdMap));
+        }
+
+        $desiredImages = $imageQuery
             ->with('imageAsset')
             ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
             ->orderBy('position')
             ->orderBy('id')
             ->get()
             ->values()
-            ->map(function (Image $image, int $index): array {
+            ->map(function (Image $image, int $index) use ($existingEntriesById, $existingEntriesByUrl): array {
+                $previousMatch = $this->findExistingImageMatch(
+                    $this->nullIfEmpty($image->shopify_id),
+                    $this->normalizeMediaUrl($image->src),
+                    $this->nullIfEmpty($image->desiredSyncSourceUrl()),
+                    $existingEntriesById,
+                    $existingEntriesByUrl,
+                );
+
                 return [
                     'image' => $image,
                     'shopify_id' => $this->nullIfEmpty($image->shopify_id),
@@ -2945,6 +3047,8 @@ GQL;
                     'index' => $index,
                     'matched_media_id' => null,
                     'requires_republish' => $image->needsShopifyRepublish(),
+                    'previous_media_id' => trim((string) ($previousMatch['id'] ?? '')) ?: null,
+                    'previous_media_mode' => trim((string) ($previousMatch['mode'] ?? '')) ?: null,
                 ];
             })
             ->filter(function (array $row) use (&$warnings, $product): bool {
@@ -2957,7 +3061,7 @@ GQL;
 
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => "Skipped image {$image->id} because it has no usable backup or source URL.",
+                    'warning' => "Skipped image {$image->id} because it has no usable backup-backed source URL.",
                 ];
 
                 return false;
@@ -3002,65 +3106,67 @@ GQL;
             return $desiredImage;
         });
 
-        // Non-destructive cleanup: remove product references for shared media files,
-        // and never delete the underlying Shopify CDN asset from this sync path.
-        $staleEntries = collect($existingEntriesByUrl)
-            ->reject(function (array $row) use ($matchedExistingIds): bool {
-                $id = trim((string) ($row['id'] ?? ''));
-                return $id !== '' && in_array($id, $matchedExistingIds, true);
-            })
-            ->values()
-            ->all();
+        if (!$selectedSync) {
+            // Non-destructive cleanup: remove product references for shared media files,
+            // and never delete the underlying Shopify CDN asset from this sync path.
+            $staleEntries = collect($existingEntriesByUrl)
+                ->reject(function (array $row) use ($matchedExistingIds): bool {
+                    $id = trim((string) ($row['id'] ?? ''));
+                    return $id !== '' && in_array($id, $matchedExistingIds, true);
+                })
+                ->values()
+                ->all();
 
-        $fileDetachInputs = collect($staleEntries)
-            ->filter(fn (array $row) => ($row['mode'] ?? null) === 'file_reference')
-            ->map(function (array $row) use ($productId): ?array {
-                $id = trim((string) ($row['id'] ?? ''));
-                if ($id === '') {
-                    return null;
-                }
+            $fileDetachInputs = collect($staleEntries)
+                ->filter(fn (array $row) => ($row['mode'] ?? null) === 'file_reference')
+                ->map(function (array $row) use ($productId): ?array {
+                    $id = trim((string) ($row['id'] ?? ''));
+                    if ($id === '') {
+                        return null;
+                    }
 
-                return [
-                    'id' => $id,
-                    'referencesToRemove' => [$productId],
-                ];
-            })
-            ->filter()
-            ->unique('id')
-            ->values()
-            ->all();
+                    return [
+                        'id' => $id,
+                        'referencesToRemove' => [$productId],
+                    ];
+                })
+                ->filter()
+                ->unique('id')
+                ->values()
+                ->all();
 
-        if (!empty($fileDetachInputs)) {
-            try {
-                $detachData = $this->client->graphql($this->fileUpdateMutation(), [
-                    'files' => $fileDetachInputs,
-                ]);
+            if (!empty($fileDetachInputs)) {
+                try {
+                    $detachData = $this->client->graphql($this->fileUpdateMutation(), [
+                        'files' => $fileDetachInputs,
+                    ]);
 
-                $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
-                if (is_array($detachErrors) && !empty($detachErrors)) {
-                    $messages = $this->formatUserErrors($detachErrors, 'files');
+                    $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
+                    if (is_array($detachErrors) && !empty($detachErrors)) {
+                        $messages = $this->formatUserErrors($detachErrors, 'files');
+                        $warnings[] = [
+                            'product_id' => $product->id,
+                            'warning' => $messages !== '' ? $messages : 'Shopify image detach failed.',
+                        ];
+                    }
+                } catch (\Throwable $e) {
                     $warnings[] = [
                         'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify image detach failed.',
+                        'warning' => 'Shopify image detach failed: ' . $e->getMessage(),
                     ];
                 }
-            } catch (\Throwable $e) {
+            }
+
+            $legacyStaleCount = collect($staleEntries)
+                ->filter(fn (array $row) => ($row['mode'] ?? null) === 'legacy_image')
+                ->count();
+
+            if ($legacyStaleCount > 0) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify image detach failed: ' . $e->getMessage(),
+                    'warning' => "Skipped {$legacyStaleCount} stale legacy Shopify product image(s) to avoid destructive deletion.",
                 ];
             }
-        }
-
-        $legacyStaleCount = collect($staleEntries)
-            ->filter(fn (array $row) => ($row['mode'] ?? null) === 'legacy_image')
-            ->count();
-
-        if ($legacyStaleCount > 0) {
-            $warnings[] = [
-                'product_id' => $product->id,
-                'warning' => "Skipped {$legacyStaleCount} stale legacy Shopify product image(s) to avoid destructive deletion.",
-            ];
         }
 
         $desiredImages = $desiredImages->map(function (array $desiredImage) use ($product, $productId, &$warnings): array {
@@ -3123,16 +3229,255 @@ GQL;
             return $desiredImage;
         });
 
+        if ($selectedSync) {
+            $warnings = array_merge(
+                $warnings,
+                $this->cleanupSelectedStaleImages($product, $productId, $desiredImages)
+            );
+        }
+
         $warnings = array_merge(
             $warnings,
-            $this->reorderProductImages($product, $productId, $desiredImages)
+            $selectedSync
+                ? $this->reorderSelectedProductImages($product, $productId, $desiredImages)
+                : $this->reorderProductImages($product, $productId, $desiredImages)
         );
 
         return $warnings;
     }
 
+    private function findExistingImageMatch(
+        ?string $shopifyId,
+        ?string $currentUrl,
+        ?string $syncUrl,
+        array $existingEntriesById,
+        array $existingEntriesByUrl,
+    ): ?array {
+        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
+            return $existingEntriesById[$shopifyId];
+        }
+
+        if ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
+            return $existingEntriesByUrl[$currentUrl];
+        }
+
+        if ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
+            return $existingEntriesByUrl[$syncUrl];
+        }
+
+        return null;
+    }
+
     /**
-     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool}> $desiredImages
+     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function cleanupSelectedStaleImages(Product $product, string $productId, Collection $desiredImages): array
+    {
+        $warnings = [];
+
+        $fileDetachInputs = [];
+        $legacyMediaIds = [];
+
+        foreach ($desiredImages as $desiredImage) {
+            $previousMediaId = trim((string) ($desiredImage['previous_media_id'] ?? ''));
+            $matchedMediaId = trim((string) ($desiredImage['matched_media_id'] ?? ''));
+
+            if ($previousMediaId === '' || $matchedMediaId === '' || $previousMediaId === $matchedMediaId) {
+                continue;
+            }
+
+            $mode = trim((string) ($desiredImage['previous_media_mode'] ?? ''));
+
+            if ($mode === 'file_reference') {
+                $fileDetachInputs[] = [
+                    'id' => $previousMediaId,
+                    'referencesToRemove' => [$productId],
+                ];
+                continue;
+            }
+
+            if ($mode === 'legacy_image') {
+                $legacyMediaIds[] = $previousMediaId;
+            }
+        }
+
+        $fileDetachInputs = collect($fileDetachInputs)
+            ->unique('id')
+            ->values()
+            ->all();
+
+        if (!empty($fileDetachInputs)) {
+            try {
+                $detachData = $this->client->graphql($this->fileUpdateMutation(), [
+                    'files' => $fileDetachInputs,
+                ]);
+
+                $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
+                if (is_array($detachErrors) && !empty($detachErrors)) {
+                    $messages = $this->formatUserErrors($detachErrors, 'files');
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => $messages !== '' ? $messages : 'Shopify selected image detach failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify selected image detach failed: ' . $e->getMessage(),
+                ];
+            }
+        }
+
+        $legacyMediaIds = array_values(array_unique(array_filter($legacyMediaIds)));
+        if (!empty($legacyMediaIds)) {
+            try {
+                $deleteData = $this->client->graphql($this->productDeleteMediaMutation(), [
+                    'productId' => $productId,
+                    'mediaIds' => $legacyMediaIds,
+                ]);
+
+                $deleteErrors = data_get($deleteData, 'productDeleteMedia.mediaUserErrors', []);
+                if (is_array($deleteErrors) && !empty($deleteErrors)) {
+                    $messages = $this->formatUserErrors($deleteErrors, 'media');
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => $messages !== '' ? $messages : 'Shopify selected legacy image removal failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify selected legacy image removal failed: ' . $e->getMessage(),
+                ];
+            }
+        }
+
+        return $warnings;
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function reorderSelectedProductImages(Product $product, string $productId, Collection $desiredImages): array
+    {
+        $warnings = [];
+
+        if ($desiredImages->isEmpty()) {
+            return $warnings;
+        }
+
+        $details = $this->productByHandleDetails($product->handle);
+        $mediaNodes = collect(data_get($details, 'media.nodes', []))
+            ->filter(fn ($node) => is_array($node))
+            ->map(function (array $node): array {
+                return [
+                    'id' => trim((string) ($node['id'] ?? '')),
+                    'url' => trim((string) data_get($node, 'image.url', '')),
+                ];
+            })
+            ->filter(fn (array $row) => $row['id'] !== '')
+            ->values();
+
+        if ($mediaNodes->count() <= 1) {
+            return $warnings;
+        }
+
+        $mediaIdByUrl = $mediaNodes
+            ->filter(fn (array $row) => $row['url'] !== '')
+            ->mapWithKeys(fn (array $row): array => [$row['url'] => $row['id']])
+            ->all();
+        $currentMediaIds = $mediaNodes
+            ->pluck('id')
+            ->all();
+
+        $selectedPlacements = [];
+        foreach ($desiredImages
+            ->sortBy(fn (array $row): string => sprintf('%010d-%010d', $row['position'] ?? 2147483647, $row['index']))
+            ->values() as $desiredImage) {
+            $mediaId = $desiredImage['matched_media_id']
+                ?? ($desiredImage['current_url'] ? ($mediaIdByUrl[$desiredImage['current_url']] ?? null) : null)
+                ?? ($desiredImage['sync_url'] ? ($mediaIdByUrl[$desiredImage['sync_url']] ?? null) : null);
+
+            if ($mediaId === null) {
+                /** @var Image $image */
+                $image = $desiredImage['image'];
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Selected image reorder skipped for image {$image->id} because the product media ID is not available yet.",
+                ];
+                continue;
+            }
+
+            $selectedPlacements[] = [
+                'media_id' => $mediaId,
+                'target_position' => $desiredImage['position'] ?? (count($currentMediaIds) + count($selectedPlacements) + 1),
+            ];
+        }
+
+        if (empty($selectedPlacements)) {
+            return $warnings;
+        }
+
+        $selectedMediaIds = array_values(array_unique(array_map(
+            fn (array $placement): string => $placement['media_id'],
+            $selectedPlacements
+        )));
+
+        $desiredOrder = array_values(array_filter(
+            $currentMediaIds,
+            fn (string $id): bool => !in_array($id, $selectedMediaIds, true)
+        ));
+
+        foreach ($selectedPlacements as $placement) {
+            $desiredOrder = array_values(array_filter(
+                $desiredOrder,
+                fn (string $id): bool => $id !== $placement['media_id']
+            ));
+
+            $insertAt = max(0, min(count($desiredOrder), ((int) $placement['target_position']) - 1));
+            array_splice($desiredOrder, $insertAt, 0, [$placement['media_id']]);
+        }
+
+        if ($desiredOrder === $currentMediaIds) {
+            return $warnings;
+        }
+
+        $moves = [];
+        foreach ($desiredOrder as $position => $mediaId) {
+            $moves[] = [
+                'id' => $mediaId,
+                'newPosition' => (string) $position,
+            ];
+        }
+
+        try {
+            $reorderData = $this->client->graphql($this->productReorderMediaMutation(), [
+                'id' => $productId,
+                'moves' => $moves,
+            ]);
+
+            $reorderErrors = data_get($reorderData, 'productReorderMedia.mediaUserErrors', []);
+            if (is_array($reorderErrors) && !empty($reorderErrors)) {
+                $messages = $this->formatUserErrors($reorderErrors, 'media');
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => $messages !== '' ? $messages : 'Shopify selected image reorder failed.',
+                ];
+            }
+        } catch (\Throwable $e) {
+            $warnings[] = [
+                'product_id' => $product->id,
+                'warning' => 'Shopify selected image reorder failed: ' . $e->getMessage(),
+            ];
+        }
+
+        return $warnings;
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function reorderProductImages(Product $product, string $productId, Collection $desiredImages): array
@@ -3304,6 +3649,22 @@ mutation FileUpdate($files: [FileUpdateInput!]!) {
       }
     }
     userErrors {
+      field
+      message
+    }
+  }
+}
+GQL;
+    }
+
+    private function productDeleteMediaMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
+  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+    deletedMediaIds
+    deletedProductImageIds
+    mediaUserErrors {
       field
       message
     }

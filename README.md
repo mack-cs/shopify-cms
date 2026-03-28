@@ -113,6 +113,38 @@ Example Supervisor command:
 command=php /path/to/artisan queue:work --timeout=1800 --sleep=3 --tries=1
 ```
 
+## UAT checklist
+
+1. Run `php artisan migrate`.
+If `image_assets` was left behind by the earlier failed migration, this migration now reconciles that partial table and adds the missing indexes.
+
+2. Run `php artisan storage:link` and confirm the queue worker is running.
+
+3. Open one product that has images and has not yet had its first full `2/2` approval.
+
+4. Approve it with user 1, then approve it with user 2.
+
+5. Confirm the first `2/2` approval:
+- populates `images.approved_filename`
+- sets `products.first_image_auto_rename_completed_at`
+- does not auto-queue outbound Shopify image sync
+
+6. Confirm the generated filenames follow the approved title plus position pattern, for example `pot-of-wisdom-bracelets-01.jpg`.
+
+7. Open the Images relation manager, select one or more images, and run `Sync Selected Images to Shopify`.
+Confirm only the selected images are synced.
+
+8. Edit the product again without changing the title, reset approvals, and approve it to `2/2` again.
+Confirm image filenames are not auto-renamed a second time.
+
+9. Replace one existing image locally, select it in the Images relation manager, and run `Sync Selected Images to Shopify`.
+Confirm the replacement image is republished into the correct position and unselected Shopify images remain on the product.
+
+10. Click `Rename Images`, then select those renamed images and run `Sync Selected Images to Shopify`.
+Confirm the new manual filenames are used and the stale previous Shopify images for those selected slots are removed from the product.
+
+11. Confirm the selected-image sync bulk action is hidden for products that are not `2/2` approved or have no handle.
+
 
 ## Access control
 
@@ -159,6 +191,34 @@ Changes:
 5) Approvals
 Each product version needs 2 distinct user approvals.
 Approvals are stored in `approvals` with `approval_version`.
+
+### Product image workflow
+
+- Product images are backed up into `image_assets` and can be republished from backup when Shopify loses the original image.
+- The first time a product reaches `2/2` approval, image filenames are generated once from the approved product title plus image position.
+- That first automatic rename only happens once per product. Later approval cycles do not auto-rename again.
+- After the first full approval, any later image rename is manual via the product actions.
+- Replacing an image locally marks that image for backup rebuild and Shopify image re-sync, but does not auto-rename it again.
+- First full approval does not auto-sync images to Shopify. Outbound image sync is manual only.
+
+Example filename pattern:
+```text
+pot-of-wisdom-bracelets-01.jpg
+pot-of-wisdom-bracelets-02.jpg
+```
+
+### Sync Images To Shopify
+
+Products sync images to Shopify from the Images relation manager using a selected-images bulk action.
+
+- It only syncs selected images, not title, description, variants, tags, or other product fields.
+- It is only enabled for approved products (`2/2`) with a handle.
+- It first rebuilds/reuses backups for the selected images, then republishes only those selected images to Shopify.
+- Selected image sync preserves unselected Shopify product images.
+- If selected image content changes locally, that image is republished.
+- If the approved/manual filename changes, that image is republished and the stale previous Shopify image for that selected slot is removed from the product.
+
+This action is available from the product Images relation manager.
 
 6) Export
 Exports are written to:

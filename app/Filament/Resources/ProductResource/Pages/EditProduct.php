@@ -222,14 +222,6 @@ class EditProduct extends EditRecord
                         ->success()
                         ->send();
                 }),
-            Actions\Action::make('syncImages')
-                ->label('Sync Images')
-                ->icon('heroicon-o-photo')
-                ->requiresConfirmation()
-                ->disabled(fn (): bool => !$this->getRecord()->isApprovedByTwo() || !$this->getRecord()->handle)
-                ->action(function (): void {
-                    ProductResource::queueImageSync($this->getRecord());
-                }),
             Actions\DeleteAction::make()
                 ->visible(fn () => ProductResource::canDelete($this->getRecord())),
         ];

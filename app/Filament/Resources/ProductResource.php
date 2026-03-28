@@ -1089,6 +1089,9 @@ class ProductResource extends Resource
             Action::make('approve')
                 ->label('Approve')
                 ->icon('heroicon-o-check-badge')
+                ->iconButton()
+                ->color('success')
+                ->tooltip('Approve')
                 ->requiresConfirmation()
                 ->disabled(fn (Product $record): bool => $record->has_errors || $record->isApprovedByTwo())
                 ->action(function (Product $record): void {
@@ -1097,6 +1100,9 @@ class ProductResource extends Resource
             Action::make('renameImages')
                 ->label('Rename Images')
                 ->icon('heroicon-o-tag')
+                ->iconButton()
+                ->color('warning')
+                ->tooltip('Rename Images')
                 ->requiresConfirmation()
                 ->disabled(fn (Product $record): bool => !$record->images()->exists())
                 ->action(function (Product $record): void {
@@ -1111,19 +1117,17 @@ class ProductResource extends Resource
                         ->success()
                         ->send();
                 }),
-            Action::make('syncImages')
-                ->label('Sync Images')
-                ->icon('heroicon-o-photo')
-                ->requiresConfirmation()
-                ->disabled(fn (Product $record): bool => !$record->isApprovedByTwo() || !$record->handle)
-                ->action(function (Product $record): void {
-                    self::queueImageSync($record);
-                }),
             EditAction::make()
+                ->iconButton()
+                ->color('gray')
+                ->tooltip('Edit')
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Action::make('quickEdit')
                 ->label('Quick Edit')
                 ->icon('heroicon-o-adjustments-horizontal')
+                ->iconButton()
+                ->color('gray')
+                ->tooltip('Quick Edit')
                 ->modalHeading(function (Product $record): HtmlString {
                     $name = trim((string) ($record->title ?? ''));
                     if ($name === '') {
@@ -1148,6 +1152,9 @@ class ProductResource extends Resource
                 })
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Tables\Actions\DeleteAction::make()
+                ->iconButton()
+                ->color('danger')
+                ->tooltip('Delete')
                 ->visible(fn (Product $record): bool => static::canDelete($record)),
         ])->bulkActions([
             BulkActionGroup::make([
@@ -1230,6 +1237,27 @@ class ProductResource extends Resource
                             ->send();
                     })
                     ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkBackupImages')
+                    ->label('Queue Image Backup')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records): void {
+                        $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
+                        $selectedCount = count($ids);
+
+                        \App\Jobs\ProductImageBackupJob::dispatch(
+                            $ids,
+                            Auth::id(),
+                            'Manual product image backup'
+                        );
+
+                        Notification::make()
+                            ->title('Image backup queued')
+                            ->body("Queued image backup for {$selectedCount} selected product(s). Existing backups will be reused.")
+                            ->success()
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 ExportBulkAction::make()
                     ->exporter(ProductExporter::class)
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
@@ -1296,8 +1324,22 @@ class ProductResource extends Resource
             ->send();
     }
 
-    public static function queueImageSync(Product $record): void
+    /**
+     * @param array<int, int> $imageIds
+     */
+    public static function queueSelectedImageSync(Product $record, array $imageIds): void
     {
+        $imageIds = array_values(array_unique(array_map('intval', $imageIds)));
+
+        if (empty($imageIds)) {
+            Notification::make()
+                ->title('No images selected')
+                ->body('Select at least one image to sync.')
+                ->warning()
+                ->send();
+            return;
+        }
+
         if (!$record->isApprovedByTwo()) {
             Notification::make()
                 ->title('Approval required')
@@ -1316,15 +1358,31 @@ class ProductResource extends Resource
             return;
         }
 
-        \App\Jobs\ProductImageShopifySyncJob::dispatch(
-            [$record->id],
+        \App\Jobs\SelectedProductImageShopifySyncJob::dispatch(
+            $record->id,
+            $imageIds,
             Auth::id(),
-            'Manual product image sync'
+            'Manual selected image sync'
         );
 
         Notification::make()
-            ->title('Image sync queued')
-            ->body('Shopify image sync has been queued for this product.')
+            ->title('Selected image sync queued')
+            ->body('Shopify image sync has been queued for the selected images.')
+            ->success()
+            ->send();
+    }
+
+    public static function queueProductImageBackup(Product $record): void
+    {
+        \App\Jobs\ProductImageBackupJob::dispatch(
+            [$record->id],
+            Auth::id(),
+            'Manual product image backup'
+        );
+
+        Notification::make()
+            ->title('Image backup queued')
+            ->body('Image backup has been queued for this product. Existing backups will be reused.')
             ->success()
             ->send();
     }

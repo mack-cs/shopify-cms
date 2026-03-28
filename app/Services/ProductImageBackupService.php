@@ -99,6 +99,80 @@ class ProductImageBackupService
     }
 
     /**
+     * @param Collection<int, Image> $images
+     * @return array{
+     *   products:int,
+     *   processed:int,
+     *   backed_up:int,
+     *   reused:int,
+     *   missing_source:int,
+     *   failed:int,
+     *   restored_candidates:int,
+     *   failures:array<int, array{image_id:int, product_id:int, message:string}>
+     * }
+     */
+    public function backupImages(Collection $images): array
+    {
+        $summary = [
+            'products' => $images->pluck('product_id')->filter()->unique()->count(),
+            'processed' => 0,
+            'backed_up' => 0,
+            'reused' => 0,
+            'missing_source' => 0,
+            'failed' => 0,
+            'restored_candidates' => 0,
+            'failures' => [],
+        ];
+
+        foreach ($images as $image) {
+            if (!$image instanceof Image || $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
+                continue;
+            }
+
+            $summary['processed']++;
+
+            if ($image->sync_state === Image::SYNC_STATE_REMOTE_DELETED) {
+                $summary['restored_candidates']++;
+            }
+
+            try {
+                $result = $this->backupImage($image);
+
+                if ($result === 'backed_up') {
+                    $summary['backed_up']++;
+                    continue;
+                }
+
+                if ($result === 'reused') {
+                    $summary['reused']++;
+                    continue;
+                }
+
+                if ($result === 'missing_source') {
+                    $summary['missing_source']++;
+                }
+            } catch (\Throwable $e) {
+                $summary['failed']++;
+                $summary['failures'][] = [
+                    'image_id' => $image->id,
+                    'product_id' => (int) ($image->product_id ?? 0),
+                    'message' => $e->getMessage(),
+                ];
+
+                $this->markImageFailed($image, $e->getMessage());
+
+                logger()->error('Selected product image backup failed.', [
+                    'image_id' => $image->id,
+                    'product_id' => $image->product_id,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $summary;
+    }
+
+    /**
      * @return 'backed_up'|'reused'|'missing_source'
      */
     public function backupImage(Image $image): string
