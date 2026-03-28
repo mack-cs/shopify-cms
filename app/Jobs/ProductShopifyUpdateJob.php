@@ -21,6 +21,8 @@ class ProductShopifyUpdateJob implements ShouldQueue
     public function __construct(
         public array $productIds,
         public ?int $userId = null,
+        public ?array $scopes = null,
+        public ?array $coreFields = null,
     ) {}
 
     public function handle(ProductShopifyUpdater $updater): void
@@ -29,18 +31,40 @@ class ProductShopifyUpdateJob implements ShouldQueue
             ->whereIn('id', $this->productIds)
             ->get();
 
-        $result = $updater->updateApprovedProducts($products);
+        $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields);
 
         $updatedProductIds = array_values(array_unique(array_map('intval', $result['updated_product_ids'] ?? [])));
-        foreach (array_chunk($updatedProductIds, 100) as $chunk) {
-            ProductImageBackupJob::dispatch($chunk, $this->userId, 'Post-product sync image backup');
+        $shouldQueueImageBackup = $this->scopes === null
+            || in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $this->scopes, true);
+
+        if ($shouldQueueImageBackup) {
+            foreach (array_chunk($updatedProductIds, 100) as $chunk) {
+                ProductImageBackupJob::dispatch($chunk, $this->userId, 'Post-product sync image backup');
+            }
         }
 
         if ($this->userId) {
             $parts = [];
+            $scopeLabels = ProductShopifyUpdater::syncScopeLabels();
+            $coreFieldLabels = ProductShopifyUpdater::coreFieldLabels();
+            $scopeSummary = $this->scopes === null
+                ? 'Full sync'
+                : collect($this->scopes)
+                    ->map(fn (string $scope): string => $scopeLabels[$scope] ?? $scope)
+                    ->implode(', ');
+
+            $parts[] = "Scopes: {$scopeSummary}.";
+            if ($this->scopes !== null && in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $this->scopes, true)) {
+                $coreSummary = empty($this->coreFields)
+                    ? 'none selected'
+                    : collect($this->coreFields)
+                        ->map(fn (string $field): string => $coreFieldLabels[$field] ?? $field)
+                        ->implode(', ');
+                $parts[] = "Core fields: {$coreSummary}.";
+            }
             if ($result['updated'] > 0) {
                 $parts[] = "Updated {$result['updated']}.";
-                if (!empty($updatedProductIds)) {
+                if ($shouldQueueImageBackup && !empty($updatedProductIds)) {
                     $parts[] = 'Image backup queued.';
                 }
             }
@@ -73,7 +97,7 @@ class ProductShopifyUpdateJob implements ShouldQueue
             Notification::make()
                 ->title('Shopify product update complete')
                 ->body($parts ? implode(' ', $parts) : 'No products were updated.')
-                ->success()
+                ->status($result['failed'] > 0 ? 'danger' : 'success')
                 ->sendToDatabase(\App\Models\User::find($this->userId));
         }
     }

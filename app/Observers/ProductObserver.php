@@ -30,6 +30,11 @@ class ProductObserver
             'you_save',
             'seo_title',
             'seo_description',
+            'approved_handle',
+            'first_handle_auto_lock_completed_at',
+            'first_handle_auto_lock_approval_version',
+            'first_image_auto_rename_completed_at',
+            'first_image_auto_rename_approval_version',
         ];
 
         // 2) If any meaningful field changed, bump approval_version
@@ -51,6 +56,11 @@ class ProductObserver
             'updated_at',
             'created_at',
             'approval_version', // recommended: it's system-driven
+            'approved_handle',
+            'first_handle_auto_lock_completed_at',
+            'first_handle_auto_lock_approval_version',
+            'first_image_auto_rename_completed_at',
+            'first_image_auto_rename_approval_version',
         ];
 
         $userId = Auth::id();

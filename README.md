@@ -126,24 +126,38 @@ If `image_assets` was left behind by the earlier failed migration, this migratio
 
 5. Confirm the first `2/2` approval:
 - populates `images.approved_filename`
+- populates `products.approved_handle`
+- sets `products.first_handle_auto_lock_completed_at`
 - sets `products.first_image_auto_rename_completed_at`
 - does not auto-queue outbound Shopify image sync
 
 6. Confirm the generated filenames follow the approved title plus position pattern, for example `pot-of-wisdom-bracelets-01.jpg`.
 
-7. Open the Images relation manager, select one or more images, and run `Sync Selected Images to Shopify`.
+7. Confirm the generated approved handle follows the approved title slug, for example `pot-of-wisdom-bracelets`.
+
+8. Run `Sync Approved to Shopify` for that product and confirm Shopify accepts the new handle.
+After a successful product sync, confirm the local live `handle` is promoted to match `approved_handle`.
+Confirm a pending redirect record is created from `/products/old-handle` to `/products/new-handle`.
+
+9. Open the Images relation manager, select one or more images, and run `Sync Selected Images to Shopify`.
 Confirm only the selected images are synced.
 
-8. Edit the product again without changing the title, reset approvals, and approve it to `2/2` again.
+10. Edit the product again without changing the title, reset approvals, and approve it to `2/2` again.
 Confirm image filenames are not auto-renamed a second time.
+Confirm the approved handle is not auto-regenerated a second time.
 
-9. Replace one existing image locally, select it in the Images relation manager, and run `Sync Selected Images to Shopify`.
+11. Replace one existing image locally, select it in the Images relation manager, and run `Sync Selected Images to Shopify`.
 Confirm the replacement image is republished into the correct position and unselected Shopify images remain on the product.
 
-10. Click `Rename Images`, then select those renamed images and run `Sync Selected Images to Shopify`.
+12. Click `Rename Images`, then select those renamed images and run `Sync Selected Images to Shopify`.
 Confirm the new manual filenames are used and the stale previous Shopify images for those selected slots are removed from the product.
 
-11. Confirm the selected-image sync bulk action is hidden for products that are not `2/2` approved or have no handle.
+13. Confirm the selected-image sync bulk action is hidden for products that are not `2/2` approved or have no handle.
+
+14. Open **Audit & History -> URL Redirects**.
+Confirm the pending redirect can be exported and manually queued to Shopify.
+
+15. After redirect sync completes, confirm the redirect record is marked `synced` and stores the Shopify redirect ID.
 
 
 ## Access control
@@ -202,6 +216,63 @@ Changes:
 Each product version needs 2 distinct user approvals.
 Approvals are stored in `approvals` with `approval_version`.
 
+### Product handle / URL workflow
+
+- The editable `handle` field is treated as the current live Shopify handle.
+- The first time a product reaches `2/2`, the app generates and locks an `approved_handle` from the approved title.
+- That `approved_handle` is generated only once per product and is not auto-regenerated on later approval cycles.
+- The live `handle` is not changed immediately at approval time. This is intentional so existing row linkage, image sync, and inbound Shopify sync keep working until the product is actually pushed.
+- On the next successful `Sync Approved to Shopify`, the product sync sends the locked `approved_handle` to Shopify as the target handle.
+- Only after Shopify accepts that product update does the app promote the local live `handle` to the approved one and update local handle-keyed records (`shopify_rows`, `shopify_metafields`, drafts, and style profiles).
+- This gives a staged model:
+  - `handle`: current live Shopify URL slug
+  - `approved_handle`: locked SEO target slug waiting to become live
+
+### Partial product sync workflow
+
+- The existing `Sync Approved to Shopify` bulk action still performs a full outbound product sync for selected approved products.
+- There is now a second bulk action on the Products table: `Sync Selected Fields to Shopify`.
+- That action is manual and queue-backed. It only runs for products that already have `2/2` approval.
+- Users choose one or more field groups to push:
+  - product core fields
+  - SEO title and description
+  - metafields
+  - variants and inventory
+  - images
+- If `Product core fields` is selected, users can then choose the exact core columns to push:
+  - title
+  - vendor
+  - type
+  - body HTML
+  - tags
+  - status
+  - handle
+  - category
+- The picker also includes the product-level Shopify metafield fields that are edited on the product form, such as colors, target gender, age group, jewelry material, jewelry type, bracelet design, pattern category, product metals, materials and dimensions, and SEO deindex.
+- Internal-only fields remain excluded from this sync picker, including `Bundle`, `Batch`, and `You Save`.
+- Example: choose only `SEO title and description` to push just the SEO payload to Shopify without sending title, body, tags, variants, images, or other product fields.
+- Example: choose `Product core fields` and then tick only `Title` and `Body HTML` to send those two fields without vendor, tags, status, handle, or category.
+- Handle promotion only happens during the `product core fields` scope, never during SEO-only sync.
+- Handle promotion only happens when the `Handle` core field is explicitly included.
+- Post-sync image backup is only queued when the image scope is part of the sync.
+
+### Product URL redirect workflow
+
+- Redirects are created only when a successful Shopify product sync actually promotes a live product handle from the old value to the locked `approved_handle`.
+- When that promotion happens, the app creates a pending redirect record automatically:
+  - `path`: `/products/old-handle`
+  - `target`: `/products/new-handle`
+- Redirect creation in Shopify is manual. The app does not auto-push redirects.
+- Users manage redirects from **Audit & History -> URL Redirects**.
+- Available actions:
+  - add a redirect manually for handles that were already changed before this workflow existed
+  - export pending or selected redirects to CSV
+  - queue pending or selected redirects for Shopify sync
+  - ignore redirects that should not be pushed
+- Shopify redirect sync runs in the background through a queue job.
+- Successful sync stores the Shopify redirect ID and marks the record `synced`.
+- Failed sync stores the Shopify error on the redirect record so users can retry.
+
 ### Product image workflow
 
 - Product images are backed up into `image_assets` and can be republished from backup when Shopify loses the original image.
@@ -236,6 +307,7 @@ Exports are written to:
 - `storage/app/public/exports/products_YYYYMMDD_HHMMSS_approved.csv`
 
 `Export (Approved)` only includes handles with 2 approvals for the current version.
+If a product has a locked `approved_handle`, exports write that approved handle into the Shopify CSV even before the live local `handle` has been promoted.
 
 ## Import modes
 

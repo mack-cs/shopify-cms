@@ -60,6 +60,13 @@ final class ShopifyCsvExporter
             $handle = $shopifyRow->handle;
             $product = $handle ? ($productsByHandle[$handle] ?? null) : null;
 
+            if ($product) {
+                $desiredHandle = $product->desiredHandle();
+                if ($desiredHandle !== null) {
+                    $exportRow[HeaderStore::HANDLE] = $desiredHandle;
+                }
+            }
+
             if ($product && $shopifyRow->row_type === 'product_primary') {
                 $this->overlayProductPrimary($exportRow, $product, $headers);
             }

@@ -13,6 +13,30 @@ use Illuminate\Support\Collection;
 
 final class ProductShopifyUpdater
 {
+    public const SYNC_SCOPE_PRODUCT = 'product';
+    public const SYNC_SCOPE_SEO = 'seo';
+    public const SYNC_SCOPE_METAFIELDS = 'metafields';
+    public const SYNC_SCOPE_VARIANTS = 'variants';
+    public const SYNC_SCOPE_IMAGES = 'images';
+    public const CORE_FIELD_TITLE = 'title';
+    public const CORE_FIELD_VENDOR = 'vendor';
+    public const CORE_FIELD_PRODUCT_TYPE = 'product_type';
+    public const CORE_FIELD_BODY_HTML = 'body_html';
+    public const CORE_FIELD_TAGS = 'tags';
+    public const CORE_FIELD_STATUS = 'status';
+    public const CORE_FIELD_HANDLE = 'handle';
+    public const CORE_FIELD_CATEGORY = 'category';
+    public const CORE_FIELD_COLOR = 'color';
+    public const CORE_FIELD_MATERIALS_AND_DIMENSIONS = 'materials_and_dimensions';
+    public const CORE_FIELD_JEWELRY_MATERIAL = 'jewelry_material';
+    public const CORE_FIELD_JEWELRY_TYPE = 'jewelry_type';
+    public const CORE_FIELD_TARGET_GENDER = 'target_gender';
+    public const CORE_FIELD_AGE_GROUP = 'age_group';
+    public const CORE_FIELD_BRACELET_DESIGN = 'bracelet_design';
+    public const CORE_FIELD_PATTERN_CATEGORY = 'pattern_category';
+    public const CORE_FIELD_PRODUCT_METALS = 'product_metals';
+    public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
+
     /** @var array<string, string> */
     private const PATTERN_CATEGORY_METAOBJECT_GIDS = [
         'multicolour' => 'gid://shopify/Metaobject/205977026696',
@@ -52,10 +76,13 @@ final class ProductShopifyUpdater
 
     public function __construct(
         private readonly ShopifyApiClient $client,
+        private readonly ProductHandleService $handleService,
     ) {}
 
     /**
      * @param Collection<int, Product> $products
+     * @param array<int, string>|null $scopes
+     * @param array<int, string>|null $coreFields
      * @return array{
      *   updated:int,
      *   updated_product_ids:array<int, int>,
@@ -66,8 +93,22 @@ final class ProductShopifyUpdater
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
      * }
      */
-    public function updateApprovedProducts(Collection $products): array
+    public function updateApprovedProducts(Collection $products, ?array $scopes = null, ?array $coreFields = null): array
     {
+        $resolvedScopes = $this->normalizeSyncScopes($scopes);
+        $resolvedCoreFields = $this->normalizeCoreFields($coreFields);
+        if ($scopes !== null && empty($resolvedScopes)) {
+            return [
+                'updated' => 0,
+                'updated_product_ids' => [],
+                'skipped_not_approved' => 0,
+                'skipped_missing_handle' => 0,
+                'failed' => 0,
+                'warnings' => [],
+                'failures' => [],
+            ];
+        }
+
         $updated = 0;
         $updatedProductIds = [];
         $skippedNotApproved = 0;
@@ -92,7 +133,7 @@ final class ProductShopifyUpdater
             }
 
             try {
-                $warnings = array_merge($warnings, $this->updateProduct($product));
+                $warnings = array_merge($warnings, $this->updateProduct($product, $resolvedScopes, $resolvedCoreFields));
                 $updated++;
                 $updatedProductIds[] = $product->id;
             } catch (\Throwable $e) {
@@ -118,6 +159,88 @@ final class ProductShopifyUpdater
             'failed' => $failed,
             'warnings' => $warnings,
             'failures' => $failures,
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function availableSyncScopes(): array
+    {
+        return [
+            self::SYNC_SCOPE_PRODUCT,
+            self::SYNC_SCOPE_SEO,
+            self::SYNC_SCOPE_METAFIELDS,
+            self::SYNC_SCOPE_VARIANTS,
+            self::SYNC_SCOPE_IMAGES,
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function syncScopeLabels(): array
+    {
+        return [
+            self::SYNC_SCOPE_PRODUCT => 'Product core fields',
+            self::SYNC_SCOPE_SEO => 'SEO title and description',
+            self::SYNC_SCOPE_METAFIELDS => 'Metafields',
+            self::SYNC_SCOPE_VARIANTS => 'Variants and inventory',
+            self::SYNC_SCOPE_IMAGES => 'Images',
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function availableCoreFields(): array
+    {
+        return [
+            self::CORE_FIELD_TITLE,
+            self::CORE_FIELD_VENDOR,
+            self::CORE_FIELD_PRODUCT_TYPE,
+            self::CORE_FIELD_BODY_HTML,
+            self::CORE_FIELD_TAGS,
+            self::CORE_FIELD_STATUS,
+            self::CORE_FIELD_HANDLE,
+            self::CORE_FIELD_CATEGORY,
+            self::CORE_FIELD_COLOR,
+            self::CORE_FIELD_MATERIALS_AND_DIMENSIONS,
+            self::CORE_FIELD_JEWELRY_MATERIAL,
+            self::CORE_FIELD_JEWELRY_TYPE,
+            self::CORE_FIELD_TARGET_GENDER,
+            self::CORE_FIELD_AGE_GROUP,
+            self::CORE_FIELD_BRACELET_DESIGN,
+            self::CORE_FIELD_PATTERN_CATEGORY,
+            self::CORE_FIELD_PRODUCT_METALS,
+            self::CORE_FIELD_SEO_DEINDEX,
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function coreFieldLabels(): array
+    {
+        return [
+            self::CORE_FIELD_TITLE => 'Title',
+            self::CORE_FIELD_VENDOR => 'Vendor',
+            self::CORE_FIELD_PRODUCT_TYPE => 'Type',
+            self::CORE_FIELD_BODY_HTML => 'Body HTML',
+            self::CORE_FIELD_TAGS => 'Tags',
+            self::CORE_FIELD_STATUS => 'Status',
+            self::CORE_FIELD_HANDLE => 'Handle',
+            self::CORE_FIELD_CATEGORY => 'Category',
+            self::CORE_FIELD_COLOR => 'Colors',
+            self::CORE_FIELD_MATERIALS_AND_DIMENSIONS => 'Materials and dimensions',
+            self::CORE_FIELD_JEWELRY_MATERIAL => 'Jewelry material',
+            self::CORE_FIELD_JEWELRY_TYPE => 'Jewelry type',
+            self::CORE_FIELD_TARGET_GENDER => 'Target gender',
+            self::CORE_FIELD_AGE_GROUP => 'Age group',
+            self::CORE_FIELD_BRACELET_DESIGN => 'Bracelet design',
+            self::CORE_FIELD_PATTERN_CATEGORY => 'Pattern category',
+            self::CORE_FIELD_PRODUCT_METALS => 'Product metals',
+            self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];
     }
 
@@ -159,12 +282,12 @@ final class ProductShopifyUpdater
             }
 
             try {
-                $productId = $this->resolveShopifyId($product->handle);
+                $productId = $this->resolveProductId($product);
                 if (!$productId) {
                     throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
                 }
 
-                $details = $this->productByHandleDetails($product->handle);
+                $details = $this->productDetails($product, null, $productId);
                 $warnings = array_merge($warnings, $this->updateImages($product, $productId, [], $details));
                 $synced++;
                 $syncedProductIds[] = $product->id;
@@ -242,12 +365,12 @@ final class ProductShopifyUpdater
         }
 
         try {
-            $productId = $this->resolveShopifyId($product->handle);
+            $productId = $this->resolveProductId($product);
             if (!$productId) {
                 throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
             }
 
-            $details = $this->productByHandleDetails($product->handle);
+            $details = $this->productDetails($product, null, $productId);
             $result['warnings'] = $this->updateImages($product, $productId, [], $details, $selectedImageIds);
             $result['synced'] = 1;
         } catch (\Throwable $e) {
@@ -433,13 +556,22 @@ final class ProductShopifyUpdater
 
 
 /**
+ * @param array<int, string> $coreFields
  * @return array<int, array{product_id:int, warning:string}>
  */
-private function updateProduct(Product $product): array
+private function updateProduct(Product $product, array $scopes, array $coreFields): array
 {
     $warnings = [];
+    $syncProduct = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRODUCT) && !empty($coreFields);
+    $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
+    $syncMetafields = $this->scopeEnabled($scopes, self::SYNC_SCOPE_METAFIELDS);
+    $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
+    $syncImages = $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES);
+    $selectedMetafieldHeaders = $this->selectedCoreMetafieldHeaders($coreFields);
 
-    $productId = $this->resolveShopifyId($product->handle);
+    $currentHandle = trim((string) ($product->handle ?? ''));
+    $targetHandle = trim((string) ($product->desiredHandle() ?? ''));
+    $productId = $this->resolveProductId($product);
     if (!$productId) {
         throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
     }
@@ -483,30 +615,33 @@ private function updateProduct(Product $product): array
         'id' => $productId,
     ];
 
-    if ($title !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TITLE) && $title !== null) {
         $input['title'] = $title;
     }
-    if ($vendor !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_VENDOR) && $vendor !== null) {
         $input['vendor'] = $vendor;
     }
-    if ($productType !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_PRODUCT_TYPE) && $productType !== null) {
         $input['productType'] = $productType;
     }
-    if ($bodyHtml !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_BODY_HTML) && $bodyHtml !== null) {
         $input['descriptionHtml'] = $bodyHtml;
     }
-    if ($tagsRaw !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TAGS) && $tagsRaw !== null) {
         $input['tags'] = TagNormalizer::parseTokens((string) $tagsRaw);
     }
-    if ($statusRaw !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
         $input['status'] = $this->mapStatus((string) $statusRaw);
     }
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE) && $targetHandle !== '' && $targetHandle !== $currentHandle) {
+        $input['handle'] = $targetHandle;
+    }
 
-    if ($primaryRow) {
+    if ($syncSeo) {
         $seoTitle = $this->nullIfEmpty($product->seo_title)
-            ?? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, ''));
+            ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, '')) : null);
         $seoDescription = $this->nullIfEmpty($product->seo_description)
-            ?? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, ''));
+            ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, '')) : null);
         if ($seoTitle !== null || $seoDescription !== null) {
             $input['seo'] = [
                 'title' => $seoTitle,
@@ -516,49 +651,52 @@ private function updateProduct(Product $product): array
     }
 
     // ✅ Modern Shopify expects ProductInput.category to be a STRING ID (GID)
-    if ($resolvedCategoryGid !== null) {
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null) {
         $candidates = $this->taxonomyIdCandidates($resolvedCategoryGid);
         if (!empty($candidates)) {
             $input['category'] = $candidates[0];
         }
     }
 
-    // 1) Update product (and category if provided)
-    $data = $this->client->graphql($this->productUpdateMutation(), [
-        'input' => $input,
-    ]);
+    if (count($input) > 1) {
+        // 1) Update product (and category if provided)
+        $data = $this->client->graphql($this->productUpdateMutation(), [
+            'input' => $input,
+        ]);
 
-    $errors = data_get($data, 'productUpdate.userErrors', []);
-    if (is_array($errors) && !empty($errors)) {
-        $messages = $this->formatUserErrors($errors);
+        $errors = data_get($data, 'productUpdate.userErrors', []);
+        if (is_array($errors) && !empty($errors)) {
+            $messages = $this->formatUserErrors($errors);
 
-        // If category field is rejected/unsupported, try fallback category update, then retry without category
-        if ($resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
-            $this->categoryGraphqlSupported = false;
+            // If category field is rejected/unsupported, try fallback category update, then retry without category
+            if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
+                $this->categoryGraphqlSupported = false;
 
-            $warnings = array_merge(
-                $warnings,
-                $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
-            );
+                $warnings = array_merge(
+                    $warnings,
+                    $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
+                );
 
-            unset($input['category']);
+                unset($input['category']);
 
-            $data = $this->client->graphql($this->productUpdateMutation(), [
-                'input' => $input,
-            ]);
+                $data = $this->client->graphql($this->productUpdateMutation(), [
+                    'input' => $input,
+                ]);
 
-            $errors = data_get($data, 'productUpdate.userErrors', []);
-            if (is_array($errors) && !empty($errors)) {
-                $messages = $this->formatUserErrors($errors);
+                $errors = data_get($data, 'productUpdate.userErrors', []);
+                if (is_array($errors) && !empty($errors)) {
+                    $messages = $this->formatUserErrors($errors);
+                    throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+                }
+            } else {
                 throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
             }
-        } else {
-            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
         }
     }
 
     // 2) Fetch latest details
-    $details = $this->productByHandleDetails($product->handle);
+    $detailsHandle = ($syncProduct && $targetHandle !== '') ? $targetHandle : $currentHandle;
+    $details = $this->productDetails($product, $detailsHandle, $productId);
 
     $currentCategoryId = trim((string) data_get($details, 'category.id', ''));
     if ($currentCategoryId === '') {
@@ -571,16 +709,38 @@ private function updateProduct(Product $product): array
     }
 
     // 3) Pull current metafields from Shopify for fallback reference support
-    $shopifyRawMetafields = $this->productMetafieldRawValuesByHandle($product->handle);
+    $shopifyRawMetafields = $this->productMetafieldRawValues($product, $detailsHandle, $productId);
+
+    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE) && $targetHandle !== '' && $targetHandle !== $currentHandle) {
+        $this->handleService->promoteApprovedHandle($product);
+    }
 
     // 4) Metafields — pass $primaryData (now has GID if resolved)
-    if ($primaryRow) {
+    if (($syncMetafields || !empty($selectedMetafieldHeaders)) && $primaryRow) {
+        $metafieldRowData = $primaryData;
+
+        if (!$syncMetafields) {
+            $metafieldRowData = [];
+            foreach ($selectedMetafieldHeaders as $header) {
+                $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
+                if ($metafieldValue === null) {
+                    continue;
+                }
+
+                $metafieldRowData[$header] = $metafieldValue;
+            }
+
+            if (array_key_exists(HeaderStore::PRODUCT_CATEGORY, $primaryData)) {
+                $metafieldRowData[HeaderStore::PRODUCT_CATEGORY] = $primaryData[HeaderStore::PRODUCT_CATEGORY];
+            }
+        }
+
         $warnings = array_merge(
             $warnings,
             $this->updateMetafields(
                 $product,
                 $productId,
-                $primaryData,
+                $metafieldRowData,
                 $shopifyRawMetafields,
                 $currentCategoryId !== '' ? $currentCategoryId : null,
                 $currentCategoryName !== '' ? $currentCategoryName : null
@@ -589,22 +749,28 @@ private function updateProduct(Product $product): array
     }
 
     // 5) Variants/inventory
-    $warnings = array_merge(
-        $warnings,
-        $this->updateVariantAndInventory($product, $productId, $variantRows, $details)
-    );
+    if ($syncVariants) {
+        $warnings = array_merge(
+            $warnings,
+            $this->updateVariantAndInventory($product, $productId, $variantRows, $details)
+        );
+    }
 
     // 6) Images
-    $warnings = array_merge(
-        $warnings,
-        $this->updateImages($product, $productId, $imageRows, $details)
-    );
+    if ($syncImages) {
+        $warnings = array_merge(
+            $warnings,
+            $this->updateImages($product, $productId, $imageRows, $details)
+        );
+    }
 
     // 7) Coverage warnings
-    $warnings = array_merge(
-        $warnings,
-        $this->buildSyncCoverageWarnings($product, $primaryData, $variantRows, $imageRows)
-    );
+    if ($syncProduct) {
+        $warnings = array_merge(
+            $warnings,
+            $this->buildSyncCoverageWarnings($product, $primaryData, $variantRows, $imageRows)
+        );
+    }
 
     return $warnings;
 }
@@ -796,6 +962,21 @@ private function updateProduct(Product $product): array
         return data_get($data, 'productByHandle.id');
     }
 
+    private function resolveProductId(Product $product): ?string
+    {
+        $existingId = trim((string) ($product->shopify_id ?? ''));
+        if ($existingId !== '') {
+            return $existingId;
+        }
+
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        return $this->resolveShopifyId($handle);
+    }
+
     private function productByHandleDetails(string $handle): array
     {
         $data = $this->client->graphql($this->productByHandleDetailsQuery(), [
@@ -803,6 +984,26 @@ private function updateProduct(Product $product): array
         ]);
 
         return data_get($data, 'productByHandle', []) ?: [];
+    }
+
+    private function productByIdDetails(string $id): array
+    {
+        $data = $this->client->graphql($this->productByIdDetailsQuery(), [
+            'id' => $id,
+        ]);
+
+        return data_get($data, 'product', []) ?: [];
+    }
+
+    private function productDetails(Product $product, ?string $handleOverride = null, ?string $productIdOverride = null): array
+    {
+        $productId = trim((string) ($productIdOverride ?? $product->shopify_id ?? ''));
+        if ($productId !== '') {
+            return $this->productByIdDetails($productId);
+        }
+
+        $handle = trim((string) ($handleOverride ?: $product->handle));
+        return $handle !== '' ? $this->productByHandleDetails($handle) : [];
     }
 
     /**
@@ -836,6 +1037,53 @@ private function updateProduct(Product $product): array
         }
 
         return $map;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function productMetafieldRawValuesById(string $id): array
+    {
+        $data = $this->client->graphql($this->productByIdMetafieldsQuery(), [
+            'id' => $id,
+        ]);
+
+        $nodes = data_get($data, 'product.metafields.nodes', []);
+        if (!is_array($nodes) || empty($nodes)) {
+            return [];
+        }
+
+        $map = [];
+        foreach ($nodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            $namespace = trim((string) ($node['namespace'] ?? ''));
+            $key = trim((string) ($node['key'] ?? ''));
+            $value = (string) ($node['value'] ?? '');
+            if ($namespace === '' || $key === '' || $value === '') {
+                continue;
+            }
+
+            $map["{$namespace}.{$key}"] = $value;
+        }
+
+        return $map;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function productMetafieldRawValues(Product $product, ?string $handleOverride = null, ?string $productIdOverride = null): array
+    {
+        $productId = trim((string) ($productIdOverride ?? $product->shopify_id ?? ''));
+        if ($productId !== '') {
+            return $this->productMetafieldRawValuesById($productId);
+        }
+
+        $handle = trim((string) ($handleOverride ?: $product->handle));
+        return $handle !== '' ? $this->productMetafieldRawValuesByHandle($handle) : [];
     }
 
     /**
@@ -1219,11 +1467,88 @@ query ProductByHandleDetails($handle: String!) {
 GQL;
     }
 
+    private function productByIdDetailsQuery(): string
+    {
+        return <<<'GQL'
+query ProductByIdDetails($id: ID!) {
+  product(id: $id) {
+    id
+    options {
+      id
+      name
+      position
+      values
+      optionValues {
+        id
+        name
+        hasVariants
+      }
+    }
+    category {
+      id
+      name
+    }
+    productCategory {
+      productTaxonomyNode {
+        id
+        fullName
+      }
+    }
+    variants(first: 250) {
+      nodes {
+        id
+        title
+        sku
+        selectedOptions {
+          name
+          value
+        }
+        inventoryItem {
+          id
+          unitCost { currencyCode }
+        }
+      }
+    }
+    media(first: 50) {
+      nodes {
+        ... on MediaImage {
+          id
+          image {
+            url
+          }
+        }
+      }
+    }
+    images(first: 50) {
+      nodes { id url }
+    }
+  }
+}
+GQL;
+    }
+
     private function productByHandleMetafieldsQuery(): string
     {
         return <<<'GQL'
 query ProductByHandleMetafields($handle: String!) {
   productByHandle(handle: $handle) {
+    metafields(first: 250) {
+      nodes {
+        namespace
+        key
+        value
+      }
+    }
+  }
+}
+GQL;
+    }
+
+    private function productByIdMetafieldsQuery(): string
+    {
+        return <<<'GQL'
+query ProductByIdMetafields($id: ID!) {
+  product(id: $id) {
     metafields(first: 250) {
       nodes {
         namespace
@@ -4284,6 +4609,129 @@ GQL;
     ): array {
         // Your existing logic returns [] anyway; kept untouched.
         return [];
+    }
+
+    /**
+     * @param array<int, string>|null $scopes
+     * @return array<int, string>
+     */
+    private function normalizeSyncScopes(?array $scopes): array
+    {
+        if ($scopes === null) {
+            return self::availableSyncScopes();
+        }
+
+        $allowed = array_fill_keys(self::availableSyncScopes(), true);
+        $normalized = [];
+
+        foreach ($scopes as $scope) {
+            $scope = is_string($scope) ? trim($scope) : '';
+            if ($scope === '' || !isset($allowed[$scope])) {
+                continue;
+            }
+
+            $normalized[$scope] = $scope;
+        }
+
+        return array_values($normalized);
+    }
+
+    /**
+     * @param array<int, string>|null $coreFields
+     * @return array<int, string>
+     */
+    private function normalizeCoreFields(?array $coreFields): array
+    {
+        if ($coreFields === null) {
+            return self::availableCoreFields();
+        }
+
+        $allowed = array_fill_keys(self::availableCoreFields(), true);
+        $normalized = [];
+
+        foreach ($coreFields as $field) {
+            $field = is_string($field) ? trim($field) : '';
+            if ($field === '' || !isset($allowed[$field])) {
+                continue;
+            }
+
+            $normalized[$field] = $field;
+        }
+
+        return array_values($normalized);
+    }
+
+    /**
+     * @param array<int, string> $scopes
+     */
+    private function scopeEnabled(array $scopes, string $scope): bool
+    {
+        return in_array($scope, $scopes, true);
+    }
+
+    /**
+     * @param array<int, string> $coreFields
+     */
+    private function coreFieldEnabled(array $coreFields, string $field): bool
+    {
+        return in_array($field, $coreFields, true);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function coreFieldHeaderMap(): array
+    {
+        return [
+            self::CORE_FIELD_COLOR => HeaderStore::COLOR_METAFIELD,
+            self::CORE_FIELD_MATERIALS_AND_DIMENSIONS => HeaderStore::MATERIALS_AND_DIMENSIONS,
+            self::CORE_FIELD_JEWELRY_MATERIAL => HeaderStore::JEWELRY_MATERIAL,
+            self::CORE_FIELD_JEWELRY_TYPE => HeaderStore::JEWELRY_TYPE,
+            self::CORE_FIELD_TARGET_GENDER => HeaderStore::TARGET_GENDER,
+            self::CORE_FIELD_AGE_GROUP => HeaderStore::AGE_GROUP,
+            self::CORE_FIELD_BRACELET_DESIGN => HeaderStore::BRACELET_DESIGN,
+            self::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
+            self::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
+            self::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
+        ];
+    }
+
+    /**
+     * @param array<int, string> $coreFields
+     * @return array<int, string>
+     */
+    private function selectedCoreMetafieldHeaders(array $coreFields): array
+    {
+        $map = $this->coreFieldHeaderMap();
+        $headers = [];
+
+        foreach ($coreFields as $field) {
+            if (!isset($map[$field])) {
+                continue;
+            }
+
+            $headers[$map[$field]] = $map[$field];
+        }
+
+        return array_values($headers);
+    }
+
+    private function selectedCoreMetafieldValue(Product $product, array $primaryData, string $header): ?string
+    {
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            $productValue = $this->nullIfEmpty($product->color_string);
+            if ($productValue !== null) {
+                return str_replace(',', ';', $productValue);
+            }
+        }
+
+        $value = $primaryData[$header] ?? null;
+        if (!is_scalar($value)) {
+            return null;
+        }
+
+        $stringValue = trim((string) $value);
+        return $stringValue === '' ? null : $stringValue;
     }
 
     private function isMetafieldHeader(string $header): bool

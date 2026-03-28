@@ -10,6 +10,7 @@ class ProductImageApprovalWorkflowService
 {
     public function __construct(
         private readonly ProductImageFilenameService $filenameService,
+        private readonly ProductHandleService $handleService,
     ) {}
 
     public function handleApprovalCreated(Approval $approval): bool
@@ -19,9 +20,9 @@ class ProductImageApprovalWorkflowService
             return false;
         }
 
-        $renamed = false;
+        $updated = false;
 
-        DB::transaction(function () use ($productId, &$renamed): void {
+        DB::transaction(function () use ($productId, &$updated): void {
             $product = Product::query()
                 ->lockForUpdate()
                 ->find($productId);
@@ -30,7 +31,10 @@ class ProductImageApprovalWorkflowService
                 return;
             }
 
-            if ($product->first_image_auto_rename_completed_at !== null) {
+            if (
+                $product->first_image_auto_rename_completed_at !== null
+                && $product->hasLockedApprovedHandle()
+            ) {
                 return;
             }
 
@@ -38,17 +42,24 @@ class ProductImageApprovalWorkflowService
                 return;
             }
 
-            Product::withoutEvents(function () use ($product): void {
-                $product->forceFill([
-                    'first_image_auto_rename_completed_at' => now(),
-                    'first_image_auto_rename_approval_version' => (int) ($product->approval_version ?? 1),
-                ])->save();
-            });
+            if ($product->first_image_auto_rename_completed_at === null) {
+                Product::withoutEvents(function () use ($product): void {
+                    $product->forceFill([
+                        'first_image_auto_rename_completed_at' => now(),
+                        'first_image_auto_rename_approval_version' => (int) ($product->approval_version ?? 1),
+                    ])->save();
+                });
 
-            $this->filenameService->assignFromCurrentTitle($product, manual: false);
-            $renamed = true;
+                $this->filenameService->assignFromCurrentTitle($product, manual: false);
+                $updated = true;
+            }
+
+            if (!$product->hasLockedApprovedHandle()) {
+                $this->handleService->lockInitialApprovedHandle($product->fresh());
+                $updated = true;
+            }
         });
 
-        return $renamed;
+        return $updated;
     }
 }

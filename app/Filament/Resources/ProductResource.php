@@ -20,6 +20,7 @@ use Filament\Tables\Actions\Action;
 use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Toggle;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Actions;
@@ -56,6 +57,7 @@ use App\Services\CategoryTypeMap;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Services\DropdownCollectionCatalog;
+use App\Services\ProductShopifyUpdater;
 use App\Models\Tag;
 use App\Models\Color;
 use App\Models\DropdownOption;
@@ -91,6 +93,9 @@ class ProductResource extends Resource
                                 ->required()
                                 ->maxLength(255)
                                 ->disabled(fn (?Product $record): bool => (bool) $record)
+                                ->helperText(fn (?Product $record): ?string => $record
+                                    ? 'Current live Shopify handle. This stays unchanged until a successful product sync.'
+                                    : 'Initial live handle. The first 2/2 approval will also lock an SEO-approved handle from the approved title.')
                                 ->rules(function (?Product $record): array {
                                     if ($record) {
                                         return [];
@@ -105,6 +110,12 @@ class ProductResource extends Resource
                                         Rule::unique('products', 'handle')->where('import_id', $importId),
                                     ];
                                 }),
+                            TextInput::make('approved_handle')
+                                ->label('Approved SEO Handle')
+                                ->disabled()
+                                ->dehydrated(false)
+                                ->visible(fn (?Product $record): bool => (bool) $record)
+                                ->helperText('Locked once from the approved title on the first 2/2 approval. It becomes the live Shopify handle on the next successful product sync.'),
                             TextInput::make('title')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record)),
                             Textarea::make('body_html')
@@ -1233,6 +1244,81 @@ class ProductResource extends Resource
                         Notification::make()
                             ->title('Shopify sync queued')
                             ->body("Queued {$selectedCount} selected product(s). Only approved products will be synced.")
+                            ->success()
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkPartialSyncShopify')
+                    ->label('Sync Selected Fields to Shopify')
+                    ->icon('heroicon-o-adjustments-horizontal')
+                    ->form([
+                        CheckboxList::make('scopes')
+                            ->label('Fields to sync')
+                            ->options(ProductShopifyUpdater::syncScopeLabels())
+                            ->default([ProductShopifyUpdater::SYNC_SCOPE_SEO])
+                            ->required()
+                            ->live()
+                            ->columns(2)
+                            ->helperText('Only the selected fields will be pushed to Shopify. Products still need 2 approvals.'),
+                        CheckboxList::make('core_fields')
+                            ->label('Product core fields')
+                            ->options(ProductShopifyUpdater::coreFieldLabels())
+                            ->default(ProductShopifyUpdater::availableCoreFields())
+                            ->columns(2)
+                            ->visible(fn (Get $get): bool => in_array(
+                                ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
+                                array_values(array_filter($get('scopes') ?? [], 'is_string')),
+                                true
+                            ))
+                            ->helperText('Choose the exact product columns to push when Product core fields is selected.'),
+                    ])
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records, array $data): void {
+                        $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
+                        $selectedCount = count($ids);
+                        $scopes = array_values(array_unique(array_map(
+                            'strval',
+                            array_filter($data['scopes'] ?? [], fn ($scope): bool => is_string($scope) && $scope !== '')
+                        )));
+
+                        if (empty($scopes)) {
+                            Notification::make()
+                                ->title('No fields selected')
+                                ->body('Choose at least one field group to sync.')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        $coreFields = array_values(array_unique(array_map(
+                            'strval',
+                            array_filter($data['core_fields'] ?? [], fn ($field): bool => is_string($field) && $field !== '')
+                        )));
+
+                        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true) && empty($coreFields)) {
+                            Notification::make()
+                                ->title('No core fields selected')
+                                ->body('Choose at least one product core field or deselect Product core fields.')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id(), $scopes, $coreFields);
+
+                        $scopeSummary = collect($scopes)
+                            ->map(fn (string $scope): string => ProductShopifyUpdater::syncScopeLabels()[$scope] ?? $scope)
+                            ->implode(', ');
+
+                        $coreSummary = in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)
+                            ? ' Core fields: ' . collect($coreFields)
+                                ->map(fn (string $field): string => ProductShopifyUpdater::coreFieldLabels()[$field] ?? $field)
+                                ->implode(', ') . '.'
+                            : '';
+
+                        Notification::make()
+                            ->title('Partial Shopify sync queued')
+                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary} Only approved products will be synced.")
                             ->success()
                             ->send();
                     })

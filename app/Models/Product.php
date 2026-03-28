@@ -10,11 +10,12 @@ use App\Services\CategoryTypeMap;
 class Product extends Model
 {
     protected $fillable = [
-        'import_id','shopify_id','handle','title','body_html','vendor','tags',
+        'import_id','shopify_id','handle','approved_handle','title','body_html','vendor','tags',
         'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
         'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
+        'first_handle_auto_lock_completed_at','first_handle_auto_lock_approval_version',
         'batch','is_bundle','you_save',
         'has_errors','error_fields',
     ];
@@ -25,6 +26,7 @@ class Product extends Model
         'has_errors' => 'boolean',
         'error_fields' => 'array',
         'first_image_auto_rename_completed_at' => 'datetime',
+        'first_handle_auto_lock_completed_at' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -122,6 +124,27 @@ class Product extends Model
     public function styleProfiles(): HasMany
     {
         return $this->hasMany(StyleProfile::class);
+    }
+
+    public function urlRedirects(): HasMany
+    {
+        return $this->hasMany(ProductUrlRedirect::class);
+    }
+
+    public function desiredHandle(): ?string
+    {
+        $approved = trim((string) ($this->approved_handle ?? ''));
+        if ($approved !== '') {
+            return $approved;
+        }
+
+        $handle = trim((string) ($this->handle ?? ''));
+        return $handle === '' ? null : $handle;
+    }
+
+    public function hasLockedApprovedHandle(): bool
+    {
+        return $this->first_handle_auto_lock_completed_at !== null;
     }
 
 
