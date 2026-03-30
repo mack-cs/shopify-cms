@@ -47,6 +47,7 @@ class AdminPanelProvider extends PanelProvider
             ->colors([
                 'primary' => Color::Amber,
             ])
+            ->favicon(asset('favicon.png'))
             ->assets([
                 Css::make('filament-admin', asset('css/filament-admin.css')),
             ])
