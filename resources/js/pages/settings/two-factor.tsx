@@ -6,10 +6,10 @@ import { Button } from '@/components/ui/button';
 import { useTwoFactorAuth } from '@/hooks/use-two-factor-auth';
 import AppLayout from '@/layouts/app-layout';
 import SettingsLayout from '@/layouts/settings/layout';
-import { disable, enable, show } from '@/routes/two-factor';
+import { enable, show } from '@/routes/two-factor';
 import { type BreadcrumbItem } from '@/types';
 import { Form, Head } from '@inertiajs/react';
-import { ShieldBan, ShieldCheck } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 
 interface TwoFactorProps {
@@ -64,20 +64,10 @@ export default function TwoFactor({
                                 fetchRecoveryCodes={fetchRecoveryCodes}
                                 errors={errors}
                             />
-
-                            <div className="relative inline">
-                                <Form {...disable.form()}>
-                                    {({ processing }) => (
-                                        <Button
-                                            variant="destructive"
-                                            type="submit"
-                                            disabled={processing}
-                                        >
-                                            <ShieldBan /> Disable 2FA
-                                        </Button>
-                                    )}
-                                </Form>
-                            </div>
+                            <p className="text-sm text-muted-foreground">
+                                Two-factor authentication is required for all
+                                users and cannot be disabled.
+                            </p>
                         </div>
                     ) : (
                         <div className="flex flex-col items-start justify-start space-y-4">

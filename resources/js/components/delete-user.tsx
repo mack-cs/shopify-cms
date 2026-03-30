@@ -22,14 +22,16 @@ export default function DeleteUser() {
     return (
         <div className="space-y-6">
             <HeadingSmall
-                title="Delete account"
-                description="Delete your account and all of its resources"
+                title="Disable account"
+                description="Disable your account while keeping your information in the system"
             />
             <div className="space-y-4 rounded-lg border border-red-100 bg-red-50 p-4 dark:border-red-200/10 dark:bg-red-700/10">
                 <div className="relative space-y-0.5 text-red-600 dark:text-red-100">
                     <p className="font-medium">Warning</p>
                     <p className="text-sm">
-                        Please proceed with caution, this cannot be undone.
+                        Disabling your account will immediately sign you out and
+                        block future access until an administrator reactivates
+                        it.
                     </p>
                 </div>
 
@@ -39,18 +41,18 @@ export default function DeleteUser() {
                             variant="destructive"
                             data-test="delete-user-button"
                         >
-                            Delete account
+                            Disable account
                         </Button>
                     </DialogTrigger>
                     <DialogContent>
                         <DialogTitle>
-                            Are you sure you want to delete your account?
+                            Are you sure you want to disable your account?
                         </DialogTitle>
                         <DialogDescription>
-                            Once your account is deleted, all of its resources
-                            and data will also be permanently deleted. Please
-                            enter your password to confirm you would like to
-                            permanently delete your account.
+                            Your account will be disabled and you will be signed
+                            out. Your information will remain in the system for
+                            administrators to review. Enter your password to
+                            confirm.
                         </DialogDescription>
 
                         <Form
@@ -105,7 +107,7 @@ export default function DeleteUser() {
                                                 type="submit"
                                                 data-test="confirm-delete-user-button"
                                             >
-                                                Delete account
+                                                Disable account
                                             </button>
                                         </Button>
                                     </DialogFooter>

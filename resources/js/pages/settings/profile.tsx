@@ -38,7 +38,7 @@ export default function Profile({
                 <div className="space-y-6">
                     <HeadingSmall
                         title="Profile information"
-                        description="Update your name and email address"
+                        description="Update your name"
                     />
 
                     <Form
@@ -76,17 +76,14 @@ export default function Profile({
                                         id="email"
                                         type="email"
                                         className="mt-1 block w-full"
-                                        defaultValue={auth.user.email}
-                                        name="email"
-                                        required
-                                        autoComplete="username"
-                                        placeholder="Email address"
+                                        value={auth.user.email}
+                                        disabled
+                                        readOnly
                                     />
-
-                                    <InputError
-                                        className="mt-2"
-                                        message={errors.email}
-                                    />
+                                    <p className="text-sm text-muted-foreground">
+                                        Email addresses can only be changed by
+                                        an administrator.
+                                    </p>
                                 </div>
 
                                 {mustVerifyEmail &&

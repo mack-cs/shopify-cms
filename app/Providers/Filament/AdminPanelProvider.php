@@ -2,7 +2,9 @@
 
 namespace App\Providers\Filament;
 
+use App\Http\Controllers\Auth\RedirectToLoginController;
 use Filament\Http\Middleware\Authenticate;
+use Filament\Http\Controllers\Auth\LogoutController;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
 use Filament\Http\Middleware\DispatchServingFilamentEvent;
@@ -17,9 +19,11 @@ use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
 use App\Http\Middleware\ForcePasswordChange;
+use App\Http\Middleware\RequireTwoFactorAuthentication;
 use App\Filament\Widgets\SearchTrendsWidget;
 use App\Filament\Widgets\SeoMetricsStats;
 use App\Filament\Widgets\SeoMetricsTrendChart;
@@ -33,7 +37,13 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('')
-            ->login()
+            ->login(RedirectToLoginController::class)
+            ->loginRouteSlug('panel-login')
+            ->authenticatedRoutes(function (): void {
+                Route::name('auth.')->group(function (): void {
+                    Route::post('/panel-logout', LogoutController::class)->name('logout');
+                });
+            })
             ->colors([
                 'primary' => Color::Amber,
             ])
@@ -59,7 +69,6 @@ class AdminPanelProvider extends PanelProvider
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->widgets([
                 Widgets\AccountWidget::class,
-                Widgets\FilamentInfoWidget::class,
                 // SearchTrendsWidget::class,
                 SeoMetricsStats::class,
                 SeoMetricsTrendChart::class,
@@ -79,6 +88,7 @@ class AdminPanelProvider extends PanelProvider
             ->authMiddleware([
                 Authenticate::class,
                 ForcePasswordChange::class,
+                RequireTwoFactorAuthentication::class,
             ]);
     }
 }
