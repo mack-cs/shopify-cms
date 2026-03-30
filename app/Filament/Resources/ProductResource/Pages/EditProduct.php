@@ -200,6 +200,7 @@ class EditProduct extends EditRecord
             Actions\Action::make('approve')
                 ->label('Approve')
                 ->icon('heroicon-o-check-badge')
+                ->color('success')
                 ->requiresConfirmation()
                 ->disabled(fn (): bool => $this->getRecord()->has_errors || $this->getRecord()->isApprovedByTwo())
                 ->action(function (): void {
@@ -208,9 +209,20 @@ class EditProduct extends EditRecord
             Actions\Action::make('renameImages')
                 ->label('Rename Images')
                 ->icon('heroicon-o-tag')
+                ->color('gray')
                 ->requiresConfirmation()
-                ->disabled(fn (): bool => !$this->getRecord()->images()->exists())
+                ->disabled(fn (): bool => !$this->getRecord()->isApprovedByTwo() || !$this->getRecord()->images()->exists())
                 ->action(function (): void {
+                    if (!$this->getRecord()->isApprovedByTwo()) {
+                        \Filament\Notifications\Notification::make()
+                            ->title('Approval required')
+                            ->body('Rename Images is only available after the product has 2 approvals.')
+                            ->warning()
+                            ->send();
+
+                        return;
+                    }
+
                     $count = app(\App\Services\ProductImageFilenameService::class)
                         ->assignFromCurrentTitle($this->getRecord(), manual: true);
 

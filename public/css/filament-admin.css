@@ -7,3 +7,81 @@
 .fi-main-ctn {
   padding-inline: var(--fi-content-x-padding) !important;
 }
+
+/* Product bulk action menu accents */
+.fi-dropdown-list-item.product-bulk-action {
+  border-left: 3px solid transparent;
+  border-radius: 0.7rem;
+  margin-block: 0.1rem;
+  padding-left: 0.9rem;
+}
+
+.fi-dropdown-list-item.product-bulk-action--edit {
+  border-left-color: #64748b;
+  background: linear-gradient(90deg, rgba(100, 116, 139, 0.12), rgba(100, 116, 139, 0.04));
+}
+
+.fi-dropdown-list-item.product-bulk-action--approve {
+  border-left-color: #059669;
+  background: linear-gradient(90deg, rgba(5, 150, 105, 0.14), rgba(5, 150, 105, 0.04));
+}
+
+.fi-dropdown-list-item.product-bulk-action--sync {
+  border-left-color: #0284c7;
+  background: linear-gradient(90deg, rgba(2, 132, 199, 0.14), rgba(2, 132, 199, 0.04));
+}
+
+.fi-dropdown-list-item.product-bulk-action--partial-sync {
+  border-left-color: #d97706;
+  background: linear-gradient(90deg, rgba(217, 119, 6, 0.14), rgba(217, 119, 6, 0.04));
+}
+
+.fi-dropdown-list-item.product-bulk-action--backup {
+  border-left-color: #7c3aed;
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.14), rgba(124, 58, 237, 0.04));
+}
+
+.fi-dropdown-list-item.product-bulk-action--backup .fi-dropdown-list-item-icon {
+  color: #7c3aed !important;
+}
+
+.fi-dropdown-list-item.product-bulk-action--backup .fi-dropdown-list-item-label {
+  color: #6d28d9 !important;
+}
+
+.fi-dropdown-list-item.product-bulk-action--export {
+  border-left-color: #dc2626;
+  background: linear-gradient(90deg, rgba(220, 38, 38, 0.14), rgba(220, 38, 38, 0.04));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--edit {
+  background: linear-gradient(90deg, rgba(100, 116, 139, 0.2), rgba(100, 116, 139, 0.06));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--approve {
+  background: linear-gradient(90deg, rgba(5, 150, 105, 0.22), rgba(5, 150, 105, 0.07));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--sync {
+  background: linear-gradient(90deg, rgba(2, 132, 199, 0.22), rgba(2, 132, 199, 0.07));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--partial-sync {
+  background: linear-gradient(90deg, rgba(217, 119, 6, 0.22), rgba(217, 119, 6, 0.07));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--backup {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.22), rgba(124, 58, 237, 0.07));
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--backup .fi-dropdown-list-item-icon {
+  color: #a78bfa !important;
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--backup .fi-dropdown-list-item-label {
+  color: #c4b5fd !important;
+}
+
+.dark .fi-dropdown-list-item.product-bulk-action--export {
+  background: linear-gradient(90deg, rgba(220, 38, 38, 0.22), rgba(220, 38, 38, 0.07));
+}

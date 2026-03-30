@@ -1108,26 +1108,6 @@ class ProductResource extends Resource
                 ->action(function (Product $record): void {
                     self::approveRecord($record);
                 }),
-            Action::make('renameImages')
-                ->label('Rename Images')
-                ->icon('heroicon-o-tag')
-                ->iconButton()
-                ->color('warning')
-                ->tooltip('Rename Images')
-                ->requiresConfirmation()
-                ->disabled(fn (Product $record): bool => !$record->images()->exists())
-                ->action(function (Product $record): void {
-                    $count = app(\App\Services\ProductImageFilenameService::class)
-                        ->assignFromCurrentTitle($record, manual: true);
-
-                    Notification::make()
-                        ->title('Image filenames updated')
-                        ->body($count > 0
-                            ? "Updated {$count} image filename(s)."
-                            : 'No image filenames needed updating.')
-                        ->success()
-                        ->send();
-                }),
             EditAction::make()
                 ->iconButton()
                 ->color('gray')
@@ -1172,6 +1152,8 @@ class ProductResource extends Resource
                 BulkAction::make('bulkEdit')
                     ->label('Bulk Edit')
                     ->icon('heroicon-o-pencil-square')
+                    ->color('gray')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--edit'])
                     ->form(self::bulkEditFormSchema())
                     ->action(function (Collection $records, array $data): void {
                         self::applyBulkEdits($records, $data);
@@ -1180,6 +1162,8 @@ class ProductResource extends Resource
                 BulkAction::make('bulkApprove')
                     ->label('Bulk Approve')
                     ->icon('heroicon-o-check-badge')
+                    ->color('success')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--approve'])
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $errorCount = $records->filter(fn (Product $record) => $record->has_errors)->count();
@@ -1235,6 +1219,8 @@ class ProductResource extends Resource
                 BulkAction::make('bulkSyncShopify')
                     ->label('Sync Approved to Shopify')
                     ->icon('heroicon-o-cloud-arrow-up')
+                    ->color('info')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--sync'])
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $ids = $records->pluck('id')->all();
@@ -1251,6 +1237,8 @@ class ProductResource extends Resource
                 BulkAction::make('bulkPartialSyncShopify')
                     ->label('Sync Selected Fields to Shopify')
                     ->icon('heroicon-o-adjustments-horizontal')
+                    ->color('warning')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--partial-sync'])
                     ->form([
                         CheckboxList::make('scopes')
                             ->label('Fields to sync')
@@ -1326,6 +1314,8 @@ class ProductResource extends Resource
                 BulkAction::make('bulkBackupImages')
                     ->label('Queue Image Backup')
                     ->icon('heroicon-o-arrow-down-tray')
+                    ->color('gray')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--backup'])
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
@@ -1345,6 +1335,8 @@ class ProductResource extends Resource
                     })
                     ->deselectRecordsAfterCompletion(),
                 ExportBulkAction::make()
+                    ->color('danger')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--export'])
                     ->exporter(ProductExporter::class)
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
             ]),

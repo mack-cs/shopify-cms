@@ -1311,9 +1311,6 @@ class NewProductDraftResource extends Resource
                 Tables\Actions\DeleteAction::make()->color('danger'),
             ])
             ->headerActions([
-                Tables\Actions\CreateAction::make()
-                    ->label('Create Draft')
-                    ->color('success'),
                 Tables\Actions\Action::make('downloadTemplate')
                     ->label('Download Template')
                     ->color('gray')
@@ -1571,6 +1568,33 @@ class NewProductDraftResource extends Resource
                             }
                         });
                     }),
+                SelectFilter::make('batch')
+                    ->label('Batch')
+                    ->options(fn () => NewProductDraft::query()
+                        ->whereNotNull('batch')
+                        ->where('batch', '!=', '')
+                        ->distinct()
+                        ->orderByDesc('batch')
+                        ->pluck('batch', 'batch')
+                        ->all())
+                    ->searchable()
+                    ->preload(),
+                TernaryFilter::make('sent_to_shopify')
+                    ->label('Sent to Shopify')
+                    ->placeholder('All')
+                    ->trueLabel('Sent')
+                    ->falseLabel('Not sent')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereNotNull('handle')
+                            ->where('handle', '!=', ''),
+                        false: fn (Builder $query): Builder => $query->where(function (Builder $subQuery): void {
+                            $subQuery
+                                ->whereNull('handle')
+                                ->orWhere('handle', '');
+                        }),
+                        blank: fn (Builder $query): Builder => $query,
+                    ),
                 TernaryFilter::make('has_errors')
                     ->label('Errors')
                     ->queries(
