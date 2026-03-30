@@ -2,8 +2,8 @@
 
 namespace App\Providers\Filament;
 
+use App\Http\Middleware\AuthenticatePanelUser;
 use App\Http\Controllers\Auth\RedirectToLoginController;
-use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Controllers\Auth\LogoutController;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
@@ -86,7 +86,7 @@ class AdminPanelProvider extends PanelProvider
                 DispatchServingFilamentEvent::class,
             ])
             ->authMiddleware([
-                Authenticate::class,
+                AuthenticatePanelUser::class,
                 ForcePasswordChange::class,
                 RequireTwoFactorAuthentication::class,
             ]);

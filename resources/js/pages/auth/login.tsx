@@ -49,6 +49,8 @@ export default function Login({
                 )}
 
                 <div className="grid gap-6">
+                    <InputError message={errors.auth} />
+
                     <div className="grid gap-2">
                         <Label htmlFor="email">Email address</Label>
                         <Input
