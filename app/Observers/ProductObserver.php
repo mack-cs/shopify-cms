@@ -11,6 +11,7 @@ use App\Models\Tag;
 use App\Models\NewProductDraft;
 use App\Services\HeaderStore;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 class ProductObserver
 {
@@ -209,21 +210,238 @@ class ProductObserver
 
     private function findDraftForProduct(Product $product): ?NewProductDraft
     {
+        $handle = trim((string) ($product->handle ?? ''));
         $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handleDraft = null;
 
+        if ($handle !== '') {
+            $handleDraft = NewProductDraft::query()
+                ->where('handle', $handle)
+                ->first();
+        }
+
+        $shopifyDraft = null;
         if ($shopifyId !== '') {
-            $draft = NewProductDraft::query()
+            $shopifyDraft = NewProductDraft::query()
                 ->where('shopify_id', $shopifyId)
                 ->first();
+        }
 
-            if ($draft) {
-                return $draft;
+        if ($handleDraft && $shopifyDraft && $handleDraft->isNot($shopifyDraft)) {
+            $preferred = $this->preferredDraftForProduct($handleDraft, $shopifyDraft);
+
+            return $this->mergeConflictingDrafts(
+                $preferred,
+                $preferred->is($handleDraft) ? $shopifyDraft : $handleDraft
+            );
+        }
+
+        return $handleDraft ?? $shopifyDraft;
+    }
+
+    private function preferredDraftForProduct(NewProductDraft $handleDraft, NewProductDraft $shopifyDraft): NewProductDraft
+    {
+        if ($handleDraft->origin === NewProductDraft::ORIGIN_DRAFT_TOOL) {
+            return $handleDraft;
+        }
+
+        if ($shopifyDraft->origin === NewProductDraft::ORIGIN_DRAFT_TOOL) {
+            return $shopifyDraft;
+        }
+
+        if ($handleDraft->origin === NewProductDraft::ORIGIN_PRODUCT_MIRROR) {
+            return $shopifyDraft;
+        }
+
+        return $handleDraft;
+    }
+
+    private function mergeConflictingDrafts(NewProductDraft $preferred, NewProductDraft $duplicate): NewProductDraft
+    {
+        if ($preferred->is($duplicate)) {
+            return $preferred;
+        }
+
+        DB::transaction(function () use ($preferred, $duplicate): void {
+            $preferred = $preferred->fresh();
+            $duplicate = $duplicate->fresh();
+
+            if (!$preferred || !$duplicate || $preferred->is($duplicate)) {
+                return;
+            }
+
+            $updates = $this->mergedDraftValues($preferred, $duplicate);
+
+            if (!empty($updates)) {
+                NewProductDraft::query()
+                    ->whereKey($preferred->id)
+                    ->update($updates);
+            }
+
+            $approvalRows = DB::table('new_product_draft_approvals')
+                ->where('new_product_draft_id', $duplicate->id)
+                ->get();
+
+            foreach ($approvalRows as $row) {
+                DB::table('new_product_draft_approvals')->insertOrIgnore([
+                    'new_product_draft_id' => $preferred->id,
+                    'user_id' => $row->user_id,
+                    'approval_version' => $row->approval_version,
+                    'created_at' => $row->created_at,
+                    'updated_at' => $row->updated_at,
+                ]);
+            }
+
+            $assignmentRows = DB::table('new_product_draft_assignment_items')
+                ->where('new_product_draft_id', $duplicate->id)
+                ->get();
+
+            foreach ($assignmentRows as $row) {
+                $exists = DB::table('new_product_draft_assignment_items')
+                    ->where('assignment_id', $row->assignment_id)
+                    ->where('new_product_draft_id', $preferred->id)
+                    ->exists();
+
+                if ($exists) {
+                    DB::table('new_product_draft_assignment_items')
+                        ->where('id', $row->id)
+                        ->delete();
+
+                    continue;
+                }
+
+                DB::table('new_product_draft_assignment_items')
+                    ->where('id', $row->id)
+                    ->update([
+                        'new_product_draft_id' => $preferred->id,
+                        'handle' => $row->handle ?: $preferred->handle,
+                        'title' => $row->title ?: $preferred->title,
+                        'updated_at' => now(),
+                    ]);
+            }
+
+            NewProductDraft::query()
+                ->whereKey($duplicate->id)
+                ->delete();
+        });
+
+        return $preferred->fresh() ?? $preferred;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function mergedDraftValues(NewProductDraft $preferred, NewProductDraft $duplicate): array
+    {
+        $updates = [];
+        $preferDuplicateValues = $duplicate->origin === NewProductDraft::ORIGIN_DRAFT_TOOL
+            && $preferred->origin !== NewProductDraft::ORIGIN_DRAFT_TOOL;
+
+        $mergeableFields = [
+            'shopify_id',
+            'sku',
+            'title',
+            'body_html',
+            'vendor',
+            'product_category',
+            'google_product_category',
+            'type',
+            'tags',
+            'color_string',
+            'status',
+            'published',
+            'image_path',
+            'image_url',
+            'batch',
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+            'material_cost',
+            'jewelry_material',
+            'product_materials',
+            'materials_and_dimensions',
+            'product_design',
+            'metal',
+            'colour_style',
+            'size',
+            'siblings',
+            'siblings_collection_name',
+            'uvp_short_paragraph',
+            'complementary_products',
+            'variant_inventory_policy',
+            'variant_fulfillment_service',
+            'payload',
+            'origin',
+            'approval_version',
+            'created_by',
+        ];
+
+        foreach ($mergeableFields as $field) {
+            $preferredValue = $preferred->getAttribute($field);
+            $duplicateValue = $duplicate->getAttribute($field);
+
+            if ($field === 'payload') {
+                $preferredPayload = is_array($preferredValue) ? $preferredValue : [];
+                $duplicatePayload = is_array($duplicateValue) ? $duplicateValue : [];
+                $mergedPayload = $preferDuplicateValues
+                    ? array_replace($preferredPayload, $duplicatePayload)
+                    : array_replace($duplicatePayload, $preferredPayload);
+
+                if ($mergedPayload !== $preferredPayload) {
+                    $updates[$field] = $mergedPayload;
+                }
+
+                continue;
+            }
+
+            if ($field === 'origin') {
+                $resolvedOrigin = $this->resolvedDraftOrigin($preferred, $duplicate);
+                if ($resolvedOrigin !== null && $resolvedOrigin !== $preferredValue) {
+                    $updates[$field] = $resolvedOrigin;
+                }
+
+                continue;
+            }
+
+            if ($field === 'approval_version') {
+                $resolvedVersion = max((int) ($preferredValue ?? 1), (int) ($duplicateValue ?? 1));
+                if ($resolvedVersion !== (int) ($preferredValue ?? 1)) {
+                    $updates[$field] = $resolvedVersion;
+                }
+
+                continue;
+            }
+
+            if ($this->isEmptyDraftValue($duplicateValue)) {
+                continue;
+            }
+
+            if ($preferDuplicateValues || $this->isEmptyDraftValue($preferredValue)) {
+                if ($preferredValue !== $duplicateValue) {
+                    $updates[$field] = $duplicateValue;
+                }
             }
         }
 
-        return NewProductDraft::query()
-            ->where('handle', $product->handle)
-            ->first();
+        return $updates;
+    }
+
+    private function resolvedDraftOrigin(NewProductDraft $preferred, NewProductDraft $duplicate): ?string
+    {
+        $origins = array_values(array_filter([
+            $preferred->origin,
+            $duplicate->origin,
+        ], fn ($value): bool => is_string($value) && trim($value) !== ''));
+
+        if (in_array(NewProductDraft::ORIGIN_DRAFT_TOOL, $origins, true)) {
+            return NewProductDraft::ORIGIN_DRAFT_TOOL;
+        }
+
+        if (in_array(NewProductDraft::ORIGIN_PRODUCT_MIRROR, $origins, true)) {
+            return NewProductDraft::ORIGIN_PRODUCT_MIRROR;
+        }
+
+        return $origins[0] ?? null;
     }
 
     /**
