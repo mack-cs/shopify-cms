@@ -12,6 +12,10 @@ use App\Models\Product;
 
 class NewProductDraft extends Model
 {
+    public const ORIGIN_DRAFT_TOOL = 'draft_tool';
+    public const ORIGIN_SHOPIFY_SEED = 'shopify_seed';
+    public const ORIGIN_PRODUCT_MIRROR = 'product_mirror';
+
     protected $fillable = [
         'handle',
         'shopify_id',
@@ -47,6 +51,7 @@ class NewProductDraft extends Model
         'variant_inventory_policy',
         'variant_fulfillment_service',
         'payload',
+        'origin',
         'approval_version',
         'created_by',
     ];

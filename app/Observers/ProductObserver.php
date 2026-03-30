@@ -128,6 +128,7 @@ class ProductObserver
 
         $payload = [
             'handle' => $product->handle,
+            'shopify_id' => $product->shopify_id,
             'title' => $product->title,
             'body_html' => $product->body_html,
             'vendor' => $product->vendor,
@@ -139,6 +140,7 @@ class ProductObserver
             'status' => $product->status,
             'color_string' => $product->color_string,
             'batch' => $product->batch,
+            'origin' => NewProductDraft::ORIGIN_PRODUCT_MIRROR,
         ];
 
         if ($sku !== '') {
@@ -173,37 +175,14 @@ class ProductObserver
         }
 
         NewProductDraft::withoutEvents(function () use ($product, $payload): void {
-            $draft = NewProductDraft::query()
-                ->where('handle', $product->handle)
-                ->first();
+            $draft = $this->findDraftForProduct($product);
 
             if (!$draft) {
                 NewProductDraft::create($payload);
                 return;
             }
 
-            $updates = [];
-            foreach ($payload as $key => $incomingValue) {
-                if ($key === 'handle') {
-                    continue;
-                }
-                if ($this->isEmptyDraftValue($incomingValue)) {
-                    continue;
-                }
-
-                $currentValue = $draft->getAttribute($key);
-                // SKU should always mirror the current product variant SKU.
-                if ($key === 'sku') {
-                    if ((string) $currentValue !== (string) $incomingValue) {
-                        $updates[$key] = $incomingValue;
-                    }
-                    continue;
-                }
-
-                if ($this->isEmptyDraftValue($currentValue)) {
-                    $updates[$key] = $incomingValue;
-                }
-            }
+            $updates = $this->draftUpdatesForPayload($draft, $payload);
 
             if (!empty($updates)) {
                 $draft->fill($updates)->save();
@@ -226,6 +205,68 @@ class ProductObserver
         }
 
         return false;
+    }
+
+    private function findDraftForProduct(Product $product): ?NewProductDraft
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+
+        if ($shopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($draft) {
+                return $draft;
+            }
+        }
+
+        return NewProductDraft::query()
+            ->where('handle', $product->handle)
+            ->first();
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private function draftUpdatesForPayload(NewProductDraft $draft, array $payload): array
+    {
+        $updates = [];
+
+        foreach ($payload as $key => $incomingValue) {
+            if ($key === 'handle' || $key === 'shopify_id') {
+                if (
+                    ! $this->isEmptyDraftValue($incomingValue)
+                    && (string) $draft->getAttribute($key) !== (string) $incomingValue
+                ) {
+                    $updates[$key] = $incomingValue;
+                }
+
+                continue;
+            }
+
+            if ($this->isEmptyDraftValue($incomingValue)) {
+                continue;
+            }
+
+            $currentValue = $draft->getAttribute($key);
+
+            // SKU should always mirror the current product variant SKU.
+            if ($key === 'sku') {
+                if ((string) $currentValue !== (string) $incomingValue) {
+                    $updates[$key] = $incomingValue;
+                }
+
+                continue;
+            }
+
+            if ($this->isEmptyDraftValue($currentValue)) {
+                $updates[$key] = $incomingValue;
+            }
+        }
+
+        return $updates;
     }
 
     private function syncTagsForProduct(Product $product): void

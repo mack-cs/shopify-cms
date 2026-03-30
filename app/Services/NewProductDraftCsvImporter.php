@@ -181,6 +181,7 @@ final class NewProductDraftCsvImporter
                     $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
                     $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
                     $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
+                    $data['origin'] = $data['origin'] ?? NewProductDraft::ORIGIN_DRAFT_TOOL;
 
                     NewProductDraft::create($data);
                     $created++;

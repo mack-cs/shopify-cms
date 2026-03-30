@@ -15,13 +15,11 @@ final class NewProductDraftProductSync
 {
     public function syncToExistingProduct(NewProductDraft $draft, bool $ensureApprovalReset = true): bool
     {
-        if (!$draft->handle) {
+        if (!$draft->handle && !$draft->shopify_id) {
             return false;
         }
 
-        $product = Product::query()
-            ->where('handle', $draft->handle)
-            ->first();
+        $product = $this->findExistingProduct($draft);
 
         if (!$product) {
             return false;
@@ -62,8 +60,14 @@ final class NewProductDraftProductSync
         $skippedMissingImport = 0;
 
         $drafts = $drafts ?? NewProductDraft::query()
-            ->whereNotNull('handle')
-            ->where('handle', '!=', '')
+            ->where(function ($query): void {
+                $query->whereNotNull('handle')
+                    ->where('handle', '!=', '')
+                    ->orWhere(function ($idQuery): void {
+                        $idQuery->whereNotNull('shopify_id')
+                            ->where('shopify_id', '!=', '');
+                    });
+            })
             ->get();
 
         foreach ($drafts as $draft) {
@@ -71,7 +75,7 @@ final class NewProductDraftProductSync
                 continue;
             }
 
-            if (!$draft->handle) {
+            if (!$draft->handle && !$draft->shopify_id) {
                 $skippedMissingHandle++;
                 continue;
             }
@@ -81,15 +85,18 @@ final class NewProductDraftProductSync
                 continue;
             }
 
-            $product = Product::query()
-                ->where('handle', $draft->handle)
-                ->first();
+            $product = $this->findExistingProduct($draft);
 
             $data = $this->mapDraftToProduct($draft);
 
             if ($product) {
                 $this->syncToExistingProduct($draft, ensureApprovalReset: false);
                 $updated++;
+                continue;
+            }
+
+            if (!$draft->handle) {
+                $skippedMissingHandle++;
                 continue;
             }
 
@@ -113,6 +120,31 @@ final class NewProductDraftProductSync
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_missing_import' => $skippedMissingImport,
         ];
+    }
+
+    private function findExistingProduct(NewProductDraft $draft): ?Product
+    {
+        $shopifyId = trim((string) ($draft->shopify_id ?? ''));
+
+        if ($shopifyId !== '') {
+            $product = Product::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($product) {
+                return $product;
+            }
+        }
+
+        $handle = trim((string) ($draft->handle ?? ''));
+
+        if ($handle === '') {
+            return null;
+        }
+
+        return Product::query()
+            ->where('handle', $handle)
+            ->first();
     }
 
     /**

@@ -33,10 +33,10 @@
         <div class="rounded-xl border border-warning-200 bg-warning-50 p-4 text-sm text-warning-900">
             <div class="flex items-start justify-between gap-4">
                 <div>
-                    <div class="font-semibold">New products need sync</div>
+                    <div class="font-semibold">New product drafts need sync</div>
                     <div class="mt-1">
-                        {{ $count }} new product{{ $count === 1 ? '' : 's' }} were created in Shopify and are not yet in this list.
-                        Run a sync to pull them into Products.
+                        {{ $count }} new product draft{{ $count === 1 ? '' : 's' }} created from the New Products workflow {{ $count === 1 ? 'was' : 'were' }} sent to Shopify and {{ $count === 1 ? 'is' : 'are' }} not yet in this list.
+                        Run a sync to pull {{ $count === 1 ? 'it' : 'them' }} into Products.
                     </div>
                 </div>
                 <x-filament::button

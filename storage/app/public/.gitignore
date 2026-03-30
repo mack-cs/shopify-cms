@@ -1,2 +1,6 @@
 *
 !.gitignore
+!template/
+template/*
+!template/dropdown-seed*.csv
+!template/New Products Template*

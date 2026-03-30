@@ -130,6 +130,7 @@ class NewProductDraftResource extends Resource
                                 ->placeholder('Select option')
                                 ->options(fn (): array => self::collectionOptions())
                                 ->searchable()
+                                ->preload()
                                 ->reactive()
                                 ->dehydrated(false)
                                 ->afterStateHydrated(function (Select $component, ?NewProductDraft $record): void {
@@ -779,11 +780,12 @@ class NewProductDraftResource extends Resource
         $collections = DropdownOption::query()
             ->whereNotNull('collection_style')
             ->where('collection_style', '!=', '')
+            ->distinct()
             ->orderBy('collection_style')
             ->pluck('collection_style')
             ->all();
 
-        return array_combine($collections, $collections);
+        return array_combine($collections, $collections) ?: [];
     }
 
     private static function collectionFromTags(?string $tags): ?string

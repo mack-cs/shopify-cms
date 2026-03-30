@@ -52,6 +52,7 @@ final class NewProductDraftSeeder
                         'uvp_short_paragraph' => $product->uvp_short_paragraph,
                         'batch' => $product->batch,
                         'image_url' => $imageUrl,
+                        'origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED,
                         'created_by' => $userId,
                     ];
 

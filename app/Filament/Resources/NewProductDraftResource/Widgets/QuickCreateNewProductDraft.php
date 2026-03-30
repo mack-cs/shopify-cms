@@ -78,6 +78,7 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
             'variant_inventory_policy' => 'deny',
             'variant_fulfillment_service' => 'manual',
             'batch' => 'batch' . now()->format('Ymd'),
+            'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
             'created_by' => Auth::id(),
         ]);
 
