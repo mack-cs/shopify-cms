@@ -88,7 +88,14 @@ class Image extends Model
 
     public function desiredSyncSourceUrl(): ?string
     {
-        return $this->backupReady() ? $this->backupPublicUrl() : null;
+        if ($this->backupReady() || $this->localUploadReady()) {
+            return route('product-image-backups.show', [
+                'image' => $this,
+                'filename' => $this->preferredFilename(),
+            ]);
+        }
+
+        return null;
     }
 
     public function backupPublicUrl(): ?string
@@ -101,6 +108,13 @@ class Image extends Model
             'image' => $this,
             'filename' => $this->preferredFilename(),
         ]);
+    }
+
+    public function localUploadReady(): bool
+    {
+        $imagePath = trim((string) $this->image_path);
+
+        return $imagePath !== '' && Storage::disk('public')->exists($imagePath);
     }
 
     public function preferredFilename(): string
@@ -165,12 +179,7 @@ class Image extends Model
 
     public function hasManagedSource(): bool
     {
-        if ($this->backupReady()) {
-            return true;
-        }
-
-        $imagePath = trim((string) $this->image_path);
-        if ($imagePath !== '' && Storage::disk('public')->exists($imagePath)) {
+        if ($this->backupReady() || $this->localUploadReady()) {
             return true;
         }
 

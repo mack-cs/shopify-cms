@@ -3386,7 +3386,7 @@ GQL;
 
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => "Skipped image {$image->id} because it has no usable backup-backed source URL.",
+                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
                 ];
 
                 return false;

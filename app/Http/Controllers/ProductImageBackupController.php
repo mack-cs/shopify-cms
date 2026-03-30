@@ -12,18 +12,32 @@ class ProductImageBackupController extends Controller
     {
         $image->loadMissing('imageAsset');
 
-        $asset = $image->imageAsset;
-        if (!$asset || !$asset->isAvailable()) {
-            abort(404);
-        }
-
         $downloadName = trim((string) ($filename ?: $image->backupFilename()));
 
-        return Storage::disk($asset->storage_disk)->response(
-            $asset->storage_path,
+        $asset = $image->imageAsset;
+        if ($asset && $asset->isAvailable()) {
+            return $this->streamDiskResponse(
+                $asset->storage_disk,
+                $asset->storage_path,
+                $downloadName
+            );
+        }
+
+        $localPath = trim((string) $image->image_path);
+        if ($localPath !== '' && Storage::disk('public')->exists($localPath)) {
+            return $this->streamDiskResponse('public', $localPath, $downloadName);
+        }
+
+        abort(404);
+    }
+
+    private function streamDiskResponse(string $disk, string $path, string $downloadName): StreamedResponse
+    {
+        return Storage::disk($disk)->response(
+            $path,
             $downloadName !== '' ? $downloadName : null,
             [
-                'Content-Disposition' => 'inline; filename="' . addslashes($downloadName !== '' ? $downloadName : basename($asset->storage_path)) . '"',
+                'Content-Disposition' => 'inline; filename="' . addslashes($downloadName !== '' ? $downloadName : basename($path)) . '"',
                 'Cache-Control' => 'public, max-age=3600',
             ]
         );
