@@ -67,6 +67,7 @@ class NewProductDraftResource extends Resource
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'New Products';
     protected static ?int $navigationSort = 1;
+    private static ?array $siblingCollectionLookupCache = null;
 
     private static function defaultBatch(): string
     {
@@ -762,8 +763,10 @@ class NewProductDraftResource extends Resource
                             Select::make('sibling_collection')
                                 ->label('Sibling Collection')
                                 ->placeholder('Select sibling collection')
-                                ->options(fn (Get $get): array => self::siblingCollectionOptions($get('sibling_collection')))
+                                ->helperText('Select the actual Shopify collection title here. "Sibling Collection" is the metafield name.')
+                                ->options(fn (): array => self::siblingCollectionOptions())
                                 ->searchable()
+                                ->getSearchResultsUsing(fn (string $search): array => self::siblingCollectionSearchResults($search))
                                 ->preload()
                                 ->getOptionLabelUsing(fn ($value): ?string => self::siblingCollectionDisplayLabel(
                                     is_string($value) ? $value : null
@@ -1073,28 +1076,10 @@ class NewProductDraftResource extends Resource
      */
     private static function siblingCollectionOptions(mixed $currentValue = null): array
     {
-        $options = ShopifyCollection::query()
-            ->select(['shopify_id', 'title', 'handle'])
-            ->whereNotNull('shopify_id')
-            ->where('shopify_id', '!=', '')
-            ->orderByRaw("CASE WHEN title IS NULL OR title = '' THEN 1 ELSE 0 END")
-            ->orderBy('title')
-            ->orderBy('handle')
+        $options = self::siblingCollectionQuery()
+            ->limit(100)
             ->get()
-            ->mapWithKeys(function (ShopifyCollection $collection): array {
-                $shopifyId = trim((string) ($collection->shopify_id ?? ''));
-                $label = self::siblingCollectionOptionLabel(
-                    $shopifyId,
-                    $collection->title,
-                    $collection->handle
-                );
-
-                if ($shopifyId === '' || $label === null) {
-                    return [];
-                }
-
-                return [$shopifyId => $label];
-            })
+            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
             ->all();
 
         $current = self::normalizeSiblingCollectionValue($currentValue);
@@ -1109,6 +1094,30 @@ class NewProductDraftResource extends Resource
         }
 
         return $options;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function siblingCollectionSearchResults(string $search): array
+    {
+        $term = trim($search);
+
+        $query = self::siblingCollectionQuery();
+
+        if ($term !== '') {
+            $query->where(function (Builder $query) use ($term): void {
+                $query->where('title', 'like', "%{$term}%")
+                    ->orWhere('handle', 'like', "%{$term}%")
+                    ->orWhere('shopify_id', 'like', "%{$term}%");
+            });
+        }
+
+        return $query
+            ->limit(50)
+            ->get()
+            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
+            ->all();
     }
 
     /**
@@ -1228,23 +1237,7 @@ class NewProductDraftResource extends Resource
 
         $normalized = strtolower(trim($current));
 
-        $collection = ShopifyCollection::query()
-            ->select(['shopify_id'])
-            ->whereNotNull('shopify_id')
-            ->where('shopify_id', '!=', '')
-            ->where(function (Builder $query) use ($current, $normalized): void {
-                $query->whereRaw('LOWER(title) = ?', [$normalized])
-                    ->orWhereRaw('LOWER(handle) = ?', [$normalized])
-                    ->orWhere('title', $current)
-                    ->orWhere('handle', $current);
-            })
-            ->orderByRaw("CASE WHEN LOWER(title) = ? THEN 0 WHEN LOWER(handle) = ? THEN 1 ELSE 2 END", [
-                $normalized,
-                $normalized,
-            ])
-            ->value('shopify_id');
-
-        $resolved = trim((string) ($collection ?? ''));
+        $resolved = trim((string) (self::siblingCollectionLookup()['aliases'][$normalized] ?? ''));
 
         return $resolved !== '' ? $resolved : $current;
     }
@@ -1256,17 +1249,9 @@ class NewProductDraftResource extends Resource
             return null;
         }
 
-        $collection = ShopifyCollection::query()
-            ->select(['shopify_id', 'title', 'handle'])
-            ->where('shopify_id', $normalized)
-            ->first();
-
-        if ($collection instanceof ShopifyCollection) {
-            return self::siblingCollectionOptionLabel(
-                $normalized,
-                $collection->title,
-                $collection->handle
-            );
+        $label = self::siblingCollectionLookup()['options'][$normalized] ?? null;
+        if (is_string($label) && $label !== '') {
+            return $label;
         }
 
         return $normalized;
@@ -1291,6 +1276,93 @@ class NewProductDraftResource extends Resource
         }
 
         return $resolvedId !== '' ? $resolvedId : null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function siblingCollectionOptionPair(ShopifyCollection $collection): array
+    {
+        $shopifyId = trim((string) ($collection->shopify_id ?? ''));
+        $label = self::siblingCollectionOptionLabel(
+            $shopifyId,
+            $collection->title,
+            $collection->handle
+        );
+
+        if ($shopifyId === '' || $label === null) {
+            return [];
+        }
+
+        return [$shopifyId => $label];
+    }
+
+    /**
+     * @return array{
+     *   options: array<string, string>,
+     *   aliases: array<string, string>
+     * }
+     */
+    private static function siblingCollectionLookup(): array
+    {
+        if (self::$siblingCollectionLookupCache !== null) {
+            return self::$siblingCollectionLookupCache;
+        }
+
+        $options = [];
+        $aliases = [];
+
+        ShopifyCollection::query()
+            ->select(['shopify_id', 'title', 'handle'])
+            ->whereNotNull('shopify_id')
+            ->where('shopify_id', '!=', '')
+            ->orderByRaw("CASE WHEN title IS NULL OR title = '' THEN 1 ELSE 0 END")
+            ->orderBy('title')
+            ->orderBy('handle')
+            ->get()
+            ->each(function (ShopifyCollection $collection) use (&$options, &$aliases): void {
+                $shopifyId = trim((string) ($collection->shopify_id ?? ''));
+                if ($shopifyId === '') {
+                    return;
+                }
+
+                $label = self::siblingCollectionOptionLabel(
+                    $shopifyId,
+                    $collection->title,
+                    $collection->handle
+                );
+
+                if ($label !== null) {
+                    $options[$shopifyId] = $label;
+                }
+
+                foreach ([
+                    trim((string) ($collection->title ?? '')),
+                    trim((string) ($collection->handle ?? '')),
+                ] as $alias) {
+                    $normalizedAlias = strtolower($alias);
+                    if ($normalizedAlias !== '' && !array_key_exists($normalizedAlias, $aliases)) {
+                        $aliases[$normalizedAlias] = $shopifyId;
+                    }
+                }
+            });
+
+        return self::$siblingCollectionLookupCache = [
+            'options' => $options,
+            'aliases' => $aliases,
+        ];
+    }
+
+    private static function siblingCollectionQuery(): Builder
+    {
+        return ShopifyCollection::query()
+            ->select(['shopify_id', 'title', 'handle'])
+            ->whereNotNull('shopify_id')
+            ->where('shopify_id', '!=', '')
+            ->distinct()
+            ->orderByRaw("CASE WHEN title IS NULL OR title = '' THEN 1 ELSE 0 END")
+            ->orderBy('title')
+            ->orderBy('handle');
     }
 
     private static function vendorSelectionHint(mixed $collection, mixed $vendor): ?HtmlString
