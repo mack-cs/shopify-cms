@@ -260,6 +260,12 @@ final class NewProductDraftProductSync
         $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products);
+        foreach ($this->extraDraftPayloadHeaders($product) as $header) {
+            $updates[$header] = '';
+        }
+        foreach ($this->extraDraftPayloadUpdates($draft, $product) as $header => $value) {
+            $updates[$header] = $value;
+        }
 
         if (empty($updates)) {
             return;
@@ -284,5 +290,40 @@ final class NewProductDraftProductSync
         }
 
         $updates[$header] = $stringValue;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function extraDraftPayloadHeaders(Product $product): array
+    {
+        return HeaderStore::extraProductHeadersForDraftWorkflow($product->import?->headers ?? []);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function extraDraftPayloadUpdates(NewProductDraft $draft, Product $product): array
+    {
+        $payload = is_array($draft->payload) ? $draft->payload : [];
+        $allowed = array_flip($this->extraDraftPayloadHeaders($product));
+
+        $updates = [];
+        foreach ($payload as $header => $value) {
+            if (!is_string($header) || !isset($allowed[$header])) {
+                continue;
+            }
+
+            if (is_array($value)) {
+                $value = implode('; ', array_values(array_filter(array_map(
+                    fn (mixed $item): string => trim((string) $item),
+                    $value
+                ))));
+            }
+
+            $updates[$header] = is_scalar($value) ? trim((string) $value) : '';
+        }
+
+        return $updates;
     }
 }

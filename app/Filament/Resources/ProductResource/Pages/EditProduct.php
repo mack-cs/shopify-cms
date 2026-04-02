@@ -60,10 +60,6 @@ class EditProduct extends EditRecord
     protected function afterSave(): void
     {
         $data = $this->form->getState();
-        $extra = $data['extra_shopify_fields'] ?? [];
-
-        $headers = $this->record->import?->headers ?? [];
-        $allowed = array_flip(HeaderStore::extraProductHeaders($headers));
 
         $rows = ShopifyRow::where('import_id', $this->record->import_id)
             ->where('handle', $this->record->handle)
@@ -163,14 +159,6 @@ class EditProduct extends EditRecord
         if (array_key_exists('cost_per_item', $formState)) {
             $data['Cost per item'] = $formState['cost_per_item'] ?? '';
         }
-        foreach ($extra as $item) {
-            $key = $item['key'] ?? null;
-            if (!$key || (!empty($allowed) && !isset($allowed[$key]))) {
-                continue;
-            }
-            $data[$key] = $item['value'] ?? '';
-        }
-
         foreach ($rows as $row) {
             $row->data = $data;
             $row->save();

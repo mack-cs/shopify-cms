@@ -11,6 +11,11 @@ class ListNewProductDrafts extends ListRecords
     protected static string $resource = NewProductDraftResource::class;
     protected $listeners = ['draft-created' => '$refresh'];
 
+    public function updatedPaginators($page, $pageName): void
+    {
+        $this->dispatch('scroll-to-top');
+    }
+
     public function getHeaderWidgetsColumns(): int|array
     {
         return 1;

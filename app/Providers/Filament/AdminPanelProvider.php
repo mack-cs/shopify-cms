@@ -14,6 +14,7 @@ use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
 use Filament\Support\Assets\Css;
+use Filament\View\PanelsRenderHook;
 use Filament\Widgets;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
@@ -51,6 +52,10 @@ class AdminPanelProvider extends PanelProvider
             ->assets([
                 Css::make('filament-admin', asset('css/filament-admin.css')),
             ])
+            ->renderHook(
+                PanelsRenderHook::SCRIPTS_AFTER,
+                fn (): string => view('filament.partials.scroll-to-top-listener')->render(),
+            )
             ->databaseNotifications()
             ->sidebarCollapsibleOnDesktop()
             ->navigationGroups([

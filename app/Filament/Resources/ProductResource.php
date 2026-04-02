@@ -13,7 +13,6 @@ use App\Models\Import;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
-use Filament\Forms\Form;
 use Filament\Tables\Table;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
@@ -33,7 +32,6 @@ use Filament\Forms\Components\Tabs;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\RichEditor;
-use Filament\Tables\Actions\EditAction;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
@@ -48,6 +46,7 @@ use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Actions\DeleteBulkAction;
 use Illuminate\Support\Collection;
 use App\Filament\Exports\ProductExporter;
+use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource\Pages;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Filament\Resources\RelationManagers\RelationManager;
@@ -56,6 +55,7 @@ use App\Services\HeaderStore;
 use App\Services\CategoryTypeMap;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
+use App\Services\NewProductDraftSeeder;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Models\Tag;
@@ -844,13 +844,16 @@ class ProductResource extends Resource
                         ->schema([
                             Repeater::make('extra_shopify_fields')
                                 ->label('Fields')
+                                ->helperText('Edit these fields from New Products.')
                                 ->schema([
                                     TextInput::make('key')
                                         ->label('Field')
                                         ->disabled()
                                         ->dehydrated(),
                                     TextInput::make('value')
-                                        ->label('Value'),
+                                        ->label('Value')
+                                        ->disabled()
+                                        ->dehydrated(false),
                                 ])
                                 ->columns(2)
                                 ->grid(2)
@@ -1107,38 +1110,16 @@ class ProductResource extends Resource
                 ->action(function (Product $record): void {
                     self::approveRecord($record);
                 }),
-            EditAction::make()
+            Action::make('editDraft')
+                ->label('Edit Draft')
+                ->icon('heroicon-o-pencil-square')
                 ->iconButton()
                 ->color('gray')
-                ->tooltip('Edit')
-                ->visible(fn (Product $record): bool => static::canEdit($record)),
-            Action::make('quickEdit')
-                ->label('Quick Edit')
-                ->icon('heroicon-o-adjustments-horizontal')
-                ->iconButton()
-                ->color('gray')
-                ->tooltip('Quick Edit')
-                ->modalHeading(function (Product $record): HtmlString {
-                    $name = trim((string) ($record->title ?? ''));
-                    if ($name === '') {
-                        $name = trim((string) ($record->handle ?? ''));
-                    }
-                    if ($name === '') {
-                        return new HtmlString('Quick Edit');
-                    }
+                ->tooltip('Edit Draft')
+                ->action(function (Product $record) {
+                    $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($record, Auth::id());
 
-                    $safeName = e($name);
-                    return new HtmlString("Quick Edit | <em>{$safeName}</em>");
-                })
-                ->form(function (Action $action, Form $form, Product $record): array {
-                    return self::form($form->model($record))->getComponents();
-                })
-                ->mountUsing(function (Action $action, Form $form, Product $record): void {
-                    $record->refresh();
-                    $form->fill($record->attributesToArray());
-                })
-                ->action(function (Product $record, array $data): void {
-                    self::applyEditModal($record, $data);
+                    return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
                 })
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
             Tables\Actions\DeleteAction::make()
@@ -1148,16 +1129,6 @@ class ProductResource extends Resource
                 ->visible(fn (Product $record): bool => static::canDelete($record)),
         ])->bulkActions([
             BulkActionGroup::make([
-                BulkAction::make('bulkEdit')
-                    ->label('Bulk Edit')
-                    ->icon('heroicon-o-pencil-square')
-                    ->color('gray')
-                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--edit'])
-                    ->form(self::bulkEditFormSchema())
-                    ->action(function (Collection $records, array $data): void {
-                        self::applyBulkEdits($records, $data);
-                    })
-                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkApprove')
                     ->label('Bulk Approve')
                     ->icon('heroicon-o-check-badge')

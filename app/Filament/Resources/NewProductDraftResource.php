@@ -3,19 +3,25 @@
 namespace App\Filament\Resources;
 
 use App\Enums\RolesEnum;
+use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\NewProductDraftResource\RelationManagers;
 use App\Filament\Resources\NewProductDraftResource\Pages;
 use App\Models\Color;
+use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
 use App\Models\Product;
+use App\Models\RequiredField;
 use App\Models\ShopifyCollection;
+use App\Models\ShopifyRow;
+use App\Models\Status;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\NewProductDraftProductSync;
 use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
 use Filament\Forms;
@@ -68,8 +74,13 @@ class NewProductDraftResource extends Resource
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
-            Forms\Components\Grid::make(3)
+            Forms\Components\Tabs::make('NewProductDraftTabs')
+                ->columnSpanFull()
                 ->schema([
+                    Forms\Components\Tabs\Tab::make('Details')
+                        ->schema([
+                            Forms\Components\Grid::make(3)
+                                ->schema([
                     Group::make([
                         Section::make('Core')
                             ->schema([
@@ -277,6 +288,7 @@ class NewProductDraftResource extends Resource
                         ->schema([
                             Select::make('color_string')
                                 ->label('Colors')
+                                ->helperText(fn (Get $get): ?HtmlString => self::colorSelectionHint($get))
                                 ->multiple()
                                 ->searchable()
                                 ->preload()
@@ -334,6 +346,21 @@ class NewProductDraftResource extends Resource
                                     }
                                 })
                                 ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::COLOR_METAFIELD,
+                                                vendor: $get('vendor'),
+                                                productType: $get('type'),
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
                                     function (Get $get): \Closure {
                                         return function (string $attribute, $value, $fail) use ($get): void {
                                             $values = is_array($value) ? $value : [];
@@ -447,6 +474,10 @@ class NewProductDraftResource extends Resource
                                 ]),
                             Select::make('complementary_products')
                                 ->label('Complementary products')
+                                ->helperText(fn (Get $get): ?HtmlString => self::productReferenceStatusHint(
+                                    $get,
+                                    'complementary_products'
+                                ))
                                 ->placeholder('Select products')
                                 ->multiple()
                                 ->searchable()
@@ -454,6 +485,14 @@ class NewProductDraftResource extends Resource
                                 ->options(fn (Get $get): array => self::productReferenceOptions(
                                     $get('complementary_products')
                                 ))
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail): void {
+                                        $invalid = self::invalidProductReferenceStatusLabels($value);
+                                        if (!empty($invalid)) {
+                                            $fail('Inactive products selected: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
                                 ->afterStateHydrated(function (Select $component, $state): void {
                                     $component->state(self::parseProductReferenceState($state));
                                 })
@@ -648,6 +687,10 @@ class NewProductDraftResource extends Resource
                         ->schema([
                             Select::make('siblings')
                                 ->label('Siblings')
+                                ->helperText(fn (Get $get): ?HtmlString => self::productReferenceStatusHint(
+                                    $get,
+                                    'siblings'
+                                ))
                                 ->placeholder('Select products')
                                 ->multiple()
                                 ->searchable()
@@ -655,6 +698,14 @@ class NewProductDraftResource extends Resource
                                 ->options(fn (Get $get): array => self::productReferenceOptions(
                                     $get('siblings')
                                 ))
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail): void {
+                                        $invalid = self::invalidProductReferenceStatusLabels($value);
+                                        if (!empty($invalid)) {
+                                            $fail('Inactive products selected: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
                                 ->afterStateHydrated(function (Select $component, $state): void {
                                     $component->state(self::parseProductReferenceState($state));
                                 })
@@ -663,6 +714,7 @@ class NewProductDraftResource extends Resource
                                 ->label('Siblings Collection Name')
                                 ->placeholder('Select option')
                                 ->searchable()
+                                ->preload()
                                 ->options(fn (Get $get): array => self::siblingsCollectionNameOptions(
                                     is_string($get('siblings_collection_name')) ? $get('siblings_collection_name') : null
                                 )),
@@ -836,7 +888,7 @@ class NewProductDraftResource extends Resource
                             fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
                                 $invalid = self::invalidCollectionSelectionValues(
                                     $value,
-                                    self::designOptionsForDraftState($get)
+                                    self::allowedDesignOptionsForDraftState($get)
                                 );
                                 if (!empty($invalid)) {
                                     $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -868,7 +920,49 @@ class NewProductDraftResource extends Resource
                 ->columnSpan(1),
                 ])
                 ->columnSpanFull(),
-        ]);
+                        ]),
+                    Forms\Components\Tabs\Tab::make('Extra Fields')
+                        ->schema([
+                            Section::make('Extra Shopify Fields')
+                                ->schema([
+                                    Forms\Components\Repeater::make('extra_shopify_fields')
+                                        ->label('Fields')
+                                        ->schema([
+                                            TextInput::make('key')
+                                                ->label('Field')
+                                                ->disabled()
+                                                ->dehydrated(),
+                                            TextInput::make('value')
+                                                ->label('Value'),
+                                        ])
+                                        ->columns(2)
+                                        ->grid(2)
+                                        ->addable(false)
+                                        ->deletable(false)
+                                        ->reorderable(false)
+                                        ->rules(function (Get $get): array {
+                                            $key = $get('key');
+                                            if (!$key) {
+                                                return [];
+                                            }
+                                            if (!in_array($key, HeaderStore::semicolonSeparatedHeaders(), true)) {
+                                                return [];
+                                            }
+                                            return [
+                                                function (string $attribute, $value, $fail) use ($key): void {
+                                                    if ($value !== null && str_contains((string) $value, ',')) {
+                                                        $fail("{$key} must use ';' separators (no commas).");
+                                                    }
+                                                },
+                                            ];
+                                        })
+                                        ->afterStateHydrated(function (Forms\Components\Repeater $component, ?NewProductDraft $record): void {
+                                            $component->state(self::extraShopifyFieldsForDraft($record));
+                                        }),
+                                ]),
+                        ]),
+                ]),
+        ])->columns(1);
     }
 
     private static function collectionOptions(): array
@@ -1071,17 +1165,25 @@ class NewProductDraftResource extends Resource
      */
     private static function designOptionsForDraftState(Get $get, mixed $currentValue = null): array
     {
+        return self::withCurrentOptions(
+            self::allowedDesignOptionsForDraftState($get),
+            $currentValue
+        );
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function allowedDesignOptionsForDraftState(Get $get): array
+    {
         $header = self::designHeaderForDraftState($get);
         if ($header === null) {
             return [];
         }
 
-        return self::withCurrentOptions(
-            self::dropdownOptionsForHeader(
-                $header,
-                tags: self::filterTags($get, $get('vendor'), $get('type'))
-            ),
-            $currentValue
+        return self::dropdownOptionsForHeader(
+            $header,
+            tags: self::filterTags($get, $get('vendor'), $get('type'))
         );
     }
 
@@ -1104,7 +1206,7 @@ class NewProductDraftResource extends Resource
 
         $invalid = self::invalidCollectionSelectionValues(
             $get('product_design'),
-            self::designOptionsForDraftState($get)
+            self::allowedDesignOptionsForDraftState($get)
         );
 
         if (empty($invalid)) {
@@ -1354,6 +1456,85 @@ class NewProductDraftResource extends Resource
             . '. Remove them or choose values available for this collection.';
 
         return new HtmlString('<span class="text-danger-600">' . e($message) . '</span>');
+    }
+
+    private static function colorSelectionHint(Get $get): ?HtmlString
+    {
+        $parts = [];
+
+        $invalid = self::invalidCollectionSelectionValues(
+            $get('color_string'),
+            self::dropdownOptionsForHeader(
+                HeaderStore::COLOR_METAFIELD,
+                vendor: $get('vendor'),
+                productType: $get('type'),
+                tags: self::filterTags($get, $get('vendor'), $get('type'))
+            )
+        );
+
+        if (!empty($invalid)) {
+            $parts[] = 'Invalid value(s) for selected collection: ' . implode('; ', $invalid)
+                . '. Remove them or choose values available for this collection.';
+        }
+
+        $conflict = trim((string) ($get('color_conflict_message') ?? ''));
+        if ($conflict !== '') {
+            $parts[] = $conflict;
+        }
+
+        if (empty($parts)) {
+            return null;
+        }
+
+        return new HtmlString('<span class="text-danger-600">' . e(implode(' ', $parts)) . '</span>');
+    }
+
+    private static function productReferenceStatusHint(Get $get, string $field): ?HtmlString
+    {
+        $invalid = self::invalidProductReferenceStatusLabels($get($field));
+
+        if (empty($invalid)) {
+            return null;
+        }
+
+        $message = 'Inactive products in this list: ' . implode('; ', $invalid)
+            . '. Remove them before saving.';
+
+        return new HtmlString('<span class="text-danger-600">' . e($message) . '</span>');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function invalidProductReferenceStatusLabels(mixed $value): array
+    {
+        $selected = self::parseProductReferenceState($value);
+        if (empty($selected)) {
+            return [];
+        }
+
+        $products = Product::query()
+            ->whereIn('shopify_id', $selected)
+            ->get(['shopify_id', 'title', 'handle', 'status'])
+            ->keyBy(fn (Product $product): string => trim((string) $product->shopify_id));
+
+        $invalid = [];
+
+        foreach ($selected as $gid) {
+            $product = $products->get($gid);
+            if (!$product instanceof Product) {
+                continue;
+            }
+
+            $status = strtolower(trim((string) ($product->status ?? '')));
+            if (in_array($status, ['active', 'draft'], true)) {
+                continue;
+            }
+
+            $invalid[] = self::productReferenceLabel($product);
+        }
+
+        return array_values(array_unique($invalid));
     }
 
     /**
@@ -1621,7 +1802,8 @@ class NewProductDraftResource extends Resource
                     ->label('Error fields')
                     ->color(fn (NewProductDraft $record): string => self::draftHasLinkedProductErrors($record) ? 'danger' : 'gray')
                     ->state(fn (NewProductDraft $record): string => self::draftErrorFieldsSummary($record))
-                    ->wrap()
+                    ->extraAttributes(['style' => 'min-width: 32rem;'])
+                    ->tooltip(fn (NewProductDraft $record): string => self::draftErrorFieldsSummary($record))
                     ->toggleable(),
                 TextColumn::make('type')->label('Type')->toggleable(),
                 TextColumn::make('vendor')->toggleable(),
@@ -1708,6 +1890,23 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->actions([
+                Tables\Actions\Action::make('editImagesAndVariants')
+                    ->label('Edit Images / Variants')
+                    ->icon('heroicon-o-photo')
+                    ->color('gray')
+                    ->visible(fn (NewProductDraft $record): bool => self::linkedProductEditUrl($record) !== null)
+                    ->url(fn (NewProductDraft $record): ?string => self::linkedProductEditUrl($record)),
+                Tables\Actions\Action::make('quickEdit')
+                    ->label('Quick Edit')
+                    ->icon('heroicon-o-adjustments-horizontal')
+                    ->iconButton()
+                    ->color('gray')
+                    ->tooltip('Quick Edit')
+                    ->form(self::draftQuickEditFormSchema())
+                    ->fillForm(fn (NewProductDraft $record): array => self::draftQuickEditDefaults($record))
+                    ->action(function (NewProductDraft $record, array $data): void {
+                        self::applyQuickEditsToDraft($record, $data);
+                    }),
                 Tables\Actions\EditAction::make()->color('warning'),
                 Tables\Actions\DeleteAction::make()->color('danger'),
             ])
@@ -1767,6 +1966,15 @@ class NewProductDraftResource extends Resource
             ])
             ->bulkActions([
                 BulkActionGroup::make([
+                    BulkAction::make('bulkEdit')
+                        ->label('Bulk Edit')
+                        ->icon('heroicon-o-pencil-square')
+                        ->color('gray')
+                        ->form(self::draftBulkEditFormSchema())
+                        ->action(function ($records, array $data): void {
+                            self::applyBulkEditsToDrafts($records, $data);
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     DeleteBulkAction::make(),
                     BulkAction::make('bulkApproveForShopify')
                         ->label('Bulk Approve for Shopify')
@@ -2200,6 +2408,602 @@ class NewProductDraftResource extends Resource
         $src = is_string($src) ? trim($src) : '';
 
         return $src !== '' ? $src : null;
+    }
+
+    private static function linkedProductForDraft(NewProductDraft $record): ?Product
+    {
+        $product = $record->relationLoaded('product')
+            ? $record->product
+            : $record->product()->first();
+
+        return $product instanceof Product ? $product : null;
+    }
+
+    private static function linkedProductEditUrl(NewProductDraft $record): ?string
+    {
+        $product = self::linkedProductForDraft($record);
+        if (!$product) {
+            return null;
+        }
+
+        return ProductResource::getUrl('edit', ['record' => $product]);
+    }
+
+    /**
+     * @return array<int, array{key:string,value:string}>
+     */
+    private static function extraShopifyFieldsForDraft(?NewProductDraft $record): array
+    {
+        $headers = self::extraShopifyHeadersForDraft($record);
+        $payload = is_array($record?->payload) ? $record->payload : [];
+
+        return array_map(function (string $header) use ($payload, $record): array {
+            $value = $payload[$header] ?? self::linkedDraftRowValue($record, $header);
+
+            return [
+                'key' => $header,
+                'value' => is_scalar($value) ? (string) $value : '',
+            ];
+        }, $headers);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function extraShopifyHeadersForDraft(?NewProductDraft $record): array
+    {
+        $headers = [];
+
+        $product = $record ? self::linkedProductForDraft($record) : null;
+        if ($product) {
+            $headers = $product->import?->headers ?? [];
+        } else {
+            $currentImport = Import::query()->where('is_current', true)->first();
+            $headers = $currentImport?->headers ?? [];
+        }
+
+        if (empty($headers)) {
+            $headers = self::templateHeaders();
+        }
+
+        return HeaderStore::extraProductHeadersForDraftWorkflow($headers);
+    }
+
+    private static function linkedDraftRowValue(?NewProductDraft $record, string $header): string
+    {
+        if (!$record || blank($record->handle)) {
+            return '';
+        }
+
+        $product = self::linkedProductForDraft($record);
+        if (!$product) {
+            return '';
+        }
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        return is_string($row?->get($header, null)) ? (string) $row->get($header, '') : '';
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    public static function mutateDraftFormData(array $data): array
+    {
+        $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
+        unset($data['extra_shopify_fields']);
+
+        return $data;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    private static function payloadFromExtraShopifyFields(mixed $state): ?array
+    {
+        if (!is_array($state)) {
+            return null;
+        }
+
+        $payload = [];
+        foreach ($state as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $key = trim((string) ($item['key'] ?? ''));
+            if ($key === '') {
+                continue;
+            }
+
+            $value = trim((string) ($item['value'] ?? ''));
+            if ($value === '') {
+                continue;
+            }
+
+            $payload[$key] = $value;
+        }
+
+        return $payload === [] ? null : $payload;
+    }
+
+    /**
+     * @return array<int, array{attribute:string,label:string,type:string,safe_key:string}>
+     */
+    private static function draftQuickEditableFields(): array
+    {
+        $fields = [
+            ['attribute' => 'title', 'label' => 'Title', 'type' => 'text'],
+            ['attribute' => 'sku', 'label' => 'SKU', 'type' => 'text'],
+            ['attribute' => 'vendor', 'label' => 'Vendor', 'type' => 'text'],
+            ['attribute' => 'type', 'label' => 'Type', 'type' => 'type'],
+            ['attribute' => 'product_category', 'label' => 'Category', 'type' => 'category'],
+            ['attribute' => 'tags', 'label' => 'Tags', 'type' => 'tags'],
+            ['attribute' => 'status', 'label' => 'Status', 'type' => 'status'],
+            ['attribute' => 'published', 'label' => 'Published', 'type' => 'published'],
+            ['attribute' => 'body_html', 'label' => 'Description', 'type' => 'textarea'],
+            ['attribute' => 'variant_price', 'label' => 'Price', 'type' => 'numeric'],
+            ['attribute' => 'variant_compare_at_price', 'label' => 'Compare-at Price', 'type' => 'numeric'],
+            ['attribute' => 'variant_inventory_qty', 'label' => 'Inventory', 'type' => 'numeric'],
+            ['attribute' => 'material_cost', 'label' => 'Material Cost', 'type' => 'numeric'],
+            ['attribute' => 'uvp_short_paragraph', 'label' => 'UVP Short Paragraph', 'type' => 'textarea'],
+            ['attribute' => 'batch', 'label' => 'Batch', 'type' => 'text'],
+        ];
+
+        return array_map(function (array $field): array {
+            $field['safe_key'] = 'f_' . md5($field['attribute']);
+
+            return $field;
+        }, $fields);
+    }
+
+    private static function draftBulkEditFormSchema(): array
+    {
+        $fields = self::draftBulkEditableFields();
+        if (empty($fields)) {
+            return [
+                Placeholder::make('no_bulk_fields')
+                    ->content('No bulk-editable fields are configured.'),
+            ];
+        }
+
+        $schema = [
+            Placeholder::make('bulk_edit_hint')
+                ->label('')
+                ->content('Tick a field to enable it, then enter the value to apply to all selected products.'),
+        ];
+
+        $schema[] = Forms\Components\Grid::make(1)
+            ->schema(array_map(function (array $field) {
+                $safeKey = $field['safe_key'];
+                $label = $field['label'];
+
+                return Forms\Components\Grid::make(12)
+                    ->schema([
+                        Forms\Components\Checkbox::make("fields.{$safeKey}")
+                            ->label($label)
+                            ->live()
+                            ->columnSpan(4),
+                        self::draftBulkEditComponent($field)
+                            ->label('')
+                            ->statePath("values.{$safeKey}")
+                            ->columnSpan(8)
+                            ->disabled(fn (Get $get): bool => !($get("fields.{$safeKey}") ?? false))
+                            ->dehydrated(fn (Get $get): bool => (bool) ($get("fields.{$safeKey}") ?? false)),
+                    ]);
+            }, $fields));
+
+        return $schema;
+    }
+
+    private static function draftQuickEditFormSchema(): array
+    {
+        return self::draftEditSelectionSchema('Quick edit hint - (Tick the fields to edit for this draft, then enter the new values.)');
+    }
+
+    private static function draftEditSelectionSchema(string $hint): array
+    {
+        $fields = self::draftQuickEditableFields();
+        if (empty($fields)) {
+            return [
+                Placeholder::make('no_draft_edit_fields')
+                    ->content('No draft edit fields are configured.'),
+            ];
+        }
+
+        $schema = [
+            Placeholder::make('draft_edit_hint')
+                ->label($hint)
+                ->content(''),
+        ];
+
+        $schema[] = Forms\Components\Grid::make(1)
+            ->schema(array_map(function (array $field) {
+                $safeKey = $field['safe_key'];
+
+                return Forms\Components\Grid::make(12)
+                    ->schema([
+                        Forms\Components\Checkbox::make("fields.{$safeKey}")
+                            ->label($field['label'])
+                            ->live()
+                            ->columnSpan(4),
+                        self::draftBulkEditComponent($field)
+                            ->label('')
+                            ->statePath("values.{$safeKey}")
+                            ->columnSpan(8)
+                            ->disabled(fn (Get $get): bool => !($get("fields.{$safeKey}") ?? false))
+                            ->dehydrated(fn (Get $get): bool => (bool) ($get("fields.{$safeKey}") ?? false)),
+                    ]);
+            }, $fields));
+
+        return $schema;
+    }
+
+    private static function draftBulkEditComponent(array $field): Forms\Components\Component
+    {
+        $name = $field['safe_key'];
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'tags') {
+            return Select::make($name)
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn () => Tag::query()->orderBy('name')->pluck('name', 'name')->all());
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'color_string') {
+            return Select::make($name)
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn (): array => self::dropdownOptionsForHeader(HeaderStore::COLOR_METAFIELD));
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'type') {
+            return Select::make($name)
+                ->options(array_combine(CategoryTypeMap::types(), CategoryTypeMap::types()))
+                ->searchable();
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'product_category') {
+            return Select::make($name)
+                ->options(CategoryTypeMap::categoryOptions())
+                ->getOptionLabelUsing(fn ($value): ?string => CategoryTypeMap::categoryLabelForValue(
+                    is_string($value) ? $value : null
+                ))
+                ->dehydrateStateUsing(function ($state): ?string {
+                    if (!is_string($state) || trim($state) === '') {
+                        return null;
+                    }
+
+                    $mapping = CategoryTypeMap::byCategoryValue($state);
+                    return $mapping['shopify_taxonomy_gid'] ?? $state;
+                })
+                ->searchable();
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'status') {
+            return Select::make($name)
+                ->options(fn () => Status::query()->orderBy('name')->pluck('name', 'name')->all())
+                ->searchable();
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'published') {
+            return Forms\Components\Toggle::make($name);
+        }
+
+        if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'body_html') {
+            return Textarea::make($name)->rows(4);
+        }
+
+        return match ($field['type'] ?? 'text') {
+            'textarea' => Textarea::make($name)->rows(4),
+            'numeric' => TextInput::make($name)->numeric(),
+            default => TextInput::make($name),
+        };
+    }
+
+    /**
+     * @return array<int, array{key:string,safe_key:string,source:string,attribute:string,label:string}>
+     */
+    private static function draftBulkEditableFields(): array
+    {
+        $labelOverrides = [
+            'product|color_string' => 'Colors',
+            'product|product_category' => 'Category',
+            'product|google_product_category' => 'Google product category',
+            'product|seo_title' => 'SEO title',
+            'product|seo_description' => 'SEO description',
+            'row|' . HeaderStore::JEWELRY_MATERIAL => 'Jewelry material',
+            'row|' . HeaderStore::BRACELET_DESIGN => 'Bracelet design',
+        ];
+
+        $lockedProductFields = [
+            'handle',
+            'title',
+            'body_html',
+            'seo_title',
+            'seo_description',
+        ];
+
+        $lockedRowFields = [
+            HeaderStore::IMAGE_SRC,
+            HeaderStore::IMAGE_ALT_TEXT,
+            HeaderStore::IMAGE_POSITION,
+        ];
+
+        $fields = [];
+
+        foreach (
+            RequiredField::query()
+                ->where('bulk_editable', true)
+                ->whereIn('source', ['product', 'row'])
+                ->orderBy('label')
+                ->get() as $field
+        ) {
+            if ($field->source === 'product' && in_array($field->attribute, $lockedProductFields, true)) {
+                continue;
+            }
+
+            if ($field->source === 'row' && in_array($field->attribute, $lockedRowFields, true)) {
+                continue;
+            }
+
+            if (!self::supportsDraftBulkField($field->source, $field->attribute)) {
+                continue;
+            }
+
+            $labelKey = "{$field->source}|{$field->attribute}";
+            $label = $labelOverrides[$labelKey] ?? $field->label;
+            $key = "{$field->source}__{$field->attribute}";
+
+            $fields[] = [
+                'key' => $key,
+                'safe_key' => 'f_' . md5($key),
+                'source' => $field->source,
+                'attribute' => $field->attribute,
+                'label' => $label,
+            ];
+        }
+
+        return $fields;
+    }
+
+    private static function supportsDraftBulkField(string $source, string $attribute): bool
+    {
+        if ($source === 'product') {
+            return in_array($attribute, [
+                'vendor',
+                'tags',
+                'type',
+                'published',
+                'product_category',
+                'google_product_category',
+                'status',
+                'color_string',
+                'batch',
+            ], true);
+        }
+
+        if ($source === 'row') {
+            return self::draftAttributeForBulkRowHeader($attribute) !== null;
+        }
+
+        return false;
+    }
+
+    private static function draftAttributeForBulkRowHeader(string $header): ?string
+    {
+        return match ($header) {
+            HeaderStore::COST_PER_ITEM,
+            HeaderStore::MATERIAL_COST => 'material_cost',
+            HeaderStore::JEWELRY_MATERIAL => 'jewelry_material',
+            HeaderStore::PRODUCT_MATERIALS => 'product_materials',
+            HeaderStore::MATERIALS_AND_DIMENSIONS => 'materials_and_dimensions',
+            HeaderStore::BRACELET_DESIGN,
+            HeaderStore::NECKLACE_DESIGN,
+            HeaderStore::EARRING_DESIGN => 'product_design',
+            HeaderStore::PRODUCT_METALS => 'metal',
+            HeaderStore::PATTERN_CATEGORY => 'colour_style',
+            HeaderStore::SIZE => 'size',
+            HeaderStore::SIBLINGS => 'siblings',
+            HeaderStore::SIBLINGS_COLLECTION_NAME => 'siblings_collection_name',
+            HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
+            HeaderStore::COMPLEMENTARY_PRODUCTS => 'complementary_products',
+            default => null,
+        };
+    }
+
+    /**
+     * @return array{fields:array<string,bool>,values:array<string,mixed>}
+     */
+    private static function draftQuickEditDefaults(NewProductDraft $record): array
+    {
+        $values = [];
+        foreach (self::draftQuickEditableFields() as $field) {
+            $attribute = $field['attribute'];
+            $value = $record->getAttribute($attribute);
+
+            if ($attribute === 'tags') {
+                $value = self::normalizeTagList($value);
+            } elseif ($attribute === 'published') {
+                $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+            }
+
+            $values[$field['safe_key']] = $value;
+        }
+
+        return [
+            'fields' => [],
+            'values' => $values,
+        ];
+    }
+
+    private static function applyQuickEditsToDraft(NewProductDraft $record, array $data): void
+    {
+        self::applySelectedDraftEdits([$record], $data);
+    }
+
+    private static function applyBulkEditsToDrafts(iterable $records, array $data): void
+    {
+        $selected = array_keys(array_filter($data['fields'] ?? []));
+        $values = $data['values'] ?? [];
+        if (!is_array($selected) || empty($selected)) {
+            return;
+        }
+
+        $fieldMap = [];
+        foreach (self::draftBulkEditableFields() as $field) {
+            $fieldMap[$field['safe_key']] = $field;
+        }
+
+        foreach ($records as $record) {
+            if (!$record instanceof NewProductDraft) {
+                continue;
+            }
+
+            $updates = [];
+
+            foreach ($selected as $safeKey) {
+                $field = $fieldMap[$safeKey] ?? null;
+                if (!$field) {
+                    continue;
+                }
+
+                $value = $values[$safeKey] ?? null;
+
+                if ($field['source'] === 'product') {
+                    $attribute = $field['attribute'];
+
+                    if ($attribute === 'tags') {
+                        $updates['tags'] = TagNormalizer::normalizeFromArray(is_array($value) ? $value : []);
+                        continue;
+                    }
+
+                    if ($attribute === 'color_string') {
+                        $arr = is_array($value) ? $value : [];
+                        $clean = array_values(array_unique(array_filter(array_map(
+                            fn ($v) => trim((string) $v),
+                            $arr
+                        ))));
+                        $updates['color_string'] = $clean ? implode('; ', $clean) : null;
+                        continue;
+                    }
+
+                    if ($attribute === 'published') {
+                        $updates['published'] = $value ? 'true' : 'false';
+                        continue;
+                    }
+
+                    $updates[$attribute] = $value;
+                    continue;
+                }
+
+                if ($field['source'] === 'row') {
+                    $draftAttribute = self::draftAttributeForBulkRowHeader($field['attribute']);
+                    if ($draftAttribute === null) {
+                        continue;
+                    }
+
+                    $updates[$draftAttribute] = self::nullIfEmpty($value);
+                }
+            }
+
+            if (empty($updates)) {
+                continue;
+            }
+
+            $record->fill($updates)->save();
+            app(NewProductDraftProductSync::class)->syncToExistingProduct($record, ensureApprovalReset: false);
+        }
+    }
+
+    private static function applySelectedDraftEdits(iterable $records, array $data): void
+    {
+        $selected = array_keys(array_filter($data['fields'] ?? []));
+        $values = $data['values'] ?? [];
+        if (!is_array($selected) || empty($selected)) {
+            return;
+        }
+
+        $fieldMap = [];
+        foreach (self::draftQuickEditableFields() as $field) {
+            $fieldMap[$field['safe_key']] = $field;
+        }
+
+        foreach ($records as $record) {
+            if (!$record instanceof NewProductDraft) {
+                continue;
+            }
+
+            $updates = [];
+            foreach ($selected as $safeKey) {
+                $field = $fieldMap[$safeKey] ?? null;
+                if (!$field) {
+                    continue;
+                }
+
+                $attribute = $field['attribute'];
+                $value = $values[$safeKey] ?? null;
+
+                if ($attribute === 'tags') {
+                    $updates['tags'] = TagNormalizer::normalizeFromArray(is_array($value) ? $value : []);
+                    continue;
+                }
+
+                if ($attribute === 'published') {
+                    $updates['published'] = $value ? 'true' : 'false';
+                    continue;
+                }
+
+                if ($attribute === 'product_category') {
+                    if (!is_string($value) || trim($value) === '') {
+                        $updates[$attribute] = null;
+                    } else {
+                        $mapping = CategoryTypeMap::byCategoryValue($value);
+                        $updates[$attribute] = $mapping['shopify_taxonomy_gid'] ?? $value;
+                    }
+                    continue;
+                }
+
+                $updates[$attribute] = self::nullIfEmpty($value);
+            }
+
+            if (array_key_exists('product_category', $updates)) {
+                $mapping = CategoryTypeMap::byCategoryValue(
+                    is_string($updates['product_category']) ? $updates['product_category'] : null
+                );
+                if ($mapping) {
+                    $updates['type'] = $mapping['type'];
+                    $updates['google_product_category'] = $mapping['google_product_category'];
+                }
+            } elseif (array_key_exists('type', $updates)) {
+                $mapping = CategoryTypeMap::byType(
+                    is_string($updates['type']) ? $updates['type'] : null
+                );
+                if ($mapping) {
+                    $updates['product_category'] = $mapping['shopify_taxonomy_gid'] ?? $mapping['category'];
+                    $updates['google_product_category'] = $mapping['google_product_category'];
+                }
+            }
+
+            if (empty($updates)) {
+                continue;
+            }
+
+            $record->fill($updates)->save();
+            app(NewProductDraftProductSync::class)->syncToExistingProduct($record, ensureApprovalReset: false);
+        }
+
+        Notification::make()
+            ->title('Draft edits saved')
+            ->success()
+            ->send();
     }
 
     private static function templateHeaders(): array

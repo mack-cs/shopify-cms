@@ -26,72 +26,7 @@ final class NewProductDraftSeeder
             ->orderBy('id')
             ->chunkById(200, function ($products) use (&$created, &$updated, &$skipped, $userId): void {
                 foreach ($products as $product) {
-                    $imageUrl = $product->images()
-                        ->orderBy('position')
-                        ->value('src');
-
-                    $row = ShopifyRow::query()
-                        ->where('import_id', $product->import_id)
-                        ->where('handle', $product->handle)
-                        ->where('row_type', 'product_primary')
-                        ->first();
-
-                    $data = [
-                        'handle' => $product->handle,
-                        'shopify_id' => $product->shopify_id,
-                        'title' => $product->title,
-                        'body_html' => $product->body_html,
-                        'vendor' => $product->vendor,
-                        'tags' => $product->tags,
-                        'type' => $product->type,
-                        'published' => $product->published,
-                        'product_category' => $product->product_category,
-                        'google_product_category' => $product->google_product_category,
-                        'status' => $product->status,
-                        'color_string' => $product->color_string,
-                        'uvp_short_paragraph' => $product->uvp_short_paragraph,
-                        'batch' => $product->batch,
-                        'image_url' => $imageUrl,
-                        'origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED,
-                        'created_by' => $userId,
-                    ];
-
-                    if ($row) {
-                        $data['material_cost'] = $row->get(HeaderStore::MATERIAL_COST, null);
-                    }
-                    $data['jewelry_material'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::JEWELRY_MATERIAL, [
-                            ['shopify', 'jewelry-material'],
-                        ]);
-                    $data['product_materials'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_MATERIALS, [
-                            ['custom', 'product_materials'],
-                        ]);
-                    $data['materials_and_dimensions'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::MATERIALS_AND_DIMENSIONS, [
-                            ['custom', 'materials_and_dimensions'],
-                        ]);
-                    $data['product_design'] = $this->designValueFromRowOrMetafield($product, $row);
-                    $data['metal'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_METALS, [
-                            ['custom', 'product_metals'],
-                        ]);
-                    $data['colour_style'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PATTERN_CATEGORY, [
-                            ['custom', 'pattern_category'],
-                        ]);
-                    $data['size'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIZE, [
-                            ['custom', 'size'],
-                        ]);
-                    $data['siblings'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS, [
-                            ['shopify--discovery--product_recommendation', 'related_products'],
-                        ]);
-                    $data['siblings_collection_name'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
-                            ['stiletto', 'sibling_option_name'],
-                        ]);
-                    if ($data['uvp_short_paragraph'] === null || trim((string) $data['uvp_short_paragraph']) === '') {
-                        $data['uvp_short_paragraph'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::UVP_SHORT_PARAGRAPH, [
-                            ['custom', 'uvp_short_paragraph'],
-                        ]);
-                    }
-                    $data['complementary_products'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::COMPLEMENTARY_PRODUCTS, [
-                        ['shopify--discovery--product_recommendation', 'complementary_products'],
-                    ]);
+                    $data = $this->draftDataFromProduct($product, $userId);
 
                     $draft = NewProductDraft::query()
                         ->where('handle', $product->handle)
@@ -144,6 +79,53 @@ final class NewProductDraftSeeder
         ];
     }
 
+    public function upsertFromProduct(Product $product, ?int $userId = null): NewProductDraft
+    {
+        $data = $this->draftDataFromProduct($product, $userId);
+
+        $draft = NewProductDraft::query()
+            ->where('handle', $product->handle)
+            ->first();
+
+        if (!$draft && filled(trim((string) ($product->shopify_id ?? '')))) {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $product->shopify_id)
+                ->first();
+        }
+
+        if (!$draft) {
+            return NewProductDraft::create($data);
+        }
+
+        $changes = [];
+        foreach ($data as $key => $incomingValue) {
+            if ($key === 'handle' || $key === 'created_by') {
+                continue;
+            }
+            if ($this->isEmptyValue($incomingValue)) {
+                continue;
+            }
+
+            $currentValue = $draft->getAttribute($key);
+            if ($key === 'sku') {
+                if ((string) $currentValue !== (string) $incomingValue) {
+                    $changes[$key] = $incomingValue;
+                }
+                continue;
+            }
+
+            if ($this->isEmptyValue($currentValue)) {
+                $changes[$key] = $incomingValue;
+            }
+        }
+
+        if (!empty($changes)) {
+            $draft->fill($changes)->save();
+        }
+
+        return $draft->fresh() ?? $draft;
+    }
+
     private function isEmptyValue(mixed $value): bool
     {
         if ($value === null) {
@@ -192,6 +174,82 @@ final class NewProductDraftSeeder
         return null;
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function draftDataFromProduct(Product $product, ?int $userId = null): array
+    {
+        $imageUrl = $product->images()
+            ->orderBy('position')
+            ->value('src');
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        $data = [
+            'handle' => $product->handle,
+            'shopify_id' => $product->shopify_id,
+            'title' => $product->title,
+            'body_html' => $product->body_html,
+            'vendor' => $product->vendor,
+            'tags' => $product->tags,
+            'type' => $product->type,
+            'published' => $product->published,
+            'product_category' => $product->product_category,
+            'google_product_category' => $product->google_product_category,
+            'status' => $product->status,
+            'color_string' => $product->color_string,
+            'uvp_short_paragraph' => $product->uvp_short_paragraph,
+            'batch' => $product->batch,
+            'image_url' => $imageUrl,
+            'origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED,
+            'created_by' => $userId,
+            'payload' => $this->extraPayloadFromRow($product, $row),
+        ];
+
+        if ($row) {
+            $data['material_cost'] = $row->get(HeaderStore::MATERIAL_COST, null);
+        }
+        $data['jewelry_material'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::JEWELRY_MATERIAL, [
+                ['shopify', 'jewelry-material'],
+            ]);
+        $data['product_materials'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_MATERIALS, [
+                ['custom', 'product_materials'],
+            ]);
+        $data['materials_and_dimensions'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::MATERIALS_AND_DIMENSIONS, [
+                ['custom', 'materials_and_dimensions'],
+            ]);
+        $data['product_design'] = $this->designValueFromRowOrMetafield($product, $row);
+        $data['metal'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_METALS, [
+                ['custom', 'product_metals'],
+            ]);
+        $data['colour_style'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PATTERN_CATEGORY, [
+                ['custom', 'pattern_category'],
+            ]);
+        $data['size'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIZE, [
+                ['custom', 'size'],
+            ]);
+        $data['siblings'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS, [
+                ['shopify--discovery--product_recommendation', 'related_products'],
+            ]);
+        $data['siblings_collection_name'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
+                ['stiletto', 'sibling_option_name'],
+            ]);
+        if ($data['uvp_short_paragraph'] === null || trim((string) $data['uvp_short_paragraph']) === '') {
+            $data['uvp_short_paragraph'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::UVP_SHORT_PARAGRAPH, [
+                ['custom', 'uvp_short_paragraph'],
+            ]);
+        }
+        $data['complementary_products'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::COMPLEMENTARY_PRODUCTS, [
+            ['shopify--discovery--product_recommendation', 'complementary_products'],
+        ]);
+
+        return $data;
+    }
+
     private function designValueFromRowOrMetafield(Product $product, ?ShopifyRow $row): ?string
     {
         $resolvedHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
@@ -226,5 +284,32 @@ final class NewProductDraftSeeder
             HeaderStore::EARRING_DESIGN => [['shopify', 'earring-design']],
             default => [],
         };
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    private function extraPayloadFromRow(Product $product, ?ShopifyRow $row): ?array
+    {
+        if (!$row) {
+            return null;
+        }
+
+        $payload = [];
+        foreach (HeaderStore::extraProductHeadersForDraftWorkflow($product->import?->headers ?? []) as $header) {
+            $value = $row->get($header, null);
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $trimmed = trim($value);
+            if ($trimmed === '') {
+                continue;
+            }
+
+            $payload[$header] = $trimmed;
+        }
+
+        return $payload === [] ? null : $payload;
     }
 }

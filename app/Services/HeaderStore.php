@@ -146,6 +146,39 @@ final class HeaderStore
         ));
     }
 
+    public static function extraProductHeadersForDraftWorkflow(array $headers): array
+    {
+        $excluded = [
+            self::SEO_TITLE,
+            self::SEO_DESCRIPTION,
+            self::SEO_DEINDEX,
+            self::GOOGLE_SHOPPING_AGE_GROUP,
+            self::TARGET_GENDER,
+            self::AGE_GROUP,
+            self::MATERIAL_COST,
+            self::COST_PER_ITEM,
+            self::JEWELRY_MATERIAL,
+            self::PRODUCT_MATERIALS,
+            self::MATERIALS_AND_DIMENSIONS,
+            self::JEWELRY_TYPE,
+            self::BRACELET_DESIGN,
+            self::NECKLACE_DESIGN,
+            self::EARRING_DESIGN,
+            self::PATTERN_CATEGORY,
+            self::PRODUCT_METALS,
+            self::SIZE,
+            self::SIBLINGS,
+            self::SIBLINGS_COLLECTION_NAME,
+            self::UVP_SHORT_PARAGRAPH,
+            self::COMPLEMENTARY_PRODUCTS,
+        ];
+
+        return array_values(array_filter(
+            self::extraProductHeaders($headers),
+            fn (string $header): bool => !in_array($header, $excluded, true)
+        ));
+    }
+
     public static function semicolonSeparatedHeaders(): array
     {
         return [

@@ -173,6 +173,7 @@ class ProductObserver
             $payload['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
             $payload['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
             $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
+            $payload['payload'] = $this->extraDraftPayloadFromRow($product, $row);
         }
 
         NewProductDraft::withoutEvents(function () use ($product, $payload): void {
@@ -258,6 +259,33 @@ class ProductObserver
         }
 
         return null;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    private function extraDraftPayloadFromRow(Product $product, ?ShopifyRow $row): ?array
+    {
+        if (!$row) {
+            return null;
+        }
+
+        $payload = [];
+        foreach (HeaderStore::extraProductHeadersForDraftWorkflow($product->import?->headers ?? []) as $header) {
+            $value = $row->get($header, null);
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $trimmed = trim($value);
+            if ($trimmed === '') {
+                continue;
+            }
+
+            $payload[$header] = $trimmed;
+        }
+
+        return $payload === [] ? null : $payload;
     }
 
     private function preferredDraftForProduct(NewProductDraft $handleDraft, NewProductDraft $shopifyDraft): NewProductDraft

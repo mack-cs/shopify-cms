@@ -17,6 +17,11 @@ class ListProducts extends ListRecords
     protected static string $resource = ProductResource::class;
     protected $listeners = ['products-table-refresh' => '$refresh'];
 
+    public function updatedPaginators($page, $pageName): void
+    {
+        $this->dispatch('scroll-to-top');
+    }
+
     protected function getHeaderActions(): array
     {
         return [];

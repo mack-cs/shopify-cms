@@ -13,6 +13,7 @@ class CreateNewProductDraft extends CreateRecord
 
     protected function mutateFormDataBeforeCreate(array $data): array
     {
+        $data = NewProductDraftResource::mutateDraftFormData($data);
         $data['created_by'] = Auth::id();
         $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
         $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
