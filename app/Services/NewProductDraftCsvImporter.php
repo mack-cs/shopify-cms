@@ -75,6 +75,7 @@ final class NewProductDraftCsvImporter
             'siblings' => 'siblings',
             'siblings add product siblings here' => 'siblings',
             'siblings collection name' => 'siblings_collection_name',
+            'sibling collection' => 'sibling_collection',
             'uvp short paragraph' => 'uvp_short_paragraph',
             'complementary products' => 'complementary_products',
             'complementary products finish the set and get one free' => 'complementary_products',

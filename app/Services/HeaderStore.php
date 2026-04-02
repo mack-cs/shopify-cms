@@ -52,6 +52,7 @@ final class HeaderStore
     public const SIZE = 'Size';
     public const SIBLINGS = 'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)';
     public const SIBLINGS_COLLECTION_NAME = 'Sibling Option Name (product.metafields.stiletto.sibling_option_name)';
+    public const SIBLING_COLLECTION = 'Sibling Collection (product.metafields.stiletto.sibling_collection)';
     public const UVP_SHORT_PARAGRAPH = 'UVP Short Paragraph';
     public const COMPLEMENTARY_PRODUCTS = 'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
@@ -92,6 +93,7 @@ final class HeaderStore
             self::UVP_SHORT_PARAGRAPH,
             self::SIBLINGS,
             self::SIBLINGS_COLLECTION_NAME,
+            self::SIBLING_COLLECTION,
         ];
     }
 
@@ -169,6 +171,7 @@ final class HeaderStore
             self::SIZE,
             self::SIBLINGS,
             self::SIBLINGS_COLLECTION_NAME,
+            self::SIBLING_COLLECTION,
             self::UVP_SHORT_PARAGRAPH,
             self::COMPLEMENTARY_PRODUCTS,
         ];

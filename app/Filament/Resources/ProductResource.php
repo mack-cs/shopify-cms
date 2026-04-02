@@ -520,15 +520,22 @@ class ProductResource extends Resource
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Vendor')
                                 ->placeholder('Select option')
-                                ->options(fn () => Product::query()
-                                    ->whereNotNull('vendor')
-                                    ->where('vendor', '!=', '')
-                                    ->distinct()
-                                    ->orderBy('vendor')
-                                    ->pluck('vendor', 'vendor')
-                                    ->all())
+                                ->options(fn (Get $get): array => self::vendorOptionsForCollection(
+                                    $get('collection_filter'),
+                                    $get('vendor')
+                                ))
                                 ->searchable()
-                                ->preload(),
+                                ->preload()
+                                ->reactive()
+                                ->helperText(fn (Get $get): ?HtmlString => self::vendorSelectionHint(
+                                    $get('collection_filter'),
+                                    $get('vendor')
+                                ))
+                                ->rules([
+                                    fn (Get $get): \Closure => self::vendorMatchesCollectionRule(
+                                        $get('collection_filter')
+                                    ),
+                                ]),
                             Select::make('collection_filter')
                                 ->label('Collection')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
@@ -547,6 +554,13 @@ class ProductResource extends Resource
                                     $collectionTags = self::collectionTags($state);
                                     if ($collectionTags === []) {
                                         return;
+                                    }
+
+                                    $expectedVendor = self::expectedVendorForCollection(
+                                        is_string($state) ? $state : null
+                                    );
+                                    if ($expectedVendor !== null) {
+                                        $set('vendor', $expectedVendor);
                                     }
 
                                     $current = $get('tags');
@@ -882,6 +896,16 @@ class ProductResource extends Resource
                         ]),
                 ]),
             ]),
+            Placeholder::make('product_edit_scroll_hint')
+                ->label('')
+                ->visible(fn (?Product $record): bool => (bool) $record)
+                ->content(new HtmlString(
+                    '<div class="flex items-center justify-center gap-4">' .
+                    '<div class="text-sm font-medium" style="color:#2563eb;">Scroll up to edit product details.</div>' .
+                    '<button type="button" class="fi-btn fi-btn-size-sm rounded-lg px-3 py-2 text-sm font-semibold" style="background-color:#2563eb;color:#ffffff;border:1px solid #2563eb;" onclick="window.scrollTo({ top: 0, behavior: \'smooth\' })">Scroll Up</button>' .
+                    '</div>'
+                ))
+                ->columnSpanFull(),
         ])->columns(1);
     }
     public static function table(Table $table): Table
@@ -2615,6 +2639,27 @@ class ProductResource extends Resource
         return empty($collections) ? [] : array_combine($collections, $collections);
     }
 
+    /**
+     * @return array<string, string>
+     */
+    private static function vendorOptionsForCollection(mixed $collection, mixed $currentValue = null): array
+    {
+        $expected = self::expectedVendorForCollection(is_string($collection) ? $collection : null);
+        if ($expected !== null) {
+            return self::withCurrentOption([$expected => $expected], $currentValue);
+        }
+
+        $options = Product::query()
+            ->whereNotNull('vendor')
+            ->where('vendor', '!=', '')
+            ->distinct()
+            ->orderBy('vendor')
+            ->pluck('vendor', 'vendor')
+            ->all();
+
+        return self::withCurrentOption($options, $currentValue);
+    }
+
     private static function collectionFromTags(?string $tags): ?string
     {
         if ($tags === null || trim($tags) === '') {
@@ -2692,6 +2737,70 @@ class ProductResource extends Resource
         }
 
         return array_values(array_unique($tags));
+    }
+
+    private static function expectedVendorForCollection(?string $collection): ?string
+    {
+        return app(DropdownCollectionCatalog::class)->vendorForCollection($collection);
+    }
+
+    private static function vendorSelectionHint(mixed $collection, mixed $vendor): ?HtmlString
+    {
+        $collectionName = is_string($collection) ? trim($collection) : '';
+        if ($collectionName === '') {
+            return null;
+        }
+
+        $expected = self::expectedVendorForCollection($collectionName);
+        if ($expected === null) {
+            return null;
+        }
+
+        $current = self::nullIfEmpty($vendor);
+        if ($current !== null && strcasecmp($current, $expected) !== 0) {
+            return null;
+        }
+
+        return new HtmlString('<span class="text-gray-600">Expected vendor: ' . e($expected) . '.</span>');
+    }
+
+    private static function vendorMatchesCollectionRule(mixed $collection): \Closure
+    {
+        $expected = self::expectedVendorForCollection(is_string($collection) ? $collection : null);
+
+        return function (string $attribute, $value, $fail) use ($expected): void {
+            if ($expected === null) {
+                return;
+            }
+
+            $vendor = self::nullIfEmpty($value);
+            if ($vendor === null) {
+                $fail("Expected vendor: {$expected}.");
+                return;
+            }
+
+            if (strcasecmp($vendor, $expected) !== 0) {
+                $fail("Expected vendor: {$expected}.");
+            }
+        };
+    }
+
+    /**
+     * @param array<string, string> $options
+     */
+    private static function withCurrentOption(array $options, mixed $currentValue): array
+    {
+        $current = trim((string) ($currentValue ?? ''));
+        if ($current === '') {
+            return $options;
+        }
+
+        if (!array_key_exists($current, $options)) {
+            $options[$current] = $current;
+            ksort($options);
+        }
+
+        return $options;
     }
 
     private static function normalizeTagList(mixed $value): array

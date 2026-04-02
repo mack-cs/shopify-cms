@@ -529,19 +529,21 @@ class PendingDropdownOptionResource extends Resource
             ->where('active', false)
             ->chunkById(200, function ($rows) use ($allowed): void {
                 foreach ($rows as $row) {
+                    if (blank($row->collection_tag_primary) && blank($row->collection_tag_secondary)) {
+                        // Keep unmapped pending rows visible so users can review/reject them.
+                        continue;
+                    }
+
                     $key = strtolower(implode('|', [
                         trim((string) ($row->collection_style ?? '')),
                         trim((string) ($row->collection_tag_primary ?? '')),
                         trim((string) ($row->collection_tag_secondary ?? '')),
                     ]));
 
-                    if ($key === '||') {
-                        $row->delete();
-                        continue;
-                    }
-
                     if (!isset($allowed[$key])) {
-                        $row->delete();
+                        // Preserve unknown mappings instead of silently deleting them.
+                        // They still need review in the pending queue.
+                        continue;
                     }
                 }
             });

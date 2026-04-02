@@ -282,6 +282,7 @@ final class NewProductDraftProductSync
         $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes);
         $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings, 'siblings', $attributes);
         $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name, 'siblings_collection_name', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $draft->sibling_collection, 'sibling_collection', $attributes);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
 

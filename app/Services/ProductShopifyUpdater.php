@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Category;
 use App\Models\Image;
 use App\Models\Product;
+use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
@@ -59,6 +60,8 @@ final class ProductShopifyUpdater
     private array $metaobjectsByTypeCache = [];
     /** @var array<string, string>|null */
     private ?array $productReferenceLookupCache = null;
+    /** @var array<string, string>|null */
+    private ?array $collectionReferenceLookupCache = null;
     /** @var array<string, string|null> */
     private array $productReferenceRemoteCache = [];
 
@@ -2912,11 +2915,60 @@ GQL;
 
     private function resolveHardcodedReferenceByNormalized(string $lookup, string $normalized): ?string
     {
-        if ($lookup !== 'custom.pattern_category') {
-            return null;
+        if ($lookup === 'stiletto.sibling_collection') {
+            $map = $this->collectionReferenceLookupMap();
+
+            if (isset($map[$normalized])) {
+                return $map[$normalized];
+            }
+
+            return $this->fuzzyReferenceMatch($map, $normalized);
         }
 
-        return self::PATTERN_CATEGORY_METAOBJECT_GIDS[$normalized] ?? null;
+        if ($lookup === 'custom.pattern_category') {
+            return self::PATTERN_CATEGORY_METAOBJECT_GIDS[$normalized] ?? null;
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function collectionReferenceLookupMap(): array
+    {
+        if ($this->collectionReferenceLookupCache !== null) {
+            return $this->collectionReferenceLookupCache;
+        }
+
+        $map = [];
+
+        ShopifyCollection::query()
+            ->select(['shopify_id', 'title', 'handle'])
+            ->whereNotNull('shopify_id')
+            ->where('shopify_id', '!=', '')
+            ->chunkById(500, function ($collections) use (&$map): void {
+                foreach ($collections as $collection) {
+                    $gid = trim((string) ($collection->shopify_id ?? ''));
+                    if ($gid === '') {
+                        continue;
+                    }
+
+                    foreach ([
+                        trim((string) ($collection->title ?? '')),
+                        trim((string) ($collection->handle ?? '')),
+                    ] as $label) {
+                        $normalized = $this->normalizeReferenceLabel($label);
+                        if ($normalized !== '' && !isset($map[$normalized])) {
+                            $map[$normalized] = $gid;
+                        }
+                    }
+                }
+            });
+
+        $this->collectionReferenceLookupCache = $map;
+
+        return $map;
     }
 
     /**

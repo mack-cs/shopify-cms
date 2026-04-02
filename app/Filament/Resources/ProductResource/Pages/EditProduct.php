@@ -2,15 +2,23 @@
 
 namespace App\Filament\Resources\ProductResource\Pages;
 
+use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
+use App\Services\NewProductDraftSeeder;
 use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
+use Illuminate\Support\Facades\Auth;
 
 class EditProduct extends EditRecord
 {
     protected static string $resource = ProductResource::class;
+
+    protected function getFormActions(): array
+    {
+        return [];
+    }
 
     /**
      * Fields owned by New Product Draft workflow; Product edit page must not persist them.
@@ -185,6 +193,15 @@ class EditProduct extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('editDraft')
+                ->label('Edit Product')
+                ->icon('heroicon-o-pencil-square')
+                ->color('warning')
+                ->action(function () {
+                    $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($this->getRecord(), Auth::id());
+
+                    return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
+                }),
             Actions\Action::make('approve')
                 ->label('Approve')
                 ->icon('heroicon-o-check-badge')

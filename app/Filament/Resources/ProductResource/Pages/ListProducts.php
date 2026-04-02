@@ -11,6 +11,7 @@ use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Str;
 
 class ListProducts extends ListRecords
 {
@@ -61,7 +62,7 @@ class ListProducts extends ListRecords
             ->filter(fn ($row) => !in_array($row->status_key, ['active', 'draft', 'archived'], true));
 
         foreach ($extraStatuses as $row) {
-            $label = $row->status_label;
+            $label = Str::title(str_replace(['_', '-'], ' ', (string) $row->status_label));
             $key = $row->status_key;
             $tabs[$key] = Tab::make($label)
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));

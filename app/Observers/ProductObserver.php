@@ -169,6 +169,7 @@ class ProductObserver
             $payload['size'] = $row->get(HeaderStore::SIZE, null);
             $payload['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
             $payload['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
+            $payload['sibling_collection'] = $row->get(HeaderStore::SIBLING_COLLECTION, null);
             $payload['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
             $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
             $payload['payload'] = $this->extraDraftPayloadFromRow($product, $row);
@@ -413,6 +414,7 @@ class ProductObserver
             'size',
             'siblings',
             'siblings_collection_name',
+            'sibling_collection',
             'uvp_short_paragraph',
             'complementary_products',
             'variant_inventory_policy',

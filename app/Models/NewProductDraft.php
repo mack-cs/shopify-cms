@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
 use App\Models\StyleProfile;
@@ -12,6 +13,8 @@ use App\Models\Product;
 
 class NewProductDraft extends Model
 {
+    protected static ?bool $supportsShopifySyncWarningsColumnCache = null;
+
     public const ORIGIN_DRAFT_TOOL = 'draft_tool';
     public const ORIGIN_SHOPIFY_SEED = 'shopify_seed';
     public const ORIGIN_PRODUCT_MIRROR = 'product_mirror';
@@ -46,6 +49,7 @@ class NewProductDraft extends Model
         'size',
         'siblings',
         'siblings_collection_name',
+        'sibling_collection',
         'uvp_short_paragraph',
         'complementary_products',
         'variant_inventory_policy',
@@ -167,6 +171,18 @@ class NewProductDraft extends Model
         return $this->approvalsForCurrentVersionCount() >= 2;
     }
 
+    public static function supportsShopifySyncWarningsColumn(): bool
+    {
+        if (self::$supportsShopifySyncWarningsColumnCache !== null) {
+            return self::$supportsShopifySyncWarningsColumnCache;
+        }
+
+        return self::$supportsShopifySyncWarningsColumnCache = Schema::hasColumn(
+            (new static())->getTable(),
+            'shopify_sync_warnings'
+        );
+    }
+
     public function shopifySyncWarningCount(): int
     {
         return count($this->shopifySyncWarnings());
@@ -177,6 +193,10 @@ class NewProductDraft extends Model
      */
     public function shopifySyncWarnings(): array
     {
+        if (!static::supportsShopifySyncWarningsColumn()) {
+            return [];
+        }
+
         $warnings = $this->shopify_sync_warnings;
 
         if (!is_array($warnings)) {
@@ -184,7 +204,10 @@ class NewProductDraft extends Model
         }
 
         return array_values(array_filter($warnings, function (mixed $warning): bool {
+            $field = is_array($warning) ? trim((string) ($warning['field'] ?? '')) : '';
+
             return is_array($warning)
+                && !in_array($field, ['image_url', 'image_path'], true)
                 && is_string($warning['field'] ?? null)
                 && is_string($warning['label'] ?? null)
                 && array_key_exists('draft_value', $warning)

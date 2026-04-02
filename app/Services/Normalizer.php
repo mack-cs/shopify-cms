@@ -1017,7 +1017,7 @@ final class Normalizer
                 continue;
             }
 
-            $targetContexts = $this->targetCollectionContextsForHeader($header);
+            $targetContexts = $this->targetCollectionContextsForHeader($header, $collectionContext);
             if (empty($targetContexts)) {
                 continue;
             }
@@ -1026,8 +1026,13 @@ final class Normalizer
                 foreach ($targetContexts as $ctx) {
                     $query = DropdownOption::query()
                         ->where('header', $header)
-                        ->whereRaw('LOWER(value) = ?', [strtolower($value)])
-                        ->where('collection_tag_primary', $ctx['tag_primary']);
+                        ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+
+                    if ($ctx['tag_primary'] !== null) {
+                        $query->where('collection_tag_primary', $ctx['tag_primary']);
+                    } else {
+                        $query->whereNull('collection_tag_primary');
+                    }
 
                     if ($ctx['tag_secondary'] !== null) {
                         $query->where('collection_tag_secondary', $ctx['tag_secondary']);
@@ -1131,30 +1136,17 @@ final class Normalizer
     /**
      * @return array<int, array{collection_style:string,tag_primary:string,tag_secondary:?string}>
      */
-    private function targetCollectionContextsForHeader(string $header): array
+    private function targetCollectionContextsForHeader(string $header, array $collectionContext): array
     {
-        $contexts = app(DropdownCollectionCatalog::class)->contexts();
-
-        $needle = match ($header) {
-            HeaderStore::BRACELET_DESIGN => 'bracelet',
-            'Necklace design (product.metafields.shopify.necklace-design)' => 'necklace',
-            'Earring design (product.metafields.shopify.earring-design)' => 'earring',
-            default => null,
-        };
-
-        if ($needle === null) {
-            return $contexts;
+        if (($collectionContext['tag_primary'] ?? null) !== null) {
+            return [$collectionContext];
         }
 
-        return array_values(array_filter($contexts, function (array $ctx) use ($needle): bool {
-            $haystack = strtolower(implode(' ', array_filter([
-                $ctx['collection_style'] ?? '',
-                $ctx['tag_primary'] ?? '',
-                $ctx['tag_secondary'] ?? '',
-            ])));
-
-            return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
-        }));
+        return [[
+            'collection_style' => null,
+            'tag_primary' => null,
+            'tag_secondary' => null,
+        ]];
     }
 
     private function parseDropdownValues(string $header, mixed $raw): array

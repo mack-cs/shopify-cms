@@ -4,7 +4,12 @@ namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
+use App\Models\NewProductDraft;
+use App\Models\Status;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Resources\Pages\ListRecords\Tab;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Str;
 
 class ListNewProductDrafts extends ListRecords
 {
@@ -26,5 +31,84 @@ class ListNewProductDrafts extends ListRecords
         return [
             QuickCreateNewProductDraft::class,
         ];
+    }
+
+    public function getTabs(): array
+    {
+        $tabs = [
+            'all' => Tab::make('All'),
+        ];
+
+        foreach ($this->resolvedStatusTabs() as $key => $label) {
+            $tabs[$key] = Tab::make($label)
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
+        }
+
+        return $tabs;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function resolvedStatusTabs(): array
+    {
+        $preferred = ['active', 'draft', 'archived'];
+        $resolved = [];
+
+        $configuredStatuses = Status::query()
+            ->whereNotNull('name')
+            ->where('name', '!=', '')
+            ->orderBy('name')
+            ->pluck('name')
+            ->all();
+
+        $presentStatuses = NewProductDraft::query()
+            ->whereNotNull('status')
+            ->where('status', '!=', '')
+            ->selectRaw('LOWER(status) as status_key, MIN(status) as status_label')
+            ->groupByRaw('LOWER(status)')
+            ->orderByRaw('LOWER(status)')
+            ->get()
+            ->mapWithKeys(fn ($row): array => [
+                (string) $row->status_key => (string) $row->status_label,
+            ])
+            ->all();
+
+        foreach ($preferred as $status) {
+            if (isset($presentStatuses[$status])) {
+                $resolved[$status] = self::formatStatusTabLabel($presentStatuses[$status]);
+                continue;
+            }
+
+            foreach ($configuredStatuses as $configured) {
+                if (strtolower(trim((string) $configured)) === $status) {
+                    $resolved[$status] = self::formatStatusTabLabel((string) $configured);
+                    break;
+                }
+            }
+        }
+
+        foreach ($configuredStatuses as $configured) {
+            $label = trim((string) $configured);
+            if ($label === '') {
+                continue;
+            }
+
+            $key = strtolower($label);
+            $resolved[$key] = $resolved[$key] ?? self::formatStatusTabLabel($label);
+        }
+
+        foreach ($presentStatuses as $key => $label) {
+            $resolved[$key] = $resolved[$key] ?? self::formatStatusTabLabel($label);
+        }
+
+        return $resolved;
+    }
+
+    private static function formatStatusTabLabel(string $label): string
+    {
+        $trimmed = trim($label);
+
+        return $trimmed === '' ? $label : Str::title(str_replace(['_', '-'], ' ', $trimmed));
     }
 }

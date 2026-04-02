@@ -20,12 +20,15 @@ class EditNewProductDraft extends EditRecord
     {
         return [
             Actions\Action::make('editImagesAndVariants')
-                ->label('Edit Images / Variants')
+                ->label('Edit Product')
                 ->icon('heroicon-o-photo')
                 ->color('gray')
                 ->visible(fn (): bool => $this->record?->product !== null)
                 ->url(fn (): ?string => $this->record?->product
-                    ? ProductResource::getUrl('edit', ['record' => $this->record->product])
+                    ? ProductResource::getUrl('edit', [
+                        'record' => $this->record->product,
+                        'activeRelationManager' => '1',
+                    ]) . '#relationManager1'
                     : null),
         ];
     }

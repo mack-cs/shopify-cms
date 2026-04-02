@@ -60,6 +60,43 @@ final class DropdownCollectionCatalog
         return array_values($contexts);
     }
 
+    public function vendorForCollection(?string $collectionStyle): ?string
+    {
+        if (!is_string($collectionStyle) || trim($collectionStyle) === '') {
+            return null;
+        }
+
+        foreach ($this->contexts() as $context) {
+            if (strcasecmp((string) ($context['collection_style'] ?? ''), $collectionStyle) !== 0) {
+                continue;
+            }
+
+            return $this->humanizeVendorTag($context['tag_primary'] ?? null);
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function vendorsByCollection(): array
+    {
+        $vendors = [];
+
+        foreach ($this->contexts() as $context) {
+            $collectionStyle = $this->normalizeValue($context['collection_style'] ?? null);
+            $vendor = $this->humanizeVendorTag($context['tag_primary'] ?? null);
+            if ($collectionStyle === null || $vendor === null) {
+                continue;
+            }
+
+            $vendors[strtolower($collectionStyle)] = $vendor;
+        }
+
+        return $vendors;
+    }
+
     private function normalizeHeader(string $header): string
     {
         $header = str_replace("\r", '', $header);
@@ -87,5 +124,21 @@ final class DropdownCollectionCatalog
         $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
     }
-}
 
+    private function humanizeVendorTag(mixed $value): ?string
+    {
+        $tag = $this->normalizeValue($value);
+        if ($tag === null) {
+            return null;
+        }
+
+        $parts = preg_split('/[-_]+/', strtolower($tag)) ?: [];
+        $parts = array_values(array_filter(array_map('trim', $parts), fn (string $part): bool => $part !== ''));
+
+        if (empty($parts)) {
+            return null;
+        }
+
+        return implode(' ', array_map(fn (string $part): string => ucfirst($part), $parts));
+    }
+}

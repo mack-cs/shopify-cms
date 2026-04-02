@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
@@ -108,10 +109,11 @@ final class NewProductDraftSeeder
     {
         $changes = [];
         $warnings = [];
+        $supportsWarnings = NewProductDraft::supportsShopifySyncWarningsColumn();
 
         $identityFields = ['handle', 'shopify_id'];
         $skipFields = ['created_by'];
-        $nonWarningFields = ['origin', 'payload'];
+        $nonWarningFields = ['origin', 'payload', 'image_url', 'image_path'];
 
         foreach ($data as $key => $incomingValue) {
             if (in_array($key, $skipFields, true)) {
@@ -140,13 +142,13 @@ final class NewProductDraftSeeder
                 continue;
             }
 
-            if (!$this->valuesMatch($currentValue, $incomingValue)) {
+            if ($supportsWarnings && !$this->valuesMatch($currentValue, $incomingValue)) {
                 $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
             }
         }
 
-        $existingWarnings = $draft->shopifySyncWarnings();
-        if ($existingWarnings !== $warnings) {
+        $existingWarnings = $supportsWarnings ? $draft->shopifySyncWarnings() : [];
+        if ($supportsWarnings && $existingWarnings !== $warnings) {
             $changes['shopify_sync_warnings'] = empty($warnings) ? null : $warnings;
         }
 
@@ -248,6 +250,7 @@ final class NewProductDraftSeeder
         $data['siblings_collection_name'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
                 ['stiletto', 'sibling_option_name'],
             ]);
+        $data['sibling_collection'] = $this->resolvedSiblingCollectionValue($product, $row);
         if ($data['uvp_short_paragraph'] === null || trim((string) $data['uvp_short_paragraph']) === '') {
             $data['uvp_short_paragraph'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::UVP_SHORT_PARAGRAPH, [
                 ['custom', 'uvp_short_paragraph'],
@@ -258,6 +261,34 @@ final class NewProductDraftSeeder
         ]);
 
         return $data;
+    }
+
+    private function resolvedSiblingCollectionValue(Product $product, ?ShopifyRow $row): ?string
+    {
+        $value = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLING_COLLECTION, [
+            ['stiletto', 'sibling_collection'],
+        ]);
+
+        $trimmed = is_string($value) ? trim($value) : '';
+        if ($trimmed === '') {
+            return null;
+        }
+
+        if (!str_starts_with($trimmed, 'gid://shopify/Collection/')) {
+            return $trimmed;
+        }
+
+        $collection = ShopifyCollection::query()
+            ->where('shopify_id', $trimmed)
+            ->first(['title', 'handle']);
+
+        $title = trim((string) ($collection?->title ?? ''));
+        if ($title !== '') {
+            return $title;
+        }
+
+        $handle = trim((string) ($collection?->handle ?? ''));
+        return $handle !== '' ? $handle : $trimmed;
     }
 
     private function designValueFromRowOrMetafield(Product $product, ?ShopifyRow $row): ?string
