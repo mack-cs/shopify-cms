@@ -22,7 +22,9 @@ class DropdownOptionResource extends Resource
     protected static ?string $model = DropdownOption::class;
     protected static ?string $navigationIcon = 'heroicon-o-list-bullet';
     protected static ?string $navigationGroup = 'Configurations';
-    protected static ?string $navigationLabel = 'Dropdown Options';
+    protected static ?string $navigationLabel = 'Approved Dropdown Values';
+    protected static ?string $modelLabel = 'approved dropdown value';
+    protected static ?string $pluralModelLabel = 'Approved Dropdown Values';
 
     public static function form(Form $form): Form
     {
