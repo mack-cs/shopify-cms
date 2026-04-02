@@ -21,7 +21,6 @@ use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
-use App\Services\NewProductDraftProductSync;
 use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
 use Filament\Forms;
@@ -82,6 +81,11 @@ class NewProductDraftResource extends Resource
                             Forms\Components\Grid::make(3)
                                 ->schema([
                     Group::make([
+                        Placeholder::make('shopify_sync_warnings_notice')
+                            ->label('Shopify Sync Warnings')
+                            ->content(fn (?NewProductDraft $record): ?HtmlString => self::shopifySyncWarningsHtml($record))
+                            ->visible(fn (?NewProductDraft $record): bool => ($record?->shopifySyncWarningCount() ?? 0) > 0)
+                            ->columnSpanFull(),
                         Section::make('Core')
                             ->schema([
                     Forms\Components\Grid::make(3)
@@ -1778,6 +1782,12 @@ class NewProductDraftResource extends Resource
                     ->label('Approvals')
                     ->state(fn (NewProductDraft $record): string => $record->approvalsForCurrentVersionCount() . '/2')
                     ->toggleable(),
+                TextColumn::make('shopify_sync_warning_count')
+                    ->label('Sync Warnings')
+                    ->state(fn (NewProductDraft $record): int => $record->shopifySyncWarningCount())
+                    ->badge()
+                    ->color(fn (int $state): string => $state > 0 ? 'warning' : 'gray')
+                    ->toggleable(),
                 IconColumn::make('approved')
                     ->label('Approved')
                     ->boolean()
@@ -2062,6 +2072,48 @@ class NewProductDraftResource extends Resource
                             Notification::make()
                                 ->title('Shopify create queued')
                                 ->body('The background job has been queued. Only handle-less drafts with 2 approvals will be created. You will be notified when it finishes.')
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('useShopifyValues')
+                        ->label('Use Shopify Values')
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->modalHeading('Use Shopify values for warnings')
+                        ->modalDescription('For each selected draft, replace warning fields with the latest imported Shopify values and clear the warnings.')
+                        ->action(function ($records): void {
+                            $result = self::applyShopifyWarningValuesToDrafts($records);
+
+                            Notification::make()
+                                ->title('Shopify values applied')
+                                ->body(self::warningResolutionSummary(
+                                    resolved: $result['updated'],
+                                    skipped: $result['skipped'],
+                                    extra: []
+                                ))
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('keepDraftValues')
+                        ->label('Keep Draft Values')
+                        ->icon('heroicon-o-arrow-up-tray')
+                        ->color('gray')
+                        ->requiresConfirmation()
+                        ->modalHeading('Keep draft values for warnings')
+                        ->modalDescription('For each selected draft, clear the warnings, keep the draft values as source of truth, and sync those values back into Products.')
+                        ->action(function ($records): void {
+                            $result = self::keepDraftWarningValues($records);
+
+                            Notification::make()
+                                ->title('Draft values kept')
+                                ->body(self::warningResolutionSummary(
+                                    resolved: $result['cleared'],
+                                    skipped: $result['skipped'],
+                                    extra: $result['synced'] > 0 ? ["Synced {$result['synced']} back to Products."] : []
+                                ))
                                 ->success()
                                 ->send();
                         })
@@ -2919,7 +2971,6 @@ class NewProductDraftResource extends Resource
             }
 
             $record->fill($updates)->save();
-            app(NewProductDraftProductSync::class)->syncToExistingProduct($record, ensureApprovalReset: false);
         }
     }
 
@@ -2997,13 +3048,161 @@ class NewProductDraftResource extends Resource
             }
 
             $record->fill($updates)->save();
-            app(NewProductDraftProductSync::class)->syncToExistingProduct($record, ensureApprovalReset: false);
         }
 
         Notification::make()
             ->title('Draft edits saved')
             ->success()
             ->send();
+    }
+
+    private static function shopifySyncWarningsHtml(?NewProductDraft $record): ?HtmlString
+    {
+        if (!$record) {
+            return null;
+        }
+
+        $warnings = $record->shopifySyncWarnings();
+        if (empty($warnings)) {
+            return null;
+        }
+
+        $items = array_map(function (array $warning): string {
+            $label = e((string) ($warning['label'] ?? $warning['field'] ?? 'Field'));
+            $draftValue = e((string) ($warning['draft_value'] ?? ''));
+            $shopifyValue = e((string) ($warning['shopify_value'] ?? ''));
+
+            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but Shopify imported <code>{$shopifyValue}</code>.</li>";
+        }, $warnings);
+
+        return new HtmlString(
+            "<div class='text-warning-700 text-sm'><p class='font-medium mb-2'>Draft values differ from the latest Shopify import.</p><ul class='list-disc pl-5 space-y-1'>"
+            . implode('', $items)
+            . '</ul></div>'
+        );
+    }
+
+    /**
+     * @param iterable<mixed> $records
+     * @return array{updated:int,skipped:int}
+     */
+    private static function applyShopifyWarningValuesToDrafts(iterable $records): array
+    {
+        $updated = 0;
+        $skipped = 0;
+
+        foreach ($records as $record) {
+            if (!$record instanceof NewProductDraft) {
+                continue;
+            }
+
+            $warnings = $record->shopifySyncWarnings();
+            if (empty($warnings)) {
+                $skipped++;
+                continue;
+            }
+
+            $updates = ['shopify_sync_warnings' => null];
+            foreach ($warnings as $warning) {
+                $field = trim((string) ($warning['field'] ?? ''));
+                if ($field === '') {
+                    continue;
+                }
+
+                $updates[$field] = self::draftWarningResolvedValue(
+                    $field,
+                    (string) ($warning['shopify_value'] ?? '')
+                );
+            }
+
+            NewProductDraft::withoutEvents(function () use ($record, $updates): void {
+                $record->fill($updates)->save();
+            });
+
+            $updated++;
+        }
+
+        return [
+            'updated' => $updated,
+            'skipped' => $skipped,
+        ];
+    }
+
+    /**
+     * @param iterable<mixed> $records
+     * @return array{cleared:int,synced:int,skipped:int}
+     */
+    private static function keepDraftWarningValues(iterable $records): array
+    {
+        $cleared = 0;
+        $synced = 0;
+        $skipped = 0;
+        $sync = app(NewProductDraftProductSync::class);
+
+        foreach ($records as $record) {
+            if (!$record instanceof NewProductDraft) {
+                continue;
+            }
+
+            $warnings = $record->shopifySyncWarnings();
+            if (empty($warnings)) {
+                $skipped++;
+                continue;
+            }
+
+            NewProductDraft::withoutEvents(function () use ($record): void {
+                $record->forceFill([
+                    'shopify_sync_warnings' => null,
+                ])->save();
+            });
+
+            $cleared++;
+
+            if ($sync->syncToExistingProduct($record->fresh(), ensureApprovalReset: true)) {
+                $synced++;
+            }
+        }
+
+        return [
+            'cleared' => $cleared,
+            'synced' => $synced,
+            'skipped' => $skipped,
+        ];
+    }
+
+    private static function draftWarningResolvedValue(string $field, string $value): mixed
+    {
+        $trimmed = trim($value);
+
+        return match ($field) {
+            'variant_inventory_qty' => $trimmed === '' ? null : (int) $trimmed,
+            'published' => $trimmed === '' ? null : (strtolower($trimmed) === 'true' ? 'true' : 'false'),
+            'variant_price',
+            'variant_compare_at_price',
+            'material_cost' => $trimmed === '' ? null : $trimmed,
+            default => $trimmed === '' ? null : $trimmed,
+        };
+    }
+
+    /**
+     * @param array<int, string> $extra
+     */
+    private static function warningResolutionSummary(int $resolved, int $skipped, array $extra = []): string
+    {
+        $parts = [];
+
+        if ($resolved > 0) {
+            $parts[] = "Resolved {$resolved}.";
+        }
+        if ($skipped > 0) {
+            $parts[] = "Skipped {$skipped} without warnings.";
+        }
+
+        foreach ($extra as $part) {
+            $parts[] = $part;
+        }
+
+        return $parts === [] ? 'No drafts were updated.' : implode(' ', $parts);
     }
 
     private static function templateHeaders(): array

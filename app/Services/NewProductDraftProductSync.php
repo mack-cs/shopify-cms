@@ -13,7 +13,11 @@ use Illuminate\Support\Collection;
 
 final class NewProductDraftProductSync
 {
-    public function syncToExistingProduct(NewProductDraft $draft, bool $ensureApprovalReset = true): bool
+    public function syncToExistingProduct(
+        NewProductDraft $draft,
+        bool $ensureApprovalReset = true,
+        ?array $attributes = null
+    ): bool
     {
         if (!$draft->handle && !$draft->shopify_id) {
             return false;
@@ -26,12 +30,15 @@ final class NewProductDraftProductSync
         }
 
         $initialApprovalVersion = (int) ($product->approval_version ?? 1);
-        $data = $this->mapDraftToProduct($draft);
+        $attributes = $this->normalizeAttributes($attributes);
+        $data = $this->mapDraftToProduct($draft, $attributes);
 
-        $product->fill($data)->save();
-        $this->syncVariantFromDraft($product, $draft);
-        $this->syncCostPerItemRow($product, $draft);
-        $this->syncShopifyRowFieldsFromDraft($product, $draft);
+        if (!empty($data)) {
+            $product->fill($data)->save();
+        }
+        $this->syncVariantFromDraft($product, $draft, $attributes);
+        $this->syncCostPerItemRow($product, $draft, $attributes);
+        $this->syncShopifyRowFieldsFromDraft($product, $draft, $attributes);
 
         $product->refresh();
         if ($ensureApprovalReset && (int) ($product->approval_version ?? 1) === $initialApprovalVersion) {
@@ -150,9 +157,9 @@ final class NewProductDraftProductSync
     /**
      * @return array<string, mixed>
      */
-    private function mapDraftToProduct(NewProductDraft $draft): array
+    private function mapDraftToProduct(NewProductDraft $draft, ?array $attributes = null): array
     {
-        return array_filter([
+        $data = [
             'shopify_id' => $draft->shopify_id,
             'title' => $draft->title,
             'body_html' => $draft->body_html,
@@ -166,10 +173,25 @@ final class NewProductDraftProductSync
             'color_string' => $draft->color_string,
             'uvp_short_paragraph' => $draft->uvp_short_paragraph,
             'batch' => $draft->batch,
-        ], static fn ($value) => $value !== null);
+        ];
+
+        if ($attributes === null) {
+            return array_filter($data, static fn ($value) => $value !== null);
+        }
+
+        $selected = [];
+        foreach ($attributes as $attribute) {
+            if (!array_key_exists($attribute, $data)) {
+                continue;
+            }
+
+            $selected[$attribute] = $data[$attribute];
+        }
+
+        return $selected;
     }
 
-    private function syncVariantFromDraft(Product $product, NewProductDraft $draft): void
+    private function syncVariantFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
     {
         $variant = Variant::where('product_id', $product->id)->orderBy('id')->first();
         if (!$variant) {
@@ -177,16 +199,16 @@ final class NewProductDraftProductSync
         }
 
         $updates = [];
-        if ($draft->sku) {
+        if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
             $updates['sku'] = $draft->sku;
         }
-        if ($draft->variant_price !== null) {
+        if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)) {
             $updates['price'] = $draft->variant_price;
         }
-        if ($draft->variant_compare_at_price !== null) {
+        if ($this->shouldSyncDraftAttribute('variant_compare_at_price', $attributes, $draft->variant_compare_at_price)) {
             $updates['compare_at_price'] = $draft->variant_compare_at_price;
         }
-        if ($draft->variant_inventory_qty !== null) {
+        if ($this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty)) {
             $updates['inventory_qty'] = $draft->variant_inventory_qty;
         }
 
@@ -195,9 +217,12 @@ final class NewProductDraftProductSync
         }
     }
 
-    private function syncCostPerItemRow(Product $product, NewProductDraft $draft): void
+    private function syncCostPerItemRow(Product $product, NewProductDraft $draft, ?array $attributes = null): void
     {
-        if ($draft->material_cost === null && $draft->variant_inventory_qty === null) {
+        $syncMaterialCost = $this->shouldSyncDraftAttribute('material_cost', $attributes, $draft->material_cost);
+        $syncInventory = $this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty);
+
+        if (!$syncMaterialCost && !$syncInventory) {
             return;
         }
 
@@ -210,16 +235,16 @@ final class NewProductDraftProductSync
             return;
         }
 
-        if ($draft->material_cost !== null) {
+        if ($syncMaterialCost) {
             $row->set(HeaderStore::COST_PER_ITEM, (string) $draft->material_cost);
         }
-        if ($draft->variant_inventory_qty !== null) {
+        if ($syncInventory) {
             $row->set(HeaderStore::VARIANT_INVENTORY_QTY, (string) $draft->variant_inventory_qty);
         }
         $row->save();
     }
 
-    private function syncShopifyRowFieldsFromDraft(Product $product, NewProductDraft $draft): void
+    private function syncShopifyRowFieldsFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
     {
         $row = ShopifyRow::where('import_id', $product->import_id)
             ->where('handle', $product->handle)
@@ -232,39 +257,41 @@ final class NewProductDraftProductSync
 
         $updates = [];
 
-        $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost);
-        $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material);
-        $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials);
-        $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions);
-        foreach (HeaderStore::designHeaders() as $designHeader) {
-            $updates[$designHeader] = '';
+        $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials, 'product_materials', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions, 'materials_and_dimensions', $attributes);
+
+        if ($this->shouldSyncDraftAttribute('product_design', $attributes, $draft->product_design)) {
+            foreach (HeaderStore::designHeaders() as $designHeader) {
+                $updates[$designHeader] = '';
+            }
+
+            $resolvedDesignHeader = HeaderStore::designHeaderForTypeAndTags($draft->type, $draft->tags);
+            if ($resolvedDesignHeader !== null) {
+                $updates[$resolvedDesignHeader] = trim((string) ($draft->product_design ?? ''));
+            }
         }
-        $resolvedDesignHeader = HeaderStore::designHeaderForTypeAndTags($draft->type, $draft->tags);
-        if ($resolvedDesignHeader !== null) {
-            $updates[$resolvedDesignHeader] = trim((string) ($draft->product_design ?? ''));
+
+        if ($this->shouldSyncDraftAttribute('metal', $attributes, $draft->metal)) {
+            $updates[HeaderStore::PRODUCT_METALS] = trim((string) ($draft->metal ?? ''));
         }
-        if ($draft->metal === null || trim((string) $draft->metal) === '') {
-            // Clearing in draft must clear the Shopify row value too.
-            $updates[HeaderStore::PRODUCT_METALS] = '';
-        } else {
-            $this->addRowUpdate($updates, HeaderStore::PRODUCT_METALS, $draft->metal);
+        if ($this->shouldSyncDraftAttribute('colour_style', $attributes, $draft->colour_style)) {
+            $updates[HeaderStore::PATTERN_CATEGORY] = trim((string) ($draft->colour_style ?? ''));
         }
-        if ($draft->colour_style === null || trim((string) $draft->colour_style) === '') {
-            // Clearing in draft must clear the Shopify row value too.
-            $updates[HeaderStore::PATTERN_CATEGORY] = '';
-        } else {
-            $this->addRowUpdate($updates, HeaderStore::PATTERN_CATEGORY, $draft->colour_style);
-        }
-        $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size);
-        $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings);
-        $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name);
-        $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph);
-        $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products);
-        foreach ($this->extraDraftPayloadHeaders($product) as $header) {
-            $updates[$header] = '';
-        }
-        foreach ($this->extraDraftPayloadUpdates($draft, $product) as $header => $value) {
-            $updates[$header] = $value;
+        $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings, 'siblings', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::SIBLINGS_COLLECTION_NAME, $draft->siblings_collection_name, 'siblings_collection_name', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
+
+        if ($this->shouldSyncDraftAttribute('payload', $attributes, $draft->payload)) {
+            foreach ($this->extraDraftPayloadHeaders($product) as $header) {
+                $updates[$header] = '';
+            }
+            foreach ($this->extraDraftPayloadUpdates($draft, $product) as $header => $value) {
+                $updates[$header] = $value;
+            }
         }
 
         if (empty($updates)) {
@@ -278,18 +305,19 @@ final class NewProductDraftProductSync
         $row->save();
     }
 
-    private function addRowUpdate(array &$updates, string $header, mixed $value): void
+    private function addRowUpdate(
+        array &$updates,
+        string $header,
+        mixed $value,
+        string $attribute,
+        ?array $attributes = null
+    ): void
     {
-        if ($value === null) {
+        if (!$this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
             return;
         }
 
-        $stringValue = is_scalar($value) ? (string) $value : null;
-        if ($stringValue === null) {
-            return;
-        }
-
-        $updates[$header] = $stringValue;
+        $updates[$header] = is_scalar($value) ? (string) $value : '';
     }
 
     /**
@@ -325,5 +353,41 @@ final class NewProductDraftProductSync
         }
 
         return $updates;
+    }
+
+    private function shouldSyncDraftAttribute(string $attribute, ?array $attributes, mixed $value): bool
+    {
+        if ($attributes === null) {
+            return $value !== null;
+        }
+
+        return in_array($attribute, $attributes, true);
+    }
+
+    /**
+     * @param array<int, mixed>|null $attributes
+     * @return array<int, string>|null
+     */
+    private function normalizeAttributes(?array $attributes): ?array
+    {
+        if ($attributes === null) {
+            return null;
+        }
+
+        $normalized = [];
+        foreach ($attributes as $attribute) {
+            if (!is_string($attribute)) {
+                continue;
+            }
+
+            $attribute = trim($attribute);
+            if ($attribute === '') {
+                continue;
+            }
+
+            $normalized[$attribute] = $attribute;
+        }
+
+        return array_values($normalized);
     }
 }

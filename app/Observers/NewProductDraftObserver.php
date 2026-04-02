@@ -48,7 +48,11 @@ class NewProductDraftObserver
         $sync = app(NewProductDraftProductSync::class);
 
         // Existing products mirror draft edits immediately and require fresh approval in Products.
-        $mirroredToExisting = $sync->syncToExistingProduct($draft, ensureApprovalReset: true);
+        $mirroredToExisting = $sync->syncToExistingProduct(
+            $draft,
+            ensureApprovalReset: true,
+            attributes: array_values($meaningfulChanges)
+        );
 
         // Keep create-from-draft behavior gated by draft approvals.
         if (!$mirroredToExisting && $draft->isApprovedByTwo()) {

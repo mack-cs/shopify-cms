@@ -52,12 +52,14 @@ class NewProductDraft extends Model
         'variant_fulfillment_service',
         'payload',
         'origin',
+        'shopify_sync_warnings',
         'approval_version',
         'created_by',
     ];
 
     protected $casts = [
         'payload' => 'array',
+        'shopify_sync_warnings' => 'array',
         'variant_price' => 'decimal:2',
         'variant_compare_at_price' => 'decimal:2',
         'variant_inventory_qty' => 'integer',
@@ -163,5 +165,30 @@ class NewProductDraft extends Model
     public function isApprovedByTwo(): bool
     {
         return $this->approvalsForCurrentVersionCount() >= 2;
+    }
+
+    public function shopifySyncWarningCount(): int
+    {
+        return count($this->shopifySyncWarnings());
+    }
+
+    /**
+     * @return array<int, array{field:string,label:string,draft_value:string,shopify_value:string}>
+     */
+    public function shopifySyncWarnings(): array
+    {
+        $warnings = $this->shopify_sync_warnings;
+
+        if (!is_array($warnings)) {
+            return [];
+        }
+
+        return array_values(array_filter($warnings, function (mixed $warning): bool {
+            return is_array($warning)
+                && is_string($warning['field'] ?? null)
+                && is_string($warning['label'] ?? null)
+                && array_key_exists('draft_value', $warning)
+                && array_key_exists('shopify_value', $warning);
+        }));
     }
 }

@@ -29,8 +29,6 @@ class ProductObserver
             'batch',
             'is_bundle',
             'you_save',
-            'seo_title',
-            'seo_description',
             'approved_handle',
             'first_handle_auto_lock_completed_at',
             'first_handle_auto_lock_approval_version',

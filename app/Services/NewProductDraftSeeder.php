@@ -38,30 +38,7 @@ final class NewProductDraftSeeder
                         continue;
                     }
 
-                    $changes = [];
-                    foreach ($data as $key => $incomingValue) {
-                        if ($key === 'handle' || $key === 'created_by') {
-                            continue;
-                        }
-                        if ($this->isEmptyValue($incomingValue)) {
-                            continue;
-                        }
-
-                        $currentValue = $draft->getAttribute($key);
-
-                        // SKU should always mirror current product variant SKU.
-                        if ($key === 'sku') {
-                            if ((string) $currentValue !== (string) $incomingValue) {
-                                $changes[$key] = $incomingValue;
-                            }
-                            continue;
-                        }
-
-                        // Backfill only when draft field is still empty.
-                        if ($this->isEmptyValue($currentValue)) {
-                            $changes[$key] = $incomingValue;
-                        }
-                    }
+                    $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
                     if (!empty($changes)) {
                         $draft->fill($changes)->save();
@@ -97,27 +74,7 @@ final class NewProductDraftSeeder
             return NewProductDraft::create($data);
         }
 
-        $changes = [];
-        foreach ($data as $key => $incomingValue) {
-            if ($key === 'handle' || $key === 'created_by') {
-                continue;
-            }
-            if ($this->isEmptyValue($incomingValue)) {
-                continue;
-            }
-
-            $currentValue = $draft->getAttribute($key);
-            if ($key === 'sku') {
-                if ((string) $currentValue !== (string) $incomingValue) {
-                    $changes[$key] = $incomingValue;
-                }
-                continue;
-            }
-
-            if ($this->isEmptyValue($currentValue)) {
-                $changes[$key] = $incomingValue;
-            }
-        }
+        $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
         if (!empty($changes)) {
             $draft->fill($changes)->save();
@@ -141,6 +98,59 @@ final class NewProductDraftSeeder
         }
 
         return false;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    private function reconcileDraftWithImportedData(NewProductDraft $draft, array $data): array
+    {
+        $changes = [];
+        $warnings = [];
+
+        $identityFields = ['handle', 'shopify_id'];
+        $skipFields = ['created_by'];
+        $nonWarningFields = ['origin', 'payload'];
+
+        foreach ($data as $key => $incomingValue) {
+            if (in_array($key, $skipFields, true)) {
+                continue;
+            }
+
+            $currentValue = $draft->getAttribute($key);
+
+            if (in_array($key, $identityFields, true)) {
+                if (!$this->valuesMatch($currentValue, $incomingValue)) {
+                    $changes[$key] = $incomingValue;
+                }
+                continue;
+            }
+
+            if ($this->isEmptyValue($incomingValue)) {
+                continue;
+            }
+
+            if ($this->isEmptyValue($currentValue)) {
+                $changes[$key] = $incomingValue;
+                continue;
+            }
+
+            if (in_array($key, $nonWarningFields, true)) {
+                continue;
+            }
+
+            if (!$this->valuesMatch($currentValue, $incomingValue)) {
+                $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
+            }
+        }
+
+        $existingWarnings = $draft->shopifySyncWarnings();
+        if ($existingWarnings !== $warnings) {
+            $changes['shopify_sync_warnings'] = empty($warnings) ? null : $warnings;
+        }
+
+        return $changes;
     }
 
     /**
@@ -311,5 +321,89 @@ final class NewProductDraftSeeder
         }
 
         return $payload === [] ? null : $payload;
+    }
+
+    /**
+     * @return array{field:string,label:string,draft_value:string,shopify_value:string}
+     */
+    private function warningPayload(string $field, mixed $draftValue, mixed $shopifyValue): array
+    {
+        return [
+            'field' => $field,
+            'label' => $this->warningLabel($field),
+            'draft_value' => $this->stringifyValue($draftValue),
+            'shopify_value' => $this->stringifyValue($shopifyValue),
+        ];
+    }
+
+    private function warningLabel(string $field): string
+    {
+        return match ($field) {
+            'body_html' => 'Description',
+            'product_category' => 'Product category',
+            'google_product_category' => 'Google product category',
+            'color_string' => 'Colors',
+            'variant_price' => 'Price',
+            'variant_compare_at_price' => 'Compare-at price',
+            'variant_inventory_qty' => 'Inventory',
+            'material_cost' => 'Material cost',
+            'jewelry_material' => 'Jewelry material',
+            'product_materials' => 'Product materials',
+            'materials_and_dimensions' => 'Materials and dimensions',
+            'product_design' => 'Product design',
+            'metal' => 'Metal',
+            'colour_style' => 'Pattern category',
+            'siblings_collection_name' => 'Siblings collection name',
+            'uvp_short_paragraph' => 'UVP short paragraph',
+            'complementary_products' => 'Complementary products',
+            default => ucwords(str_replace('_', ' ', $field)),
+        };
+    }
+
+    private function valuesMatch(mixed $left, mixed $right): bool
+    {
+        if (is_array($left) || is_array($right)) {
+            return $this->normalizeArrayValue($left) === $this->normalizeArrayValue($right);
+        }
+
+        return $this->stringifyValue($left) === $this->stringifyValue($right);
+    }
+
+    /**
+     * @return array<int|string, mixed>|null
+     */
+    private function normalizeArrayValue(mixed $value): ?array
+    {
+        if (!is_array($value)) {
+            return null;
+        }
+
+        ksort($value);
+
+        return array_map(function (mixed $item): mixed {
+            if (is_array($item)) {
+                return $this->normalizeArrayValue($item);
+            }
+
+            return is_string($item) ? trim($item) : $item;
+        }, $value);
+    }
+
+    private function stringifyValue(mixed $value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if (is_array($value)) {
+            $normalized = $this->normalizeArrayValue($value);
+            return $normalized === null ? '' : (json_encode($normalized) ?: '');
+        }
+
+        return trim((string) $value);
     }
 }

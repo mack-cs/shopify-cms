@@ -4,7 +4,6 @@ namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
-use App\Services\NewProductDraftProductSync;
 use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
 
@@ -15,17 +14,6 @@ class EditNewProductDraft extends EditRecord
     protected function mutateFormDataBeforeSave(array $data): array
     {
         return NewProductDraftResource::mutateDraftFormData($data);
-    }
-
-    protected function afterSave(): void
-    {
-        /** @var \App\Models\NewProductDraft $draft */
-        $draft = $this->record;
-
-        app(NewProductDraftProductSync::class)->syncToExistingProduct(
-            $draft,
-            ensureApprovalReset: false
-        );
     }
 
     protected function getHeaderActions(): array
