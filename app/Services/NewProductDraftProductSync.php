@@ -236,7 +236,13 @@ final class NewProductDraftProductSync
         $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material);
         $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials);
         $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions);
-        $this->addRowUpdate($updates, HeaderStore::BRACELET_DESIGN, $draft->product_design);
+        foreach (HeaderStore::designHeaders() as $designHeader) {
+            $updates[$designHeader] = '';
+        }
+        $resolvedDesignHeader = HeaderStore::designHeaderForTypeAndTags($draft->type, $draft->tags);
+        if ($resolvedDesignHeader !== null) {
+            $updates[$resolvedDesignHeader] = trim((string) ($draft->product_design ?? ''));
+        }
         if ($draft->metal === null || trim((string) $draft->metal) === '') {
             // Clearing in draft must clear the Shopify row value too.
             $updates[HeaderStore::PRODUCT_METALS] = '';

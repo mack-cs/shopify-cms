@@ -7,6 +7,7 @@ use App\Filament\Resources\NewProductDraftResource\RelationManagers;
 use App\Filament\Resources\NewProductDraftResource\Pages;
 use App\Models\Color;
 use App\Models\NewProductDraft;
+use App\Models\NewProductDraftApproval;
 use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\DropdownOption;
@@ -267,9 +268,8 @@ class NewProductDraftResource extends Resource
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
                         ->schema([
-                            Textarea::make('body_html')
+                            RichEditor::make('body_html')
                                 ->label('Description')
-                                ->rows(3)
                                 ->columnSpan(2),
                         ])
                         ->columnSpanFull(),
@@ -412,22 +412,52 @@ class NewProductDraftResource extends Resource
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
                         ->schema([
-                            Textarea::make('materials_and_dimensions')
+                            Select::make('materials_and_dimensions')
                                 ->label('Materials and Dimensions')
-                                ->rows(2),
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'materials_and_dimensions',
+                                    HeaderStore::MATERIALS_AND_DIMENSIONS
+                                ))
+                                ->placeholder('Select option')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::MATERIALS_AND_DIMENSIONS,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                ))
+                                ->searchable()
+                                ->reactive()
+                                ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                                ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                                    $data,
+                                    HeaderStore::MATERIALS_AND_DIMENSIONS
+                                ))
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::MATERIALS_AND_DIMENSIONS,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ]),
                             Select::make('complementary_products')
                                 ->label('Complementary products')
                                 ->placeholder('Select products')
                                 ->multiple()
                                 ->searchable()
                                 ->preload()
-                                ->options(fn (Get $get): array => self::complementaryProductOptions(
+                                ->options(fn (Get $get): array => self::productReferenceOptions(
                                     $get('complementary_products')
                                 ))
                                 ->afterStateHydrated(function (Select $component, $state): void {
-                                    $component->state(self::parseComplementaryProductState($state));
+                                    $component->state(self::parseProductReferenceState($state));
                                 })
-                                ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateComplementaryProductState($state)),
+                                ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateProductReferenceState($state)),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -444,6 +474,7 @@ class NewProductDraftResource extends Resource
                                     HeaderStore::JEWELRY_MATERIAL,
                                     tags: self::filterTags($get, $get('vendor'), $get('type'))
                                 ))
+                                ->multiple()
                                 ->searchable()
                                 ->reactive()
                                 ->rules([
@@ -459,7 +490,27 @@ class NewProductDraftResource extends Resource
                                             $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
                                         }
                                     },
-                                ]),
+                                ])
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (! is_string($state) || trim($state) === '') {
+                                        $component->state([]);
+                                        return;
+                                    }
+
+                                    $normalized = str_replace(',', ';', $state);
+                                    $component->state(
+                                        array_values(array_filter(array_map('trim', explode(';', $normalized))))
+                                    );
+                                })
+                                ->dehydrateStateUsing(function ($state): ?string {
+                                    $arr = is_array($state) ? $state : [];
+                                    $clean = array_values(array_unique(array_filter(array_map(
+                                        fn ($v) => trim((string) $v),
+                                        $arr
+                                    ))));
+
+                                    return $clean ? implode('; ', $clean) : null;
+                                }),
                             Select::make('product_materials')
                                 ->label('Product Materials')
                                 ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
@@ -595,8 +646,19 @@ class NewProductDraftResource extends Resource
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
                         ->schema([
-                            TextInput::make('siblings')
-                                ->label('Siblings'),
+                            Select::make('siblings')
+                                ->label('Siblings')
+                                ->placeholder('Select products')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->options(fn (Get $get): array => self::productReferenceOptions(
+                                    $get('siblings')
+                                ))
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    $component->state(self::parseProductReferenceState($state));
+                                })
+                                ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateProductReferenceState($state)),
                             Select::make('siblings_collection_name')
                                 ->label('Siblings Collection Name')
                                 ->placeholder('Select option')
@@ -737,14 +799,50 @@ class NewProductDraftResource extends Resource
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::draftImageLocked($get, $record)),
                     Select::make('product_design')
-                        ->label('Product design')
+                        ->label(fn (Get $get): string => self::designLabelForDraftState($get))
                         ->placeholder('Select option')
-                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                            HeaderStore::BRACELET_DESIGN,
-                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                        ->options(fn (Get $get): array => self::designOptionsForDraftState(
+                            $get,
+                            $get('product_design')
                         ))
+                        ->multiple()
+                        ->helperText(fn (Get $get): ?HtmlString => self::designInvalidSelectionHint($get))
                         ->searchable()
-                        ->reactive(),
+                        ->reactive()
+                        ->visible(fn (Get $get): bool => self::shouldShowDesignField($get))
+                        ->createOptionForm(self::controlledDesignDropdownCreateOptionForm())
+                        ->createOptionUsing(fn (array $data): ?string => self::createControlledDesignDropdownOption($data))
+                        ->afterStateHydrated(function (Select $component, $state): void {
+                            if (! is_string($state) || trim($state) === '') {
+                                $component->state([]);
+                                return;
+                            }
+
+                            $normalized = str_replace(',', ';', $state);
+                            $component->state(
+                                array_values(array_filter(array_map('trim', explode(';', $normalized))))
+                            );
+                        })
+                        ->dehydrateStateUsing(function ($state): ?string {
+                            $arr = is_array($state) ? $state : [];
+                            $clean = array_values(array_unique(array_filter(array_map(
+                                fn ($v) => trim((string) $v),
+                                $arr
+                            ))));
+
+                            return $clean ? implode('; ', $clean) : null;
+                        })
+                        ->rules([
+                            fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                $invalid = self::invalidCollectionSelectionValues(
+                                    $value,
+                                    self::designOptionsForDraftState($get)
+                                );
+                                if (!empty($invalid)) {
+                                    $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                }
+                            },
+                        ]),
                     Select::make('status')
                         ->options([
                             'draft' => 'draft',
@@ -762,9 +860,7 @@ class NewProductDraftResource extends Resource
                         ->required(),
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
-                        ->toolbarButtons([
-                            'bold',
-                        ]),
+                        ->toolbarButtons(self::compactRichTextToolbarButtons()),
                     TextInput::make('batch')
                         ->label('Batch')
                         ->default(fn () => self::defaultBatch()),
@@ -786,6 +882,21 @@ class NewProductDraftResource extends Resource
             ->all();
 
         return array_combine($collections, $collections) ?: [];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function compactRichTextToolbarButtons(): array
+    {
+        return [
+            'bold',
+            'italic',
+            'bulletList',
+            'orderedList',
+            'undo',
+            'redo',
+        ];
     }
 
     private static function collectionFromTags(?string $tags): ?string
@@ -913,6 +1024,221 @@ class NewProductDraftResource extends Resource
             ->all();
     }
 
+    private static function controlledDropdownCreateOptionForm(): array
+    {
+        return [
+            TextInput::make('value')
+                ->required()
+                ->maxLength(255),
+            Select::make('collection_style')
+                ->label('Collection')
+                ->options(fn (): array => self::collectionOptions())
+                ->default(fn (Get $get): ?string => self::defaultCollectionStyleForState($get))
+                ->searchable()
+                ->placeholder('Use current product collection by default')
+                ->helperText('Pick a collection only if you want to override the current one.'),
+        ];
+    }
+
+    private static function controlledDesignDropdownCreateOptionForm(): array
+    {
+        return [
+            Forms\Components\Hidden::make('header')
+                ->default(fn (Get $get): ?string => self::designHeaderForDraftState($get)),
+            ...self::controlledDropdownCreateOptionForm(),
+        ];
+    }
+
+    private static function designHeaderForDraftState(Get $get): ?string
+    {
+        return HeaderStore::designHeaderForTypeAndTags(
+            is_string($get('type')) ? $get('type') : null,
+            self::filterTags($get, $get('vendor'), $get('type'))
+        );
+    }
+
+    private static function designLabelForDraftState(Get $get): string
+    {
+        return match (self::designHeaderForDraftState($get)) {
+            HeaderStore::NECKLACE_DESIGN => 'Necklace design',
+            HeaderStore::EARRING_DESIGN => 'Earring design',
+            default => 'Bracelet design',
+        };
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function designOptionsForDraftState(Get $get, mixed $currentValue = null): array
+    {
+        $header = self::designHeaderForDraftState($get);
+        if ($header === null) {
+            return [];
+        }
+
+        return self::withCurrentOptions(
+            self::dropdownOptionsForHeader(
+                $header,
+                tags: self::filterTags($get, $get('vendor'), $get('type'))
+            ),
+            $currentValue
+        );
+    }
+
+    private static function shouldShowDesignField(Get $get): bool
+    {
+        if (self::designHeaderForDraftState($get) === null) {
+            return false;
+        }
+
+        return !empty(self::designOptionsForDraftState($get, $get('product_design')))
+            || !empty(self::normalizeSelectedOptionTokens($get('product_design')));
+    }
+
+    private static function designInvalidSelectionHint(Get $get): ?HtmlString
+    {
+        $header = self::designHeaderForDraftState($get);
+        if ($header === null) {
+            return null;
+        }
+
+        $invalid = self::invalidCollectionSelectionValues(
+            $get('product_design'),
+            self::designOptionsForDraftState($get)
+        );
+
+        if (empty($invalid)) {
+            return null;
+        }
+
+        $message = 'Invalid value(s) for selected collection: ' . implode('; ', $invalid)
+            . '. Remove them or choose values available for this collection.';
+
+        return new HtmlString('<span class="text-danger-600">' . e($message) . '</span>');
+    }
+
+    private static function defaultCollectionStyleForState(Get $get): ?string
+    {
+        $selected = self::nullIfEmpty($get('collection_filter'));
+        if ($selected !== null) {
+            return $selected;
+        }
+
+        $tags = self::normalizeTagList($get('tags'));
+        if (empty($tags)) {
+            return null;
+        }
+
+        return self::collectionFromTags(implode(', ', $tags));
+    }
+
+    private static function createControlledDesignDropdownOption(array $data): ?string
+    {
+        $header = trim((string) ($data['header'] ?? ''));
+        if ($header === '') {
+            $header = self::designHeaderForCollectionStyle($data['collection_style'] ?? null) ?? '';
+        }
+
+        if ($header === '') {
+            return null;
+        }
+
+        return self::createControlledDropdownOption($data, $header);
+    }
+
+    private static function designHeaderForCollectionStyle(mixed $collectionStyle): ?string
+    {
+        $collection = self::nullIfEmpty($collectionStyle);
+        if ($collection === null) {
+            return null;
+        }
+
+        return HeaderStore::designHeaderForTypeAndTags(null, self::collectionTags($collection));
+    }
+
+    private static function createControlledDropdownOption(array $data, string $header): ?string
+    {
+        $value = trim((string) ($data['value'] ?? ''));
+        if ($value === '') {
+            return null;
+        }
+
+        $collectionStyle = self::nullIfEmpty($data['collection_style'] ?? null);
+        $context = self::contextForCreateOption($collectionStyle);
+
+        $query = DropdownOption::query()
+            ->where('header', $header)
+            ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+
+        if ($context['tag_primary'] !== null) {
+            $query->where('collection_tag_primary', $context['tag_primary']);
+        } else {
+            $query->whereNull('collection_tag_primary');
+        }
+
+        if ($context['tag_secondary'] !== null) {
+            $query->where('collection_tag_secondary', $context['tag_secondary']);
+        } else {
+            $query->whereNull('collection_tag_secondary');
+        }
+
+        $existing = $query->first();
+        if ($existing) {
+            if (!$existing->active) {
+                $existing->update(['active' => true]);
+            }
+        } else {
+            DropdownOption::create([
+                'header' => $header,
+                'value' => $value,
+                'collection_style' => $context['collection_style'],
+                'collection_tag_primary' => $context['tag_primary'],
+                'collection_tag_secondary' => $context['tag_secondary'],
+                'active' => true,
+                'sort_order' => 0,
+            ]);
+        }
+
+        return $value;
+    }
+
+    /**
+     * @return array{collection_style:?string,tag_primary:?string,tag_secondary:?string}
+     */
+    private static function contextForCreateOption(?string $collectionStyle): array
+    {
+        if ($collectionStyle === null) {
+            return [
+                'collection_style' => null,
+                'tag_primary' => null,
+                'tag_secondary' => null,
+            ];
+        }
+
+        $row = DropdownOption::query()
+            ->where('collection_style', $collectionStyle)
+            ->whereNotNull('collection_tag_primary')
+            ->orderBy('collection_tag_primary')
+            ->orderBy('collection_tag_secondary')
+            ->first(['collection_style', 'collection_tag_primary', 'collection_tag_secondary']);
+
+        return [
+            'collection_style' => $collectionStyle,
+            'tag_primary' => self::nullIfEmpty($row?->collection_tag_primary),
+            'tag_secondary' => self::nullIfEmpty($row?->collection_tag_secondary),
+        ];
+    }
+
+    private static function nullIfEmpty(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $trimmed = trim((string) $value);
+        return $trimmed === '' ? null : $trimmed;
+    }
+
     /**
      * @param array<string, string> $options
      */
@@ -927,6 +1253,27 @@ class NewProductDraftResource extends Resource
             $options[$current] = $current;
             ksort($options);
         }
+
+        return $options;
+    }
+
+    /**
+     * @param array<string, string> $options
+     */
+    private static function withCurrentOptions(array $options, mixed $currentValue): array
+    {
+        $selected = self::normalizeSelectedOptionTokens($currentValue);
+        if (empty($selected)) {
+            return $options;
+        }
+
+        foreach ($selected as $current) {
+            if (!array_key_exists($current, $options)) {
+                $options[$current] = $current;
+            }
+        }
+
+        ksort($options);
 
         return $options;
     }
@@ -1012,14 +1359,21 @@ class NewProductDraftResource extends Resource
     /**
      * @return array<string, string>
      */
-    private static function complementaryProductOptions(mixed $currentValue = null): array
+    private static function productReferenceOptions(mixed $currentValue = null): array
     {
+        $selected = self::parseProductReferenceState($currentValue);
+
         $products = Product::query()
             ->whereNotNull('shopify_id')
             ->where('shopify_id', '!=', '')
+            ->where(function (Builder $query): void {
+                $query
+                    ->whereRaw('LOWER(status) = ?', ['active'])
+                    ->orWhereRaw('LOWER(status) = ?', ['draft']);
+            })
             ->orderBy('title')
             ->orderBy('handle')
-            ->get(['shopify_id', 'title', 'handle']);
+            ->get(['shopify_id', 'title', 'handle', 'status']);
 
         $options = [];
         foreach ($products as $product) {
@@ -1028,16 +1382,29 @@ class NewProductDraftResource extends Resource
                 continue;
             }
 
-            $title = trim((string) $product->title);
-            $handle = trim((string) $product->handle);
-            $label = $title !== '' ? $title : ($handle !== '' ? $handle : $gid);
-            if ($handle !== '' && strcasecmp($label, $handle) !== 0) {
-                $label .= " ({$handle})";
-            }
-            $options[$gid] = $label;
+            $options[$gid] = self::productReferenceLabel($product);
         }
 
-        $selected = self::parseComplementaryProductState($currentValue);
+        $missingSelected = array_values(array_filter(
+            $selected,
+            fn (string $gid): bool => !isset($options[$gid])
+        ));
+
+        if (!empty($missingSelected)) {
+            $selectedProducts = Product::query()
+                ->whereIn('shopify_id', $missingSelected)
+                ->get(['shopify_id', 'title', 'handle', 'status']);
+
+            foreach ($selectedProducts as $product) {
+                $gid = trim((string) $product->shopify_id);
+                if ($gid === '') {
+                    continue;
+                }
+
+                $options[$gid] = self::productReferenceLabel($product);
+            }
+        }
+
         foreach ($selected as $gid) {
             if (!isset($options[$gid])) {
                 $options[$gid] = $gid;
@@ -1047,10 +1414,33 @@ class NewProductDraftResource extends Resource
         return $options;
     }
 
+    private static function productReferenceLabel(Product $product): string
+    {
+        $gid = trim((string) $product->shopify_id);
+        $title = trim((string) $product->title);
+        $handle = trim((string) $product->handle);
+        $status = strtolower(trim((string) ($product->status ?? '')));
+
+        $label = $title !== '' ? $title : ($handle !== '' ? $handle : $gid);
+        if ($handle !== '' && strcasecmp($label, $handle) !== 0) {
+            $label .= " ({$handle})";
+        }
+
+        if ($status === 'draft') {
+            return "[DRAFT] {$label}";
+        }
+
+        if ($status !== '' && $status !== 'active') {
+            return '[' . strtoupper($status) . "] {$label}";
+        }
+
+        return $label;
+    }
+
     /**
      * @return array<int, string>
      */
-    private static function parseComplementaryProductState(mixed $state): array
+    private static function parseProductReferenceState(mixed $state): array
     {
         if (is_array($state)) {
             return array_values(array_filter(array_map(
@@ -1067,7 +1457,7 @@ class NewProductDraftResource extends Resource
         if (str_starts_with($raw, '[')) {
             $decoded = json_decode($raw, true);
             if (is_array($decoded)) {
-                return self::parseComplementaryProductState($decoded);
+                return self::parseProductReferenceState($decoded);
             }
         }
 
@@ -1081,9 +1471,9 @@ class NewProductDraftResource extends Resource
         ), fn (string $item): bool => $item !== ''));
     }
 
-    private static function dehydrateComplementaryProductState(mixed $state): ?string
+    private static function dehydrateProductReferenceState(mixed $state): ?string
     {
-        $tokens = self::parseComplementaryProductState($state);
+        $tokens = self::parseProductReferenceState($state);
         if (empty($tokens)) {
             return null;
         }
@@ -1092,14 +1482,14 @@ class NewProductDraftResource extends Resource
         return implode('; ', $tokens);
     }
 
-    private static function complementaryProductsAsLabels(?string $value): string
+    private static function productReferencesAsLabels(?string $value): string
     {
-        $tokens = self::parseComplementaryProductState($value);
+        $tokens = self::parseProductReferenceState($value);
         if (empty($tokens)) {
             return '';
         }
 
-        $labelsByGid = self::complementaryProductOptions();
+        $labelsByGid = self::productReferenceOptions();
         $labels = array_map(
             fn (string $gid): string => $labelsByGid[$gid] ?? $gid,
             $tokens
@@ -1203,6 +1593,15 @@ class NewProductDraftResource extends Resource
                     ->searchable()
                     ->sortable()
                     ->toggleable(),
+                TextColumn::make('approvals_current')
+                    ->label('Approvals')
+                    ->state(fn (NewProductDraft $record): string => $record->approvalsForCurrentVersionCount() . '/2')
+                    ->toggleable(),
+                IconColumn::make('approved')
+                    ->label('Approved')
+                    ->boolean()
+                    ->state(fn (NewProductDraft $record): bool => $record->isApprovedByTwo())
+                    ->toggleable(),
                 TextColumn::make('color_string')
                     ->label('Colors')
                     ->toggleable(isToggledHiddenByDefault: true),
@@ -1287,6 +1686,8 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('siblings')
                     ->label('Siblings')
+                    ->formatStateUsing(fn (?string $state): string => self::productReferencesAsLabels($state))
+                    ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('siblings_collection_name')
                     ->label('Siblings Collection Name')
@@ -1296,7 +1697,7 @@ class NewProductDraftResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('complementary_products')
                     ->label('Complementary products')
-                    ->formatStateUsing(fn (?string $state): string => self::complementaryProductsAsLabels($state))
+                    ->formatStateUsing(fn (?string $state): string => self::productReferencesAsLabels($state))
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
@@ -1367,6 +1768,72 @@ class NewProductDraftResource extends Resource
             ->bulkActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make(),
+                    BulkAction::make('bulkApproveForShopify')
+                        ->label('Bulk Approve for Shopify')
+                        ->icon('heroicon-o-check-badge')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->action(function ($records): void {
+                            $approvedCount = 0;
+                            $skippedHasHandleCount = 0;
+                            $skippedFullyApprovedCount = 0;
+                            $skippedAlreadyApprovedCount = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof NewProductDraft) {
+                                    continue;
+                                }
+
+                                if (filled(trim((string) ($record->handle ?? '')))) {
+                                    $skippedHasHandleCount++;
+                                    continue;
+                                }
+
+                                if ($record->isApprovedByTwo()) {
+                                    $skippedFullyApprovedCount++;
+                                    continue;
+                                }
+
+                                $exists = NewProductDraftApproval::query()
+                                    ->where('new_product_draft_id', $record->id)
+                                    ->where('user_id', Auth::id())
+                                    ->where('approval_version', $record->approval_version)
+                                    ->exists();
+
+                                if ($exists) {
+                                    $skippedAlreadyApprovedCount++;
+                                    continue;
+                                }
+
+                                NewProductDraftApproval::create([
+                                    'new_product_draft_id' => $record->id,
+                                    'user_id' => Auth::id(),
+                                    'approval_version' => $record->approval_version,
+                                ]);
+                                $approvedCount++;
+                            }
+
+                            $parts = [];
+                            if ($approvedCount > 0) {
+                                $parts[] = "Approved {$approvedCount}.";
+                            }
+                            if ($skippedHasHandleCount > 0) {
+                                $parts[] = "Skipped {$skippedHasHandleCount} already has a handle.";
+                            }
+                            if ($skippedFullyApprovedCount > 0) {
+                                $parts[] = "Skipped {$skippedFullyApprovedCount} already at 2 approvals.";
+                            }
+                            if ($skippedAlreadyApprovedCount > 0) {
+                                $parts[] = "Skipped {$skippedAlreadyApprovedCount} already approved by you.";
+                            }
+
+                            Notification::make()
+                                ->title('Bulk approval complete')
+                                ->body($parts ? implode(' ', $parts) : 'No drafts were approved.')
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('mergeToProducts')
                         ->label('Create In Shopify')
                         ->icon('heroicon-o-cloud-arrow-up')
@@ -1386,7 +1853,7 @@ class NewProductDraftResource extends Resource
 
                             Notification::make()
                                 ->title('Shopify create queued')
-                                ->body('The background job has been queued. You will be notified when it finishes.')
+                                ->body('The background job has been queued. Only handle-less drafts with 2 approvals will be created. You will be notified when it finishes.')
                                 ->success()
                                 ->send();
                         })

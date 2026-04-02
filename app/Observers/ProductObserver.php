@@ -165,7 +165,7 @@ class ProductObserver
             $payload['jewelry_material'] = $row->get(HeaderStore::JEWELRY_MATERIAL, null);
             $payload['product_materials'] = $row->get(HeaderStore::PRODUCT_MATERIALS, null);
             $payload['materials_and_dimensions'] = $row->get(HeaderStore::MATERIALS_AND_DIMENSIONS, null);
-            $payload['product_design'] = $row->get(HeaderStore::BRACELET_DESIGN, null);
+            $payload['product_design'] = $this->designValueFromRow($product, $row);
             $payload['metal'] = $row->get(HeaderStore::PRODUCT_METALS, null);
             $payload['colour_style'] = $row->get(HeaderStore::PATTERN_CATEGORY, null);
             $payload['size'] = $row->get(HeaderStore::SIZE, null);
@@ -237,6 +237,27 @@ class ProductObserver
         }
 
         return $handleDraft ?? $shopifyDraft;
+    }
+
+    private function designValueFromRow(Product $product, ?ShopifyRow $row): ?string
+    {
+        if (!$row) {
+            return null;
+        }
+
+        $resolvedHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
+        $headers = $resolvedHeader !== null
+            ? array_values(array_unique(array_merge([$resolvedHeader], HeaderStore::designHeaders())))
+            : HeaderStore::designHeaders();
+
+        foreach ($headers as $header) {
+            $value = $row->get($header, null);
+            if (is_string($value) && trim($value) !== '') {
+                return trim($value);
+            }
+        }
+
+        return null;
     }
 
     private function preferredDraftForProduct(NewProductDraft $handleDraft, NewProductDraft $shopifyDraft): NewProductDraft

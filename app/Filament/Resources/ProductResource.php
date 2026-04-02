@@ -118,8 +118,9 @@ class ProductResource extends Resource
                                 ->helperText('Locked once from the approved title on the first 2/2 approval. It becomes the live Shopify handle on the next successful product sync.'),
                             TextInput::make('title')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record)),
-                            Textarea::make('body_html')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))->rows(5)->columnSpanFull(),
+                            RichEditor::make('body_html')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
+                                ->columnSpanFull(),
                             Grid::make(3)->schema([
                             Select::make('target_gender')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
@@ -833,9 +834,7 @@ class ProductResource extends Resource
                             RichEditor::make('uvp_short_paragraph')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('UVP Short Paragraph')
-                                ->toolbarButtons([
-                                    'bold',
-                                ])
+                                ->toolbarButtons(self::compactRichTextToolbarButtons())
                                 ->columnSpanFull(),
                         ])->columnSpan(1),
                     ]),
@@ -2670,6 +2669,21 @@ class ProductResource extends Resource
         }
 
         return null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function compactRichTextToolbarButtons(): array
+    {
+        return [
+            'bold',
+            'italic',
+            'bulletList',
+            'orderedList',
+            'undo',
+            'redo',
+        ];
     }
 
     private static function collectionTags(?string $collection): array

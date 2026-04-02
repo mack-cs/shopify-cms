@@ -68,9 +68,7 @@ final class NewProductDraftSeeder
                     $data['materials_and_dimensions'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::MATERIALS_AND_DIMENSIONS, [
                             ['custom', 'materials_and_dimensions'],
                         ]);
-                    $data['product_design'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::BRACELET_DESIGN, [
-                            ['shopify', 'bracelet-design'],
-                        ]);
+                    $data['product_design'] = $this->designValueFromRowOrMetafield($product, $row);
                     $data['metal'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_METALS, [
                             ['custom', 'product_metals'],
                         ]);
@@ -192,5 +190,41 @@ final class NewProductDraftSeeder
         }
 
         return null;
+    }
+
+    private function designValueFromRowOrMetafield(Product $product, ?ShopifyRow $row): ?string
+    {
+        $resolvedHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
+        $headers = $resolvedHeader !== null
+            ? array_values(array_unique(array_merge([$resolvedHeader], HeaderStore::designHeaders())))
+            : HeaderStore::designHeaders();
+
+        foreach ($headers as $header) {
+            $value = $this->valueFromRowOrMetafield(
+                $product,
+                $row,
+                $header,
+                $this->designMetafieldLookups($header)
+            );
+
+            if (is_string($value) && trim($value) !== '') {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<int, array{0:string,1:string}>
+     */
+    private function designMetafieldLookups(string $header): array
+    {
+        return match ($header) {
+            HeaderStore::BRACELET_DESIGN => [['shopify', 'bracelet-design']],
+            HeaderStore::NECKLACE_DESIGN => [['shopify', 'necklace-design']],
+            HeaderStore::EARRING_DESIGN => [['shopify', 'earring-design']],
+            default => [],
+        };
     }
 }

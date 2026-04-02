@@ -8,9 +8,11 @@ use Filament\Forms;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Forms\Form;
+use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Widgets\Widget;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
 
 class QuickCreateNewProductDraft extends Widget implements HasForms
 {
@@ -31,12 +33,12 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
     {
         return $form
             ->schema([
-                Forms\Components\Grid::make(12)->schema([
+                Forms\Components\Grid::make(24)->schema([
                     Forms\Components\TextInput::make('title')
                         ->label('Title')
                         ->required()
                         ->maxLength(255)
-                        ->columnSpan(5),
+                        ->columnSpan(['default' => 24, 'xl' => 5]),
                     Forms\Components\TextInput::make('sku')
                         ->label('SKU')
                         ->maxLength(255)
@@ -55,13 +57,44 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
                                 };
                             },
                         ])
-                        ->columnSpan(4),
+                        ->columnSpan(['default' => 24, 'xl' => 4]),
+                    Forms\Components\FileUpload::make('image_path')
+                        ->label('Primary Image')
+                        ->disk('public')
+                        ->directory('new-product-images')
+                        ->preserveFilenames()
+                        ->getUploadedFileNameForStorageUsing(function ($file): string {
+                            $disk = Storage::disk('public');
+                            $directory = 'new-product-images';
+                            $original = $file->getClientOriginalName();
+                            $name = pathinfo($original, PATHINFO_FILENAME);
+                            $ext = strtolower($file->getClientOriginalExtension());
+                            $ext = $ext !== '' ? ".{$ext}" : '';
+
+                            $candidate = "{$name}{$ext}";
+                            $path = "{$directory}/{$candidate}";
+                            $suffix = 1;
+
+                            while ($disk->exists($path)) {
+                                $candidate = "{$name}-{$suffix}{$ext}";
+                                $path = "{$directory}/{$candidate}";
+                                $suffix++;
+                            }
+
+                            return $candidate;
+                        })
+                        ->image()
+                        ->imageEditor()
+                        ->imagePreviewHeight('90')
+                        ->maxSize(5120)
+                        ->columnSpan(['default' => 24, 'xl' => 9]),
                     Forms\Components\Actions::make([
                         Forms\Components\Actions\Action::make('create')
                             ->label('Add Draft')
                             ->color('success')
+                            ->extraAttributes(['style' => 'white-space: nowrap;'])
                             ->action(fn () => $this->createDraft()),
-                    ])->columnSpan(3)->alignEnd(),
+                    ])->columnSpan(['default' => 24, 'xl' => 3])->alignEnd(),
                 ]),
             ])
             ->statePath('data');
@@ -74,6 +107,7 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
         $draft = NewProductDraft::create([
             'title' => $state['title'],
             'sku' => $state['sku'] ?? null,
+            'image_path' => $state['image_path'] ?? null,
             'status' => 'draft',
             'variant_inventory_policy' => 'deny',
             'variant_fulfillment_service' => 'manual',

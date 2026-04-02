@@ -60,6 +60,8 @@ final class HeaderStore
     public const TARGET_GENDER = 'Target gender (product.metafields.shopify.target-gender)';
     public const AGE_GROUP = 'Age group (product.metafields.shopify.age-group)';
     public const BRACELET_DESIGN = 'Bracelet design (product.metafields.shopify.bracelet-design)';
+    public const NECKLACE_DESIGN = 'Necklace design (product.metafields.shopify.necklace-design)';
+    public const EARRING_DESIGN = 'Earring design (product.metafields.shopify.earring-design)';
     public const INTERNAL_VARIANT_SHOPIFY_ID = '__shopify_variant_id';
     public const INTERNAL_IMAGE_SHOPIFY_ID = '__shopify_image_id';
 
@@ -85,6 +87,8 @@ final class HeaderStore
             self::TARGET_GENDER,
             self::AGE_GROUP,
             self::BRACELET_DESIGN,
+            self::NECKLACE_DESIGN,
+            self::EARRING_DESIGN,
             self::UVP_SHORT_PARAGRAPH,
             self::SIBLINGS,
             self::SIBLINGS_COLLECTION_NAME,
@@ -151,14 +155,59 @@ final class HeaderStore
             self::AGE_GROUP,
             self::COLOR_METAFIELD,
             self::BRACELET_DESIGN,
-            'Earring design (product.metafields.shopify.earring-design)',
+            self::EARRING_DESIGN,
             self::JEWELRY_MATERIAL,
             self::JEWELRY_TYPE,
-            'Necklace design (product.metafields.shopify.necklace-design)',
+            self::NECKLACE_DESIGN,
             'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)',
             self::SIBLINGS,
             'Search product boosts (product.metafields.shopify--discovery--product_search_boost.queries)',
         ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function designHeaders(): array
+    {
+        return [
+            self::BRACELET_DESIGN,
+            self::NECKLACE_DESIGN,
+            self::EARRING_DESIGN,
+        ];
+    }
+
+    public static function designHeaderForTypeAndTags(?string $type, mixed $tags = null): ?string
+    {
+        $tokens = is_array($tags)
+            ? array_values(array_filter(array_map(
+                static fn (mixed $tag): string => strtolower(trim((string) $tag)),
+                $tags
+            ), static fn (string $tag): bool => $tag !== ''))
+            : TagNormalizer::parseTokens((string) $tags);
+
+        if (in_array('bracelets', $tokens, true) || in_array('bracelet', $tokens, true)) {
+            return self::BRACELET_DESIGN;
+        }
+        if (in_array('necklaces', $tokens, true) || in_array('necklace', $tokens, true)) {
+            return self::NECKLACE_DESIGN;
+        }
+        if (in_array('earrings', $tokens, true) || in_array('earring', $tokens, true)) {
+            return self::EARRING_DESIGN;
+        }
+
+        $typeNormalized = strtolower(trim((string) ($type ?? '')));
+        if (in_array($typeNormalized, ['bracelet', 'bracelets'], true)) {
+            return self::BRACELET_DESIGN;
+        }
+        if (in_array($typeNormalized, ['necklace', 'necklaces'], true)) {
+            return self::NECKLACE_DESIGN;
+        }
+        if (in_array($typeNormalized, ['earring', 'earrings'], true)) {
+            return self::EARRING_DESIGN;
+        }
+
+        return null;
     }
 
     public static function latestTemplatePath(): ?string
