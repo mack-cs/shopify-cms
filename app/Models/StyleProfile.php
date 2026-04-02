@@ -9,6 +9,11 @@ use App\Models\ShopifyRow;
 
 class StyleProfile extends Model
 {
+    public const SEO_TITLE_RECOMMENDED_MIN = 50;
+    public const SEO_TITLE_RECOMMENDED_MAX = 60;
+    public const SEO_DESCRIPTION_RECOMMENDED_MIN = 150;
+    public const SEO_DESCRIPTION_RECOMMENDED_MAX = 160;
+
     protected $fillable = [
         'product_id','handle','sku','image_url',
         'style_type','materials','components','colour_prompt',
@@ -103,5 +108,47 @@ class StyleProfile extends Model
 
         $trimmed = trim($value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    public static function trimmedLength(mixed $value): int
+    {
+        return mb_strlen(trim((string) ($value ?? '')));
+    }
+
+    public static function seoTitleLengthHint(mixed $value): string
+    {
+        return self::recommendedLengthHint(
+            $value,
+            self::SEO_TITLE_RECOMMENDED_MIN,
+            self::SEO_TITLE_RECOMMENDED_MAX
+        );
+    }
+
+    public static function seoDescriptionLengthHint(mixed $value): string
+    {
+        return self::recommendedLengthHint(
+            $value,
+            self::SEO_DESCRIPTION_RECOMMENDED_MIN,
+            self::SEO_DESCRIPTION_RECOMMENDED_MAX
+        );
+    }
+
+    private static function recommendedLengthHint(mixed $value, int $min, int $max): string
+    {
+        $length = self::trimmedLength($value);
+
+        if ($length === 0) {
+            return "Recommended {$min}-{$max} characters.";
+        }
+
+        if ($length < $min) {
+            return "Too short: {$length} characters. Recommended {$min}-{$max}.";
+        }
+
+        if ($length > $max) {
+            return "Too long: {$length} characters. Recommended {$min}-{$max}.";
+        }
+
+        return "Length looks good: {$length} characters. Recommended {$min}-{$max}.";
     }
 }

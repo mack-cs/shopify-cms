@@ -86,13 +86,37 @@ class StyleProfileRelationManager extends RelationManager
 
             Forms\Components\TextInput::make('draft_seo_title')
                 ->label('SEO Title')
-                ->maxLength(255)
+                ->live(debounce: 500)
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoTitleLengthHint($get('draft_seo_title')))
+                ->maxLength(StyleProfile::SEO_TITLE_RECOMMENDED_MAX)
+                ->rules([
+                    function (): \Closure {
+                        return function (string $attribute, $value, $fail): void {
+                            $length = StyleProfile::trimmedLength($value);
+                            if ($length > 0 && $length < StyleProfile::SEO_TITLE_RECOMMENDED_MIN) {
+                                $fail('SEO title is too short. Use at least ' . StyleProfile::SEO_TITLE_RECOMMENDED_MIN . ' characters.');
+                            }
+                        };
+                    },
+                ])
                 ->columnSpanFull(),
 
             Forms\Components\Textarea::make('draft_seo_description')
-                ->label('SEO Description (160 chars)')
+                ->label('SEO Description (150-160 chars)')
+                ->live(debounce: 500)
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
                 ->rows(2)
-                ->maxLength(160)
+                ->maxLength(StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX)
+                ->rules([
+                    function (): \Closure {
+                        return function (string $attribute, $value, $fail): void {
+                            $length = StyleProfile::trimmedLength($value);
+                            if ($length > 0 && $length < StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN) {
+                                $fail('SEO description is too short. Use at least ' . StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN . ' characters.');
+                            }
+                        };
+                    },
+                ])
                 ->columnSpanFull(),
         ]);
     }

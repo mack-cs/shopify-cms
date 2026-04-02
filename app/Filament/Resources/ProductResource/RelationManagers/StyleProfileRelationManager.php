@@ -9,6 +9,7 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\ImageColumn;
 use Illuminate\Support\HtmlString;
+use App\Models\StyleProfile;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
 
@@ -83,13 +84,15 @@ class StyleProfileRelationManager extends RelationManager
 
             Forms\Components\TextInput::make('draft_seo_title')
                 ->label('SEO Title')
-                ->maxLength(255)
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoTitleLengthHint($get('draft_seo_title')))
+                ->maxLength(StyleProfile::SEO_TITLE_RECOMMENDED_MAX)
                 ->columnSpanFull(),
 
             Forms\Components\Textarea::make('draft_seo_description')
-                ->label('SEO Description (160 chars)')
+                ->label('SEO Description (150-160 chars)')
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
                 ->rows(2)
-                ->maxLength(160)
+                ->maxLength(StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX)
                 ->columnSpanFull(),
         ]);
     }
