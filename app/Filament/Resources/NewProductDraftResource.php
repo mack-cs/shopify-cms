@@ -21,6 +21,7 @@ use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\NewProductDraftProductSync;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
