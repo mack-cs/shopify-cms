@@ -37,6 +37,7 @@ class RequiredFieldSeeder extends Seeder
             HeaderStore::VARIANT_SKU => 'sku',
             HeaderStore::VARIANT_PRICE => 'price',
             HeaderStore::VARIANT_COMPARE_AT => 'compare_at_price',
+            HeaderStore::VARIANT_INVENTORY_QTY => 'inventory_qty',
             HeaderStore::VARIANT_BARCODE => 'barcode',
             HeaderStore::VARIANT_GRAMS => 'weight',
             HeaderStore::VARIANT_WEIGHT_UNIT => 'weight_unit',
@@ -85,7 +86,11 @@ class RequiredFieldSeeder extends Seeder
         ];
 
         $bulkEditableLookup = array_fill_keys($bulkEditableDefaults, true);
-        $quickEditDefaults = [];
+        $quickEditDefaults = [
+            'product|title',
+            'row|' . HeaderStore::SIBLINGS,
+            'row|' . HeaderStore::COMPLEMENTARY_PRODUCTS,
+        ];
         $quickEditLookup = array_fill_keys($quickEditDefaults, true);
 
         $rows = [];

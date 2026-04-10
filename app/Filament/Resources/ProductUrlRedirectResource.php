@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use App\Enums\PermissionEnum;
 use App\Models\Product;
 use App\Models\ProductUrlRedirect;
+use App\Services\AdminNotification;
 use App\Services\ProductUrlRedirectService;
 use Filament\Forms\Form;
 use Filament\Forms\Components\Select;
@@ -133,11 +134,11 @@ class ProductUrlRedirectResource extends Resource
                         $newHandle = trim((string) ($data['new_handle'] ?? ''));
 
                         if ($oldHandle === '' || $newHandle === '') {
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Redirect not created')
                                 ->body('Both old and new handles are required.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
@@ -156,11 +157,11 @@ class ProductUrlRedirectResource extends Resource
                             ]
                         );
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Redirect created')
                             ->body("Created pending redirect from /products/{$oldHandle} to /products/{$newHandle}.")
                             ->success()
-                            ->send();
+                        );
                     }),
                 Action::make('exportPending')
                     ->label('Export Pending CSV')
@@ -193,21 +194,21 @@ class ProductUrlRedirectResource extends Resource
                             ->all();
 
                         if (empty($ids)) {
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Nothing to sync')
                                 ->body('There are no pending or failed redirects to sync.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
                         \App\Jobs\ProductUrlRedirectSyncJob::dispatch($ids, Auth::id());
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Redirect sync queued')
                             ->body('Queued pending URL redirects for Shopify sync.')
                             ->success()
-                            ->send();
+                        );
                     }),
             ])
             ->actions([
@@ -220,11 +221,11 @@ class ProductUrlRedirectResource extends Resource
                     ->action(function (ProductUrlRedirect $record): void {
                         \App\Jobs\ProductUrlRedirectSyncJob::dispatch([(int) $record->id], Auth::id());
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Redirect sync queued')
                             ->body("Queued redirect {$record->path} for Shopify sync.")
                             ->success()
-                            ->send();
+                        );
                     }),
                 Action::make('ignore')
                     ->label('Ignore')
@@ -248,11 +249,11 @@ class ProductUrlRedirectResource extends Resource
                             $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
                             \App\Jobs\ProductUrlRedirectSyncJob::dispatch($ids, Auth::id());
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Redirect sync queued')
                                 ->body('Queued selected URL redirects for Shopify sync.')
                                 ->success()
-                                ->send();
+                            );
                         }),
                     BulkAction::make('exportSelected')
                         ->label('Export Selected CSV')
@@ -315,18 +316,18 @@ class ProductUrlRedirectResource extends Resource
     private static function notifyExport(ProductUrlRedirectService $service, Collection $redirects, string $scopeLabel): void
     {
         if ($redirects->isEmpty()) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Nothing to export')
                 ->body("There are no {$scopeLabel} redirects to export.")
                 ->warning()
-                ->send();
+            );
             return;
         }
 
         $export = $service->exportRedirects($redirects);
         $url = Storage::disk($export['disk'])->url($export['path']);
 
-        Notification::make()
+        self::sendNotification(Notification::make()
             ->title('Redirect CSV created')
             ->body("Saved {$export['row_count']} redirect(s) to {$export['path']}")
             ->success()
@@ -335,6 +336,11 @@ class ProductUrlRedirectResource extends Resource
                     ->label('Download')
                     ->url($url, shouldOpenInNewTab: true),
             ])
-            ->send();
+        );
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        AdminNotification::send($notification);
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Product;
+use App\Services\AdminNotification;
 use App\Services\ProductShopifyUpdater;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -94,11 +95,13 @@ class ProductShopifyUpdateJob implements ShouldQueue
                 $parts[] = "Failures: {$failures}";
             }
 
-            Notification::make()
-                ->title('Shopify product update complete')
-                ->body($parts ? implode(' ', $parts) : 'No products were updated.')
-                ->status($result['failed'] > 0 ? 'danger' : 'success')
-                ->sendToDatabase(\App\Models\User::find($this->userId));
+            AdminNotification::sendToUserId(
+                Notification::make()
+                    ->title('Shopify product update complete')
+                    ->body($parts ? implode(' ', $parts) : 'No products were updated.')
+                    ->status($result['failed'] > 0 ? 'danger' : 'success'),
+                $this->userId
+            );
         }
     }
 }

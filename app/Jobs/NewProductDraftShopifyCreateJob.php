@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\NewProductDraft;
 use App\Models\Import;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\NewProductDraftShopifyCreator;
 use App\Services\ShopifyApiImporter;
 use App\Jobs\ShopifySyncJob;
@@ -39,8 +39,6 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
         if ($drafts->isEmpty()) {
             return;
         }
-
-        $user = User::find($this->userId);
 
         try {
             $result = $creator->createApprovedDrafts($drafts);
@@ -97,37 +95,37 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
                 }
             }
 
-            if ($user) {
-                $bodyParts = [];
-                $bodyParts[] = $parts ? implode(' ', $parts) : 'No drafts were created.';
-                if ($syncQueued) {
-                    $bodyParts[] = 'Sync queued to refresh Products.';
-                }
-                if ($failureSummary !== null) {
-                    $bodyParts[] = $failureSummary;
-                }
-                $body = implode(' ', $bodyParts);
+            $bodyParts = [];
+            $bodyParts[] = $parts ? implode(' ', $parts) : 'No drafts were created.';
+            if ($syncQueued) {
+                $bodyParts[] = 'Sync queued to refresh Products.';
+            }
+            if ($failureSummary !== null) {
+                $bodyParts[] = $failureSummary;
+            }
+            $body = implode(' ', $bodyParts);
 
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Shopify create complete')
                     ->body($body)
                     ->when($result['failed'] > 0, fn (Notification $n) => $n->warning())
-                    ->when($result['failed'] === 0, fn (Notification $n) => $n->success())
-                    ->sendToDatabase($user);
-            }
+                    ->when($result['failed'] === 0, fn (Notification $n) => $n->success()),
+                $this->userId
+            );
         } catch (\Throwable $e) {
             Log::error('New product draft Shopify create job failed.', [
                 'error' => $e->getMessage(),
                 'draft_ids' => $this->draftIds,
             ]);
 
-            if ($user) {
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Shopify create failed')
                     ->body($e->getMessage())
-                    ->danger()
-                    ->sendToDatabase($user);
-            }
+                    ->danger(),
+                $this->userId
+            );
 
             throw $e;
         }

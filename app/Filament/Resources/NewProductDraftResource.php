@@ -10,18 +10,23 @@ use App\Models\Color;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
+use App\Models\Image;
 use App\Models\Product;
 use App\Models\RequiredField;
 use App\Models\ShopifyCollection;
 use App\Models\ShopifyRow;
 use App\Models\Status;
+use App\Models\Setting;
+use App\Models\StyleProfile;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
+use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftRoundtripCsvService;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
@@ -78,6 +83,27 @@ class NewProductDraftResource extends Resource
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
+            Placeholder::make('draft_save_indicator')
+                ->label('')
+                ->content(new HtmlString(<<<'HTML'
+                    <div
+                        class="hidden items-start gap-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-900 shadow-sm"
+                        wire:loading.delay.flex
+                        wire:target="create,save"
+                    >
+                        <svg class="mt-0.5 h-5 w-5 animate-spin text-primary-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.25" stroke-width="4"></circle>
+                            <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"></path>
+                        </svg>
+                        <div>
+                            <div class="font-semibold">Saving draft</div>
+                            <div class="mt-1">
+                                Your product draft is being saved. Wait for the success message before leaving this page.
+                            </div>
+                        </div>
+                    </div>
+                HTML))
+                ->columnSpanFull(),
             Forms\Components\Tabs::make('NewProductDraftTabs')
                 ->columnSpanFull()
                 ->schema([
@@ -104,7 +130,7 @@ class NewProductDraftResource extends Resource
 
                                             $result = self::applyShopifyWarningValuesToDrafts([$record->fresh()]);
 
-                                            Notification::make()
+                                            self::sendNotification(Notification::make()
                                                 ->title('Shopify values applied')
                                                 ->body(self::warningResolutionSummary(
                                                     resolved: $result['updated'],
@@ -112,7 +138,7 @@ class NewProductDraftResource extends Resource
                                                     extra: []
                                                 ))
                                                 ->success()
-                                                ->send();
+                                            );
 
                                             return redirect(self::getUrl('edit', ['record' => $record]));
                                         }),
@@ -128,7 +154,7 @@ class NewProductDraftResource extends Resource
 
                                             $result = self::keepDraftWarningValues([$record->fresh()]);
 
-                                            Notification::make()
+                                            self::sendNotification(Notification::make()
                                                 ->title('Draft values kept')
                                                 ->body(self::warningResolutionSummary(
                                                     resolved: $result['cleared'],
@@ -136,7 +162,7 @@ class NewProductDraftResource extends Resource
                                                     extra: $result['synced'] > 0 ? ["Synced {$result['synced']} back to Products."] : []
                                                 ))
                                                 ->success()
-                                                ->send();
+                                            );
 
                                             return redirect(self::getUrl('edit', ['record' => $record]));
                                         }),
@@ -559,6 +585,16 @@ class NewProductDraftResource extends Resource
                                         $invalid = self::invalidProductReferenceStatusLabels($value);
                                         if (!empty($invalid)) {
                                             $fail('Inactive products selected: ' . implode('; ', $invalid));
+                                        }
+
+                                        if (!self::complementaryMinimumEnabled()) {
+                                            return;
+                                        }
+
+                                        $selected = self::parseProductReferenceState($value);
+                                        $minimum = self::complementaryMinimumCount();
+                                        if (count($selected) < $minimum) {
+                                            $fail("Select at least {$minimum} complementary products.");
                                         }
                                     },
                                 ])
@@ -1842,16 +1878,24 @@ class NewProductDraftResource extends Resource
 
     private static function productReferenceStatusHint(Get $get, string $field): ?HtmlString
     {
+        $messages = [];
+
         $invalid = self::invalidProductReferenceStatusLabels($get($field));
 
-        if (empty($invalid)) {
+        if (!empty($invalid)) {
+            $messages[] = 'Inactive products in this list: ' . implode('; ', $invalid)
+                . '. Remove them before saving.';
+        }
+
+        if ($field === 'complementary_products' && self::complementaryMinimumEnabled()) {
+            $messages[] = 'Minimum required: ' . self::complementaryMinimumCount() . ' complementary products.';
+        }
+
+        if (empty($messages)) {
             return null;
         }
 
-        $message = 'Inactive products in this list: ' . implode('; ', $invalid)
-            . '. Remove them before saving.';
-
-        return new HtmlString('<span class="text-danger-600">' . e($message) . '</span>');
+        return new HtmlString('<span class="text-danger-600">' . e(implode(' ', $messages)) . '</span>');
     }
 
     /**
@@ -2111,6 +2155,7 @@ class NewProductDraftResource extends Resource
                     ->square()
                     ->size(40)
                     ->state(fn (NewProductDraft $record) => self::draftDisplayImageUrl($record))
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByThumbnail($query, $direction))
                     ->toggleable(),
                 TextColumn::make('handle')
                     ->searchable(query: function (Builder $query, string $search): Builder {
@@ -2128,32 +2173,39 @@ class NewProductDraftResource extends Resource
                 TextColumn::make('approvals_current')
                     ->label('Approvals')
                     ->state(fn (NewProductDraft $record): string => $record->approvalsForCurrentVersionCount() . '/2')
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByApprovalCount($query, $direction))
                     ->toggleable(),
                 TextColumn::make('shopify_sync_warning_count')
                     ->label('Sync Warnings')
                     ->state(fn (NewProductDraft $record): int => $record->shopifySyncWarningCount())
                     ->badge()
                     ->color(fn (int $state): string => $state > 0 ? 'warning' : 'gray')
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByWarningCount($query, $direction))
                     ->toggleable(),
                 IconColumn::make('approved')
                     ->label('Approved')
                     ->boolean()
                     ->state(fn (NewProductDraft $record): bool => $record->isApprovedByTwo())
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByApprovalCount($query, $direction))
                     ->toggleable(),
                 TextColumn::make('color_string')
                     ->label('Colors')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('jewelry_material')
                     ->label('Jewelry material')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('material_cost')
                     ->label('Cost per item')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 IconColumn::make('linked_product_errors')
                     ->label('Errors')
                     ->icon(fn (bool $state): string => $state ? 'heroicon-o-x-circle' : 'heroicon-o-check-circle')
                     ->color(fn (bool $state): string => $state ? 'danger' : 'success')
                     ->state(fn (NewProductDraft $record): bool => self::draftHasLinkedProductErrors($record))
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByLinkedProductColumn($query, 'has_errors', $direction))
                     ->toggleable(),
                 TextColumn::make('linked_product_error_fields')
                     ->label('Error fields')
@@ -2161,106 +2213,124 @@ class NewProductDraftResource extends Resource
                     ->state(fn (NewProductDraft $record): string => self::draftErrorFieldsSummary($record))
                     ->extraAttributes(['style' => 'min-width: 32rem;'])
                     ->tooltip(fn (NewProductDraft $record): string => self::draftErrorFieldsSummary($record))
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByLinkedProductColumn($query, 'error_fields', $direction))
                     ->toggleable(),
-                TextColumn::make('type')->label('Type')->toggleable(),
-                TextColumn::make('vendor')->toggleable(),
+                TextColumn::make('type')->label('Type')->sortable()->toggleable(),
+                TextColumn::make('vendor')->sortable()->toggleable(),
                 IconColumn::make('published')
                     ->label('Published')
                     ->boolean()
                     ->state(fn (NewProductDraft $record): bool => filter_var($record->published, FILTER_VALIDATE_BOOLEAN))
+                    ->sortable()
                     ->toggleable(),
                 TextColumn::make('batch')
                     ->label('Batch')
+                    ->sortable()
                     ->toggleable(),
                 TextColumn::make('sku')
                     ->state(fn (NewProductDraft $record): ?string => self::resolvedSkuForDraft($record))
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('status')
                     ->badge()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_category')
                     ->label('Product Category')
                     ->formatStateUsing(fn ($state): string => (string) (
                         CategoryTypeMap::categoryLabelForValue(is_string($state) ? $state : null) ?? $state ?? ''
                     ))
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('google_product_category')
                     ->label('Google Product Category')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('tags')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('body_html')
                     ->label('Description')
                     ->limit(60)
                     ->wrap()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_price')
                     ->label('Price')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_compare_at_price')
                     ->label('Compare-at')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_inventory_qty')
                     ->label('Inventory')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_materials')
                     ->label('Product Materials')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('materials_and_dimensions')
                     ->label('Materials and Dimensions')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_design')
                     ->label('Product design')
                     ->formatStateUsing(fn ($state): string => self::normalizeDesignAliasValue($state) ?? '')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('metal')
                     ->label('Metal')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('colour_style')
                     ->label('Pattern category')
                     ->formatStateUsing(fn ($state): string => self::normalizeDesignAliasValue($state) ?? '')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('size')
                     ->label('Size')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('siblings')
                     ->label('Siblings')
                     ->formatStateUsing(fn (?string $state): string => self::productReferencesAsLabels($state))
                     ->wrap()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('siblings_collection_name')
                     ->label('Siblings Option Name')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('sibling_collection')
                     ->label('Sibling Collection')
                     ->formatStateUsing(fn (?string $state): string => self::siblingCollectionDisplayLabel($state) ?? '')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('uvp_short_paragraph')
                     ->label('UVP Short Paragraph')
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('complementary_products')
                     ->label('Complementary products')
                     ->formatStateUsing(fn (?string $state): string => self::productReferencesAsLabels($state))
                     ->wrap()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
                     ->dateTime()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('created_at')
                     ->dateTime()
+                    ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->actions([
-                Tables\Actions\Action::make('editImagesAndVariants')
-                    ->label('Edit Images / Variants')
-                    ->icon('heroicon-o-photo')
-                    ->color('gray')
-                    ->visible(fn (NewProductDraft $record): bool => self::linkedProductEditUrl($record) !== null)
-                    ->url(fn (NewProductDraft $record): ?string => self::linkedProductEditUrl($record)),
                 Tables\Actions\Action::make('quickEdit')
                     ->label('Quick Edit')
                     ->icon('heroicon-o-adjustments-horizontal')
-                    ->iconButton()
                     ->color('gray')
                     ->tooltip('Quick Edit')
                     ->form(self::draftQuickEditFormSchema())
@@ -2287,7 +2357,7 @@ class NewProductDraftResource extends Resource
                         $disk->put("template/{$name}", $writer->toString());
                         $url = $disk->url("template/{$name}");
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Template ready')
                             ->body("Saved to public/template/{$name}")
                             ->success()
@@ -2296,7 +2366,7 @@ class NewProductDraftResource extends Resource
                                     ->label('Download')
                                     ->url($url, shouldOpenInNewTab: true),
                             ])
-                            ->send();
+                        );
                     }),
                 Tables\Actions\Action::make('importCsv')
                     ->label('Import CSV')
@@ -2313,16 +2383,60 @@ class NewProductDraftResource extends Resource
                         $path = Storage::disk('local')->path($data['file']);
                         $result = $importer->importFromPath($path);
 
-                        Notification::make()
+                        $referenceParts = [];
+                        if (($result['resolved_product_references'] ?? 0) > 0) {
+                            $referenceParts[] = "Resolved links: {$result['resolved_product_references']}";
+                        }
+                        if (($result['unresolved_product_references'] ?? 0) > 0) {
+                            $referenceParts[] = "Unresolved links: {$result['unresolved_product_references']}";
+                        }
+
+                        self::sendNotification(Notification::make()
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Created: {$result['created']}, " .
                                 "Updated: {$result['updated']}, SEO Drafts: {$result['seo_drafts_upserted']}, " .
                                 "Missing handle: {$result['skipped_missing_handle']}, " .
-                                "Duplicate SKU: {$result['skipped_duplicate_sku']}"
+                                "Duplicate SKU: {$result['skipped_duplicate_sku']}, " .
+                                "Reference rule skips: " . ($result['skipped_reference_validation'] ?? 0) .
+                                ($referenceParts === [] ? '' : ', ' . implode(', ', $referenceParts))
                             )
                             ->success()
-                            ->send();
+                        );
+                    }),
+                Tables\Actions\Action::make('configureComplementaryRule')
+                    ->label(fn (): string => self::complementaryMinimumEnabled()
+                        ? 'Complementary Rule: On'
+                        : 'Complementary Rule: Off')
+                    ->color(fn (): string => self::complementaryMinimumEnabled() ? 'success' : 'gray')
+                    ->icon('heroicon-o-adjustments-horizontal')
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->form([
+                        Forms\Components\Toggle::make('enabled')
+                            ->label('Require a minimum number of complementary products')
+                            ->default(fn (): bool => self::complementaryMinimumEnabled()),
+                        TextInput::make('minimum_count')
+                            ->label('Minimum complementary products')
+                            ->numeric()
+                            ->integer()
+                            ->minValue(1)
+                            ->default(fn (): int => self::complementaryMinimumCount())
+                            ->required(),
+                    ])
+                    ->action(function (array $data): void {
+                        $enabled = (bool) ($data['enabled'] ?? false);
+                        $minimumCount = max(1, (int) ($data['minimum_count'] ?? self::complementaryMinimumCount()));
+
+                        Setting::putBool('new_product_drafts.complementary_minimum.enabled', $enabled);
+                        Setting::putValue('new_product_drafts.complementary_minimum.count', $minimumCount);
+
+                        self::sendNotification(Notification::make()
+                            ->title('Complementary rule updated')
+                            ->body($enabled
+                                ? "Minimum complementary products enabled at {$minimumCount}."
+                                : 'Minimum complementary products disabled.')
+                            ->success()
+                        );
                     }),
             ])
             ->bulkActions([
@@ -2396,11 +2510,11 @@ class NewProductDraftResource extends Resource
                                 $parts[] = "Skipped {$skippedAlreadyApprovedCount} already approved by you.";
                             }
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Bulk approval complete')
                                 ->body($parts ? implode(' ', $parts) : 'No drafts were approved.')
                                 ->success()
-                                ->send();
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('mergeToProducts')
@@ -2410,21 +2524,21 @@ class NewProductDraftResource extends Resource
                         ->action(function ($records): void {
                             $draftIds = $records->pluck('id')->all();
                             if (empty($draftIds)) {
-                                Notification::make()
+                                self::sendNotification(Notification::make()
                                     ->title('Nothing to queue')
                                     ->body('No drafts selected.')
                                     ->warning()
-                                    ->send();
+                                );
                                 return;
                             }
 
                             NewProductDraftShopifyCreateJob::dispatch($draftIds, Auth::id());
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Shopify create queued')
                                 ->body('The background job has been queued. Only handle-less drafts with 2 approvals will be created. You will be notified when it finishes.')
                                 ->success()
-                                ->send();
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('useShopifyValues')
@@ -2437,7 +2551,7 @@ class NewProductDraftResource extends Resource
                         ->action(function ($records): void {
                             $result = self::applyShopifyWarningValuesToDrafts($records);
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Shopify values applied')
                                 ->body(self::warningResolutionSummary(
                                     resolved: $result['updated'],
@@ -2445,7 +2559,7 @@ class NewProductDraftResource extends Resource
                                     extra: []
                                 ))
                                 ->success()
-                                ->send();
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('keepDraftValues')
@@ -2458,7 +2572,7 @@ class NewProductDraftResource extends Resource
                         ->action(function ($records): void {
                             $result = self::keepDraftWarningValues($records);
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Draft values kept')
                                 ->body(self::warningResolutionSummary(
                                     resolved: $result['cleared'],
@@ -2466,7 +2580,53 @@ class NewProductDraftResource extends Resource
                                     extra: $result['synced'] > 0 ? ["Synced {$result['synced']} back to Products."] : []
                                 ))
                                 ->success()
-                                ->send();
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('exportEditableCsv')
+                        ->label('Export Editable CSV')
+                        ->icon('heroicon-o-document-arrow-down')
+                        ->color('info')
+                        ->form([
+                            CheckboxList::make('columns')
+                                ->label('Columns to export')
+                                ->options(fn (): array => app(NewProductDraftRoundtripCsvService::class)->exportColumnOptions())
+                                ->default(fn (): array => app(NewProductDraftRoundtripCsvService::class)->defaultExportColumns())
+                                ->columns(2)
+                                ->required()
+                                ->helperText('Draft ID, Handle, and Shopify ID are always included so the file can be imported back safely. Only drafts that already have handles are exported. Siblings and Complementary Products export as handles.'),
+                        ])
+                        ->action(function ($records, array $data, NewProductDraftRoundtripCsvService $service): void {
+                            try {
+                                $columns = array_values(array_filter($data['columns'] ?? [], 'is_string'));
+                                $export = $service->exportDrafts($records, $columns);
+                                $url = Storage::disk($export['disk'])->url($export['path']);
+
+                                $skipMessage = ($export['skipped_without_handle'] ?? 0) > 0
+                                    ? " Skipped {$export['skipped_without_handle']} draft(s) with no handle."
+                                    : '';
+
+                                self::sendNotification(Notification::make()
+                                    ->title('Editable CSV created')
+                                    ->body(
+                                        "Saved {$export['row_count']} draft(s) with {$export['column_count']} editable column(s) to {$export['path']}. " .
+                                        'Any exported draft and SEO columns can be edited and imported back together.' .
+                                        $skipMessage
+                                    )
+                                    ->success()
+                                    ->actions([
+                                        \Filament\Notifications\Actions\Action::make('download')
+                                            ->label('Download')
+                                            ->url($url, shouldOpenInNewTab: true),
+                                    ])
+                                );
+                            } catch (\Throwable $e) {
+                                self::sendNotification(Notification::make()
+                                    ->title('Export failed')
+                                    ->body($e->getMessage())
+                                    ->danger()
+                                );
+                            }
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('sendAssignmentEmail')
@@ -2518,17 +2678,17 @@ class NewProductDraftResource extends Resource
                                 $assignment = $service->createAssignment($records, $data, Auth::user());
                                 SendNewProductDraftAssignmentEmailJob::dispatch($assignment->id);
 
-                                Notification::make()
+                                self::sendNotification(Notification::make()
                                     ->title('Assignment queued')
                                     ->body("Assignment #{$assignment->id} was recorded and the email has been queued.")
                                     ->success()
-                                    ->send();
+                                );
                             } catch (\Throwable $e) {
-                                Notification::make()
+                                self::sendNotification(Notification::make()
                                     ->title('Assignment failed')
                                     ->body($e->getMessage())
                                     ->danger()
-                                    ->send();
+                                );
                             }
                         })
                         ->deselectRecordsAfterCompletion(),
@@ -2775,6 +2935,68 @@ class NewProductDraftResource extends Resource
         return $value === '' ? 'All required fields are good.' : $value;
     }
 
+    private static function complementaryMinimumEnabled(): bool
+    {
+        return Setting::getBool('new_product_drafts.complementary_minimum.enabled', false);
+    }
+
+    private static function complementaryMinimumCount(): int
+    {
+        $configured = (int) Setting::getValue('new_product_drafts.complementary_minimum.count', 3);
+
+        return max(1, $configured);
+    }
+
+    private static function sortDraftsByApprovalCount(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy(
+            NewProductDraftApproval::query()
+                ->selectRaw('COUNT(DISTINCT user_id)')
+                ->whereColumn('new_product_draft_approvals.new_product_draft_id', 'new_product_drafts.id')
+                ->whereColumn('new_product_draft_approvals.approval_version', 'new_product_drafts.approval_version'),
+            $direction
+        );
+    }
+
+    private static function sortDraftsByThumbnail(Builder $query, string $direction): Builder
+    {
+        $direction = strtolower($direction) === 'desc' ? 'desc' : 'asc';
+
+        $productImageSubquery = Image::query()
+            ->select('images.src')
+            ->join('products as sortable_products', 'sortable_products.id', '=', 'images.product_id')
+            ->whereColumn('sortable_products.handle', 'new_product_drafts.handle')
+            ->orderByRaw('COALESCE(images.position, 2147483647)')
+            ->limit(1);
+
+        return $query->orderByRaw(
+            "COALESCE((" . $productImageSubquery->toSql() . "), NULLIF(image_url, ''), NULLIF(image_path, '')) {$direction}",
+            $productImageSubquery->getBindings()
+        );
+    }
+
+    private static function sortDraftsByWarningCount(Builder $query, string $direction): Builder
+    {
+        if (!NewProductDraft::supportsShopifySyncWarningsColumn()) {
+            return $query;
+        }
+
+        $direction = strtolower($direction) === 'desc' ? 'desc' : 'asc';
+
+        return $query->orderByRaw("COALESCE(JSON_LENGTH(shopify_sync_warnings), 0) {$direction}");
+    }
+
+    private static function sortDraftsByLinkedProductColumn(Builder $query, string $column, string $direction): Builder
+    {
+        return $query->orderBy(
+            Product::query()
+                ->select($column)
+                ->whereColumn('products.handle', 'new_product_drafts.handle')
+                ->limit(1),
+            $direction
+        );
+    }
+
     private static function draftImageLocked(Get $get, ?NewProductDraft $record): bool
     {
         return self::linkedProductExists($get, $record);
@@ -2958,33 +3180,61 @@ class NewProductDraftResource extends Resource
     }
 
     /**
-     * @return array<int, array{attribute:string,label:string,type:string,safe_key:string}>
+     * @return array<int, array{key:string,safe_key:string,source:string,attribute:string,label:string,type:string}>
      */
     private static function draftQuickEditableFields(): array
     {
-        $fields = [
-            ['attribute' => 'title', 'label' => 'Title', 'type' => 'text'],
-            ['attribute' => 'sku', 'label' => 'SKU', 'type' => 'text'],
-            ['attribute' => 'vendor', 'label' => 'Vendor', 'type' => 'text'],
-            ['attribute' => 'type', 'label' => 'Type', 'type' => 'type'],
-            ['attribute' => 'product_category', 'label' => 'Category', 'type' => 'category'],
-            ['attribute' => 'tags', 'label' => 'Tags', 'type' => 'tags'],
-            ['attribute' => 'status', 'label' => 'Status', 'type' => 'status'],
-            ['attribute' => 'published', 'label' => 'Published', 'type' => 'published'],
-            ['attribute' => 'body_html', 'label' => 'Description', 'type' => 'textarea'],
-            ['attribute' => 'variant_price', 'label' => 'Price', 'type' => 'numeric'],
-            ['attribute' => 'variant_compare_at_price', 'label' => 'Compare-at Price', 'type' => 'numeric'],
-            ['attribute' => 'variant_inventory_qty', 'label' => 'Inventory', 'type' => 'numeric'],
-            ['attribute' => 'material_cost', 'label' => 'Material Cost', 'type' => 'numeric'],
-            ['attribute' => 'uvp_short_paragraph', 'label' => 'UVP Short Paragraph', 'type' => 'textarea'],
-            ['attribute' => 'batch', 'label' => 'Batch', 'type' => 'text'],
+        $labelOverrides = [
+            'product|color_string' => 'Colors',
+            'product|product_category' => 'Category',
+            'product|google_product_category' => 'Google product category',
+            'row|' . HeaderStore::JEWELRY_MATERIAL => 'Jewelry material',
+            'row|' . HeaderStore::BRACELET_DESIGN => 'Bracelet design',
+        ];
+
+        $fields = [];
+
+        foreach (
+            RequiredField::query()
+                ->where('quick_edit', true)
+                ->whereIn('source', ['product', 'row', 'variant'])
+                ->orderBy('label')
+                ->get() as $field
+        ) {
+            if (!self::supportsDraftQuickField($field->source, $field->attribute)) {
+                continue;
+            }
+
+            $labelKey = "{$field->source}|{$field->attribute}";
+            $label = $labelOverrides[$labelKey] ?? $field->label;
+            $key = "{$field->source}__{$field->attribute}";
+
+            $fields[] = [
+                'key' => $key,
+                'safe_key' => 'f_' . md5($key),
+                'source' => $field->source,
+                'attribute' => $field->attribute,
+                'label' => $label,
+                'type' => self::draftQuickFieldType($field->source, $field->attribute),
+            ];
+        }
+
+        if ($fields !== []) {
+            return $fields;
+        }
+
+        $fallback = [
+            ['source' => 'product', 'attribute' => 'title', 'label' => 'Title', 'type' => 'text'],
+            ['source' => 'row', 'attribute' => HeaderStore::SIBLINGS, 'label' => 'Siblings', 'type' => 'product_references'],
+            ['source' => 'row', 'attribute' => HeaderStore::COMPLEMENTARY_PRODUCTS, 'label' => 'Complementary products', 'type' => 'product_references'],
         ];
 
         return array_map(function (array $field): array {
-            $field['safe_key'] = 'f_' . md5($field['attribute']);
+            $field['key'] = "{$field['source']}__{$field['attribute']}";
+            $field['safe_key'] = 'f_' . md5($field['key']);
 
             return $field;
-        }, $fields);
+        }, $fallback);
     }
 
     private static function draftBulkEditFormSchema(): array
@@ -3072,6 +3322,54 @@ class NewProductDraftResource extends Resource
     private static function draftBulkEditComponent(array $field): Forms\Components\Component
     {
         $name = $field['safe_key'];
+
+        if (($field['source'] ?? 'product') === 'row' && in_array($field['attribute'], [
+            HeaderStore::SIBLINGS,
+            HeaderStore::COMPLEMENTARY_PRODUCTS,
+        ], true)) {
+            $isComplementary = $field['attribute'] === HeaderStore::COMPLEMENTARY_PRODUCTS;
+
+            return Select::make($name)
+                ->multiple()
+                ->searchable()
+                ->preload()
+                ->options(fn (Get $get): array => self::productReferenceOptions(
+                    $get("values.{$name}")
+                ))
+                ->helperText($isComplementary
+                    ? fn (): ?HtmlString => self::complementaryMinimumEnabled()
+                        ? new HtmlString('<span class="text-gray-600">Minimum required: ' . e((string) self::complementaryMinimumCount()) . ' complementary products.</span>')
+                        : null
+                    : null)
+                ->rules([
+                    function () use ($isComplementary): \Closure {
+                        return function (string $attribute, $value, $fail) use ($isComplementary): void {
+                            $invalid = self::invalidProductReferenceStatusLabels($value);
+                            if (!empty($invalid)) {
+                                $fail('Inactive products selected: ' . implode('; ', $invalid));
+                            }
+
+                            if ($isComplementary && self::complementaryMinimumEnabled()) {
+                                $selected = self::parseProductReferenceState($value);
+                                $minimum = self::complementaryMinimumCount();
+                                if (count($selected) < $minimum) {
+                                    $fail("Select at least {$minimum} complementary products.");
+                                }
+                            }
+                        };
+                    },
+                ]);
+        }
+
+        if (($field['source'] ?? 'product') === 'row' && $field['attribute'] === HeaderStore::SIBLING_COLLECTION) {
+            return Select::make($name)
+                ->options(fn (): array => self::siblingCollectionOptions())
+                ->searchable()
+                ->getSearchResultsUsing(fn (string $search): array => self::siblingCollectionSearchResults($search))
+                ->getOptionLabelUsing(fn ($value): ?string => self::siblingCollectionDisplayLabel(
+                    is_string($value) ? $value : null
+                ));
+        }
 
         if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'tags') {
             return Select::make($name)
@@ -3252,13 +3550,41 @@ class NewProductDraftResource extends Resource
     {
         $values = [];
         foreach (self::draftQuickEditableFields() as $field) {
-            $attribute = $field['attribute'];
+            $styleProfileAttribute = self::draftStyleProfileAttribute($field['source'], $field['attribute']);
+            if ($styleProfileAttribute !== null) {
+                $values[$field['safe_key']] = self::draftStyleProfileDefaultValue($record, $styleProfileAttribute);
+                continue;
+            }
+
+            $attribute = self::draftAttributeForQuickField($field['source'], $field['attribute']);
+
+            if ($field['source'] === 'row' && $attribute === null) {
+                $payload = is_array($record->payload) ? $record->payload : [];
+                $values[$field['safe_key']] = array_key_exists($field['attribute'], $payload)
+                    ? (string) ($payload[$field['attribute']] ?? '')
+                    : self::linkedDraftRowValue($record, $field['attribute']);
+                continue;
+            }
+
+            if ($attribute === null) {
+                continue;
+            }
+
             $value = $record->getAttribute($attribute);
 
             if ($attribute === 'tags') {
                 $value = self::normalizeTagList($value);
+            } elseif ($attribute === 'color_string') {
+                $value = is_string($value)
+                    ? array_values(array_unique(array_filter(array_map(
+                        static fn (string $token): string => trim($token),
+                        preg_split('/\s*;\s*/', $value) ?: []
+                    ))))
+                    : [];
             } elseif ($attribute === 'published') {
                 $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+            } elseif (in_array($attribute, ['siblings', 'complementary_products'], true)) {
+                $value = self::parseProductReferenceState($value);
             }
 
             $values[$field['safe_key']] = $value;
@@ -3331,7 +3657,7 @@ class NewProductDraftResource extends Resource
                 }
 
                 if ($field['source'] === 'row') {
-                    $draftAttribute = self::draftAttributeForBulkRowHeader($field['attribute']);
+                    $draftAttribute = self::draftAttributeForQuickField($field['source'], $field['attribute']);
                     if ($draftAttribute === null) {
                         continue;
                     }
@@ -3367,17 +3693,68 @@ class NewProductDraftResource extends Resource
             }
 
             $updates = [];
+            $payload = is_array($record->payload) ? $record->payload : [];
+            $styleProfileUpdates = [];
             foreach ($selected as $safeKey) {
                 $field = $fieldMap[$safeKey] ?? null;
                 if (!$field) {
                     continue;
                 }
 
+                if ($field['source'] === 'row') {
+                    $value = $values[$safeKey] ?? null;
+                    $draftAttribute = self::draftAttributeForQuickField($field['source'], $field['attribute']);
+
+                    if ($draftAttribute === null) {
+                        $payload[$field['attribute']] = self::quickEditPayloadValue($value);
+                        $updates['payload'] = $payload;
+                        continue;
+                    }
+
+                    if (in_array($draftAttribute, ['siblings', 'complementary_products'], true)) {
+                        $updates[$draftAttribute] = self::dehydrateProductReferenceState($value);
+                        continue;
+                    }
+
+                    if ($draftAttribute === 'sibling_collection') {
+                        $updates[$draftAttribute] = self::normalizeSiblingCollectionValue($value);
+                        continue;
+                    }
+
+                    $updates[$draftAttribute] = self::nullIfEmpty($value);
+                    continue;
+                }
+
+                if ($field['source'] === 'variant') {
+                    $draftAttribute = self::draftAttributeForQuickField($field['source'], $field['attribute']);
+                    if ($draftAttribute === null) {
+                        continue;
+                    }
+
+                    $updates[$draftAttribute] = self::nullIfEmpty($value);
+                    continue;
+                }
+
                 $attribute = $field['attribute'];
                 $value = $values[$safeKey] ?? null;
+                $styleProfileAttribute = self::draftStyleProfileAttribute($field['source'], $attribute);
+                if ($styleProfileAttribute !== null) {
+                    $styleProfileUpdates[$styleProfileAttribute] = self::nullIfEmpty($value);
+                    continue;
+                }
 
                 if ($attribute === 'tags') {
                     $updates['tags'] = TagNormalizer::normalizeFromArray(is_array($value) ? $value : []);
+                    continue;
+                }
+
+                if ($attribute === 'color_string') {
+                    $selectedColors = is_array($value) ? $value : [];
+                    $clean = array_values(array_unique(array_filter(array_map(
+                        fn ($token) => trim((string) $token),
+                        $selectedColors
+                    ))));
+                    $updates['color_string'] = $clean === [] ? null : implode('; ', $clean);
                     continue;
                 }
 
@@ -3399,6 +3776,10 @@ class NewProductDraftResource extends Resource
                 $updates[$attribute] = self::nullIfEmpty($value);
             }
 
+            if ($updates === [] && $styleProfileUpdates === []) {
+                continue;
+            }
+
             if (array_key_exists('product_category', $updates)) {
                 $mapping = CategoryTypeMap::byCategoryValue(
                     is_string($updates['product_category']) ? $updates['product_category'] : null
@@ -3417,17 +3798,186 @@ class NewProductDraftResource extends Resource
                 }
             }
 
-            if (empty($updates)) {
-                continue;
+            if ($updates !== []) {
+                $record->fill($updates)->save();
             }
 
-            $record->fill($updates)->save();
+            if ($styleProfileUpdates !== []) {
+                self::upsertDraftStyleProfile($record, $styleProfileUpdates);
+            }
         }
 
-        Notification::make()
+        self::sendNotification(Notification::make()
             ->title('Draft edits saved')
             ->success()
-            ->send();
+        );
+    }
+
+    private static function supportsDraftQuickField(string $source, string $attribute): bool
+    {
+        if ($source === 'product') {
+            return in_array($attribute, [
+                'title',
+                'sku',
+                'vendor',
+                'type',
+                'product_category',
+                'google_product_category',
+                'seo_title',
+                'seo_description',
+                'tags',
+                'status',
+                'published',
+                'body_html',
+                'color_string',
+                'variant_price',
+                'variant_compare_at_price',
+                'variant_inventory_qty',
+                'material_cost',
+                'uvp_short_paragraph',
+                'batch',
+            ], true);
+        }
+
+        if ($source === 'row') {
+            return trim($attribute) !== '';
+        }
+
+        if ($source === 'variant') {
+            return self::draftAttributeForQuickField($source, $attribute) !== null;
+        }
+
+        return false;
+    }
+
+    private static function draftQuickFieldType(string $source, string $attribute): string
+    {
+        if ($source === 'row' && in_array($attribute, [
+            HeaderStore::SIBLINGS,
+            HeaderStore::COMPLEMENTARY_PRODUCTS,
+        ], true)) {
+            return 'product_references';
+        }
+
+        return match ($attribute) {
+            'price', 'compare_at_price', 'inventory_qty' => 'numeric',
+            'type' => 'type',
+            'product_category' => 'category',
+            'tags' => 'tags',
+            'status' => 'status',
+            'published' => 'published',
+            'body_html', 'seo_description', 'uvp_short_paragraph' => 'textarea',
+            'variant_price', 'variant_compare_at_price', 'variant_inventory_qty', 'material_cost' => 'numeric',
+            default => 'text',
+        };
+    }
+
+    private static function draftAttributeForQuickField(string $source, string $attribute): ?string
+    {
+        if ($source === 'row') {
+            if ($attribute === HeaderStore::VARIANT_INVENTORY_QTY) {
+                return 'variant_inventory_qty';
+            }
+
+            return self::draftAttributeForBulkRowHeader($attribute);
+        }
+
+        if ($source === 'variant') {
+            return match ($attribute) {
+                'sku' => 'sku',
+                'price' => 'variant_price',
+                'compare_at_price' => 'variant_compare_at_price',
+                'inventory_qty' => 'variant_inventory_qty',
+                default => null,
+            };
+        }
+
+        return $attribute;
+    }
+
+    private static function draftStyleProfileAttribute(string $source, string $attribute): ?string
+    {
+        if ($source !== 'product') {
+            return null;
+        }
+
+        return match ($attribute) {
+            'seo_title' => 'draft_seo_title',
+            'seo_description' => 'draft_seo_description',
+            default => null,
+        };
+    }
+
+    private static function draftStyleProfileDefaultValue(NewProductDraft $record, string $attribute): ?string
+    {
+        $profile = $record->relationLoaded('styleProfiles')
+            ? $record->styleProfiles->first()
+            : $record->styleProfiles()->first();
+
+        $value = $profile?->{$attribute};
+        if (is_string($value) && trim($value) !== '') {
+            return $value;
+        }
+
+        return match ($attribute) {
+            'draft_seo_title' => self::nullIfEmpty($record->product?->seo_title),
+            'draft_seo_description' => self::nullIfEmpty($record->product?->seo_description),
+            default => null,
+        };
+    }
+
+    private static function quickEditPayloadValue(mixed $value): string
+    {
+        if (is_array($value)) {
+            return implode('; ', array_values(array_filter(array_map(
+                fn ($item) => trim((string) $item),
+                $value
+            ))));
+        }
+
+        return trim((string) ($value ?? ''));
+    }
+
+    private static function upsertDraftStyleProfile(NewProductDraft $record, array $updates): void
+    {
+        $handle = trim((string) ($record->handle ?? ''));
+        if ($handle === '') {
+            return;
+        }
+
+        $product = self::linkedProductForDraft($record);
+        $styleProfile = StyleProfile::query()
+            ->where('handle', $handle)
+            ->first();
+
+        if (!$styleProfile) {
+            $styleProfile = new StyleProfile([
+                'handle' => $handle,
+            ]);
+        }
+
+        $styleProfile->product_id = $product?->id;
+        $styleProfile->handle = $handle;
+
+        if (!filled($styleProfile->sku)) {
+            $styleProfile->sku = trim((string) (
+                $record->sku
+                ?? $product?->variants()->orderBy('id')->value('sku')
+                ?? $handle
+            )) ?: null;
+        }
+
+        if (!filled($styleProfile->image_url)) {
+            $styleProfile->image_url = $product?->images()->orderBy('position')->value('src') ?? $record->imageUrl();
+        }
+
+        $styleProfile->fill($updates);
+        $styleProfile->save();
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        AdminNotification::send($notification);
     }
 
     private static function shopifySyncWarningsHtml(?NewProductDraft $record): ?HtmlString

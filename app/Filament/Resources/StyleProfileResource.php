@@ -7,6 +7,7 @@ use App\Enums\RolesEnum;
 use App\Models\Product;
 use App\Models\Setting;
 use App\Models\StyleProfile;
+use App\Services\AdminNotification;
 use App\Services\StyleProfileCsvImporter;
 use App\Services\TagNormalizer;
 use Filament\Forms\Components\Checkbox;
@@ -288,10 +289,10 @@ class StyleProfileResource extends Resource
                         $enabled = Setting::getBool('style_profiles.lock_product_seo', $default);
                         Setting::putBool('style_profiles.lock_product_seo', !$enabled);
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title(!$enabled ? 'SEO lock enabled' : 'SEO lock disabled')
                             ->success()
-                            ->send();
+                        );
                     }),
                 Tables\Actions\CreateAction::make()
                     ->modalHeading('Add Style Profile')
@@ -312,7 +313,7 @@ class StyleProfileResource extends Resource
                         $path = Storage::disk('local')->path($data['file']);
                         $result = $importer->importFromPath($path);
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Import complete')
                             ->body(
                                 "Total: {$result['total']}, Imported: {$result['imported']}, " .
@@ -320,7 +321,7 @@ class StyleProfileResource extends Resource
                                 "No product link: {$result['unlinked_no_product']}"
                             )
                             ->success()
-                            ->send();
+                        );
                     }),
                 Tables\Actions\Action::make('loadMissingProducts')
                     ->label('Load Missing Products')
@@ -415,11 +416,11 @@ class StyleProfileResource extends Resource
                                 }
                             });
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Style profiles loaded')
                             ->body("Created {$created}. Skipped (existing handle): {$skippedExisting}.")
                             ->success()
-                            ->send();
+                        );
                     }),
             ])
             ->bulkActions([
@@ -441,11 +442,11 @@ class StyleProfileResource extends Resource
                                 $updated++;
                             }
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Styles marked ready')
                                 ->body("Updated {$updated} style(s).")
                                 ->success()
-                                ->send();
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('bulkUpdateInputs')
@@ -497,10 +498,10 @@ class StyleProfileResource extends Resource
                             ];
 
                             if (!array_filter($fields)) {
-                                Notification::make()
+                                self::sendNotification(Notification::make()
                                     ->title('Choose at least one field')
                                     ->warning()
-                                    ->send();
+                                );
                                 return;
                             }
 
@@ -519,10 +520,10 @@ class StyleProfileResource extends Resource
                             }
 
                             if (!$payload) {
-                                Notification::make()
+                                self::sendNotification(Notification::make()
                                     ->title('No fields to update')
                                     ->warning()
-                                    ->send();
+                                );
                                 return;
                             }
 
@@ -530,10 +531,10 @@ class StyleProfileResource extends Resource
                                 $record->update($payload);
                             }
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('Styles updated')
                                 ->success()
-                                ->send();
+                            );
                         }),
                     BulkAction::make('pushReadySeo')
                         ->label('Push to Product (Ready)')
@@ -609,11 +610,11 @@ class StyleProfileResource extends Resource
                                 ]);
                             }
 
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('SEO sync complete')
                                 ->body("Synced {$synced} style(s).")
                                 ->success()
-                                ->send();
+                            );
                         }),
                     ExportBulkAction::make()
                         ->exporter(StyleProfileExporter::class)
@@ -640,6 +641,11 @@ class StyleProfileResource extends Resource
     public static function canDelete($record): bool
     {
         return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value]) ?? false;
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        AdminNotification::send($notification);
     }
 
     public static function canDeleteAny(): bool

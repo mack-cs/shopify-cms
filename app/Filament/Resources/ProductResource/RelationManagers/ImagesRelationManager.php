@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductResource\RelationManagers;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Models\Image;
+use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
@@ -220,11 +221,12 @@ class ImagesRelationManager extends RelationManager
                         'images' => $payload,
                     ]);
 
-                    Notification::make()
-                        ->title('Shopify image links logged')
-                        ->body('The current product image URLs were written to the Laravel log.')
-                        ->success()
-                        ->send();
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Shopify image links logged')
+                            ->body('The current product image URLs were written to the Laravel log.')
+                            ->success()
+                    );
                 }),
         ])->actions([
             Tables\Actions\EditAction::make()

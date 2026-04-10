@@ -9,6 +9,7 @@ use App\Models\DropdownOption;
 use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Enums\RolesEnum;
+use App\Services\AdminNotification;
 use App\Services\Normalizer;
 use App\Services\HeaderStore;
 use App\Services\DropdownCollectionCatalog;
@@ -587,9 +588,6 @@ class PendingDropdownOptionResource extends Resource
             ->body($body)
             ->success();
 
-        if ($user = Auth::user()) {
-            $notification->sendToDatabase($user);
-        }
-        $notification->send();
+        AdminNotification::send($notification);
     }
 }

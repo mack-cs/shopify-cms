@@ -3,7 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Import;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ShopifyCollectionsImporter;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -35,24 +35,22 @@ class ShopifyCollectionsSyncJob implements ShouldQueue
 
         try {
             $importer->importIntoExistingImport($import);
-            $user = User::find($import->created_by);
-            if ($user) {
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Collections sync complete')
                     ->body("Import #{$import->id} is ready")
-                    ->success()
-                    ->sendToDatabase($user);
-            }
+                    ->success(),
+                $import->created_by
+            );
         } catch (\Throwable $e) {
             $import->update(['status' => 'failed']);
-            $user = User::find($import->created_by);
-            if ($user) {
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Collections sync failed')
                     ->body($e->getMessage())
-                    ->danger()
-                    ->sendToDatabase($user);
-            }
+                    ->danger(),
+                $import->created_by
+            );
             throw $e;
         }
     }

@@ -16,6 +16,7 @@ use Filament\Tables\Actions\Action;
 use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyApiImporter;
 use App\Services\ShopifySyncSnapshotService;
+use App\Services\AdminNotification;
 use App\Jobs\ShopifySyncJob;
 use App\Services\Normalizer;
 use Filament\Tables\Columns\TextColumn;
@@ -340,10 +341,7 @@ class ImportResource extends Resource
 
     private static function sendNotification(Notification $notification): void
     {
-        if ($user = Auth::user()) {
-            $notification->sendToDatabase($user);
-        }
-        $notification->send();
+        AdminNotification::send($notification);
     }
 }
 

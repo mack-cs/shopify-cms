@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Image;
 use App\Models\Product;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ProductImageBackupService;
 use App\Services\ProductShopifyUpdater;
 use Filament\Notifications\Notification;
@@ -49,11 +49,6 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
         $result = $updater->syncSelectedProductImages($product->fresh(), $imageIds);
 
         if (!$this->userId) {
-            return;
-        }
-
-        $user = User::find($this->userId);
-        if (!$user) {
             return;
         }
 
@@ -106,6 +101,6 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
             $notification->success();
         }
 
-        $notification->sendToDatabase($user);
+        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

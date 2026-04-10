@@ -288,10 +288,14 @@ final class NewProductDraftProductSync
 
         if ($this->shouldSyncDraftAttribute('payload', $attributes, $draft->payload)) {
             foreach ($this->extraDraftPayloadHeaders($product) as $header) {
-                $updates[$header] = '';
+                if (!array_key_exists($header, $updates)) {
+                    $updates[$header] = '';
+                }
             }
-            foreach ($this->extraDraftPayloadUpdates($draft, $product) as $header => $value) {
-                $updates[$header] = $value;
+            foreach ($this->payloadRowUpdates($draft, $product) as $header => $value) {
+                if (!array_key_exists($header, $updates)) {
+                    $updates[$header] = $value;
+                }
             }
         }
 
@@ -335,7 +339,7 @@ final class NewProductDraftProductSync
     private function extraDraftPayloadUpdates(NewProductDraft $draft, Product $product): array
     {
         $payload = is_array($draft->payload) ? $draft->payload : [];
-        $allowed = array_flip($this->extraDraftPayloadHeaders($product));
+        $allowed = array_flip($this->payloadAllowedHeaders($product));
 
         $updates = [];
         foreach ($payload as $header => $value) {
@@ -354,6 +358,30 @@ final class NewProductDraftProductSync
         }
 
         return $updates;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function payloadRowUpdates(NewProductDraft $draft, Product $product): array
+    {
+        return $this->extraDraftPayloadUpdates($draft, $product);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function payloadAllowedHeaders(Product $product): array
+    {
+        $headers = $product->import?->headers ?? [];
+        if (!empty($headers)) {
+            return array_values(array_filter(array_map(
+                static fn (mixed $header): string => trim((string) $header),
+                $headers
+            ), static fn (string $header): bool => $header !== ''));
+        }
+
+        return HeaderStore::knownHeaders();
     }
 
     private function shouldSyncDraftAttribute(string $attribute, ?array $attributes, mixed $value): bool

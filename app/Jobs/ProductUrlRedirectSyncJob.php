@@ -3,7 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\ProductUrlRedirect;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ProductUrlRedirectService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -36,11 +36,6 @@ class ProductUrlRedirectSyncJob implements ShouldQueue
             return;
         }
 
-        $user = User::find($this->userId);
-        if (!$user) {
-            return;
-        }
-
         $parts = [];
         if ($result['synced'] > 0) {
             $parts[] = "Synced {$result['synced']}.";
@@ -67,6 +62,6 @@ class ProductUrlRedirectSyncJob implements ShouldQueue
             $notification->warning();
         }
 
-        $notification->sendToDatabase($user);
+        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

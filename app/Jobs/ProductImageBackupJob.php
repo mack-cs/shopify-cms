@@ -3,7 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Product;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ProductImageBackupService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -36,11 +36,6 @@ class ProductImageBackupJob implements ShouldQueue
         $result = $service->backupProducts($products);
 
         if (!$this->userId) {
-            return;
-        }
-
-        $user = User::find($this->userId);
-        if (!$user) {
             return;
         }
 
@@ -86,6 +81,6 @@ class ProductImageBackupJob implements ShouldQueue
             $notification->success();
         }
 
-        $notification->sendToDatabase($user);
+        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

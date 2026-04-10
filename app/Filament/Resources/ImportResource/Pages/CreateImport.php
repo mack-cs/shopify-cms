@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ImportResource\Pages;
 
 use App\Models\Import;
 use App\Filament\Resources\ImportResource;
+use App\Services\AdminNotification;
 use Filament\Actions;
 use Filament\Resources\Pages\CreateRecord;
 use Filament\Notifications\Notification;
@@ -51,20 +52,22 @@ class CreateImport extends CreateRecord
         $result = ImportResource::validateImportRecord($record, $validator);
 
         if ($result['valid']) {
-            Notification::make()
-                ->title('CSV looks valid')
-                ->success()
-                ->send();
+            AdminNotification::send(
+                Notification::make()
+                    ->title('CSV looks valid')
+                    ->success()
+            );
             return;
         }
 
         $body = ImportResource::formatValidationErrors($result['errors']);
 
-        Notification::make()
-            ->title('CSV validation failed')
-            ->body($body)
-            ->danger()
-            ->send();
+        AdminNotification::send(
+            Notification::make()
+                ->title('CSV validation failed')
+                ->body($body)
+                ->danger()
+        );
     }
 
 }

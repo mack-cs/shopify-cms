@@ -3,7 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\ShopifyCollection;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ShopifyCollectionUpdater;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -140,11 +140,6 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
             return;
         }
 
-        $user = User::find($this->userId);
-        if (!$user) {
-            return;
-        }
-
         $parts = ["Synced {$synced} collection(s)."];
 
         if ($skippedNotApproved > 0) {
@@ -176,6 +171,6 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
             $notification->success();
         }
 
-        $notification->sendToDatabase($user);
+        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

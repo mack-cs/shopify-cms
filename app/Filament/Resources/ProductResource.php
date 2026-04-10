@@ -9,6 +9,7 @@ use App\Enums\RolesEnum;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
+use App\Models\Image;
 use App\Models\Import;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
@@ -52,6 +53,7 @@ use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Filament\Resources\RelationManagers\RelationManager;
 use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
+use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
@@ -94,7 +96,7 @@ class ProductResource extends Resource
                                 ->maxLength(255)
                                 ->disabled(fn (?Product $record): bool => (bool) $record)
                                 ->helperText(fn (?Product $record): ?string => $record
-                                    ? 'Current live Shopify handle. This stays unchanged until a successful product sync.'
+                                    ? 'Current live Shopify handle. This stays unchanged until users run the Apply Approved URLs action.'
                                     : 'Initial live handle. The first 2/2 approval will also lock an SEO-approved handle from the approved title.')
                                 ->rules(function (?Product $record): array {
                                     if ($record) {
@@ -115,7 +117,7 @@ class ProductResource extends Resource
                                 ->disabled()
                                 ->dehydrated(false)
                                 ->visible(fn (?Product $record): bool => (bool) $record)
-                                ->helperText('Locked once from the approved title on the first 2/2 approval. It becomes the live Shopify handle on the next successful product sync.'),
+                                ->helperText('Locked once from the approved title on the first 2/2 approval. Review products with URL Update Pending, then run Apply Approved URLs only for the selected products that should change.'),
                             TextInput::make('title')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record)),
                             RichEditor::make('body_html')
@@ -916,6 +918,7 @@ class ProductResource extends Resource
                 ->state(fn (Product $record) => $record->images()->orderBy('position')->value('src'))
                 ->square()
                 ->size(40)
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByThumbnail($query, $direction))
                 ->toggleable(),
             TextColumn::make('handle')
                 ->searchable(query: function (Builder $query, string $search): Builder {
@@ -923,33 +926,50 @@ class ProductResource extends Resource
                         ->orWhere('title', 'like', "%{$search}%")
                         ->orWhereHas('variants', fn (Builder $variantQuery) => $variantQuery->where('sku', 'like', "%{$search}%"));
                 })
+                ->sortable()
                 ->toggleable(),
-            TextColumn::make('title')->searchable()->toggleable(),
+            TextColumn::make('approved_handle')
+                ->label('Approved URL')
+                ->placeholder('-')
+                ->color(fn (Product $record): string => trim((string) ($record->approved_handle ?? '')) !== ''
+                    && trim((string) ($record->approved_handle ?? '')) !== trim((string) ($record->handle ?? ''))
+                    ? 'warning'
+                    : 'gray')
+                ->sortable()
+                ->toggleable(),
+            TextColumn::make('title')->searchable()->sortable()->toggleable(),
             TextColumn::make('seo_title')
                 ->label('SEO title')
+                ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('seo_description')
                 ->label('SEO description')
+                ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('color_string')
                 ->label('Colors')
+                ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('jewelry_material')
                 ->label('Jewelry material')
                 ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::JEWELRY_MATERIAL))
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByShopifyPrimaryHeader($query, HeaderStore::JEWELRY_MATERIAL, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('google_shopping_age_group')
                 ->label('Age group')
                 ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP))
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByShopifyPrimaryHeader($query, HeaderStore::GOOGLE_SHOPPING_AGE_GROUP, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('cost_per_item')
                 ->label('Cost per item')
                 ->state(fn (Product $record): string => self::shopifyRowValue($record, HeaderStore::COST_PER_ITEM))
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByShopifyPrimaryHeader($query, HeaderStore::COST_PER_ITEM, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('has_errors')
                 ->label('Errors')
                 ->icon(fn (bool $state): string => $state ? 'heroicon-o-x-circle' : 'heroicon-o-check-circle')
                 ->color(fn (bool $state): string => $state ? 'danger' : 'success')
+                ->sortable()
                 ->toggleable(),
             TextColumn::make('error_fields')
                 ->label('Error fields')
@@ -962,25 +982,30 @@ class ProductResource extends Resource
                     $value = trim((string) $state);
                     return $value === '' ? 'All required fields are good.' : $value;
                 })
+                ->sortable()
                 ->toggleable(),
-            TextColumn::make('type')->label('Type')->toggleable(),
-            TextColumn::make('vendor')->toggleable(),
+            TextColumn::make('type')->label('Type')->sortable()->toggleable(),
+            TextColumn::make('vendor')->sortable()->toggleable(),
             IconColumn::make('published')
                 ->label('Published')
                 ->boolean()
                 ->state(fn (Product $record): bool => filter_var($record->published, FILTER_VALIDATE_BOOLEAN))
+                ->sortable()
                 ->toggleable(),
             TextColumn::make('batch')
                 ->label('Batch')
+                ->sortable()
                 ->toggleable(),
             IconColumn::make('is_bundle')
                 ->label('Bundle')
                 ->boolean()
                 ->trueColor('warning')
                 ->falseColor('gray')
+                ->sortable()
                 ->toggleable(),
             TextColumn::make('you_save')
                 ->label('You Save')
+                ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('approvals_current')
                 ->label('Approvals')
@@ -988,6 +1013,7 @@ class ProductResource extends Resource
                 ->formatStateUsing(fn (int $state) => "{$state}/2")
                 ->badge()
                 ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('approved')
                 ->label('Approved')
@@ -995,6 +1021,7 @@ class ProductResource extends Resource
                 ->boolean()
                 ->trueColor('success')
                 ->falseColor('gray')
+                ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
             SelectFilter::make('type')
@@ -1118,6 +1145,19 @@ class ProductResource extends Resource
                         '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
                     )
                 ),
+            TernaryFilter::make('url_update_pending')
+                ->label('URL Update Pending')
+                ->queries(
+                    true: fn (Builder $query): Builder => $query
+                        ->whereNotNull('approved_handle')
+                        ->where('approved_handle', '!=', '')
+                        ->whereColumn('approved_handle', '!=', 'handle'),
+                    false: fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                        $sub->whereNull('approved_handle')
+                            ->orWhere('approved_handle', '')
+                            ->orWhereColumn('approved_handle', 'handle');
+                    })
+                ),
             TernaryFilter::make('is_bundle')
                 ->label('Bundles'),
             TernaryFilter::make('has_errors')
@@ -1203,11 +1243,11 @@ class ProductResource extends Resource
                             $parts[] = "Errors on {$errorCount}; fix before approval.";
                         }
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Bulk approval complete')
                             ->body($parts ? implode(' ', $parts) : 'No products were approved.')
                             ->success()
-                            ->send();
+                        );
                     })
                     ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkSyncShopify')
@@ -1221,11 +1261,79 @@ class ProductResource extends Resource
                         $selectedCount = count($ids);
                         \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id());
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Shopify sync queued')
                             ->body("Queued {$selectedCount} selected product(s). Only approved products will be synced.")
                             ->success()
-                            ->send();
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkApplyApprovedHandles')
+                    ->label('Apply Approved URLs')
+                    ->icon('heroicon-o-link')
+                    ->color('primary')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--url-sync'])
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records): void {
+                        $eligibleIds = [];
+                        $skippedNotApproved = 0;
+                        $skippedNoChange = 0;
+
+                        foreach ($records as $record) {
+                            $approvedHandle = trim((string) ($record->approved_handle ?? ''));
+                            $currentHandle = trim((string) ($record->handle ?? ''));
+
+                            if (!$record->isApprovedByTwo()) {
+                                $skippedNotApproved++;
+                                continue;
+                            }
+
+                            if ($approvedHandle === '' || $approvedHandle === $currentHandle) {
+                                $skippedNoChange++;
+                                continue;
+                            }
+
+                            $eligibleIds[] = (int) $record->id;
+                        }
+
+                        if (empty($eligibleIds)) {
+                            $parts = [];
+                            if ($skippedNotApproved > 0) {
+                                $parts[] = "Skipped {$skippedNotApproved} not approved.";
+                            }
+                            if ($skippedNoChange > 0) {
+                                $parts[] = "Skipped {$skippedNoChange} with no approved URL change.";
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('No URL updates queued')
+                                ->body($parts ? implode(' ', $parts) : 'None of the selected products need a URL update.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        \App\Jobs\ProductShopifyUpdateJob::dispatch(
+                            $eligibleIds,
+                            Auth::id(),
+                            [ProductShopifyUpdater::SYNC_SCOPE_PRODUCT],
+                            [ProductShopifyUpdater::CORE_FIELD_HANDLE]
+                        );
+
+                        $parts = ["Queued " . count($eligibleIds) . " product(s) to apply approved URLs."];
+                        $parts[] = 'Pending redirects will be created only for products whose live handle changes.';
+                        if ($skippedNotApproved > 0) {
+                            $parts[] = "Skipped {$skippedNotApproved} not approved.";
+                        }
+                        if ($skippedNoChange > 0) {
+                            $parts[] = "Skipped {$skippedNoChange} with no approved URL change.";
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Approved URL sync queued')
+                            ->body(implode(' ', $parts))
+                            ->success()
+                        );
                     })
                     ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkPartialSyncShopify')
@@ -1245,14 +1353,14 @@ class ProductResource extends Resource
                         CheckboxList::make('core_fields')
                             ->label('Product core fields')
                             ->options(ProductShopifyUpdater::coreFieldLabels())
-                            ->default(ProductShopifyUpdater::availableCoreFields())
+                            ->default(ProductShopifyUpdater::defaultCoreFields())
                             ->columns(2)
                             ->visible(fn (Get $get): bool => in_array(
                                 ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
                                 array_values(array_filter($get('scopes') ?? [], 'is_string')),
                                 true
                             ))
-                            ->helperText('Choose the exact product columns to push when Product core fields is selected.'),
+                            ->helperText('Choose the exact product columns to push when Product core fields is selected. URL changes are handled separately through Apply Approved URLs.'),
                     ])
                     ->requiresConfirmation()
                     ->action(function (Collection $records, array $data): void {
@@ -1264,11 +1372,11 @@ class ProductResource extends Resource
                         )));
 
                         if (empty($scopes)) {
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('No fields selected')
                                 ->body('Choose at least one field group to sync.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
@@ -1278,11 +1386,11 @@ class ProductResource extends Resource
                         )));
 
                         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true) && empty($coreFields)) {
-                            Notification::make()
+                            self::sendNotification(Notification::make()
                                 ->title('No core fields selected')
                                 ->body('Choose at least one product core field or deselect Product core fields.')
                                 ->warning()
-                                ->send();
+                            );
                             return;
                         }
 
@@ -1298,11 +1406,11 @@ class ProductResource extends Resource
                                 ->implode(', ') . '.'
                             : '';
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Partial Shopify sync queued')
                             ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary} Only approved products will be synced.")
                             ->success()
-                            ->send();
+                        );
                     })
                     ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkBackupImages')
@@ -1321,11 +1429,11 @@ class ProductResource extends Resource
                             'Manual product image backup'
                         );
 
-                        Notification::make()
+                        self::sendNotification(Notification::make()
                             ->title('Image backup queued')
                             ->body("Queued image backup for {$selectedCount} selected product(s). Existing backups will be reused.")
                             ->success()
-                            ->send();
+                        );
                     })
                     ->deselectRecordsAfterCompletion(),
                 ExportBulkAction::make()
@@ -1350,20 +1458,20 @@ class ProductResource extends Resource
     public static function approveRecord(Product $record): void
     {
         if ($record->has_errors) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Approval blocked')
                 ->body('Fix product errors before approval.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
         if ($record->isApprovedByTwo()) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Already fully approved')
                 ->body('This version already has 2 approvals.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
@@ -1373,11 +1481,11 @@ class ProductResource extends Resource
             ->exists();
 
         if ($exists) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Already approved')
                 ->body('You have already approved this version.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
@@ -1389,11 +1497,11 @@ class ProductResource extends Resource
 
         $record->refresh();
 
-        Notification::make()
+        self::sendNotification(Notification::make()
             ->title('Product approved')
             ->body("Approvals: {$record->approvalsForCurrentVersionCount()}/2.")
             ->success()
-            ->send();
+        );
     }
 
     /**
@@ -1404,29 +1512,29 @@ class ProductResource extends Resource
         $imageIds = array_values(array_unique(array_map('intval', $imageIds)));
 
         if (empty($imageIds)) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('No images selected')
                 ->body('Select at least one image to sync.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
         if (!$record->isApprovedByTwo()) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Approval required')
                 ->body('This product needs 2 approvals before image sync.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
         if (!$record->handle) {
-            Notification::make()
+            self::sendNotification(Notification::make()
                 ->title('Missing handle')
                 ->body('This product must have a handle before image sync.')
                 ->warning()
-                ->send();
+            );
             return;
         }
 
@@ -1437,11 +1545,11 @@ class ProductResource extends Resource
             'Manual selected image sync'
         );
 
-        Notification::make()
+        self::sendNotification(Notification::make()
             ->title('Selected image sync queued')
             ->body('Shopify image sync has been queued for the selected images.')
             ->success()
-            ->send();
+        );
     }
 
     public static function queueProductImageBackup(Product $record): void
@@ -1452,11 +1560,16 @@ class ProductResource extends Resource
             'Manual product image backup'
         );
 
-        Notification::make()
+        self::sendNotification(Notification::make()
             ->title('Image backup queued')
             ->body('Image backup has been queued for this product. Existing backups will be reused.')
             ->success()
-            ->send();
+        );
+    }
+
+    private static function sendNotification(Notification $notification): void
+    {
+        AdminNotification::send($notification);
     }
 
     public static function getPages(): array
@@ -1541,6 +1654,49 @@ class ProductResource extends Resource
             ->first();
 
         return (string) ($row?->get($header, '') ?? '');
+    }
+
+    private static function sortProductsByApprovalCount(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy(
+            Approval::query()
+                ->selectRaw('COUNT(DISTINCT user_id)')
+                ->whereColumn('approvals.product_id', 'products.id')
+                ->whereColumn('approvals.approval_version', 'products.approval_version'),
+            $direction
+        );
+    }
+
+    private static function sortProductsByThumbnail(Builder $query, string $direction): Builder
+    {
+        return $query->orderBy(
+            Image::query()
+                ->select('src')
+                ->whereColumn('images.product_id', 'products.id')
+                ->orderByRaw('COALESCE(position, 2147483647)')
+                ->limit(1),
+            $direction
+        );
+    }
+
+    private static function sortProductsByShopifyPrimaryHeader(Builder $query, string $header, string $direction): Builder
+    {
+        return $query->orderBy(
+            ShopifyRow::query()
+                ->selectRaw('JSON_UNQUOTE(JSON_EXTRACT(data, ?))', [self::jsonPathForHeader($header)])
+                ->whereColumn('shopify_rows.import_id', 'products.import_id')
+                ->whereColumn('shopify_rows.handle', 'products.handle')
+                ->where('row_type', 'product_primary')
+                ->limit(1),
+            $direction
+        );
+    }
+
+    private static function jsonPathForHeader(string $header): string
+    {
+        $escaped = str_replace(['\\', '"'], ['\\\\', '\\"'], $header);
+
+        return '$."' . $escaped . '"';
     }
 
     private static function templateHeaders(): array

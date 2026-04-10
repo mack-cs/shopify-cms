@@ -221,6 +221,19 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * Default product-field sync excludes handle changes.
+     *
+     * @return array<int, string>
+     */
+    public static function defaultCoreFields(): array
+    {
+        return array_values(array_filter(
+            self::availableCoreFields(),
+            fn (string $field): bool => $field !== self::CORE_FIELD_HANDLE
+        ));
+    }
+
+    /**
      * @return array<string, string>
      */
     public static function coreFieldLabels(): array
@@ -4695,7 +4708,7 @@ GQL;
     private function normalizeCoreFields(?array $coreFields): array
     {
         if ($coreFields === null) {
-            return self::availableCoreFields();
+            return self::defaultCoreFields();
         }
 
         $allowed = array_fill_keys(self::availableCoreFields(), true);

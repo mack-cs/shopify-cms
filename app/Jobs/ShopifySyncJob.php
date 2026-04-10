@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\Setting;
-use App\Models\User;
+use App\Services\AdminNotification;
 use App\Services\ShopifyApiImporter;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftSeeder;
@@ -62,24 +62,22 @@ class ShopifySyncJob implements ShouldQueue
                     );
                 });
 
-            $user = User::find($import->created_by);
-            if ($user) {
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Shopify sync complete')
                     ->body("Import #{$import->id} is ready. Image backup is queued and the Shopify snapshot CSV is ready.")
-                    ->success()
-                    ->sendToDatabase($user);
-            }
+                    ->success(),
+                $import->created_by
+            );
         } catch (\Throwable $e) {
             $import->update(['status' => 'failed']);
-            $user = User::find($import->created_by);
-            if ($user) {
+            AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Shopify sync failed')
                     ->body($e->getMessage())
-                    ->danger()
-                    ->sendToDatabase($user);
-            }
+                    ->danger(),
+                $import->created_by
+            );
             throw $e;
         }
     }

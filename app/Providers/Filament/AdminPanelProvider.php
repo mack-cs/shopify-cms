@@ -57,6 +57,7 @@ class AdminPanelProvider extends PanelProvider
                 fn (): string => view('filament.partials.scroll-to-top-listener')->render(),
             )
             ->databaseNotifications()
+            ->databaseNotificationsPolling('10s')
             ->sidebarCollapsibleOnDesktop()
             ->navigationGroups([
                 NavigationGroup::make('Product Data'),

@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductResource\Pages;
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
 use App\Models\ShopifyRow;
+use App\Services\AdminNotification;
 use App\Services\HeaderStore;
 use App\Services\NewProductDraftSeeder;
 use Filament\Actions;
@@ -219,11 +220,12 @@ class EditProduct extends EditRecord
                 ->disabled(fn (): bool => !$this->getRecord()->isApprovedByTwo() || !$this->getRecord()->images()->exists())
                 ->action(function (): void {
                     if (!$this->getRecord()->isApprovedByTwo()) {
-                        \Filament\Notifications\Notification::make()
-                            ->title('Approval required')
-                            ->body('Rename Images is only available after the product has 2 approvals.')
-                            ->warning()
-                            ->send();
+                        AdminNotification::send(
+                            \Filament\Notifications\Notification::make()
+                                ->title('Approval required')
+                                ->body('Rename Images is only available after the product has 2 approvals.')
+                                ->warning()
+                        );
 
                         return;
                     }
@@ -231,13 +233,14 @@ class EditProduct extends EditRecord
                     $count = app(\App\Services\ProductImageFilenameService::class)
                         ->assignFromCurrentTitle($this->getRecord(), manual: true);
 
-                    \Filament\Notifications\Notification::make()
-                        ->title('Image filenames updated')
-                        ->body($count > 0
-                            ? "Updated {$count} image filename(s)."
-                            : 'No image filenames needed updating.')
-                        ->success()
-                        ->send();
+                    AdminNotification::send(
+                        \Filament\Notifications\Notification::make()
+                            ->title('Image filenames updated')
+                            ->body($count > 0
+                                ? "Updated {$count} image filename(s)."
+                                : 'No image filenames needed updating.')
+                            ->success()
+                    );
                 }),
             Actions\DeleteAction::make()
                 ->visible(fn () => ProductResource::canDelete($this->getRecord())),

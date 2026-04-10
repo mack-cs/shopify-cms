@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Filament\Resources\PendingDropdownOptionResource;
 use App\Models\DropdownOption;
-use App\Models\User;
+use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -88,16 +88,11 @@ class ProcessPendingDropdownOptionsJob implements ShouldQueue
             return;
         }
 
-        $user = User::find($this->userId);
-        if (!$user) {
-            return;
-        }
-
         $notification = Notification::make()
             ->title($title)
             ->body($body);
 
         $notification = $success ? $notification->success() : $notification->danger();
-        $notification->sendToDatabase($user);
+        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

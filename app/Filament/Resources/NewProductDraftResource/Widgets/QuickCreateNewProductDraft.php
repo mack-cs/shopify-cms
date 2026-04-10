@@ -4,6 +4,7 @@ namespace App\Filament\Resources\NewProductDraftResource\Widgets;
 
 use App\Models\NewProductDraft;
 use App\Models\Variant;
+use App\Services\AdminNotification;
 use Filament\Forms;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
@@ -118,11 +119,11 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
 
         $this->form->fill();
 
-        Notification::make()
+        AdminNotification::send(Notification::make()
             ->title('Draft created')
             ->body("{$draft->title} was added.")
             ->success()
-            ->send();
+        );
 
         $this->dispatch('draft-created');
     }

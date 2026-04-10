@@ -9,6 +9,7 @@ use App\Jobs\ShopifyCollectionUpdateJob;
 use App\Jobs\ShopifyCollectionsSyncJob;
 use App\Models\CollectionApproval;
 use App\Models\ShopifyCollection;
+use App\Services\AdminNotification;
 use App\Services\ShopifyCollectionsImporter;
 use App\Services\ShopifyCollectionSeoImporter;
 use Filament\Forms;
@@ -440,11 +441,12 @@ class ShopifyCollectionResource extends Resource
                         }
 
                         if (!config('services.shopify.shop') || !config('services.shopify.admin_access_token')) {
-                            Notification::make()
-                                ->title('Shopify credentials missing')
-                                ->body('Set SHOPIFY_SHOP and SHOPIFY_ADMIN_ACCESS_TOKEN in .env before syncing.')
-                                ->danger()
-                                ->send();
+                            self::sendNotification(
+                                Notification::make()
+                                    ->title('Shopify credentials missing')
+                                    ->body('Set SHOPIFY_SHOP and SHOPIFY_ADMIN_ACCESS_TOKEN in .env before syncing.')
+                                    ->danger()
+                            );
                             return;
                         }
 
@@ -452,17 +454,19 @@ class ShopifyCollectionResource extends Resource
                             $import = $importer->createOrReuseCollectionsImport($user->id);
                             ShopifyCollectionsSyncJob::dispatch($import->id);
 
-                            Notification::make()
-                                ->title('Collections sync queued')
-                                ->body("Import #{$import->id} is processing in the background")
-                                ->success()
-                                ->send();
+                            self::sendNotification(
+                                Notification::make()
+                                    ->title('Collections sync queued')
+                                    ->body("Import #{$import->id} is processing in the background")
+                                    ->success()
+                            );
                         } catch (\Throwable $e) {
-                            Notification::make()
-                                ->title('Collections sync failed')
-                                ->body($e->getMessage())
-                                ->danger()
-                                ->send();
+                            self::sendNotification(
+                                Notification::make()
+                                    ->title('Collections sync failed')
+                                    ->body($e->getMessage())
+                                    ->danger()
+                            );
                         }
                     }),
                 Tables\Actions\Action::make('importSeoCsv')
@@ -481,11 +485,12 @@ class ShopifyCollectionResource extends Resource
                             ->orderByDesc('id')
                             ->value('id');
                         if (!$importId) {
-                            Notification::make()
-                                ->title('No collections import found')
-                                ->body('Run Sync Collections first.')
-                                ->warning()
-                                ->send();
+                            self::sendNotification(
+                                Notification::make()
+                                    ->title('No collections import found')
+                                    ->body('Run Sync Collections first.')
+                                    ->warning()
+                            );
                             return;
                         }
 
@@ -497,16 +502,17 @@ class ShopifyCollectionResource extends Resource
 
                         $result = $importer->importFromPath($import, $path);
 
-                        Notification::make()
-                            ->title('Collection SEO import complete')
-                            ->body(
-                                "Total: {$result['total']}, Updated: {$result['updated']}, " .
-                                "Missing Handle: {$result['skipped_missing_handle']}, " .
-                                "Not Found: {$result['skipped_not_found']}, " .
-                                "Batch: {$result['batch']}"
-                            )
-                            ->success()
-                            ->send();
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Collection SEO import complete')
+                                ->body(
+                                    "Total: {$result['total']}, Updated: {$result['updated']}, " .
+                                    "Missing Handle: {$result['skipped_missing_handle']}, " .
+                                    "Not Found: {$result['skipped_not_found']}, " .
+                                    "Batch: {$result['batch']}"
+                                )
+                                ->success()
+                        );
                     }),
             ])
             ->bulkActions([
@@ -811,11 +817,7 @@ class ShopifyCollectionResource extends Resource
 
     private static function sendNotification(Notification $notification): void
     {
-        if ($user = Auth::user()) {
-            $notification->sendToDatabase($user);
-        }
-
-        $notification->send();
+        AdminNotification::send($notification);
     }
 
     private static function currentImportId(): ?int
