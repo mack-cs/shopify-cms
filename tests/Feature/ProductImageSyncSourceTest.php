@@ -65,6 +65,55 @@ it('streams a local uploaded image through the managed source route with the app
     expect($response->streamedContent())->toBe('streamed-local-image');
 });
 
+it('auto assigns the product-title filename pattern to newly uploaded images after image rename approval has run', function (): void {
+    Storage::fake('public');
+    Storage::disk('public')->put('product-images/test/fresh-upload.png', 'fresh-local-image');
+
+    $user = User::factory()->create();
+
+    $import = Import::create([
+        'filename' => 'test-import.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+    ]);
+
+    $product = Product::create([
+        'import_id' => $import->id,
+        'handle' => 'renamed-product',
+        'title' => 'Renamed Product',
+        'product_category' => 'Apparel & Accessories > Jewelry > Bracelets',
+        'type' => 'Bracelets',
+        'first_image_auto_rename_completed_at' => now(),
+        'first_image_auto_rename_approval_version' => 1,
+    ]);
+
+    Image::create([
+        'product_id' => $product->id,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+        'local_dirty' => true,
+        'src' => 'http://shopify-editor.test/storage/product-images/test/existing-upload.png',
+        'image_path' => 'product-images/test/existing-upload.png',
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
+        'position' => 1,
+        'approved_filename' => 'renamed-product-01.png',
+        'filename_mode' => Image::FILENAME_MODE_AUTO,
+    ]);
+
+    $image = Image::create([
+        'product_id' => $product->id,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+        'local_dirty' => true,
+        'src' => 'http://shopify-editor.test/storage/product-images/test/fresh-upload.png',
+        'image_path' => 'product-images/test/fresh-upload.png',
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
+        'position' => 2,
+    ]);
+
+    expect($image->fresh()->approved_filename)->toBe('renamed-product-02.png');
+    expect($image->fresh()->filename_mode)->toBe(Image::FILENAME_MODE_AUTO);
+});
+
 function createTestImage(array $overrides = []): Image
 {
     $user = User::factory()->create();

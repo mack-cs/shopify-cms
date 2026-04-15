@@ -745,7 +745,7 @@ class ProductResource extends Resource
                         Grid::make(2)->schema([
                             Select::make('pattern_category')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
-                                ->label('Pattern category')
+                                ->label('Color Style')
                                 ->helperText(fn (Get $get, ?Product $record): ?HtmlString => self::invalidDropdownHint(
                                     $get,
                                     $record,

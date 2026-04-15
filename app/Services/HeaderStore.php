@@ -225,6 +225,9 @@ final class HeaderStore
         if (in_array('bracelets', $tokens, true) || in_array('bracelet', $tokens, true)) {
             return self::BRACELET_DESIGN;
         }
+        if (self::containsBundleToken($tokens)) {
+            return self::BRACELET_DESIGN;
+        }
         if (in_array('necklaces', $tokens, true) || in_array('necklace', $tokens, true)) {
             return self::NECKLACE_DESIGN;
         }
@@ -236,6 +239,9 @@ final class HeaderStore
         if (in_array($typeNormalized, ['bracelet', 'bracelets'], true)) {
             return self::BRACELET_DESIGN;
         }
+        if (str_contains($typeNormalized, 'bundle')) {
+            return self::BRACELET_DESIGN;
+        }
         if (in_array($typeNormalized, ['necklace', 'necklaces'], true)) {
             return self::NECKLACE_DESIGN;
         }
@@ -244,6 +250,20 @@ final class HeaderStore
         }
 
         return null;
+    }
+
+    /**
+     * @param array<int, string> $tokens
+     */
+    private static function containsBundleToken(array $tokens): bool
+    {
+        foreach ($tokens as $token) {
+            if (str_contains($token, 'bundle')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static function latestTemplatePath(): ?string

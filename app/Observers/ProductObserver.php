@@ -129,6 +129,7 @@ class ProductObserver
             'handle' => $product->handle,
             'shopify_id' => $product->shopify_id,
             'title' => $product->title,
+            'siblings_collection_name' => $product->title,
             'body_html' => $product->body_html,
             'vendor' => $product->vendor,
             'tags' => $product->tags,
@@ -168,7 +169,6 @@ class ProductObserver
             $payload['colour_style'] = $row->get(HeaderStore::PATTERN_CATEGORY, null);
             $payload['size'] = $row->get(HeaderStore::SIZE, null);
             $payload['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
-            $payload['siblings_collection_name'] = $row->get(HeaderStore::SIBLINGS_COLLECTION_NAME, null);
             $payload['sibling_collection'] = $row->get(HeaderStore::SIBLING_COLLECTION, null);
             $payload['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
             $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);

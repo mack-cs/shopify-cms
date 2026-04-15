@@ -247,7 +247,9 @@ final class NewProductDraftSeeder
         $data['siblings'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS, [
                 ['shopify--discovery--product_recommendation', 'related_products'],
             ]);
-        $data['siblings_collection_name'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
+        $data['siblings_collection_name'] = trim((string) ($product->title ?? '')) !== ''
+            ? trim((string) $product->title)
+            : $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
                 ['stiletto', 'sibling_option_name'],
             ]);
         $data['sibling_collection'] = $this->resolvedSiblingCollectionValue($product, $row);
@@ -383,7 +385,7 @@ final class NewProductDraftSeeder
             'materials_and_dimensions' => 'Materials and dimensions',
             'product_design' => 'Product design',
             'metal' => 'Metal',
-            'colour_style' => 'Pattern category',
+            'colour_style' => 'Color Style',
             'siblings_collection_name' => 'Siblings collection name',
             'uvp_short_paragraph' => 'UVP short paragraph',
             'complementary_products' => 'Complementary products',

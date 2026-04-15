@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
 use App\Services\Normalizer;
+use App\Services\ProductImageFilenameService;
 use App\Services\RowKey;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
@@ -16,6 +17,7 @@ class ImageObserver
 {
     public function creating(Image $image): void
     {
+        $this->applyManagedApprovedFilename($image);
         $image->needs_shopify_image_sync = true;
         $image->shopify_image_sync_error = null;
         $this->applyLocalSyncState($image, isCreating: true);
@@ -49,6 +51,7 @@ class ImageObserver
         }
 
         if (!empty(array_intersect(['src', 'image_path', 'position'], $contentDirty))) {
+            $this->applyManagedApprovedFilename($image);
             $image->needs_shopify_image_sync = true;
             $image->shopify_image_sync_error = null;
         }
@@ -131,6 +134,41 @@ class ImageObserver
             $product->approval_version = ($product->approval_version ?? 1) + 1;
             $product->save();
         });
+    }
+
+    private function applyManagedApprovedFilename(Image $image): void
+    {
+        $productId = (int) ($image->product_id ?? 0);
+        if ($productId <= 0) {
+            return;
+        }
+
+        $product = Product::find($productId);
+        if (!$product || $product->first_image_auto_rename_completed_at === null) {
+            return;
+        }
+
+        $hasSource = filled(trim((string) ($image->image_path ?? '')))
+            || filled(trim((string) ($image->src ?? '')));
+        if (!$hasSource) {
+            return;
+        }
+
+        $position = $image->position;
+        if ($position === null) {
+            $position = (int) ($product->allImages()
+                ->whereNotIn('sync_state', [
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED,
+                ])
+                ->max('position') ?? 0) + 1;
+        }
+
+        $filename = app(ProductImageFilenameService::class)
+            ->generateForImage($image, $product->title, (int) $position);
+
+        $image->approved_filename = $filename;
+        $image->filename_mode = Image::FILENAME_MODE_AUTO;
     }
 
     private function syncShopifyRow(Image $image, ?array $original): void

@@ -3,9 +3,12 @@
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyRow;
 use App\Models\StyleProfile;
 use App\Models\User;
+use App\Services\HeaderStore;
 use App\Services\NewProductDraftSeeder;
+use App\Services\NewProductDraftProductSync;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -90,6 +93,65 @@ it('backfills empty draft fields from shopify sync and records warnings for conf
     expect($seeded->shopifySyncWarnings()[0]['field'])->toBe('vendor');
     expect($seeded->shopifySyncWarnings()[0]['draft_value'])->toBe('Draft Vendor');
     expect($seeded->shopifySyncWarnings()[0]['shopify_value'])->toBe('Shopify Vendor');
+});
+
+it('keeps sibling option name exactly in sync with the draft title', function (): void {
+    $draft = NewProductDraft::create([
+        'handle' => 'workflow-test-product',
+        'title' => 'Initial Draft Title',
+        'siblings_collection_name' => 'Different Value',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]);
+
+    expect($draft->siblings_collection_name)->toBe('Initial Draft Title');
+
+    $draft->update([
+        'title' => 'Updated Draft Title',
+        'siblings_collection_name' => 'Another Different Value',
+    ]);
+
+    expect($draft->fresh()->siblings_collection_name)->toBe('Updated Draft Title');
+});
+
+it('syncs sibling option name to the title when pushing a draft into the linked product row', function (): void {
+    $product = createWorkflowTestProduct([
+        'title' => 'Original Product Title',
+        'approval_version' => 1,
+    ]);
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::SIBLINGS_COLLECTION_NAME => 'Old Sibling Option Name',
+        ],
+    ]);
+
+    $draft = NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => 'Synced Draft Title',
+        'siblings_collection_name' => 'Should Be Ignored',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]);
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        ensureApprovalReset: false,
+        attributes: ['title']
+    );
+
+    $row = ShopifyRow::query()
+        ->where('import_id', $product->import_id)
+        ->where('handle', $product->handle)
+        ->where('row_type', 'product_primary')
+        ->firstOrFail();
+
+    expect($row->get(HeaderStore::SIBLINGS_COLLECTION_NAME))->toBe('Synced Draft Title');
 });
 
 function createWorkflowTestProduct(array $overrides = []): Product

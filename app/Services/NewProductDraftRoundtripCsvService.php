@@ -179,7 +179,7 @@ final class NewProductDraftRoundtripCsvService
             'materials_and_dimensions' => ['label' => 'Materials and Dimensions'],
             'product_design' => ['label' => 'Product Design'],
             'metal' => ['label' => 'Metal'],
-            'colour_style' => ['label' => 'Pattern Category'],
+            'colour_style' => ['label' => 'Color Style'],
             'size' => ['label' => 'Size'],
             'siblings' => ['label' => 'Siblings'],
             'siblings_collection_name' => ['label' => 'Siblings Collection Name'],

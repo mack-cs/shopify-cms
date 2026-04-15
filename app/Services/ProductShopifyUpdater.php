@@ -254,7 +254,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_TARGET_GENDER => 'Target gender',
             self::CORE_FIELD_AGE_GROUP => 'Age group',
             self::CORE_FIELD_BRACELET_DESIGN => 'Bracelet design',
-            self::CORE_FIELD_PATTERN_CATEGORY => 'Pattern category',
+            self::CORE_FIELD_PATTERN_CATEGORY => 'Color Style',
             self::CORE_FIELD_PRODUCT_METALS => 'Product metals',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];

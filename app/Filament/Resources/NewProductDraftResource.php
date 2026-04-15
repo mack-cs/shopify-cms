@@ -177,6 +177,11 @@ class NewProductDraftResource extends Resource
                             TextInput::make('title')
                                 ->required()
                                 ->maxLength(255)
+                                ->live(debounce: 500)
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    $title = is_string($state) ? trim($state) : trim((string) ($state ?? ''));
+                                    $set('siblings_collection_name', $title !== '' ? $title : null);
+                                })
                                 ->columnSpan(1),
                             TextInput::make('sku')
                                 ->maxLength(255)
@@ -691,109 +696,6 @@ class NewProductDraftResource extends Resource
 
                         ])
                         ->columnSpanFull(),
-                    Forms\Components\Grid::make(3)
-                        ->schema([
-                            Select::make('metal')
-                                ->label('Metal')
-                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
-                                    $get,
-                                    'metal',
-                                    HeaderStore::PRODUCT_METALS
-                                ))
-                                ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PRODUCT_METALS,
-                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                ))
-                                ->searchable()
-                                ->reactive()
-                                ->rules([
-                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
-                                        $invalid = self::invalidCollectionSelectionValues(
-                                            $value,
-                                            self::dropdownOptionsForHeader(
-                                                HeaderStore::PRODUCT_METALS,
-                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
-                                        );
-                                        if (!empty($invalid)) {
-                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
-                                        }
-                                    },
-                                ])
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    if (self::normalizeDesignAliasValue($state) === null) {
-                                        $component->state(null);
-                                    }
-                                }),
-                            Select::make('colour_style')
-                                ->label('Pattern category')
-                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
-                                    $get,
-                                    'colour_style',
-                                    HeaderStore::PATTERN_CATEGORY
-                                ))
-                                ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PATTERN_CATEGORY,
-                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                ))
-                                ->searchable()
-                                ->reactive()
-                                ->rules([
-                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
-                                        $invalid = self::invalidCollectionSelectionValues(
-                                            $value,
-                                            self::dropdownOptionsForHeader(
-                                                HeaderStore::PATTERN_CATEGORY,
-                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
-                                        );
-                                        if (!empty($invalid)) {
-                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
-                                        }
-                                    },
-                                ])
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    if (self::normalizeDesignAliasValue($state) === null) {
-                                        $component->state(null);
-                                    }
-                                }),
-                            Select::make('size')
-                                ->label('Size')
-                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
-                                    $get,
-                                    'size',
-                                    HeaderStore::SIZE
-                                ))
-                                ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::SIZE,
-                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                ))
-                                ->searchable()
-                                ->reactive()
-                                ->rules([
-                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
-                                        $invalid = self::invalidCollectionSelectionValues(
-                                            $value,
-                                            self::dropdownOptionsForHeader(
-                                                HeaderStore::SIZE,
-                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
-                                        );
-                                        if (!empty($invalid)) {
-                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
-                                        }
-                                    },
-                                ])
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    if (self::normalizeDesignAliasValue($state) === null) {
-                                        $component->state(null);
-                                    }
-                                }),
-                        ])
-                        ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
                         ->schema([
 
@@ -818,7 +720,13 @@ class NewProductDraftResource extends Resource
                                 ->dehydrateStateUsing(fn ($state): ?string => self::normalizeSiblingCollectionValue($state)),
                             TextInput::make('siblings_collection_name')
                                 ->label('Siblings Option Name')
-                                ->placeholder('Enter sibling option name'),
+                                ->disabled()
+                                ->dehydrated(false)
+                                ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                    $title = trim((string) ($record?->title ?? ''));
+                                    $component->state($title !== '' ? $title : $state);
+                                })
+                                ->helperText('Always matches the product title.'),
                         ])
                         ->columnSpanFull(),
                             ])->columns(2),
@@ -951,6 +859,39 @@ class NewProductDraftResource extends Resource
                             return 'This product already exists. Image is read-only here and synced product images take priority.';
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::draftImageLocked($get, $record)),
+                    Select::make('colour_style')
+                                ->label('Color Style')
+                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                    $get,
+                                    'colour_style',
+                                    HeaderStore::PATTERN_CATEGORY
+                                ))
+                                ->placeholder('Select option')
+                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                    HeaderStore::PATTERN_CATEGORY,
+                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                ))
+                                ->searchable()
+                                ->reactive()
+                                ->rules([
+                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                        $invalid = self::invalidCollectionSelectionValues(
+                                            $value,
+                                            self::dropdownOptionsForHeader(
+                                                HeaderStore::PATTERN_CATEGORY,
+                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                            )
+                                        );
+                                        if (!empty($invalid)) {
+                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                        }
+                                    },
+                                ])
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    if (self::normalizeDesignAliasValue($state) === null) {
+                                        $component->state(null);
+                                    }
+                                }),
                     Select::make('product_design')
                         ->label(fn (Get $get): string => self::designLabelForDraftState($get))
                         ->placeholder('Select option')
@@ -996,52 +937,110 @@ class NewProductDraftResource extends Resource
                                 }
                             },
                         ]),
-                    Select::make('status')
-                        ->options([
-                            'draft' => 'draft',
-                            'active' => 'active',
-                            'archived' => 'archived',
-                        ])
-                        ->default('draft')
-                        ->required(),
-                    Select::make('published')
-                        ->options([
-                            'true' => 'true',
-                            'false' => 'false',
-                        ])
-                        ->default('false')
-                        ->required(),
+                    Textarea::make('product_materials')
+                                ->label('Product Materials')
+                                ->placeholder('Enter product materials')
+                                ->rows(3),
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
                         ->toolbarButtons(self::compactRichTextToolbarButtons()),
-                    Select::make('product_materials')
-                                ->label('Product Materials')
-                                ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
-                                    $get,
-                                    'product_materials',
-                                    HeaderStore::PRODUCT_MATERIALS
-                                ))
-                                ->placeholder('Select option')
-                                ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
-                                    HeaderStore::PRODUCT_MATERIALS,
-                                    tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                ))
-                                ->searchable()
-                                ->reactive()
-                                ->rules([
-                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
-                                        $invalid = self::invalidCollectionSelectionValues(
-                                            $value,
-                                            self::dropdownOptionsForHeader(
-                                                HeaderStore::PRODUCT_MATERIALS,
-                                                tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
-                                        );
-                                        if (!empty($invalid)) {
-                                            $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
-                                        }
-                                    },
-                                ]),
+                    Forms\Components\Grid::make(2)
+                                ->schema([
+                                    Select::make('metal')
+                                        ->label('Metal')
+                                        ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                            $get,
+                                            'metal',
+                                            HeaderStore::PRODUCT_METALS
+                                        ))
+                                        ->placeholder('Select option')
+                                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                            HeaderStore::PRODUCT_METALS,
+                                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                        ))
+                                        ->searchable()
+                                        ->reactive()
+                                        ->visible(fn (Get $get): bool => self::hasDropdownOptionsForDraftField(
+                                            $get,
+                                            HeaderStore::PRODUCT_METALS
+                                        ))
+                                        ->rules([
+                                            fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                                $invalid = self::invalidCollectionSelectionValues(
+                                                    $value,
+                                                    self::dropdownOptionsForHeader(
+                                                        HeaderStore::PRODUCT_METALS,
+                                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                                    )
+                                                );
+                                                if (!empty($invalid)) {
+                                                    $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                                }
+                                            },
+                                        ])
+                                        ->afterStateHydrated(function (Select $component, $state): void {
+                                            if (self::normalizeDesignAliasValue($state) === null) {
+                                                $component->state(null);
+                                            }
+                                        }),
+                                    Select::make('size')
+                                        ->label('Size')
+                                        ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                                            $get,
+                                            'size',
+                                            HeaderStore::SIZE
+                                        ))
+                                        ->placeholder('Select option')
+                                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                                            HeaderStore::SIZE,
+                                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                        ))
+                                        ->searchable()
+                                        ->reactive()
+                                        ->visible(fn (Get $get): bool => self::hasDropdownOptionsForDraftField(
+                                            $get,
+                                            HeaderStore::SIZE
+                                        ))
+                                        ->rules([
+                                            fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                                $invalid = self::invalidCollectionSelectionValues(
+                                                    $value,
+                                                    self::dropdownOptionsForHeader(
+                                                        HeaderStore::SIZE,
+                                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                                    )
+                                                );
+                                                if (!empty($invalid)) {
+                                                    $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                                }
+                                            },
+                                        ])
+                                        ->afterStateHydrated(function (Select $component, $state): void {
+                                            if (self::normalizeDesignAliasValue($state) === null) {
+                                                $component->state(null);
+                                            }
+                                        }),
+                                ])
+                                ->columnSpanFull(),
+                    Forms\Components\Grid::make(2)
+                                ->schema([
+                                    Select::make('status')
+                                        ->options([
+                                            'draft' => 'draft',
+                                            'active' => 'active',
+                                            'archived' => 'archived',
+                                        ])
+                                        ->default('draft')
+                                        ->required(),
+                                    Select::make('published')
+                                        ->options([
+                                            'true' => 'true',
+                                            'false' => 'false',
+                                        ])
+                                        ->default('false')
+                                        ->required(),
+                                ])
+                                ->columnSpanFull(),
 
                     TextInput::make('batch')
                         ->label('Batch')
@@ -1572,6 +1571,18 @@ class NewProductDraftResource extends Resource
             $header,
             tags: self::filterTags($get, $get('vendor'), $get('type'))
         );
+    }
+
+    private static function hasDropdownOptionsForDraftField(Get $get, string $header): bool
+    {
+        if (self::defaultCollectionStyleForState($get) === null) {
+            return false;
+        }
+
+        return !empty(self::dropdownOptionsForHeader(
+            $header,
+            tags: self::filterTags($get, $get('vendor'), $get('type'))
+        ));
     }
 
     private static function shouldShowDesignField(Get $get): bool
@@ -2285,7 +2296,7 @@ class NewProductDraftResource extends Resource
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('colour_style')
-                    ->label('Pattern category')
+                    ->label('Color Style')
                     ->formatStateUsing(fn ($state): string => self::normalizeDesignAliasValue($state) ?? '')
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
@@ -2337,6 +2348,27 @@ class NewProductDraftResource extends Resource
                     ->fillForm(fn (NewProductDraft $record): array => self::draftQuickEditDefaults($record))
                     ->action(function (NewProductDraft $record, array $data): void {
                         self::applyQuickEditsToDraft($record, $data);
+                    }),
+                Tables\Actions\Action::make('seoDraft')
+                    ->label('SEO Draft')
+                    ->icon('heroicon-o-document-text')
+                    ->color('info')
+                    ->tooltip(fn (NewProductDraft $record): string => filled(trim((string) ($record->handle ?? '')))
+                        ? 'SEO Draft'
+                        : 'Save a handle on this draft before editing the SEO Draft.')
+                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))))
+                    ->modalWidth('4xl')
+                    ->modalHeading(fn (NewProductDraft $record): string|HtmlString => self::seoDraftModalHeading($record))
+                    ->modalSubmitActionLabel('Save SEO Draft')
+                    ->form(fn (NewProductDraft $record): array => self::seoDraftFormSchema($record))
+                    ->fillForm(fn (NewProductDraft $record): array => self::seoDraftFormData($record))
+                    ->action(function (NewProductDraft $record, array $data): void {
+                        self::saveSeoDraft($record, $data);
+
+                        self::sendNotification(Notification::make()
+                            ->title('SEO draft saved')
+                            ->success()
+                        );
                     }),
                 Tables\Actions\EditAction::make()->color('warning'),
                 Tables\Actions\DeleteAction::make()->color('danger'),
@@ -3514,7 +3546,8 @@ class NewProductDraftResource extends Resource
         }
 
         if ($source === 'row') {
-            return self::draftAttributeForBulkRowHeader($attribute) !== null;
+            return $attribute !== HeaderStore::SIBLINGS_COLLECTION_NAME
+                && self::draftAttributeForBulkRowHeader($attribute) !== null;
         }
 
         return false;
@@ -3840,7 +3873,8 @@ class NewProductDraftResource extends Resource
         }
 
         if ($source === 'row') {
-            return trim($attribute) !== '';
+            return trim($attribute) !== ''
+                && $attribute !== HeaderStore::SIBLINGS_COLLECTION_NAME;
         }
 
         if ($source === 'variant') {
@@ -3895,6 +3929,214 @@ class NewProductDraftResource extends Resource
         return $attribute;
     }
 
+    public static function seoDraftFormSchema(?NewProductDraft $ownerRecord): array
+    {
+        return [
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\TextInput::make('sku')
+                        ->maxLength(80)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, mixed $record) use ($ownerRecord): void {
+                            $component->state(self::resolvedSeoDraftSku(
+                                $ownerRecord,
+                                self::resolveSeoDraftFormStyleProfileRecord($record)
+                            ));
+                        }),
+
+                    Forms\Components\TextInput::make('style_type')
+                        ->label('Product Type')
+                        ->maxLength(120)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, mixed $record) use ($ownerRecord): void {
+                            $component->state(self::resolvedSeoDraftProduct(
+                                $ownerRecord,
+                                self::resolveSeoDraftFormStyleProfileRecord($record)
+                            )?->type);
+                        }),
+                ])
+                ->columnSpanFull(),
+
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\TextInput::make('product_colors')
+                        ->label('Colors')
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, mixed $record) use ($ownerRecord): void {
+                            $component->state(self::resolvedSeoDraftProduct(
+                                $ownerRecord,
+                                self::resolveSeoDraftFormStyleProfileRecord($record)
+                            )?->color_string);
+                        }),
+                    Forms\Components\TextInput::make('jewelry_material_display')
+                        ->label('Jewelry material')
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\TextInput $component, mixed $record) use ($ownerRecord): void {
+                            $component->state(self::resolvedSeoDraftJewelryMaterial(
+                                self::resolvedSeoDraftProduct(
+                                    $ownerRecord,
+                                    self::resolveSeoDraftFormStyleProfileRecord($record)
+                                )
+                            ));
+                        }),
+                ])
+                ->columnSpanFull(),
+
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\Textarea::make('product_description')
+                        ->label('Description')
+                        ->rows(4)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->afterStateHydrated(function (Forms\Components\Textarea $component, mixed $record) use ($ownerRecord): void {
+                            $component->state(self::resolvedSeoDraftProductDescription(
+                                self::resolvedSeoDraftProduct(
+                                    $ownerRecord,
+                                    self::resolveSeoDraftFormStyleProfileRecord($record)
+                                )
+                            ));
+                        }),
+                    Forms\Components\Textarea::make('colour_prompt')
+                        ->rows(4)
+                        ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'colour_prompt')),
+                ])
+                ->columnSpanFull(),
+
+            Forms\Components\Grid::make(2)
+                ->schema([
+                    Forms\Components\TextInput::make('materials')
+                        ->maxLength(255)
+                        ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'materials')),
+                    Forms\Components\TextInput::make('components')
+                        ->maxLength(255)
+                        ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'components')),
+                ])
+                ->columnSpanFull(),
+
+            Forms\Components\TextInput::make('draft_seo_title')
+                ->label('SEO Title')
+                ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'draft_seo_title'))
+                ->live(debounce: 500)
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoTitleLengthHint($get('draft_seo_title')))
+                ->maxLength(StyleProfile::SEO_TITLE_RECOMMENDED_MAX)
+                ->rules([
+                    function (): \Closure {
+                        return function (string $attribute, $value, $fail): void {
+                            $length = StyleProfile::trimmedLength($value);
+                            if ($length > 0 && $length < StyleProfile::SEO_TITLE_RECOMMENDED_MIN) {
+                                $fail('SEO title is too short. Use at least ' . StyleProfile::SEO_TITLE_RECOMMENDED_MIN . ' characters.');
+                            }
+                        };
+                    },
+                ])
+                ->columnSpanFull(),
+
+            Forms\Components\Textarea::make('draft_seo_description')
+                ->label('SEO Description (150-160 chars)')
+                ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'draft_seo_description'))
+                ->live(debounce: 500)
+                ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
+                ->rows(2)
+                ->maxLength(StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX)
+                ->rules([
+                    function (): \Closure {
+                        return function (string $attribute, $value, $fail): void {
+                            $length = StyleProfile::trimmedLength($value);
+                            if ($length > 0 && $length < StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN) {
+                                $fail('SEO description is too short. Use at least ' . StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN . ' characters.');
+                            }
+                        };
+                    },
+                ])
+                ->columnSpanFull(),
+        ];
+    }
+
+    public static function seoDraftFormData(NewProductDraft $record): array
+    {
+        $styleProfile = self::seoDraftStyleProfile($record);
+        $product = self::resolvedSeoDraftProduct($record, $styleProfile);
+
+        return [
+            'sku' => self::resolvedSeoDraftSku($record, $styleProfile),
+            'style_type' => $product?->type,
+            'product_colors' => $product?->color_string,
+            'jewelry_material_display' => self::resolvedSeoDraftJewelryMaterial($product),
+            'materials' => self::defaultSeoDraftFieldValue($record, 'materials', $styleProfile),
+            'components' => self::defaultSeoDraftFieldValue($record, 'components', $styleProfile),
+            'colour_prompt' => self::defaultSeoDraftFieldValue($record, 'colour_prompt', $styleProfile),
+            'product_description' => self::resolvedSeoDraftProductDescription($product),
+            'draft_seo_title' => self::defaultSeoDraftFieldValue($record, 'draft_seo_title', $styleProfile),
+            'draft_seo_description' => self::defaultSeoDraftFieldValue($record, 'draft_seo_description', $styleProfile),
+        ];
+    }
+
+    public static function seoDraftModalHeading(?NewProductDraft $ownerRecord, ?StyleProfile $styleProfile = null): string|HtmlString
+    {
+        $title = self::resolvedSeoDraftProduct($ownerRecord, $styleProfile)?->title
+            ?? $ownerRecord?->title;
+
+        if (!$title) {
+            return 'SEO Draft';
+        }
+
+        return new HtmlString('SEO Draft for <em>' . e($title) . '</em>');
+    }
+
+    public static function normalizeSeoDraftFormData(?NewProductDraft $ownerRecord, array $data): array
+    {
+        $product = self::resolvedSeoDraftProduct($ownerRecord);
+
+        $data['handle'] = $ownerRecord?->handle;
+        $data['product_id'] = $product?->id;
+        $data['sku'] = self::resolvedSeoDraftSku($ownerRecord) ?? self::nullIfEmpty($data['sku'] ?? null);
+
+        if (empty($data['image_url'])) {
+            $imageUrl = $product?->images()
+                ->orderBy('position')
+                ->value('src');
+
+            if ($imageUrl) {
+                $data['image_url'] = $imageUrl;
+            }
+        }
+
+        foreach (['materials', 'components', 'colour_prompt', 'draft_seo_title', 'draft_seo_description'] as $field) {
+            $data[$field] = self::nullIfEmpty($data[$field] ?? null);
+        }
+
+        return $data;
+    }
+
+    public static function saveSeoDraft(NewProductDraft $record, array $data): StyleProfile
+    {
+        if (blank(trim((string) ($record->handle ?? '')))) {
+            throw new \InvalidArgumentException('Draft needs a handle before an SEO draft can be saved.');
+        }
+
+        $normalized = self::normalizeSeoDraftFormData($record, $data);
+        $updates = [];
+
+        foreach (['materials', 'components', 'colour_prompt', 'draft_seo_title', 'draft_seo_description'] as $field) {
+            if (array_key_exists($field, $normalized)) {
+                $updates[$field] = $normalized[$field];
+            }
+        }
+
+        self::upsertDraftStyleProfile($record, $updates);
+
+        return self::seoDraftStyleProfile($record->fresh('styleProfiles') ?? $record)
+            ?? StyleProfile::query()
+                ->where('handle', $record->handle)
+                ->latest('id')
+                ->firstOrFail();
+    }
+
     private static function draftStyleProfileAttribute(string $source, string $attribute): ?string
     {
         if ($source !== 'product') {
@@ -3910,20 +4152,109 @@ class NewProductDraftResource extends Resource
 
     private static function draftStyleProfileDefaultValue(NewProductDraft $record, string $attribute): ?string
     {
+        return self::defaultSeoDraftFieldValue($record, $attribute);
+    }
+
+    private static function seoDraftStyleProfile(NewProductDraft $record): ?StyleProfile
+    {
         $profile = $record->relationLoaded('styleProfiles')
             ? $record->styleProfiles->first()
             : $record->styleProfiles()->first();
 
-        $value = $profile?->{$attribute};
-        if (is_string($value) && trim($value) !== '') {
+        return $profile instanceof StyleProfile ? $profile : null;
+    }
+
+    private static function resolveSeoDraftFormStyleProfileRecord(mixed $record): ?StyleProfile
+    {
+        return $record instanceof StyleProfile ? $record : null;
+    }
+
+    private static function defaultSeoDraftFieldValue(
+        ?NewProductDraft $ownerRecord,
+        string $attribute,
+        ?StyleProfile $styleProfile = null
+    ): ?string {
+        $styleProfile ??= $ownerRecord ? self::seoDraftStyleProfile($ownerRecord) : null;
+
+        $value = self::nullIfEmpty($styleProfile?->{$attribute});
+        if ($value !== null) {
             return $value;
         }
 
+        $product = self::resolvedSeoDraftProduct($ownerRecord, $styleProfile);
+
         return match ($attribute) {
-            'draft_seo_title' => self::nullIfEmpty($record->product?->seo_title),
-            'draft_seo_description' => self::nullIfEmpty($record->product?->seo_description),
+            'draft_seo_title' => self::nullIfEmpty($product?->seo_title),
+            'draft_seo_description' => self::nullIfEmpty($product?->seo_description),
             default => null,
         };
+    }
+
+    private static function resolvedSeoDraftProduct(?NewProductDraft $ownerRecord, ?StyleProfile $styleProfile = null): ?Product
+    {
+        if ($styleProfile?->relationLoaded('product') && $styleProfile->product) {
+            return $styleProfile->product;
+        }
+
+        if ($styleProfile?->product) {
+            return $styleProfile->product;
+        }
+
+        if ($ownerRecord) {
+            $product = self::linkedProductForDraft($ownerRecord);
+            if ($product) {
+                return $product;
+            }
+        }
+
+        $handle = trim((string) ($styleProfile?->handle ?? $ownerRecord?->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        return Product::query()
+            ->where('handle', $handle)
+            ->first();
+    }
+
+    private static function resolvedSeoDraftSku(?NewProductDraft $ownerRecord, ?StyleProfile $styleProfile = null): ?string
+    {
+        $sku = self::nullIfEmpty($styleProfile?->sku);
+        if ($sku !== null) {
+            return $sku;
+        }
+
+        $product = self::resolvedSeoDraftProduct($ownerRecord, $styleProfile);
+        $sku = self::nullIfEmpty(
+            $product?->variants()->orderBy('id')->value('sku')
+            ?? $ownerRecord?->sku
+            ?? $ownerRecord?->handle
+        );
+
+        return $sku;
+    }
+
+    private static function resolvedSeoDraftJewelryMaterial(?Product $product): ?string
+    {
+        if (!$product) {
+            return null;
+        }
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        return self::nullIfEmpty($row?->get(HeaderStore::JEWELRY_MATERIAL, ''));
+    }
+
+    private static function resolvedSeoDraftProductDescription(?Product $product): ?string
+    {
+        if (!$product) {
+            return null;
+        }
+
+        return self::nullIfEmpty(trim(strip_tags((string) ($product->body_html ?? ''))));
     }
 
     private static function quickEditPayloadValue(mixed $value): string

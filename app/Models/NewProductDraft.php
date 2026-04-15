@@ -139,6 +139,37 @@ class NewProductDraft extends Model
         $this->attributes['image_path'] = is_string($value) ? trim($value) : $value;
     }
 
+    public function setTitleAttribute(mixed $value): void
+    {
+        $title = is_string($value) ? trim($value) : $value;
+
+        $this->attributes['title'] = $title;
+        $this->attributes['siblings_collection_name'] = self::resolvedSiblingOptionName(
+            $title,
+            $this->attributes['siblings_collection_name'] ?? null
+        );
+    }
+
+    public function setSiblingsCollectionNameAttribute(mixed $value): void
+    {
+        $this->attributes['siblings_collection_name'] = self::resolvedSiblingOptionName(
+            $this->attributes['title'] ?? null,
+            $value
+        );
+    }
+
+    private static function resolvedSiblingOptionName(mixed $title, mixed $fallback = null): ?string
+    {
+        $normalizedTitle = is_string($title) ? trim($title) : trim((string) ($title ?? ''));
+        if ($normalizedTitle !== '') {
+            return $normalizedTitle;
+        }
+
+        $normalizedFallback = is_string($fallback) ? trim($fallback) : trim((string) ($fallback ?? ''));
+
+        return $normalizedFallback !== '' ? $normalizedFallback : null;
+    }
+
     public function approvals(): HasMany
     {
         return $this->hasMany(NewProductDraftApproval::class);
