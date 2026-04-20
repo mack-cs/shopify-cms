@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Variant extends Model
 {
@@ -16,6 +17,7 @@ class Variant extends Model
 
     protected $fillable = [
         'product_id',
+        'image_id',
         'shopify_id',
         'sync_state',
         'local_dirty',
@@ -59,6 +61,16 @@ class Variant extends Model
         'last_shopify_seen_at' => 'datetime',
         'last_synced_at' => 'datetime',
     ];
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(Product::class);
+    }
+
+    public function image(): BelongsTo
+    {
+        return $this->belongsTo(Image::class);
+    }
 
     public function scopeActive(Builder $query): Builder
     {

@@ -177,7 +177,7 @@ class NewProductDraftResource extends Resource
                             TextInput::make('title')
                                 ->required()
                                 ->maxLength(255)
-                                ->live(debounce: 500)
+                                ->live(onBlur: true)
                                 ->afterStateUpdated(function ($state, callable $set): void {
                                     $title = is_string($state) ? trim($state) : trim((string) ($state ?? ''));
                                     $set('siblings_collection_name', $title !== '' ? $title : null);
@@ -3174,6 +3174,14 @@ class NewProductDraftResource extends Resource
      */
     public static function mutateDraftFormData(array $data): array
     {
+        $title = is_string($data['title'] ?? null)
+            ? trim($data['title'])
+            : trim((string) ($data['title'] ?? ''));
+
+        $data['siblings_collection_name'] = $title !== ''
+            ? $title
+            : null;
+
         $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
         unset($data['extra_shopify_fields']);
 

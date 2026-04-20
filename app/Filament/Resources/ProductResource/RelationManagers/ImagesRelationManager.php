@@ -257,7 +257,10 @@ class ImagesRelationManager extends RelationManager
                     );
                 })
                 ->deselectRecordsAfterCompletion(),
-        ]);
+        ])
+            ->defaultSort('position')
+            ->paginated(false)
+            ->reorderable('position');
     }
 
     private function normalizeImageUrl(?string $src): ?string

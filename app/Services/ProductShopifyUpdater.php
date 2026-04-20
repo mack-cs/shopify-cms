@@ -780,6 +780,13 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         );
     }
 
+    if ($syncVariants) {
+        $warnings = array_merge(
+            $warnings,
+            $this->syncVariantMediaAssignments($product, $productId, $variantRows)
+        );
+    }
+
     // 7) Coverage warnings
     if ($syncProduct) {
         $warnings = array_merge(
@@ -1459,6 +1466,13 @@ query ProductByHandleDetails($handle: String!) {
           name
           value
         }
+        media(first: 20) {
+          nodes {
+            ... on MediaImage {
+              id
+            }
+          }
+        }
         inventoryItem {
           id
           unitCost { currencyCode }
@@ -1518,6 +1532,13 @@ query ProductByIdDetails($id: ID!) {
         selectedOptions {
           name
           value
+        }
+        media(first: 20) {
+          nodes {
+            ... on MediaImage {
+              id
+            }
+          }
         }
         inventoryItem {
           id
@@ -3966,6 +3987,248 @@ GQL;
         return $warnings;
     }
 
+    /**
+     * @param array<int, array> $rowDataList
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function syncVariantMediaAssignments(Product $product, string $productId, array $rowDataList): array
+    {
+        $warnings = [];
+
+        $localVariantsOrdered = $product->variants()
+            ->with('image')
+            ->orderBy('id')
+            ->get()
+            ->values();
+
+        $variantSources = $this->buildVariantSources($rowDataList, $localVariantsOrdered);
+        if (empty($variantSources)) {
+            return $warnings;
+        }
+
+        $details = $this->productByHandleDetails($product->handle);
+        $variantNodes = data_get($details, 'variants.nodes', []);
+        if (!is_array($variantNodes) || empty($variantNodes)) {
+            return $warnings;
+        }
+
+        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
+        $shopifyVariantsBySku = [];
+        $shopifyVariantsBySignature = [];
+
+        foreach ($variantNodesOrdered as $variantNode) {
+            $sku = trim((string) ($variantNode['sku'] ?? ''));
+            if ($sku !== '') {
+                $shopifyVariantsBySku[$sku] = $variantNode;
+            }
+
+            $signature = $this->variantOptionSignatureFromNode($variantNode);
+            if ($signature !== '') {
+                $shopifyVariantsBySignature[$signature] = $variantNode;
+            }
+        }
+
+        $mediaNodes = collect(data_get($details, 'media.nodes', []))
+            ->filter(fn ($node) => is_array($node))
+            ->map(function (array $node): array {
+                return [
+                    'id' => trim((string) ($node['id'] ?? '')),
+                    'url' => trim((string) data_get($node, 'image.url', '')),
+                ];
+            })
+            ->filter(fn (array $row) => $row['id'] !== '')
+            ->values();
+
+        $mediaIdByShopifyId = $product->images()
+            ->whereNotNull('shopify_id')
+            ->pluck('shopify_id', 'id')
+            ->mapWithKeys(fn (string $shopifyId, int $imageId): array => [$imageId => trim($shopifyId)])
+            ->all();
+
+        $mediaIdByUrl = $mediaNodes
+            ->filter(fn (array $row) => $row['url'] !== '')
+            ->mapWithKeys(fn (array $row): array => [$row['url'] => $row['id']])
+            ->all();
+
+        $detachInputs = [];
+        $appendInputs = [];
+
+        foreach ($variantSources as $rowIndex => $variantSource) {
+            /** @var Variant|null $localVariant */
+            $localVariant = $variantSource['local'];
+            if ($localVariant === null) {
+                continue;
+            }
+
+            $variantNode = $this->resolveShopifyVariantNode(
+                $variantNodesOrdered,
+                $shopifyVariantsBySku,
+                $shopifyVariantsBySignature,
+                $localVariant,
+                $variantSource['row'],
+                $rowIndex,
+            );
+
+            if ($variantNode === null) {
+                continue;
+            }
+
+            $variantId = trim((string) ($variantNode['id'] ?? ''));
+            if ($variantId === '') {
+                continue;
+            }
+
+            $currentMediaIds = collect(data_get($variantNode, 'media.nodes', []))
+                ->filter(fn ($node) => is_array($node))
+                ->map(fn (array $node): string => trim((string) ($node['id'] ?? '')))
+                ->filter()
+                ->values()
+                ->all();
+
+            $desiredMediaId = $this->desiredVariantMediaId($localVariant, $mediaIdByShopifyId, $mediaIdByUrl);
+
+            if ($localVariant->image_id !== null && $desiredMediaId === null) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Variant {$localVariant->sku} image assignment was skipped because the linked product image has not been synced to Shopify yet.",
+                ];
+                continue;
+            }
+
+            $mediaIdsToDetach = $desiredMediaId === null
+                ? $currentMediaIds
+                : array_values(array_filter(
+                    $currentMediaIds,
+                    fn (string $mediaId): bool => $mediaId !== $desiredMediaId
+                ));
+
+            if (!empty($mediaIdsToDetach)) {
+                $detachInputs[] = [
+                    'variantId' => $variantId,
+                    'mediaIds' => $mediaIdsToDetach,
+                ];
+            }
+
+            if ($desiredMediaId !== null && !in_array($desiredMediaId, $currentMediaIds, true)) {
+                $appendInputs[] = [
+                    'variantId' => $variantId,
+                    'mediaIds' => [$desiredMediaId],
+                ];
+            }
+        }
+
+        if (!empty($detachInputs)) {
+            try {
+                $detachData = $this->client->graphql($this->productVariantDetachMediaMutation(), [
+                    'productId' => $productId,
+                    'variantMedia' => $detachInputs,
+                ]);
+
+                $detachErrors = data_get($detachData, 'productVariantDetachMedia.userErrors', []);
+                if (is_array($detachErrors) && !empty($detachErrors)) {
+                    $messages = $this->formatUserErrors($detachErrors, 'variantMedia');
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => $messages !== '' ? $messages : 'Shopify variant image detach failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify variant image detach failed: ' . $e->getMessage(),
+                ];
+            }
+        }
+
+        if (!empty($appendInputs)) {
+            try {
+                $appendData = $this->client->graphql($this->productVariantAppendMediaMutation(), [
+                    'productId' => $productId,
+                    'variantMedia' => $appendInputs,
+                ]);
+
+                $appendErrors = data_get($appendData, 'productVariantAppendMedia.userErrors', []);
+                if (is_array($appendErrors) && !empty($appendErrors)) {
+                    $messages = $this->formatUserErrors($appendErrors, 'variantMedia');
+                    $warnings[] = [
+                        'product_id' => $product->id,
+                        'warning' => $messages !== '' ? $messages : 'Shopify variant image attach failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => 'Shopify variant image attach failed: ' . $e->getMessage(),
+                ];
+            }
+        }
+
+        return $warnings;
+    }
+
+    /**
+     * @param array<int, array> $variantNodesOrdered
+     * @param array<string, array> $shopifyVariantsBySku
+     * @param array<string, array> $shopifyVariantsBySignature
+     * @param array<string, mixed> $rowData
+     */
+    private function resolveShopifyVariantNode(
+        array $variantNodesOrdered,
+        array $shopifyVariantsBySku,
+        array $shopifyVariantsBySignature,
+        ?Variant $localVariant,
+        array $rowData,
+        int $rowIndex
+    ): ?array {
+        $desiredSku = $this->variantDesiredValue($localVariant, $rowData, 'sku', HeaderStore::VARIANT_SKU);
+        $desiredSignature = $this->variantOptionSignature(
+            $this->variantOptionValuesFromSource($rowData, $localVariant)
+        );
+
+        $variantNode = $desiredSku !== null
+            ? ($shopifyVariantsBySku[$desiredSku] ?? null)
+            : null;
+
+        if ($variantNode === null && $desiredSignature !== '') {
+            $variantNode = $shopifyVariantsBySignature[$desiredSignature] ?? null;
+        }
+
+        if ($variantNode === null) {
+            $variantNode = $variantNodesOrdered[$rowIndex] ?? null;
+        }
+
+        return is_array($variantNode) ? $variantNode : null;
+    }
+
+    /**
+     * @param array<int, string> $mediaIdByShopifyId
+     * @param array<string, string> $mediaIdByUrl
+     */
+    private function desiredVariantMediaId(Variant $variant, array $mediaIdByShopifyId, array $mediaIdByUrl): ?string
+    {
+        $image = $variant->image;
+        if ($image === null) {
+            return null;
+        }
+
+        $linkedShopifyId = trim((string) ($mediaIdByShopifyId[$image->id] ?? ''));
+        if ($linkedShopifyId !== '') {
+            return $linkedShopifyId;
+        }
+
+        $currentUrl = $this->normalizeMediaUrl($image->src);
+        if ($currentUrl !== null && isset($mediaIdByUrl[$currentUrl])) {
+            return $mediaIdByUrl[$currentUrl];
+        }
+
+        $syncUrl = $this->nullIfEmpty($image->desiredSyncSourceUrl());
+        if ($syncUrl !== null && isset($mediaIdByUrl[$syncUrl])) {
+            return $mediaIdByUrl[$syncUrl];
+        }
+
+        return null;
+    }
+
     private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null): void
     {
         Image::withoutEvents(function () use ($image, $shopifyId, $filename): void {
@@ -4037,6 +4300,46 @@ mutation FileUpdate($files: [FileUpdateInput!]!) {
       ... on MediaImage {
         id
       }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+GQL;
+    }
+
+    private function productVariantAppendMediaMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductVariantAppendMedia($productId: ID!, $variantMedia: [ProductVariantAppendMediaInput!]!) {
+  productVariantAppendMedia(productId: $productId, variantMedia: $variantMedia) {
+    product {
+      id
+    }
+    productVariants {
+      id
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+GQL;
+    }
+
+    private function productVariantDetachMediaMutation(): string
+    {
+        return <<<'GQL'
+mutation ProductVariantDetachMedia($productId: ID!, $variantMedia: [ProductVariantDetachMediaInput!]!) {
+  productVariantDetachMedia(productId: $productId, variantMedia: $variantMedia) {
+    product {
+      id
+    }
+    productVariants {
+      id
     }
     userErrors {
       field

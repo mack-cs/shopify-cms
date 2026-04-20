@@ -3,6 +3,7 @@
 use App\Models\Image;
 use App\Models\Import;
 use App\Models\Product;
+use App\Models\Variant;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
@@ -112,6 +113,25 @@ it('auto assigns the product-title filename pattern to newly uploaded images aft
 
     expect($image->fresh()->approved_filename)->toBe('renamed-product-02.png');
     expect($image->fresh()->filename_mode)->toBe(Image::FILENAME_MODE_AUTO);
+});
+
+it('clears a variant image link when the shared product image is deleted', function (): void {
+    $image = createTestImage([
+        'src' => 'http://shopify-editor.test/storage/product-images/test/linked-image.jpg',
+        'position' => 1,
+    ]);
+
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $image->product_id,
+        'image_id' => $image->id,
+        'sku' => 'LINKED-SKU',
+        'sync_state' => Variant::SYNC_STATE_LOCAL_NEW,
+        'local_dirty' => true,
+    ]));
+
+    Image::withoutEvents(fn () => $image->delete());
+
+    expect($variant->fresh()->image_id)->toBeNull();
 });
 
 function createTestImage(array $overrides = []): Image
