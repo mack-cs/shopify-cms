@@ -28,7 +28,10 @@ class CollectionUrlRedirectService
                 continue;
             }
 
-            if ($redirect->status === CollectionUrlRedirect::STATUS_IGNORED) {
+            if (in_array($redirect->status, [
+                CollectionUrlRedirect::STATUS_IGNORED,
+                CollectionUrlRedirect::STATUS_SYNCED,
+            ], true)) {
                 $summary['skipped']++;
                 continue;
             }

@@ -37,6 +37,15 @@ class EditShopifyCollection extends EditRecord
                 ->action(function (): void {
                     ShopifyCollectionResource::approveDeletion($this->getRecord());
                 }),
+            Actions\Action::make('pushToShopify')
+                ->label('Push to Shopify')
+                ->icon('heroicon-o-cloud-arrow-up')
+                ->color('primary')
+                ->requiresConfirmation()
+                ->form(ShopifyCollectionResource::pushToShopifyFormSchema())
+                ->action(function (array $data): void {
+                    ShopifyCollectionResource::queuePushToShopify($this->getRecord(), $data);
+                }),
         ];
     }
 }

@@ -28,7 +28,10 @@ class ProductUrlRedirectService
                 continue;
             }
 
-            if ($redirect->status === ProductUrlRedirect::STATUS_IGNORED) {
+            if (in_array($redirect->status, [
+                ProductUrlRedirect::STATUS_IGNORED,
+                ProductUrlRedirect::STATUS_SYNCED,
+            ], true)) {
                 $summary['skipped']++;
                 continue;
             }

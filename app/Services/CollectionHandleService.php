@@ -7,13 +7,13 @@ use App\Models\ShopifyCollection;
 
 class CollectionHandleService
 {
-    public function promoteHandle(ShopifyCollection $collection, string $newHandle, ?int $createdBy = null): bool
+    public function promoteHandle(ShopifyCollection $collection, string $newHandle, ?int $createdBy = null): ?CollectionUrlRedirect
     {
         $newHandle = trim($newHandle);
         $currentHandle = trim((string) ($collection->handle ?? ''));
 
         if ($newHandle === '' || $newHandle === $currentHandle) {
-            return false;
+            return null;
         }
 
         ShopifyCollection::withoutEvents(function () use ($collection, $newHandle): void {
@@ -22,23 +22,23 @@ class CollectionHandleService
             ])->save();
         });
 
-        $this->createPendingRedirect($collection, $currentHandle, $newHandle, $createdBy);
+        $redirect = $this->createPendingRedirect($collection, $currentHandle, $newHandle, $createdBy);
 
         $collection->forceFill(['handle' => $newHandle]);
 
-        return true;
+        return $redirect;
     }
 
-    public function createPendingRedirect(ShopifyCollection $collection, string $oldHandle, string $newHandle, ?int $createdBy = null): void
+    public function createPendingRedirect(ShopifyCollection $collection, string $oldHandle, string $newHandle, ?int $createdBy = null): ?CollectionUrlRedirect
     {
         $oldHandle = trim($oldHandle);
         $newHandle = trim($newHandle);
 
         if ($oldHandle === '' || $newHandle === '' || $oldHandle === $newHandle) {
-            return;
+            return null;
         }
 
-        CollectionUrlRedirect::query()->updateOrCreate(
+        return CollectionUrlRedirect::query()->updateOrCreate(
             ['path' => "/collections/{$oldHandle}"],
             [
                 'collection_id' => $collection->id,

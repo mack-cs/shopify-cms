@@ -54,6 +54,20 @@ class ShopifyCollectionResource extends Resource
                     ->label('Current Shopify Handle')
                     ->content(fn (ShopifyCollection $record): string => trim((string) ($record->handle ?? '')) ?: 'Not set')
                     ->columnSpan(1),
+                Forms\Components\Section::make('URL Change & Redirect')
+                    ->schema([
+                        Forms\Components\Placeholder::make('url_change_notice')
+                            ->label('')
+                            ->content('Add a new URL handle only when you want to rename this collection URL. Leave it blank to keep the current URL. After approval and push to Shopify, the old URL will redirect to the new one.'),
+                        Forms\Components\TextInput::make('draft_handle')
+                            ->label('Proposed New URL Handle')
+                            ->maxLength(255)
+                            ->prefix('/collections/')
+                            ->placeholder('new-handle-only')
+                            ->dehydrateStateUsing(fn ($state): ?string => self::normalizeHandleInput($state))
+                            ->helperText(fn (?ShopifyCollection $record): string => 'Enter only the last part of the URL. Current URL: /collections/' . (trim((string) ($record?->handle ?? '')) ?: '[not set]')),
+                    ])
+                    ->columnSpanFull(),
                 Forms\Components\Placeholder::make('sync_status')
                     ->label('Sync Status')
                     ->content(fn (ShopifyCollection $record): string => $record->sync_status === ShopifyCollection::SYNC_STATUS_SYNCED ? 'Synced' : 'Pending')
@@ -220,6 +234,10 @@ class ShopifyCollectionResource extends Resource
                     ->label('Handle')
                     ->searchable()
                     ->sortable(),
+                Tables\Columns\TextColumn::make('draft_handle')
+                    ->label('Proposed URL')
+                    ->searchable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('batch')
                     ->label('Batch')
                     ->searchable()
@@ -257,7 +275,8 @@ class ShopifyCollectionResource extends Resource
                             'False' => 'success',
                             default => 'warning',
                         };
-                    }),
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\IconColumn::make('published_on_online_store_only')
                     ->label('Online Only')
                     ->boolean()
@@ -296,11 +315,13 @@ class ShopifyCollectionResource extends Resource
                 Tables\Columns\TextColumn::make('draft_seo_title')
                     ->label('Draft SEO Title')
                     ->limit(60)
-                    ->wrap(),
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('draft_seo_description')
                     ->label('Draft SEO Desc')
                     ->limit(80)
-                    ->wrap(),
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('draft_footer_title')
                     ->label('Draft Footer Title')
                     ->limit(60)
@@ -338,6 +359,26 @@ class ShopifyCollectionResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
+                Filter::make('recently_edited_today')
+                    ->label('Recently Edited Today')
+                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                Filter::make('edited_last_7_days')
+                    ->label('Edited in Last 7 Days')
+                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('pending_changes')
+                    ->label('Pending Changes')
+                    ->query(fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                        $sub->whereNull('sync_status')
+                            ->orWhere('sync_status', '!=', ShopifyCollection::SYNC_STATUS_SYNCED)
+                            ->orWhereRaw(
+                                '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) < 2'
+                            );
+                    })),
+                Filter::make('awaiting_approval')
+                    ->label('Awaiting Approval')
+                    ->query(fn (Builder $query): Builder => $query->whereRaw(
+                        '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) < 2'
+                    )),
                 SelectFilter::make('batch')
                     ->label('Batch')
                     ->options(function (): array {
@@ -415,158 +456,6 @@ class ShopifyCollectionResource extends Resource
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
-                Tables\Actions\Action::make('approve')
-                    ->label('Approve')
-                    ->icon('heroicon-o-check-badge')
-                    ->requiresConfirmation()
-                    ->action(function (ShopifyCollection $record): void {
-                        if (!self::canApprove($record)) {
-                            self::sendNotification(
-                                Notification::make()
-                                ->title('Cannot approve')
-                                ->body(self::approvalBlockMessage($record))
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        $exists = CollectionApproval::where('collection_id', $record->id)
-                            ->where('user_id', Auth::id())
-                            ->where('approval_version', $record->approval_version)
-                            ->exists();
-
-                        if ($exists) {
-                            self::sendNotification(
-                                Notification::make()
-                                ->title('Already approved')
-                                ->body('You have already approved this version.')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        try {
-                            self::storeApproval($record);
-                        } catch (\Throwable $e) {
-                            Log::error('Collection approval failed.', [
-                                'collection_id' => $record->id,
-                                'user_id' => Auth::id(),
-                                'approval_version' => $record->approval_version,
-                                'message' => $e->getMessage(),
-                            ]);
-
-                            self::sendNotification(
-                                Notification::make()
-                                ->title('Approval failed')
-                                ->body('The collection could not be approved. Check the logs for the underlying error.')
-                                ->danger()
-                            );
-
-                            return;
-                        }
-
-                        self::sendNotification(
-                            Notification::make()
-                            ->title('Approval recorded')
-                            ->success()
-                        );
-                    }),
-                Tables\Actions\Action::make('pushToShopify')
-                    ->label('Push to Shopify')
-                    ->icon('heroicon-o-cloud-arrow-up')
-                    ->requiresConfirmation()
-                    ->form([
-                        Forms\Components\CheckboxList::make('fields')
-                            ->label('Fields to sync')
-                            ->options([
-                                'title' => 'Title',
-                                'description_html' => 'Description',
-                                'seo_title' => 'SEO title',
-                                'seo_description' => 'SEO description',
-                                'footer_title' => 'Footer title metafield',
-                                'elegant_footer_description' => 'Elegant footer description metafield',
-                                'deindex' => 'Deindex (seo.hide_from_google metafield)',
-                            ])
-                            ->columns(2)
-                            ->default(['title', 'description_html', 'seo_title', 'seo_description', 'footer_title', 'elegant_footer_description', 'deindex']),
-                        Forms\Components\TextInput::make('handle_override')
-                            ->label('Handle (URL) - optional')
-                            ->maxLength(255)
-                            ->helperText('Set a new handle to update the Shopify URL. A pending collection redirect will be created from the old URL to the new one.'),
-                        Forms\Components\Select::make('deindex_override')
-                            ->label('Deindex Decision (optional)')
-                            ->options([
-                                '1' => 'True (hide from search engines)',
-                                '0' => 'False (keep indexed)',
-                            ])
-                            ->native(false)
-                            ->nullable()
-                            ->placeholder('Keep current decision'),
-                    ])
-                    ->action(function (ShopifyCollection $record, array $data): void {
-                        if (!$record->isApprovedByTwo()) {
-                            self::sendNotification(
-                                Notification::make()
-                                ->title('Approval required')
-                                ->body('This collection needs 2 approvals before syncing to Shopify.')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        $fieldNames = array_values($data['fields'] ?? []);
-                        if ($fieldNames === []) {
-                            self::sendNotification(
-                                Notification::make()
-                                ->title('Choose at least one field')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        $deindexOverride = self::parseNullableBoolean($data['deindex_override'] ?? null);
-                        ShopifyCollectionUpdateJob::dispatch(
-                            [$record->id],
-                            $fieldNames,
-                            Auth::id(),
-                            trim((string) ($data['handle_override'] ?? '')) ?: null,
-                            $deindexOverride !== null,
-                            $deindexOverride,
-                        );
-
-                        self::sendNotification(
-                            Notification::make()
-                                ->title('Collection sync queued')
-                                ->body('This collection will be pushed to Shopify in the background.')
-                                ->success()
-                        );
-                    }),
-                Tables\Actions\Action::make('requestDelete')
-                    ->label('Request Delete')
-                    ->icon('heroicon-o-trash')
-                    ->color('danger')
-                    ->requiresConfirmation()
-                    ->visible(fn (ShopifyCollection $record): bool => static::canDelete($record))
-                    ->disabled(fn (ShopifyCollection $record): bool => self::currentDeletionRequest($record) !== null)
-                    ->form([
-                        Forms\Components\Textarea::make('reason')
-                            ->label('Reason')
-                            ->rows(3)
-                            ->maxLength(1000),
-                    ])
-                    ->action(function (ShopifyCollection $record, array $data): void {
-                        self::requestDeletion($record, $data['reason'] ?? null);
-                    }),
-                Tables\Actions\Action::make('approveDelete')
-                    ->label('Approve Delete')
-                    ->icon('heroicon-o-check-circle')
-                    ->color('warning')
-                    ->requiresConfirmation()
-                    ->visible(fn (ShopifyCollection $record): bool => static::canDelete($record))
-                    ->disabled(fn (ShopifyCollection $record): bool => !self::canApproveDeletion($record))
-                    ->action(function (ShopifyCollection $record): void {
-                        self::approveDeletion($record);
-                    }),
             ])
             ->headerActions([
                 Tables\Actions\Action::make('syncCollections')
@@ -794,6 +683,140 @@ class ShopifyCollectionResource extends Resource
                             );
                         })
                         ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('requestDelete')
+                        ->label('Request Delete')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->form([
+                            Forms\Components\Textarea::make('reason')
+                                ->label('Reason')
+                                ->rows(3)
+                                ->maxLength(1000),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $requested = 0;
+                            $skipped = 0;
+                            $failed = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof ShopifyCollection) {
+                                    continue;
+                                }
+
+                                if (self::currentDeletionRequest($record) !== null) {
+                                    $skipped++;
+                                    continue;
+                                }
+
+                                try {
+                                    app(DeletionRequestWorkflowService::class)->submit($record, (int) Auth::id(), $data['reason'] ?? null);
+                                    $requested++;
+                                } catch (\Throwable $e) {
+                                    $failed++;
+
+                                    Log::error('Bulk collection delete request failed.', [
+                                        'collection_id' => $record->id,
+                                        'user_id' => Auth::id(),
+                                        'message' => $e->getMessage(),
+                                    ]);
+                                }
+                            }
+
+                            $parts = [];
+                            if ($requested > 0) {
+                                $parts[] = "Requested {$requested}.";
+                            }
+                            if ($skipped > 0) {
+                                $parts[] = "Skipped {$skipped} with an existing delete request.";
+                            }
+                            if ($failed > 0) {
+                                $parts[] = "Failed {$failed}; check logs for the underlying error.";
+                            }
+
+                            $notification = Notification::make()
+                                ->title('Bulk delete request complete')
+                                ->body($parts ? implode(' ', $parts) : 'No collections were submitted for deletion.');
+
+                            if ($failed > 0) {
+                                $notification->danger();
+                            } elseif ($requested > 0) {
+                                $notification->success();
+                            } else {
+                                $notification->warning();
+                            }
+
+                            self::sendNotification($notification);
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('approveDelete')
+                        ->label('Approve Delete')
+                        ->icon('heroicon-o-check-circle')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $approved = 0;
+                            $queued = 0;
+                            $skipped = 0;
+                            $failed = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof ShopifyCollection) {
+                                    continue;
+                                }
+
+                                if (!self::canApproveDeletion($record)) {
+                                    $skipped++;
+                                    continue;
+                                }
+
+                                try {
+                                    $result = app(DeletionRequestWorkflowService::class)->approve($record, (int) Auth::id());
+                                    $approved++;
+
+                                    if (($result['queued'] ?? false) === true) {
+                                        $queued++;
+                                    }
+                                } catch (\Throwable $e) {
+                                    $failed++;
+
+                                    Log::error('Bulk collection delete approval failed.', [
+                                        'collection_id' => $record->id,
+                                        'user_id' => Auth::id(),
+                                        'message' => $e->getMessage(),
+                                    ]);
+                                }
+                            }
+
+                            $parts = [];
+                            if ($approved > 0) {
+                                $parts[] = "Approved {$approved}.";
+                            }
+                            if ($queued > 0) {
+                                $parts[] = "Queued {$queued} for deletion.";
+                            }
+                            if ($skipped > 0) {
+                                $parts[] = "Skipped {$skipped} not awaiting your approval.";
+                            }
+                            if ($failed > 0) {
+                                $parts[] = "Failed {$failed}; check logs for the underlying error.";
+                            }
+
+                            $notification = Notification::make()
+                                ->title('Bulk delete approval complete')
+                                ->body($parts ? implode(' ', $parts) : 'No delete approvals were recorded.');
+
+                            if ($failed > 0) {
+                                $notification->danger();
+                            } elseif ($approved > 0) {
+                                $notification->success();
+                            } else {
+                                $notification->warning();
+                            }
+
+                            self::sendNotification($notification);
+                        })
+                        ->deselectRecordsAfterCompletion(),
                 ]),
             ]);
     }
@@ -889,6 +912,78 @@ class ShopifyCollectionResource extends Resource
         return $query->where('import_id', $importId);
     }
 
+    public static function pushToShopifyFormSchema(): array
+    {
+        return [
+            Forms\Components\CheckboxList::make('fields')
+                ->label('Fields to sync')
+                ->options([
+                    'title' => 'Title',
+                    'description_html' => 'Description',
+                    'seo_title' => 'SEO title',
+                    'seo_description' => 'SEO description',
+                    'footer_title' => 'Footer title metafield',
+                    'elegant_footer_description' => 'Elegant footer description metafield',
+                    'deindex' => 'Deindex (seo.hide_from_google metafield)',
+                ])
+                ->columns(2)
+                ->default(['title', 'description_html', 'seo_title', 'seo_description', 'footer_title', 'elegant_footer_description', 'deindex']),
+            Forms\Components\Select::make('deindex_override')
+                ->label('Deindex Decision (optional)')
+                ->options([
+                    '1' => 'True (hide from search engines)',
+                    '0' => 'False (keep indexed)',
+                ])
+                ->native(false)
+                ->nullable()
+                ->placeholder('Keep current decision'),
+        ];
+    }
+
+    public static function queuePushToShopify(ShopifyCollection $record, array $data): void
+    {
+        $record = $record->fresh() ?? $record;
+
+        if (!$record->isApprovedByTwo()) {
+            self::sendNotification(
+                Notification::make()
+                    ->title('Approval required')
+                    ->body('This collection needs 2 approvals before syncing to Shopify.')
+                    ->warning()
+            );
+            return;
+        }
+
+        $fieldNames = array_values($data['fields'] ?? []);
+        $handleOverride = self::proposedHandleForSync($record);
+        if ($fieldNames === [] && $handleOverride === null) {
+            self::sendNotification(
+                Notification::make()
+                    ->title('Nothing to sync')
+                    ->body('Select at least one field, or set a proposed new URL handle on the collection first.')
+                    ->warning()
+            );
+            return;
+        }
+
+        $deindexOverride = self::parseNullableBoolean($data['deindex_override'] ?? null);
+        ShopifyCollectionUpdateJob::dispatch(
+            [$record->id],
+            $fieldNames,
+            Auth::id(),
+            $handleOverride,
+            $deindexOverride !== null,
+            $deindexOverride,
+        );
+
+        self::sendNotification(
+            Notification::make()
+                ->title('Collection sync queued')
+                ->body('This collection will be pushed to Shopify in the background.')
+                ->success()
+        );
+    }
+
     private static function parseNullableBoolean(mixed $value): ?bool
     {
         if ($value === null || $value === '') {
@@ -896,6 +991,37 @@ class ShopifyCollectionResource extends Resource
         }
 
         return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    }
+
+    private static function proposedHandleForSync(ShopifyCollection $record): ?string
+    {
+        $draftHandle = self::normalizeHandleInput($record->draft_handle);
+        $currentHandle = trim((string) ($record->handle ?? ''));
+
+        if ($draftHandle === '' || $draftHandle === $currentHandle) {
+            return null;
+        }
+
+        return $draftHandle;
+    }
+
+    private static function normalizeHandleInput(mixed $value): ?string
+    {
+        $handle = trim((string) ($value ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $handle = preg_replace('#^https?://[^/]+/#i', '', $handle) ?? $handle;
+        $handle = ltrim($handle, '/');
+
+        if (str_starts_with(strtolower($handle), 'collections/')) {
+            $handle = substr($handle, strlen('collections/'));
+        }
+
+        $handle = trim($handle, " \t\n\r\0\x0B/");
+
+        return $handle === '' ? null : $handle;
     }
 
     private static function draftSeoComplete(ShopifyCollection $record): bool

@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\ShopifyCollection;
 use App\Services\AdminNotification;
 use App\Services\CollectionHandleService;
+use App\Services\CollectionUrlRedirectService;
 use App\Services\ShopifyCollectionUpdater;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -33,7 +34,11 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
         public ?bool $deindexOverride = null,
     ) {}
 
-    public function handle(ShopifyCollectionUpdater $updater, CollectionHandleService $handleService): void
+    public function handle(
+        ShopifyCollectionUpdater $updater,
+        CollectionHandleService $handleService,
+        CollectionUrlRedirectService $redirectService,
+    ): void
     {
         $collections = ShopifyCollection::query()
             ->whereIn('id', $this->collectionIds)
@@ -62,7 +67,8 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
                 $collection->refresh();
             }
 
-            $payload = $this->collectionPayload($collection, $fields);
+            $resolvedHandle = $this->resolvedHandleOverride($collection);
+            $payload = $this->collectionPayload($collection, $fields, $resolvedHandle);
             if ($payload === []) {
                 $skippedNoChanges++;
                 continue;
@@ -70,12 +76,17 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
 
             try {
                 $updater->update($collection, $payload);
-                if ($this->handleOverride !== null && trim($this->handleOverride) !== '') {
-                    $handleService->promoteHandle($collection, trim($this->handleOverride), $this->userId);
+                if ($resolvedHandle !== null) {
+                    $redirect = $handleService->promoteHandle($collection, $resolvedHandle, $this->userId);
+
+                    if ($redirect !== null) {
+                        $redirectService->syncRedirect($redirect);
+                    }
                 }
 
                 ShopifyCollection::withoutEvents(function () use ($collection): void {
                     $collection->forceFill([
+                        'draft_handle' => null,
                         'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED,
                         'last_synced_at' => now(),
                     ])->save();
@@ -100,7 +111,7 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
      * @param array<string, bool> $fields
      * @return array<string, mixed>
      */
-    private function collectionPayload(ShopifyCollection $collection, array $fields): array
+    private function collectionPayload(ShopifyCollection $collection, array $fields, ?string $resolvedHandle = null): array
     {
         $payload = [];
 
@@ -112,8 +123,8 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
             $payload['description_html'] = $collection->description_html;
         }
 
-        if ($this->handleOverride !== null && trim($this->handleOverride) !== '') {
-            $payload['handle'] = trim($this->handleOverride);
+        if ($resolvedHandle !== null) {
+            $payload['handle'] = $resolvedHandle;
         }
 
         if (!empty($fields['seo_title'])) {
@@ -137,6 +148,40 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
         }
 
         return $payload;
+    }
+
+    private function resolvedHandleOverride(ShopifyCollection $collection): ?string
+    {
+        $explicit = $this->normalizeHandle((string) ($this->handleOverride ?? ''));
+        if ($explicit !== '') {
+            return $explicit;
+        }
+
+        $draftHandle = $this->normalizeHandle((string) ($collection->draft_handle ?? ''));
+        $currentHandle = trim((string) ($collection->handle ?? ''));
+
+        if ($draftHandle === '' || $draftHandle === $currentHandle) {
+            return null;
+        }
+
+        return $draftHandle;
+    }
+
+    private function normalizeHandle(string $value): string
+    {
+        $handle = trim($value);
+        if ($handle === '') {
+            return '';
+        }
+
+        $handle = preg_replace('#^https?://[^/]+/#i', '', $handle) ?? $handle;
+        $handle = ltrim($handle, '/');
+
+        if (str_starts_with(strtolower($handle), 'collections/')) {
+            $handle = substr($handle, strlen('collections/'));
+        }
+
+        return trim($handle, " \t\n\r\0\x0B/");
     }
 
     /**

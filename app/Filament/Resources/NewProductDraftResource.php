@@ -2950,6 +2950,27 @@ class NewProductDraftResource extends Resource
                 ]),
             ])
             ->filters([
+                Filter::make('recently_edited_today')
+                    ->label('Recently Edited Today')
+                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                Filter::make('edited_last_7_days')
+                    ->label('Edited in Last 7 Days')
+                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('pending_changes')
+                    ->label('Pending Changes')
+                    ->query(fn (Builder $query): Builder => $query->whereRaw(
+                        '(select count(distinct user_id) from new_product_draft_approvals where new_product_draft_approvals.new_product_draft_id = new_product_drafts.id and new_product_draft_approvals.approval_version = new_product_drafts.approval_version) < 2'
+                    )),
+                Filter::make('awaiting_approval')
+                    ->label('Awaiting Approval')
+                    ->query(fn (Builder $query): Builder => $query->whereRaw(
+                        '(select count(distinct user_id) from new_product_draft_approvals where new_product_draft_approvals.new_product_draft_id = new_product_drafts.id and new_product_draft_approvals.approval_version = new_product_drafts.approval_version) < 2'
+                    )),
+                Filter::make('awaiting_delete_approval')
+                    ->label('Awaiting Delete Approval')
+                    ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
+                        $deletionQuery->whereIn('status', ['pending', 'processing']);
+                    })),
                 SelectFilter::make('status')
                     ->label('Status')
                     ->options(function (): array {
