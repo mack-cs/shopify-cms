@@ -2,6 +2,44 @@
 
 This document describes how to reproduce, run, and operate the Shopify CSV editor end-to-end.
 
+## Change Log
+
+### 2026-04-24
+
+Draft deletion workflow was changed to protect Shopify-backed records and improve audit logging.
+
+- Drafts with a `handle` can no longer be deleted directly.
+- Users must use `Request Delete` to open a deletion request for handled drafts.
+- A second user must use `Approve Delete` to reach `2/2` approval.
+- After the second approval, deletion is queued:
+  - the Shopify product is deleted
+  - linked local Shopify row and metafield data is cleaned up
+  - the linked local product mirror is deleted
+  - the draft record is deleted
+- All handled-draft deletion request and approval events are logged in `change_logs`.
+- Drafts without a `handle` are treated as local-only drafts.
+- Local-only drafts can be deleted immediately without approval.
+- Local-only draft deletion is still logged in `change_logs` with who deleted it and when.
+- The drafts table now shows a `Delete Request` status badge so users can see whether a record is `None`, `Pending 1/2`, `Pending 2/2`, `Processing`, or `Local Only`.
+- Bulk draft deletion was replaced with three safer bulk actions:
+  - `Request Delete`
+  - `Approve Delete`
+  - `Delete Local`
+- Delete approvals now send cross-user alerts and show a blocking popup for eligible approvers.
+- Approvers can now `Approve`, `Reject`, or `Ignore` from the popup:
+  - `Approve` records the second approval and queues deletion at `2/2`
+  - `Reject` closes the delete request, logs the rejection, and notifies the requester
+  - `Ignore` dismisses the popup only and leaves the request pending
+- A dedicated **Audit & History -> Deletion Requests** page was added for tracking all delete requests and outcomes.
+- A dedicated **Audit & History -> Shopify Missing Products** page was added to track products that existed in a previous Shopify sync but are missing from the latest one.
+- After Shopify sync, matching drafts are now flagged as missing from Shopify and blocked from automatic re-sync.
+- The **New Products** page now shows a warning banner when blocked recovery drafts exist.
+- Missing-from-Shopify drafts now support three explicit actions:
+  - `Clean Local`
+  - `Investigate`
+  - `Enable Recovery`
+- Until `Enable Recovery` is used, blocked drafts cannot silently recreate products or be pushed back to Shopify.
+
 ## Quick Start (Collections)
 
 1) Sync collections (collections-only)
@@ -195,6 +233,44 @@ Every `Sync from Shopify` run now also writes a downloadable CSV snapshot of the
 - Snapshot metadata is stored in `shopify_sync_snapshots`.
 - Users can open **Product Feed** and use the `Shopify Snapshot` action on any historical import row to download the state of Shopify for that sync.
 - If the snapshot file is missing, the action regenerates it from the stored `shopify_rows` for that import without changing products or the current workflow.
+
+### Delete request workflow
+
+- Shopify-backed deletions require `2/2` approval.
+- The user who creates the delete request becomes approval `1/2`.
+- A second eligible user must approve it to reach `2/2`.
+- For handled drafts, products, and collections, deletion is queue-backed and audited.
+- Request lifecycle:
+  - `pending`
+  - `processing`
+  - `completed`
+  - `rejected`
+  - `failed`
+- Approval popup behavior:
+  - `Approve` continues the delete workflow
+  - `Reject` closes the request and notifies the requester
+  - `Ignore` dismisses the popup only
+- Tracking:
+  - request records are stored in `deletion_requests`
+  - approvals are stored in `deletion_request_approvals`
+  - timeline events are logged in `change_logs`
+- Admins can review this history in **Audit & History -> Deletion Requests**.
+
+### Missing from Shopify recovery workflow
+
+- Each Shopify API sync now compares the latest import with the previous Shopify API import.
+- If a product existed in the previous sync but is missing in the latest one, it is recorded in **Audit & History -> Shopify Missing Products**.
+- If a matching draft still exists locally, that draft is treated as a recovery record and is automatically flagged as missing from Shopify.
+- Flagged drafts are blocked from automatic re-sync so they do not silently slip back into Products or get pushed back to Shopify.
+- The **New Products** page shows a warning banner when blocked recovery drafts exist.
+- Recovery-draft actions:
+  - `Clean Local`: remove the local Product record but keep the draft as a recovery record
+  - `Investigate`: mark the draft for investigation and keep it blocked
+  - `Enable Recovery`: explicitly allow the draft to sync back into Products again
+- All of these state changes are logged in `change_logs`.
+- Operational rule:
+  - keep the draft blocked while you investigate a Shopify-side removal
+  - only use `Enable Recovery` when you intentionally want that draft to repopulate Products / Shopify
 
 3) Normalization
 `Normalizer`:

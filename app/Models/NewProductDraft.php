@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
@@ -18,6 +19,10 @@ class NewProductDraft extends Model
     public const ORIGIN_DRAFT_TOOL = 'draft_tool';
     public const ORIGIN_SHOPIFY_SEED = 'shopify_seed';
     public const ORIGIN_PRODUCT_MIRROR = 'product_mirror';
+    public const SHOPIFY_MISSING_PENDING_REVIEW = 'pending_review';
+    public const SHOPIFY_MISSING_INVESTIGATING = 'investigating';
+    public const SHOPIFY_MISSING_CLEANED = 'cleaned';
+    public const SHOPIFY_MISSING_RECOVERY_ENABLED = 'recovery_enabled';
 
     protected $fillable = [
         'handle',
@@ -57,6 +62,9 @@ class NewProductDraft extends Model
         'payload',
         'origin',
         'shopify_sync_warnings',
+        'shopify_missing_detected_at',
+        'shopify_missing_status',
+        'shopify_missing_sync_blocked',
         'approval_version',
         'created_by',
     ];
@@ -64,6 +72,8 @@ class NewProductDraft extends Model
     protected $casts = [
         'payload' => 'array',
         'shopify_sync_warnings' => 'array',
+        'shopify_missing_detected_at' => 'datetime',
+        'shopify_missing_sync_blocked' => 'boolean',
         'variant_price' => 'decimal:2',
         'variant_compare_at_price' => 'decimal:2',
         'variant_inventory_qty' => 'integer',
@@ -185,6 +195,11 @@ class NewProductDraft extends Model
         return $this->hasMany(StyleProfile::class, 'handle', 'handle');
     }
 
+    public function deletionRequests(): MorphMany
+    {
+        return $this->morphMany(DeletionRequest::class, 'deletable');
+    }
+
     public function approvalsForCurrentVersion(): HasMany
     {
         return $this->approvals()->where('approval_version', $this->approval_version);
@@ -217,6 +232,11 @@ class NewProductDraft extends Model
     public function shopifySyncWarningCount(): int
     {
         return count($this->shopifySyncWarnings());
+    }
+
+    public function isBlockedFromShopifyMissing(): bool
+    {
+        return (bool) ($this->shopify_missing_sync_blocked ?? false);
     }
 
     /**

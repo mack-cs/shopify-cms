@@ -8,8 +8,10 @@ use App\Filament\Resources\ShopifyCollectionResource\Pages;
 use App\Jobs\ShopifyCollectionUpdateJob;
 use App\Jobs\ShopifyCollectionsSyncJob;
 use App\Models\CollectionApproval;
+use App\Models\DeletionRequest;
 use App\Models\ShopifyCollection;
 use App\Services\AdminNotification;
+use App\Services\DeletionRequestWorkflowService;
 use App\Services\ShopifyCollectionsImporter;
 use App\Services\ShopifyCollectionSeoImporter;
 use Filament\Forms;
@@ -29,6 +31,7 @@ use Filament\Tables\Filters\TernaryFilter;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\HtmlString;
 
 class ShopifyCollectionResource extends Resource
 {
@@ -43,20 +46,13 @@ class ShopifyCollectionResource extends Resource
         return $form
             ->columns(2)
             ->schema([
-                Forms\Components\TextInput::make('title')
-                    ->label('Shopify Title')
-                    ->maxLength(255)
-                    ->disabled()
-                    ->columnSpan(1),
-                Forms\Components\TextInput::make('handle')
-                    ->label('Handle')
-                    ->maxLength(255)
-                    ->helperText('Controls the collection URL slug.')
-                    ->disabled()
-                    ->columnSpan(1),
                 Forms\Components\Placeholder::make('batch')
                     ->label('Batch')
                     ->content(fn (ShopifyCollection $record): string => trim((string) ($record->batch ?? '')) ?: 'Not set')
+                    ->columnSpan(1),
+                Forms\Components\Placeholder::make('handle')
+                    ->label('Current Shopify Handle')
+                    ->content(fn (ShopifyCollection $record): string => trim((string) ($record->handle ?? '')) ?: 'Not set')
                     ->columnSpan(1),
                 Forms\Components\Placeholder::make('sync_status')
                     ->label('Sync Status')
@@ -66,6 +62,56 @@ class ShopifyCollectionResource extends Resource
                     ->label('Last Synced')
                     ->content(fn (ShopifyCollection $record): string => $record->last_synced_at?->format('Y-m-d H:i:s') ?? 'Never synced')
                     ->columnSpan(1),
+                Forms\Components\Section::make('Shopify Sync Warnings')
+                    ->schema([
+                        Forms\Components\Placeholder::make('shopify_sync_warnings_notice')
+                            ->label('')
+                            ->content(fn (?ShopifyCollection $record): ?HtmlString => self::shopifySyncWarningsHtml($record)),
+                        Forms\Components\Actions::make([
+                            Forms\Components\Actions\Action::make('useShopifyWarningValues')
+                                ->label('Use Shopify Values')
+                                ->icon('heroicon-o-arrow-down-tray')
+                                ->color('warning')
+                                ->requiresConfirmation()
+                                ->action(function (?ShopifyCollection $record) {
+                                    if (!$record) {
+                                        return null;
+                                    }
+
+                                    $result = self::applyShopifyWarningValuesToDrafts([$record->fresh()]);
+
+                                    self::sendNotification(Notification::make()
+                                        ->title('Shopify values applied')
+                                        ->body(self::warningResolutionSummary($result['updated'], $result['skipped']))
+                                        ->success()
+                                    );
+
+                                    return redirect(self::getUrl('edit', ['record' => $record]));
+                                }),
+                            Forms\Components\Actions\Action::make('keepDraftWarningValues')
+                                ->label('Keep Draft Values')
+                                ->icon('heroicon-o-arrow-up-tray')
+                                ->color('gray')
+                                ->requiresConfirmation()
+                                ->action(function (?ShopifyCollection $record) {
+                                    if (!$record) {
+                                        return null;
+                                    }
+
+                                    $result = self::keepDraftWarningValues([$record->fresh()]);
+
+                                    self::sendNotification(Notification::make()
+                                        ->title('Draft values kept')
+                                        ->body(self::warningResolutionSummary($result['cleared'], $result['skipped']))
+                                        ->success()
+                                    );
+
+                                    return redirect(self::getUrl('edit', ['record' => $record]));
+                                }),
+                        ])->alignStart(),
+                    ])
+                    ->visible(fn (?ShopifyCollection $record): bool => ($record?->shopifySyncWarningCount() ?? 0) > 0)
+                    ->columnSpanFull(),
                 Forms\Components\Section::make('Marketing Channels & Indexing')
                     ->schema([
                         Forms\Components\Placeholder::make('published_channel_names')
@@ -90,36 +136,71 @@ class ShopifyCollectionResource extends Resource
                     ])
                     ->columns(2)
                     ->columnSpanFull(),
-                Forms\Components\TextInput::make('seo_title')
-                    ->label('Shopify SEO Title')
-                    ->maxLength(255)
-                    ->disabled()
-                    ->columnSpan(1),
-                Forms\Components\Textarea::make('seo_description')
-                    ->label('Shopify SEO Description')
-                    ->rows(3)
-                    ->maxLength(512)
-                    ->disabled()
-                    ->columnSpan(1),
-                Forms\Components\RichEditor::make('description_html')
-                    ->label('Description')
-                    ->disabled()
-                    ->columnSpanFull(),
-                Forms\Components\Section::make('Draft SEO (make edits here)')
+                Forms\Components\Section::make('Draft Content (make edits here)')
                     ->schema([
                         Forms\Components\TextInput::make('draft_title')
                             ->label('Draft Title')
-                            ->maxLength(255),
+                            ->maxLength(255)
+                            ->afterStateHydrated(function (Forms\Components\TextInput $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->title);
+                            }),
                         Forms\Components\Textarea::make('draft_description_html')
                             ->label('Draft Description')
-                            ->rows(3),
+                            ->rows(3)
+                            ->afterStateHydrated(function (Forms\Components\Textarea $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->description_html);
+                            }),
                         Forms\Components\TextInput::make('draft_seo_title')
                             ->label('Draft SEO Title')
-                            ->maxLength(255),
+                            ->maxLength(255)
+                            ->afterStateHydrated(function (Forms\Components\TextInput $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->seo_title);
+                            }),
                         Forms\Components\Textarea::make('draft_seo_description')
                             ->label('Draft SEO Description')
                             ->rows(3)
-                            ->maxLength(512),
+                            ->maxLength(512)
+                            ->afterStateHydrated(function (Forms\Components\Textarea $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->seo_description);
+                            }),
+                        Forms\Components\TextInput::make('draft_footer_title')
+                            ->label('Draft Footer Title')
+                            ->helperText('Will sync to Shopify metafield custom.footer_description.')
+                            ->maxLength(255)
+                            ->afterStateHydrated(function (Forms\Components\TextInput $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->footer_title);
+                            }),
+                        Forms\Components\Textarea::make('draft_elegant_footer_description')
+                            ->label('Draft Elegant Footer Description')
+                            ->helperText('Will sync to Shopify metafield custom.elegant_footer_description.')
+                            ->rows(4)
+                            ->afterStateHydrated(function (Forms\Components\Textarea $component, ?ShopifyCollection $record): void {
+                                if (!$record || trim((string) ($component->getState() ?? '')) !== '') {
+                                    return;
+                                }
+
+                                $component->state($record->elegant_footer_description);
+                            }),
                     ])
                     ->columns(2)
                     ->columnSpanFull(),
@@ -195,6 +276,16 @@ class ShopifyCollectionResource extends Resource
                     ->badge()
                     ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
                     ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('delete_request_status')
+                    ->label('Delete Request')
+                    ->state(fn (ShopifyCollection $record): string => self::deletionRequestStatusLabel($record))
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        'Processing' => 'danger',
+                        'Pending 1/2', 'Pending 2/2' => 'warning',
+                        default => 'gray',
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\IconColumn::make('approved')
                     ->label('Approved')
                     ->state(fn (ShopifyCollection $record) => $record->isApprovedByTwo())
@@ -210,6 +301,16 @@ class ShopifyCollectionResource extends Resource
                     ->label('Draft SEO Desc')
                     ->limit(80)
                     ->wrap(),
+                Tables\Columns\TextColumn::make('draft_footer_title')
+                    ->label('Draft Footer Title')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('draft_elegant_footer_description')
+                    ->label('Draft Elegant Footer Desc')
+                    ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('seo_title')
                     ->label('Shopify SEO Title')
                     ->limit(60)
@@ -217,6 +318,16 @@ class ShopifyCollectionResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('seo_description')
                     ->label('Shopify SEO Desc')
+                    ->limit(80)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('footer_title')
+                    ->label('Shopify Footer Title')
+                    ->limit(60)
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('elegant_footer_description')
+                    ->label('Shopify Elegant Footer Desc')
                     ->limit(80)
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
@@ -372,14 +483,16 @@ class ShopifyCollectionResource extends Resource
                                 'description_html' => 'Description',
                                 'seo_title' => 'SEO title',
                                 'seo_description' => 'SEO description',
+                                'footer_title' => 'Footer title metafield',
+                                'elegant_footer_description' => 'Elegant footer description metafield',
                                 'deindex' => 'Deindex (seo.hide_from_google metafield)',
                             ])
                             ->columns(2)
-                            ->default(['title', 'description_html', 'seo_title', 'seo_description', 'deindex']),
+                            ->default(['title', 'description_html', 'seo_title', 'seo_description', 'footer_title', 'elegant_footer_description', 'deindex']),
                         Forms\Components\TextInput::make('handle_override')
                             ->label('Handle (URL) - optional')
                             ->maxLength(255)
-                            ->helperText('Set a new handle to update the Shopify URL. This does not change the local record.'),
+                            ->helperText('Set a new handle to update the Shopify URL. A pending collection redirect will be created from the old URL to the new one.'),
                         Forms\Components\Select::make('deindex_override')
                             ->label('Deindex Decision (optional)')
                             ->options([
@@ -427,6 +540,32 @@ class ShopifyCollectionResource extends Resource
                                 ->body('This collection will be pushed to Shopify in the background.')
                                 ->success()
                         );
+                    }),
+                Tables\Actions\Action::make('requestDelete')
+                    ->label('Request Delete')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->visible(fn (ShopifyCollection $record): bool => static::canDelete($record))
+                    ->disabled(fn (ShopifyCollection $record): bool => self::currentDeletionRequest($record) !== null)
+                    ->form([
+                        Forms\Components\Textarea::make('reason')
+                            ->label('Reason')
+                            ->rows(3)
+                            ->maxLength(1000),
+                    ])
+                    ->action(function (ShopifyCollection $record, array $data): void {
+                        self::requestDeletion($record, $data['reason'] ?? null);
+                    }),
+                Tables\Actions\Action::make('approveDelete')
+                    ->label('Approve Delete')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->visible(fn (ShopifyCollection $record): bool => static::canDelete($record))
+                    ->disabled(fn (ShopifyCollection $record): bool => !self::canApproveDeletion($record))
+                    ->action(function (ShopifyCollection $record): void {
+                        self::approveDeletion($record);
                     }),
             ])
             ->headerActions([
@@ -622,14 +761,16 @@ class ShopifyCollectionResource extends Resource
                             Forms\Components\CheckboxList::make('fields')
                                 ->label('Fields to sync')
                                 ->options([
-                                    'title' => 'Title',
-                                    'description_html' => 'Description',
-                                    'seo_title' => 'SEO title',
-                                    'seo_description' => 'SEO description',
-                                    'deindex' => 'Deindex (seo.hide_from_google metafield)',
-                                ])
-                                ->columns(2)
-                                ->default(['title', 'description_html', 'seo_title', 'seo_description', 'deindex']),
+                                'title' => 'Title',
+                                'description_html' => 'Description',
+                                'seo_title' => 'SEO title',
+                                'seo_description' => 'SEO description',
+                                'footer_title' => 'Footer title metafield',
+                                'elegant_footer_description' => 'Elegant footer description metafield',
+                                'deindex' => 'Deindex (seo.hide_from_google metafield)',
+                            ])
+                            ->columns(2)
+                            ->default(['title', 'description_html', 'seo_title', 'seo_description', 'footer_title', 'elegant_footer_description', 'deindex']),
                         ])
                         ->action(function (Collection $records, array $data): void {
                             $fieldNames = array_values($data['fields'] ?? []);
@@ -693,6 +834,48 @@ class ShopifyCollectionResource extends Resource
     public static function canDeleteAny(): bool
     {
         return static::canViewAny();
+    }
+
+    public static function requestDeletion(ShopifyCollection $record, ?string $reason = null): void
+    {
+        try {
+            $request = app(DeletionRequestWorkflowService::class)->submit($record, (int) Auth::id(), $reason);
+
+            self::sendNotification(Notification::make()
+                ->title('Delete request created')
+                ->body('Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete request not created')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
+    }
+
+    public static function approveDeletion(ShopifyCollection $record): void
+    {
+        try {
+            $result = app(DeletionRequestWorkflowService::class)->approve($record, (int) Auth::id());
+            /** @var DeletionRequest $request */
+            $request = $result['request'];
+
+            self::sendNotification(Notification::make()
+                ->title($result['queued'] ? 'Delete approved and queued' : 'Delete approval recorded')
+                ->body($result['queued']
+                    ? 'Two delete approvals were recorded. Shopify and local deletion are now queued.'
+                    : 'Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete approval failed')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
     }
 
     public static function getEloquentQuery(): \Illuminate\Database\Eloquent\Builder
@@ -762,6 +945,8 @@ class ShopifyCollectionResource extends Resource
                 'description_html' => self::preferredDraftValue($record->draft_description_html, $record->description_html),
                 'seo_title' => self::preferredDraftValue($record->draft_seo_title, $record->seo_title),
                 'seo_description' => self::preferredDraftValue($record->draft_seo_description, $record->seo_description),
+                'footer_title' => self::preferredDraftValue($record->draft_footer_title, $record->footer_title),
+                'elegant_footer_description' => self::preferredDraftValue($record->draft_elegant_footer_description, $record->elegant_footer_description),
                 'sync_status' => ShopifyCollection::SYNC_STATUS_PENDING,
             ]);
 
@@ -818,6 +1003,175 @@ class ShopifyCollectionResource extends Resource
     private static function sendNotification(Notification $notification): void
     {
         AdminNotification::send($notification);
+    }
+
+    private static function shopifySyncWarningsHtml(?ShopifyCollection $record): ?HtmlString
+    {
+        if (!$record) {
+            return null;
+        }
+
+        $warnings = $record->shopifySyncWarnings();
+        if (empty($warnings)) {
+            return null;
+        }
+
+        $items = array_map(function (array $warning): string {
+            $label = e((string) ($warning['label'] ?? $warning['field'] ?? 'Field'));
+            $draftValue = e((string) ($warning['draft_value'] ?? ''));
+            $shopifyValue = e((string) ($warning['shopify_value'] ?? ''));
+
+            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but Shopify imported <code>{$shopifyValue}</code>.</li>";
+        }, $warnings);
+
+        return new HtmlString(
+            "<div class='rounded-xl border border-warning-300 bg-warning-50 p-4 text-sm text-warning-900'>"
+            . "<p class='font-semibold mb-2'>Draft values differ from the latest Shopify import.</p>"
+            . "<ul class='list-disc pl-5 space-y-1'>"
+            . implode('', $items)
+            . '</ul>'
+            . '</div>'
+        );
+    }
+
+    /**
+     * @param iterable<mixed> $records
+     * @return array{updated:int,skipped:int}
+     */
+    private static function applyShopifyWarningValuesToDrafts(iterable $records): array
+    {
+        $updated = 0;
+        $skipped = 0;
+
+        foreach ($records as $record) {
+            if (!$record instanceof ShopifyCollection) {
+                continue;
+            }
+
+            $warnings = $record->shopifySyncWarnings();
+            if (empty($warnings)) {
+                $skipped++;
+                continue;
+            }
+
+            $updates = [];
+            if (ShopifyCollection::supportsShopifySyncWarningsColumn()) {
+                $updates['shopify_sync_warnings'] = null;
+            }
+
+            foreach ($warnings as $warning) {
+                $field = trim((string) ($warning['field'] ?? ''));
+                if ($field === '') {
+                    continue;
+                }
+
+                $updates[$field] = self::draftWarningResolvedValue((string) ($warning['shopify_value'] ?? ''));
+            }
+
+            if ($updates === []) {
+                $skipped++;
+                continue;
+            }
+
+            ShopifyCollection::withoutEvents(function () use ($record, $updates): void {
+                $record->fill($updates)->save();
+            });
+
+            $updated++;
+        }
+
+        return [
+            'updated' => $updated,
+            'skipped' => $skipped,
+        ];
+    }
+
+    /**
+     * @param iterable<mixed> $records
+     * @return array{cleared:int,skipped:int}
+     */
+    private static function keepDraftWarningValues(iterable $records): array
+    {
+        $cleared = 0;
+        $skipped = 0;
+
+        foreach ($records as $record) {
+            if (!$record instanceof ShopifyCollection) {
+                continue;
+            }
+
+            $warnings = $record->shopifySyncWarnings();
+            if (empty($warnings)) {
+                $skipped++;
+                continue;
+            }
+
+            ShopifyCollection::withoutEvents(function () use ($record): void {
+                if (!ShopifyCollection::supportsShopifySyncWarningsColumn()) {
+                    return;
+                }
+
+                $record->forceFill([
+                    'shopify_sync_warnings' => null,
+                ])->save();
+            });
+
+            $cleared++;
+        }
+
+        return [
+            'cleared' => $cleared,
+            'skipped' => $skipped,
+        ];
+    }
+
+    private static function draftWarningResolvedValue(string $value): ?string
+    {
+        $trimmed = trim($value);
+
+        return $trimmed === '' ? null : $value;
+    }
+
+    private static function warningResolutionSummary(int $resolved, int $skipped): string
+    {
+        $parts = [];
+
+        if ($resolved > 0) {
+            $parts[] = "Resolved {$resolved}.";
+        }
+        if ($skipped > 0) {
+            $parts[] = "Skipped {$skipped} without warnings.";
+        }
+
+        return $parts === [] ? 'No collections were updated.' : implode(' ', $parts);
+    }
+
+    private static function currentDeletionRequest(ShopifyCollection $record): ?DeletionRequest
+    {
+        return app(DeletionRequestWorkflowService::class)->openRequestFor($record);
+    }
+
+    private static function canApproveDeletion(ShopifyCollection $record): bool
+    {
+        $request = self::currentDeletionRequest($record);
+
+        return $request !== null
+            && $request->status === DeletionRequest::STATUS_PENDING
+            && !$request->userHasApproved(Auth::id());
+    }
+
+    private static function deletionRequestStatusLabel(ShopifyCollection $record): string
+    {
+        $request = self::currentDeletionRequest($record);
+        if (!$request) {
+            return 'None';
+        }
+
+        if ($request->status === DeletionRequest::STATUS_PROCESSING) {
+            return 'Processing';
+        }
+
+        return 'Pending ' . $request->approvalCount() . '/2';
     }
 
     private static function currentImportId(): ?int

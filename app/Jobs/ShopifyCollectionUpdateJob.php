@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\ShopifyCollection;
 use App\Services\AdminNotification;
+use App\Services\CollectionHandleService;
 use App\Services\ShopifyCollectionUpdater;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -32,7 +33,7 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
         public ?bool $deindexOverride = null,
     ) {}
 
-    public function handle(ShopifyCollectionUpdater $updater): void
+    public function handle(ShopifyCollectionUpdater $updater, CollectionHandleService $handleService): void
     {
         $collections = ShopifyCollection::query()
             ->whereIn('id', $this->collectionIds)
@@ -69,6 +70,10 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
 
             try {
                 $updater->update($collection, $payload);
+                if ($this->handleOverride !== null && trim($this->handleOverride) !== '') {
+                    $handleService->promoteHandle($collection, trim($this->handleOverride), $this->userId);
+                }
+
                 ShopifyCollection::withoutEvents(function () use ($collection): void {
                     $collection->forceFill([
                         'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED,
@@ -117,6 +122,14 @@ class ShopifyCollectionUpdateJob implements ShouldQueue
 
         if (!empty($fields['seo_description'])) {
             $payload['seo_description'] = $collection->seo_description;
+        }
+
+        if (!empty($fields['footer_title'])) {
+            $payload['footer_title'] = $collection->footer_title;
+        }
+
+        if (!empty($fields['elegant_footer_description'])) {
+            $payload['elegant_footer_description'] = $collection->elegant_footer_description;
         }
 
         if (!empty($fields['deindex']) && $collection->deindex !== null) {

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Category;
 use App\Models\Image;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
@@ -91,6 +92,7 @@ final class ProductShopifyUpdater
      *   updated_product_ids:array<int, int>,
      *   skipped_not_approved:int,
      *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
      *   failed:int,
      *   warnings:array<int, array{product_id:int, warning:string}>,
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
@@ -106,6 +108,7 @@ final class ProductShopifyUpdater
                 'updated_product_ids' => [],
                 'skipped_not_approved' => 0,
                 'skipped_missing_handle' => 0,
+                'skipped_blocked' => 0,
                 'failed' => 0,
                 'warnings' => [],
                 'failures' => [],
@@ -117,6 +120,7 @@ final class ProductShopifyUpdater
         $skippedNotApproved = 0;
         $skippedMissingHandle = 0;
         $failed = 0;
+        $skippedBlocked = 0;
         $warnings = [];
         $failures = [];
 
@@ -127,6 +131,11 @@ final class ProductShopifyUpdater
 
             if (!$product->handle) {
                 $skippedMissingHandle++;
+                continue;
+            }
+
+            if ($this->isBlockedByShopifyMissingDraft($product)) {
+                $skippedBlocked++;
                 continue;
             }
 
@@ -159,6 +168,7 @@ final class ProductShopifyUpdater
             'updated_product_ids' => $updatedProductIds,
             'skipped_not_approved' => $skippedNotApproved,
             'skipped_missing_handle' => $skippedMissingHandle,
+            'skipped_blocked' => $skippedBlocked,
             'failed' => $failed,
             'warnings' => $warnings,
             'failures' => $failures,
@@ -267,6 +277,7 @@ final class ProductShopifyUpdater
      *   synced_product_ids:array<int, int>,
      *   skipped_not_approved:int,
      *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
      *   failed:int,
      *   warnings:array<int, array{product_id:int, warning:string}>,
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
@@ -279,6 +290,7 @@ final class ProductShopifyUpdater
         $skippedNotApproved = 0;
         $skippedMissingHandle = 0;
         $failed = 0;
+        $skippedBlocked = 0;
         $warnings = [];
         $failures = [];
 
@@ -289,6 +301,11 @@ final class ProductShopifyUpdater
 
             if (!$product->handle) {
                 $skippedMissingHandle++;
+                continue;
+            }
+
+            if ($this->isBlockedByShopifyMissingDraft($product)) {
+                $skippedBlocked++;
                 continue;
             }
 
@@ -327,6 +344,7 @@ final class ProductShopifyUpdater
             'synced_product_ids' => $syncedProductIds,
             'skipped_not_approved' => $skippedNotApproved,
             'skipped_missing_handle' => $skippedMissingHandle,
+            'skipped_blocked' => $skippedBlocked,
             'failed' => $failed,
             'warnings' => $warnings,
             'failures' => $failures,
@@ -340,6 +358,7 @@ final class ProductShopifyUpdater
      *   processed_images:int,
      *   skipped_not_approved:int,
      *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
      *   failed:int,
      *   warnings:array<int, array{product_id:int, warning:string}>,
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
@@ -354,6 +373,7 @@ final class ProductShopifyUpdater
             'processed_images' => count($selectedImageIds),
             'skipped_not_approved' => 0,
             'skipped_missing_handle' => 0,
+            'skipped_blocked' => 0,
             'failed' => 0,
             'warnings' => [],
             'failures' => [],
@@ -372,6 +392,11 @@ final class ProductShopifyUpdater
 
         if (!$product->handle) {
             $result['skipped_missing_handle'] = 1;
+            return $result;
+        }
+
+        if ($this->isBlockedByShopifyMissingDraft($product)) {
+            $result['skipped_blocked'] = 1;
             return $result;
         }
 
@@ -5114,5 +5139,24 @@ GQL;
         }
         $trimmed = trim((string) $value);
         return $trimmed === '';
+    }
+
+    private function isBlockedByShopifyMissingDraft(Product $product): bool
+    {
+        return NewProductDraft::query()
+            ->where('shopify_missing_sync_blocked', true)
+            ->where(function ($query) use ($product): void {
+                $shopifyId = trim((string) ($product->shopify_id ?? ''));
+                $handle = trim((string) ($product->handle ?? ''));
+
+                if ($shopifyId !== '') {
+                    $query->orWhere('shopify_id', $shopifyId);
+                }
+
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+            })
+            ->exists();
     }
 }

@@ -39,6 +39,10 @@ class NewProductDraftObserver
             return;
         }
 
+        if ($draft->isBlockedFromShopifyMissing()) {
+            return;
+        }
+
         $changedKeys = array_keys($draft->getChanges());
         $meaningfulChanges = array_diff($changedKeys, $this->ignoreForApprovalReset);
         if (empty($meaningfulChanges)) {

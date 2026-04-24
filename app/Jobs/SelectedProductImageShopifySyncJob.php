@@ -77,6 +77,9 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
         if ($result['skipped_missing_handle'] > 0) {
             $parts[] = 'Skipped because product handle is missing.';
         }
+        if (($result['skipped_blocked'] ?? 0) > 0) {
+            $parts[] = 'Skipped because this product was removed from Shopify and draft recovery is still blocked.';
+        }
         if ($result['failed'] > 0) {
             $parts[] = "Failed {$result['failed']}.";
         }

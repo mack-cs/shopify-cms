@@ -3,12 +3,14 @@
 namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
 use App\Filament\Resources\NewProductDraftResource;
+use App\Filament\Resources\NewProductDraftResource\Widgets\ShopifyMissingDraftBanner;
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
 use App\Models\NewProductDraft;
 use App\Models\Status;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
 class ListNewProductDrafts extends ListRecords
@@ -29,8 +31,24 @@ class ListNewProductDrafts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
+            ShopifyMissingDraftBanner::class,
             QuickCreateNewProductDraft::class,
         ];
+    }
+
+    public function getHeading(): string|HtmlString
+    {
+        return new HtmlString(
+            '<span style="display:inline-flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">' .
+            '<span style="line-height:1;">New Products</span>' .
+            '<span style="color:#d1d5db;">|</span>' .
+            '<span style="max-width:80rem;font-size:18px;line-height:20px;color:#1d4ed8;font-weight:400;padding-top:7px;">' .
+            '<span style="font-weight:600;">In this section you can only:</span> ' .
+            'Add, update, delete products, accept or reject changes from Shopify.' .
+            '</span>' .
+            '</span>'
+        );
+
     }
 
     public function getTabs(): array

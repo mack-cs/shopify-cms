@@ -281,6 +281,8 @@ query Collections($first: Int!, $after: String) {
       title
       descriptionHtml
       seo { title description }
+      footer_title_metafield: metafield(namespace: "custom", key: "footer_description") { value }
+      elegant_footer_description_metafield: metafield(namespace: "custom", key: "elegant_footer_description") { value }
     }
   }
 }
@@ -494,6 +496,8 @@ GQL;
                     'description_html' => data_get($collection, 'descriptionHtml'),
                     'seo_title' => data_get($collection, 'seo.title'),
                     'seo_description' => data_get($collection, 'seo.description'),
+                    'footer_title' => data_get($collection, 'footer_title_metafield.value'),
+                    'elegant_footer_description' => data_get($collection, 'elegant_footer_description_metafield.value'),
                 ]
             );
         }

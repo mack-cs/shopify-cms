@@ -75,6 +75,9 @@ class ProductShopifyUpdateJob implements ShouldQueue
             if ($result['skipped_missing_handle'] > 0) {
                 $parts[] = "Skipped {$result['skipped_missing_handle']} missing handle.";
             }
+            if (($result['skipped_blocked'] ?? 0) > 0) {
+                $parts[] = "Skipped {$result['skipped_blocked']} blocked because Shopify removed them and recovery is not enabled.";
+            }
             if ($result['failed'] > 0) {
                 $parts[] = "Failed {$result['failed']}.";
             }

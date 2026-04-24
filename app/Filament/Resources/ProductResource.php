@@ -9,6 +9,7 @@ use App\Enums\RolesEnum;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
+use App\Models\DeletionRequest;
 use App\Models\Image;
 use App\Models\Import;
 use App\Models\ShopifyRow;
@@ -55,6 +56,7 @@ use App\Filament\Resources\ProductResource\RelationManagers;
 use App\Services\HeaderStore;
 use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
+use App\Services\DeletionRequestWorkflowService;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Services\NewProductDraftSeeder;
@@ -1015,6 +1017,16 @@ class ProductResource extends Resource
                 ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('delete_request_status')
+                ->label('Delete Request')
+                ->state(fn (Product $record): string => self::deletionRequestStatusLabel($record))
+                ->badge()
+                ->color(fn (string $state): string => match ($state) {
+                    'Processing' => 'danger',
+                    'Pending 1/2', 'Pending 2/2' => 'warning',
+                    default => 'gray',
+                })
+                ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('approved')
                 ->label('Approved')
                 ->state(fn (Product $record) => $record->isApprovedByTwo())
@@ -1186,11 +1198,34 @@ class ProductResource extends Resource
                     return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
                 })
                 ->visible(fn (Product $record): bool => static::canEdit($record)),
-            Tables\Actions\DeleteAction::make()
+            Action::make('requestDelete')
+                ->label('Request Delete')
                 ->iconButton()
                 ->color('danger')
-                ->tooltip('Delete')
-                ->visible(fn (Product $record): bool => static::canDelete($record)),
+                ->icon('heroicon-o-trash')
+                ->tooltip('Request Delete')
+                ->visible(fn (Product $record): bool => static::canDelete($record))
+                ->disabled(fn (Product $record): bool => self::currentDeletionRequest($record) !== null)
+                ->form([
+                    Textarea::make('reason')
+                        ->label('Reason')
+                        ->rows(3)
+                        ->maxLength(1000),
+                ])
+                ->action(function (Product $record, array $data): void {
+                    self::requestDeletion($record, $data['reason'] ?? null);
+                }),
+            Action::make('approveDelete')
+                ->label('Approve Delete')
+                ->iconButton()
+                ->color('warning')
+                ->icon('heroicon-o-check-circle')
+                ->tooltip('Approve Delete')
+                ->visible(fn (Product $record): bool => static::canDelete($record))
+                ->disabled(fn (Product $record): bool => !self::canApproveDeletion($record))
+                ->action(function (Product $record): void {
+                    self::approveDeletion($record);
+                }),
         ])->bulkActions([
             BulkActionGroup::make([
                 BulkAction::make('bulkApprove')
@@ -1572,6 +1607,34 @@ class ProductResource extends Resource
         AdminNotification::send($notification);
     }
 
+    private static function currentDeletionRequest(Product $record): ?DeletionRequest
+    {
+        return app(DeletionRequestWorkflowService::class)->openRequestFor($record);
+    }
+
+    private static function canApproveDeletion(Product $record): bool
+    {
+        $request = self::currentDeletionRequest($record);
+
+        return $request !== null
+            && $request->status === DeletionRequest::STATUS_PENDING
+            && !$request->userHasApproved(Auth::id());
+    }
+
+    private static function deletionRequestStatusLabel(Product $record): string
+    {
+        $request = self::currentDeletionRequest($record);
+        if (!$request) {
+            return 'None';
+        }
+
+        if ($request->status === DeletionRequest::STATUS_PROCESSING) {
+            return 'Processing';
+        }
+
+        return 'Pending ' . $request->approvalCount() . '/2';
+    }
+
     public static function getPages(): array
     {
         return [
@@ -1603,6 +1666,48 @@ class ProductResource extends Resource
     public static function canDeleteAny(): bool
     {
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    public static function requestDeletion(Product $record, ?string $reason = null): void
+    {
+        try {
+            $request = app(DeletionRequestWorkflowService::class)->submit($record, (int) Auth::id(), $reason);
+
+            self::sendNotification(Notification::make()
+                ->title('Delete request created')
+                ->body('Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete request not created')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
+    }
+
+    public static function approveDeletion(Product $record): void
+    {
+        try {
+            $result = app(DeletionRequestWorkflowService::class)->approve($record, (int) Auth::id());
+            /** @var DeletionRequest $request */
+            $request = $result['request'];
+
+            self::sendNotification(Notification::make()
+                ->title($result['queued'] ? 'Delete approved and queued' : 'Delete approval recorded')
+                ->body($result['queued']
+                    ? 'Two delete approvals were recorded. Shopify and local deletion are now queued.'
+                    : 'Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete approval failed')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
     }
 
     private static function extraShopifyFields(?Product $record): array

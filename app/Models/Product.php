@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use App\Services\CategoryTypeMap;
 
 class Product extends Model
@@ -124,6 +125,11 @@ class Product extends Model
     public function styleProfiles(): HasMany
     {
         return $this->hasMany(StyleProfile::class);
+    }
+
+    public function deletionRequests(): MorphMany
+    {
+        return $this->morphMany(DeletionRequest::class, 'deletable');
     }
 
     public function urlRedirects(): HasMany

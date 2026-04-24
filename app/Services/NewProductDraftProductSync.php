@@ -23,6 +23,10 @@ final class NewProductDraftProductSync
             return false;
         }
 
+        if ($draft->isBlockedFromShopifyMissing()) {
+            return false;
+        }
+
         $product = $this->findExistingProduct($draft);
 
         if (!$product) {
@@ -56,7 +60,7 @@ final class NewProductDraftProductSync
 
     /**
      * @param Collection<int, NewProductDraft>|null $drafts
-     * @return array{updated:int, created:int, skipped_unapproved:int, skipped_missing_handle:int, skipped_missing_import:int}
+     * @return array{updated:int, created:int, skipped_unapproved:int, skipped_missing_handle:int, skipped_missing_import:int, skipped_blocked:int}
      */
     public function syncApprovedDrafts(?Collection $drafts = null): array
     {
@@ -65,6 +69,7 @@ final class NewProductDraftProductSync
         $skippedUnapproved = 0;
         $skippedMissingHandle = 0;
         $skippedMissingImport = 0;
+        $skippedBlocked = 0;
 
         $drafts = $drafts ?? NewProductDraft::query()
             ->where(function ($query): void {
@@ -79,6 +84,11 @@ final class NewProductDraftProductSync
 
         foreach ($drafts as $draft) {
             if (!$draft instanceof NewProductDraft) {
+                continue;
+            }
+
+            if ($draft->isBlockedFromShopifyMissing()) {
+                $skippedBlocked++;
                 continue;
             }
 
@@ -126,6 +136,7 @@ final class NewProductDraftProductSync
             'skipped_unapproved' => $skippedUnapproved,
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_missing_import' => $skippedMissingImport,
+            'skipped_blocked' => $skippedBlocked,
         ];
     }
 

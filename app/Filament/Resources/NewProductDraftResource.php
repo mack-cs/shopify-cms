@@ -6,7 +6,9 @@ use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\NewProductDraftResource\RelationManagers;
 use App\Filament\Resources\NewProductDraftResource\Pages;
+use App\Models\ChangeLog;
 use App\Models\Color;
+use App\Models\DeletionRequest;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
@@ -24,11 +26,13 @@ use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
+use App\Services\DeletionRequestWorkflowService;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftRoundtripCsvService;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
+use App\Services\ShopifyMissingDraftWorkflowService;
 use App\Services\TagNormalizer;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
@@ -50,7 +54,6 @@ use Filament\Tables;
 use Filament\Tables\Actions\Action;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
-use Filament\Tables\Actions\DeleteBulkAction;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
@@ -2186,6 +2189,35 @@ class NewProductDraftResource extends Resource
                     ->state(fn (NewProductDraft $record): string => $record->approvalsForCurrentVersionCount() . '/2')
                     ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByApprovalCount($query, $direction))
                     ->toggleable(),
+                TextColumn::make('shopify_missing_status_display')
+                    ->label('Shopify Missing')
+                    ->state(fn (NewProductDraft $record): string => match ($record->shopify_missing_status) {
+                        NewProductDraft::SHOPIFY_MISSING_PENDING_REVIEW => 'Pending Review',
+                        NewProductDraft::SHOPIFY_MISSING_INVESTIGATING => 'Investigating',
+                        NewProductDraft::SHOPIFY_MISSING_CLEANED => 'Cleaned Local',
+                        NewProductDraft::SHOPIFY_MISSING_RECOVERY_ENABLED => 'Recovery Enabled',
+                        default => $record->isBlockedFromShopifyMissing() ? 'Blocked' : 'None',
+                    })
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        'Pending Review' => 'danger',
+                        'Investigating' => 'warning',
+                        'Cleaned Local' => 'gray',
+                        'Recovery Enabled' => 'success',
+                        'Blocked' => 'danger',
+                        default => 'gray',
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('delete_request_status')
+                    ->label('Delete Request')
+                    ->state(fn (NewProductDraft $record): string => self::deletionRequestStatusLabel($record))
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        'Processing' => 'danger',
+                        'Pending 1/2', 'Pending 2/2' => 'warning',
+                        default => 'gray',
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('shopify_sync_warning_count')
                     ->label('Sync Warnings')
                     ->state(fn (NewProductDraft $record): int => $record->shopifySyncWarningCount())
@@ -2371,7 +2403,85 @@ class NewProductDraftResource extends Resource
                         );
                     }),
                 Tables\Actions\EditAction::make()->color('warning'),
-                Tables\Actions\DeleteAction::make()->color('danger'),
+                Tables\Actions\Action::make('investigateShopifyMissing')
+                    ->label('Investigate')
+                    ->icon('heroicon-o-magnifying-glass')
+                    ->color('warning')
+                    ->visible(fn (NewProductDraft $record): bool => $record->isBlockedFromShopifyMissing())
+                    ->action(function (NewProductDraft $record): void {
+                        app(ShopifyMissingDraftWorkflowService::class)->investigate($record, Auth::id());
+
+                        self::sendNotification(Notification::make()
+                            ->title('Draft marked for investigation')
+                            ->body('This draft remains blocked from automatic re-sync until recovery is explicitly enabled.')
+                            ->warning()
+                        );
+                    }),
+                Tables\Actions\Action::make('cleanLocalProduct')
+                    ->label('Clean Local')
+                    ->icon('heroicon-o-trash')
+                    ->color('gray')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => $record->isBlockedFromShopifyMissing())
+                    ->action(function (NewProductDraft $record): void {
+                        app(ShopifyMissingDraftWorkflowService::class)->cleanLocalProduct($record, Auth::id());
+
+                        self::sendNotification(Notification::make()
+                            ->title('Local product cleaned')
+                            ->body('The local Product record was removed. The draft remains as a recovery record and is still blocked from automatic re-sync.')
+                            ->success()
+                        );
+                    }),
+                Tables\Actions\Action::make('enableRecovery')
+                    ->label('Enable Recovery')
+                    ->icon('heroicon-o-arrow-path')
+                    ->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => $record->isBlockedFromShopifyMissing())
+                    ->action(function (NewProductDraft $record): void {
+                        app(ShopifyMissingDraftWorkflowService::class)->enableRecovery($record, Auth::id());
+
+                        self::sendNotification(Notification::make()
+                            ->title('Recovery enabled')
+                            ->body('This draft can sync back into Products again when you choose to recover it.')
+                            ->success()
+                        );
+                    }),
+                Tables\Actions\Action::make('requestDelete')
+                    ->label('Request Delete')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => static::canDelete($record) && self::draftRequiresDeletionApproval($record))
+                    ->disabled(fn (NewProductDraft $record): bool => self::currentDeletionRequest($record) !== null)
+                    ->form([
+                        Textarea::make('reason')
+                            ->label('Reason')
+                            ->rows(3)
+                            ->maxLength(1000),
+                    ])
+                    ->action(function (NewProductDraft $record, array $data): void {
+                        self::requestDeletion($record, $data['reason'] ?? null);
+                    }),
+                Tables\Actions\Action::make('approveDelete')
+                    ->label('Approve Delete')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => static::canDelete($record) && self::draftRequiresDeletionApproval($record))
+                    ->disabled(fn (NewProductDraft $record): bool => !self::canApproveDeletion($record))
+                    ->action(function (NewProductDraft $record): void {
+                        self::approveDeletion($record);
+                    }),
+                Tables\Actions\Action::make('deleteLocal')
+                    ->label('Delete')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => static::canDelete($record) && !self::draftRequiresDeletionApproval($record))
+                    ->action(function (NewProductDraft $record): void {
+                        self::deleteLocally($record);
+                    }),
             ])
             ->headerActions([
                 Tables\Actions\Action::make('downloadTemplate')
@@ -2482,7 +2592,120 @@ class NewProductDraftResource extends Resource
                             self::applyBulkEditsToDrafts($records, $data);
                         })
                         ->deselectRecordsAfterCompletion(),
-                    DeleteBulkAction::make(),
+                    BulkAction::make('requestDeleteSelected')
+                        ->label('Request Delete')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->form([
+                            Textarea::make('reason')
+                                ->label('Reason')
+                                ->rows(3)
+                                ->maxLength(1000),
+                        ])
+                        ->action(function ($records, array $data): void {
+                            $requested = 0;
+                            $skippedNoHandle = 0;
+                            $skippedExisting = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof NewProductDraft) {
+                                    continue;
+                                }
+
+                                if (!self::draftRequiresDeletionApproval($record)) {
+                                    $skippedNoHandle++;
+                                    continue;
+                                }
+
+                                if (self::currentDeletionRequest($record) !== null) {
+                                    $skippedExisting++;
+                                    continue;
+                                }
+
+                                try {
+                                    app(DeletionRequestWorkflowService::class)->submit($record, (int) Auth::id(), $data['reason'] ?? null);
+                                    $requested++;
+                                } catch (\Throwable) {
+                                    $skippedExisting++;
+                                }
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Draft delete requests processed')
+                                ->body("Requested: {$requested}. Skipped without handle: {$skippedNoHandle}. Skipped with open request: {$skippedExisting}.")
+                                ->warning()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('approveDeleteSelected')
+                        ->label('Approve Delete')
+                        ->icon('heroicon-o-check-circle')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->action(function ($records): void {
+                            $approved = 0;
+                            $queued = 0;
+                            $skipped = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof NewProductDraft || !self::canApproveDeletion($record)) {
+                                    $skipped++;
+                                    continue;
+                                }
+
+                                try {
+                                    $result = app(DeletionRequestWorkflowService::class)->approve($record, (int) Auth::id());
+                                    $approved++;
+                                    if (($result['queued'] ?? false) === true) {
+                                        $queued++;
+                                    }
+                                } catch (\Throwable) {
+                                    $skipped++;
+                                }
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Draft delete approvals processed')
+                                ->body("Approved: {$approved}. Queued: {$queued}. Skipped: {$skipped}.")
+                                ->warning()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('deleteLocalSelected')
+                        ->label('Delete Local')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->action(function ($records): void {
+                            $deleted = 0;
+                            $skippedWithHandle = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof NewProductDraft) {
+                                    continue;
+                                }
+
+                                if (self::draftRequiresDeletionApproval($record)) {
+                                    $skippedWithHandle++;
+                                    continue;
+                                }
+
+                                try {
+                                    self::deleteLocally($record, sendNotification: false);
+                                    $deleted++;
+                                } catch (\Throwable) {
+                                    continue;
+                                }
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Local draft deletion processed')
+                                ->body("Deleted locally: {$deleted}. Skipped with handle: {$skippedWithHandle}.")
+                                ->success()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('bulkApproveForShopify')
                         ->label('Bulk Approve for Shopify')
                         ->icon('heroicon-o-check-badge')
@@ -2922,6 +3145,126 @@ class NewProductDraftResource extends Resource
     public static function canDeleteAny(): bool
     {
         return Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false;
+    }
+
+    public static function requestDeletion(NewProductDraft $record, ?string $reason = null): void
+    {
+        try {
+            $request = app(DeletionRequestWorkflowService::class)->submit($record, (int) Auth::id(), $reason);
+
+            self::sendNotification(Notification::make()
+                ->title('Delete request created')
+                ->body('Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete request not created')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
+    }
+
+    public static function approveDeletion(NewProductDraft $record): void
+    {
+        try {
+            $result = app(DeletionRequestWorkflowService::class)->approve($record, (int) Auth::id());
+            /** @var DeletionRequest $request */
+            $request = $result['request'];
+
+            self::sendNotification(Notification::make()
+                ->title($result['queued'] ? 'Delete approved and queued' : 'Delete approval recorded')
+                ->body($result['queued']
+                    ? 'Two delete approvals were recorded. Shopify and local deletion are now queued.'
+                    : 'Delete approvals: ' . $request->approvalCount() . '/2.')
+                ->warning()
+            );
+        } catch (\Throwable $e) {
+            self::sendNotification(Notification::make()
+                ->title('Delete approval failed')
+                ->body($e->getMessage())
+                ->danger()
+            );
+        }
+    }
+
+    public static function deleteLocally(NewProductDraft $record, bool $sendNotification = true): void
+    {
+        if (self::draftRequiresDeletionApproval($record)) {
+            throw new \RuntimeException('Drafts with a handle must go through the delete approval workflow.');
+        }
+
+        self::logLocalDeletion($record, Auth::id());
+        $record->delete();
+
+        if (!$sendNotification) {
+            return;
+        }
+
+        self::sendNotification(Notification::make()
+            ->title('Draft deleted locally')
+            ->body('The draft had no handle, so only the local record was removed.')
+            ->success()
+        );
+    }
+
+    private static function currentDeletionRequest(NewProductDraft $record): ?DeletionRequest
+    {
+        return app(DeletionRequestWorkflowService::class)->openRequestFor($record);
+    }
+
+    private static function canApproveDeletion(NewProductDraft $record): bool
+    {
+        $request = self::currentDeletionRequest($record);
+
+        return $request !== null
+            && $request->status === DeletionRequest::STATUS_PENDING
+            && !$request->userHasApproved(Auth::id());
+    }
+
+    private static function deletionRequestStatusLabel(NewProductDraft $record): string
+    {
+        if (!self::draftRequiresDeletionApproval($record)) {
+            return 'Local Only';
+        }
+
+        $request = self::currentDeletionRequest($record);
+        if (!$request) {
+            return 'None';
+        }
+
+        if ($request->status === DeletionRequest::STATUS_PROCESSING) {
+            return 'Processing';
+        }
+
+        return 'Pending ' . $request->approvalCount() . '/2';
+    }
+
+    private static function draftRequiresDeletionApproval(NewProductDraft $record): bool
+    {
+        return filled(trim((string) ($record->handle ?? '')));
+    }
+
+    private static function logLocalDeletion(NewProductDraft $record, ?int $userId): void
+    {
+        ChangeLog::create([
+            'import_id' => $record->product?->import_id,
+            'product_id' => $record->product?->id,
+            'changed_by' => $userId,
+            'model_type' => NewProductDraft::class,
+            'model_id' => $record->id,
+            'field' => 'deletion_completed',
+            'old_value' => null,
+            'new_value' => json_encode([
+                'status' => 'completed',
+                'mode' => 'local_only',
+                'title' => $record->title,
+                'handle' => $record->handle,
+                'shopify_id' => $record->shopify_id,
+                'deleted_at' => now()->toDateTimeString(),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        ]);
     }
 
     public static function getPages(): array

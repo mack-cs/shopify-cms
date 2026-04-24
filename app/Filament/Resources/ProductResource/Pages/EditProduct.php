@@ -242,8 +242,30 @@ class EditProduct extends EditRecord
                             ->success()
                     );
                 }),
-            Actions\DeleteAction::make()
-                ->visible(fn () => ProductResource::canDelete($this->getRecord())),
+            Actions\Action::make('requestDelete')
+                ->label('Request Delete')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->form([
+                    \Filament\Forms\Components\Textarea::make('reason')
+                        ->label('Reason')
+                        ->rows(3)
+                        ->maxLength(1000),
+                ])
+                ->visible(fn () => ProductResource::canDelete($this->getRecord()))
+                ->action(function (array $data): void {
+                    ProductResource::requestDeletion($this->getRecord(), $data['reason'] ?? null);
+                }),
+            Actions\Action::make('approveDelete')
+                ->label('Approve Delete')
+                ->icon('heroicon-o-check-circle')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn () => ProductResource::canDelete($this->getRecord()))
+                ->action(function (): void {
+                    ProductResource::approveDeletion($this->getRecord());
+                }),
         ];
     }
 }

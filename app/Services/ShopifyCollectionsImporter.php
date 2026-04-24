@@ -51,13 +51,22 @@ final class ShopifyCollectionsImporter
             }
             $seen[$shopifyId] = true;
 
-            $updateData = [
+            $shopifyValues = [
                 'handle' => $handle,
                 'title' => data_get($collection, 'title'),
                 'description_html' => data_get($collection, 'descriptionHtml'),
                 'seo_title' => data_get($collection, 'seo.title'),
                 'seo_description' => data_get($collection, 'seo.description'),
+                'footer_title' => data_get($collection, 'footer_title_metafield.value'),
+                'elegant_footer_description' => data_get($collection, 'elegant_footer_description_metafield.value'),
             ];
+
+            $existing = ShopifyCollection::query()
+                ->where('import_id', $import->id)
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            $updateData = $this->syncAwareCollectionData($existing, $shopifyValues);
 
             $hasDeindexMetafield = data_get($collection, 'deindex_metafield_hidden.value') !== null
                 || data_get($collection, 'deindex_metafield_hide_from_google.value') !== null;
@@ -120,6 +129,8 @@ query Collections($first: Int!, $after: String) {
       title
       descriptionHtml
       seo { title description }
+      footer_title_metafield: metafield(namespace: "custom", key: "footer_description") { value }
+      elegant_footer_description_metafield: metafield(namespace: "custom", key: "elegant_footer_description") { value }
       deindex_metafield_hidden: metafield(namespace: "seo", key: "hidden") { value }
       deindex_metafield_hide_from_google: metafield(namespace: "seo", key: "hide_from_google") { value }
       resourcePublications(first: 20, onlyPublished: true) {
@@ -147,6 +158,8 @@ query Collections($first: Int!, $after: String) {
       title
       descriptionHtml
       seo { title description }
+      footer_title_metafield: metafield(namespace: "custom", key: "footer_description") { value }
+      elegant_footer_description_metafield: metafield(namespace: "custom", key: "elegant_footer_description") { value }
       deindex_metafield_hidden: metafield(namespace: "seo", key: "hidden") { value }
       deindex_metafield_hide_from_google: metafield(namespace: "seo", key: "hide_from_google") { value }
     }
@@ -260,5 +273,79 @@ GQL;
             'false', '0', 'no' => false,
             default => null,
         };
+    }
+
+    /**
+     * @param array<string, mixed> $shopifyValues
+     * @return array<string, mixed>
+     */
+    private function syncAwareCollectionData(?ShopifyCollection $existing, array $shopifyValues): array
+    {
+        $changes = $shopifyValues;
+        $warnings = [];
+        $supportsWarnings = ShopifyCollection::supportsShopifySyncWarningsColumn();
+
+        $draftMap = [
+            'title' => 'draft_title',
+            'description_html' => 'draft_description_html',
+            'seo_title' => 'draft_seo_title',
+            'seo_description' => 'draft_seo_description',
+            'footer_title' => 'draft_footer_title',
+            'elegant_footer_description' => 'draft_elegant_footer_description',
+        ];
+
+        $labels = [
+            'draft_title' => 'draft title',
+            'draft_description_html' => 'draft description',
+            'draft_seo_title' => 'draft SEO title',
+            'draft_seo_description' => 'draft SEO description',
+            'draft_footer_title' => 'draft footer title',
+            'draft_elegant_footer_description' => 'draft elegant footer description',
+        ];
+
+        foreach ($draftMap as $shopifyField => $draftField) {
+            $incomingValue = $shopifyValues[$shopifyField] ?? null;
+            if ($this->isEmptyValue($incomingValue)) {
+                continue;
+            }
+
+            $currentDraftValue = $existing?->{$draftField};
+            if ($this->isEmptyValue($currentDraftValue)) {
+                $changes[$draftField] = $incomingValue;
+                continue;
+            }
+
+            if ($supportsWarnings && !$this->valuesMatch($currentDraftValue, $incomingValue)) {
+                $warnings[] = [
+                    'field' => $draftField,
+                    'label' => $labels[$draftField] ?? $draftField,
+                    'draft_value' => (string) $currentDraftValue,
+                    'shopify_value' => (string) $incomingValue,
+                ];
+            }
+        }
+
+        if ($supportsWarnings) {
+            $existingWarnings = $existing?->shopifySyncWarnings() ?? [];
+            if ($existingWarnings !== $warnings) {
+                $changes['shopify_sync_warnings'] = empty($warnings) ? null : $warnings;
+            }
+        }
+
+        return $changes;
+    }
+
+    private function isEmptyValue(mixed $value): bool
+    {
+        if ($value === null) {
+            return true;
+        }
+
+        return trim((string) $value) === '';
+    }
+
+    private function valuesMatch(mixed $left, mixed $right): bool
+    {
+        return trim((string) ($left ?? '')) === trim((string) ($right ?? ''));
     }
 }

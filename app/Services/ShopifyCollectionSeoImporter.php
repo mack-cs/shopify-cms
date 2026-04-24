@@ -52,6 +52,12 @@ final class ShopifyCollectionSeoImporter
             if ($map['seo_description'] !== null) {
                 $payload['draft_seo_description'] = $this->nullIfEmpty($this->mappedValue($row, $map['seo_description']));
             }
+            if ($map['footer_title'] !== null) {
+                $payload['draft_footer_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['footer_title']));
+            }
+            if ($map['elegant_footer_description'] !== null) {
+                $payload['draft_elegant_footer_description'] = $this->nullIfEmpty($this->mappedValue($row, $map['elegant_footer_description']));
+            }
             if ($map['deindex'] !== null) {
                 $payload['deindex'] = $this->nullableBool($this->mappedValue($row, $map['deindex']));
             }
@@ -100,6 +106,8 @@ final class ShopifyCollectionSeoImporter
             'description_html' => $find(['description_html', 'description html', 'description', 'body_html', 'body html']),
             'seo_title' => $find(['seo_title', 'seo title', 'meta title']),
             'seo_description' => $find(['seo_description', 'seo description', 'meta description']),
+            'footer_title' => $find(['footer_title', 'footer title', 'footer_description', 'footer description']),
+            'elegant_footer_description' => $find(['elegant_footer_description', 'elegant footer description']),
             'deindex' => $find(['deindex', 'seo_deindex', 'hide_from_google', 'seo hidden']),
             'batch' => $find(['batch']),
         ];

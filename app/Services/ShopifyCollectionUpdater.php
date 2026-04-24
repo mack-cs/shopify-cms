@@ -62,6 +62,32 @@ final class ShopifyCollectionUpdater
             $this->setDeindexMetafield($collection->shopify_id, (bool) $fields['deindex']);
         }
 
+        $metafields = [];
+
+        if (array_key_exists('footer_title', $fields)) {
+            $metafields[] = [
+                'ownerId' => $collection->shopify_id,
+                'namespace' => 'custom',
+                'key' => 'footer_description',
+                'type' => 'single_line_text_field',
+                'value' => $this->metafieldStringValue($fields['footer_title']),
+            ];
+        }
+
+        if (array_key_exists('elegant_footer_description', $fields)) {
+            $metafields[] = [
+                'ownerId' => $collection->shopify_id,
+                'namespace' => 'custom',
+                'key' => 'elegant_footer_description',
+                'type' => 'single_line_text_field',
+                'value' => $this->metafieldStringValue($fields['elegant_footer_description']),
+            ];
+        }
+
+        if ($metafields !== []) {
+            $this->setMetafields($metafields);
+        }
+
         return $result;
     }
 
@@ -85,20 +111,28 @@ GQL;
 
     private function setDeindexMetafield(string $ownerId, bool $deindex): void
     {
+        $this->setMetafields([[
+            'ownerId' => $ownerId,
+            'namespace' => 'seo',
+            'key' => 'hide_from_google',
+            'type' => 'boolean',
+            'value' => $deindex ? 'true' : 'false',
+        ]], 'Failed to update collection deindex metafield.');
+    }
+
+    /**
+     * @param array<int, array<string, string>> $metafields
+     */
+    private function setMetafields(array $metafields, string $fallbackMessage = 'Failed to update collection metafields.'): void
+    {
         $data = $this->client->graphql($this->metafieldsSetMutation(), [
-            'metafields' => [[
-                'ownerId' => $ownerId,
-                'namespace' => 'seo',
-                'key' => 'hide_from_google',
-                'type' => 'boolean',
-                'value' => $deindex ? 'true' : 'false',
-            ]],
+            'metafields' => $metafields,
         ]);
 
         $errors = data_get($data, 'metafieldsSet.userErrors', []);
         if (is_array($errors) && !empty($errors)) {
             $messages = collect($errors)->pluck('message')->filter()->implode('; ');
-            throw new \RuntimeException($messages !== '' ? $messages : 'Failed to update collection deindex metafield.');
+            throw new \RuntimeException($messages !== '' ? $messages : $fallbackMessage);
         }
     }
 
@@ -122,5 +156,10 @@ GQL;
 
         $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function metafieldStringValue(mixed $value): string
+    {
+        return $this->nullIfEmpty($value) ?? '';
     }
 }
