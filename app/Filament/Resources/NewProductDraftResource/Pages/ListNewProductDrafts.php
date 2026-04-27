@@ -53,8 +53,30 @@ class ListNewProductDrafts extends ListRecords
 
     public function getTabs(): array
     {
+        $reportCounts = $this->reportTabCounts();
+
         $tabs = [
             'all' => Tab::make('All'),
+            'missing_related_products' => Tab::make('Missing Siblings + Complementary')
+                ->badge((string) $reportCounts['missing_related_products'])
+                ->badgeColor($reportCounts['missing_related_products'] > 0 ? 'warning' : 'gray')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingRelatedProductsReportFilter($query)),
+            'missing_seo' => Tab::make('Missing SEO')
+                ->badge((string) $reportCounts['missing_seo'])
+                ->badgeColor($reportCounts['missing_seo'] > 0 ? 'warning' : 'gray')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSeoReportFilter($query)),
+            'missing_uvp' => Tab::make('Missing UVP')
+                ->badge((string) $reportCounts['missing_uvp'])
+                ->badgeColor($reportCounts['missing_uvp'] > 0 ? 'warning' : 'gray')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingUvpReportFilter($query)),
+            'missing_siblings' => Tab::make('Missing Siblings')
+                ->badge((string) $reportCounts['missing_siblings'])
+                ->badgeColor($reportCounts['missing_siblings'] > 0 ? 'warning' : 'gray')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter($query)),
+            'missing_complementary' => Tab::make('Missing Complementary')
+                ->badge((string) $reportCounts['missing_complementary'])
+                ->badgeColor($reportCounts['missing_complementary'] > 0 ? 'warning' : 'gray')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingComplementaryProductsReportFilter($query)),
         ];
 
         foreach ($this->resolvedStatusTabs() as $key => $label) {
@@ -63,6 +85,20 @@ class ListNewProductDrafts extends ListRecords
         }
 
         return $tabs;
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function reportTabCounts(): array
+    {
+        return [
+            'missing_related_products' => NewProductDraftResource::applyMissingRelatedProductsReportFilter(NewProductDraft::query())->count(),
+            'missing_seo' => NewProductDraftResource::applyMissingSeoReportFilter(NewProductDraft::query())->count(),
+            'missing_uvp' => NewProductDraftResource::applyMissingUvpReportFilter(NewProductDraft::query())->count(),
+            'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(NewProductDraft::query())->count(),
+            'missing_complementary' => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(NewProductDraft::query())->count(),
+        ];
     }
 
     /**

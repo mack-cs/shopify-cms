@@ -81,6 +81,7 @@ final class ProductShopifyUpdater
     public function __construct(
         private readonly ShopifyApiClient $client,
         private readonly ProductHandleService $handleService,
+        private readonly ProductPartialApprovalService $partialApprovalService,
     ) {}
 
     /**
@@ -139,13 +140,44 @@ final class ProductShopifyUpdater
                 continue;
             }
 
+            $effectiveScopes = $resolvedScopes;
+            $effectiveCoreFields = $resolvedCoreFields;
+
             if (!$product->isApprovedByTwo()) {
+                if (!$this->partialApprovalService->isActiveProduct($product)) {
+                    $skippedNotApproved++;
+                    continue;
+                }
+
+                $allowed = $this->partialApprovalService->allowedSelections($product, $resolvedScopes, $resolvedCoreFields);
+                $effectiveScopes = $allowed['scopes'];
+                $effectiveCoreFields = $allowed['core_fields'];
+
+                if ($effectiveScopes === []) {
+                    $skippedNotApproved++;
+                    continue;
+                }
+
+                if (in_array(self::SYNC_SCOPE_PRODUCT, $effectiveScopes, true) && $effectiveCoreFields === []) {
+                    $effectiveScopes = array_values(array_filter(
+                        $effectiveScopes,
+                        fn (string $scope): bool => $scope !== self::SYNC_SCOPE_PRODUCT
+                    ));
+                }
+
+                if ($effectiveScopes === []) {
+                    $skippedNotApproved++;
+                    continue;
+                }
+            }
+
+            if (in_array(self::SYNC_SCOPE_PRODUCT, $effectiveScopes, true) && empty($effectiveCoreFields)) {
                 $skippedNotApproved++;
                 continue;
             }
 
             try {
-                $warnings = array_merge($warnings, $this->updateProduct($product, $resolvedScopes, $resolvedCoreFields));
+                $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
                 $updated++;
                 $updatedProductIds[] = $product->id;
             } catch (\Throwable $e) {

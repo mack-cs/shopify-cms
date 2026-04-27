@@ -100,6 +100,11 @@ class Product extends Model
         return $this->hasMany(Approval::class);
     }
 
+    public function partialApprovalRequests(): HasMany
+    {
+        return $this->hasMany(ProductPartialApprovalRequest::class);
+    }
+
     public function approvalsForCurrentVersion(): HasMany
     {
         return $this->approvals()->where('approval_version', $this->approval_version);

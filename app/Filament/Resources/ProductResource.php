@@ -12,6 +12,7 @@ use App\Models\Approval;
 use App\Models\DeletionRequest;
 use App\Models\Image;
 use App\Models\Import;
+use App\Models\ProductPartialApprovalRequest;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
@@ -43,6 +44,7 @@ use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Filters\Filter;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Actions\DeleteBulkAction;
@@ -62,6 +64,7 @@ use App\Services\Normalizer;
 use App\Services\NewProductDraftSeeder;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
+use App\Services\ProductPartialApprovalService;
 use App\Models\Tag;
 use App\Models\Color;
 use App\Models\DropdownOption;
@@ -1027,6 +1030,16 @@ class ProductResource extends Resource
                     default => 'gray',
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('partial_approval_status')
+                ->label('Partial Approval')
+                ->state(fn (Product $record): string => self::partialApprovalStatusLabel($record))
+                ->badge()
+                ->color(fn (string $state): string => match (true) {
+                    str_starts_with($state, 'Pending') => 'warning',
+                    str_starts_with($state, 'Approved') => 'success',
+                    default => 'gray',
+                })
+                ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('approved')
                 ->label('Approved')
                 ->state(fn (Product $record) => $record->isApprovedByTwo())
@@ -1084,6 +1097,7 @@ class ProductResource extends Resource
                 }),
             SelectFilter::make('collection')
                 ->label('Collection')
+                ->multiple()
                 ->searchable()
                 ->preload()
                 ->options(fn () => DropdownOption::query()
@@ -1094,34 +1108,56 @@ class ProductResource extends Resource
                     ->pluck('collection_style', 'collection_style')
                     ->all())
                 ->query(function (Builder $query, array $data): Builder {
-                    $collection = $data['value'] ?? null;
-                    if (!is_string($collection) || trim($collection) === '') {
+                    $collections = $data['values'] ?? [];
+                    if (!is_array($collections) || empty($collections)) {
                         return $query;
                     }
 
-                    $tagsRow = DropdownOption::query()
-                        ->where('collection_style', $collection)
+                    $collections = array_values(array_filter(array_map(
+                        fn ($value): string => trim((string) $value),
+                        $collections
+                    )));
+
+                    if ($collections === []) {
+                        return $query;
+                    }
+
+                    $collectionTags = DropdownOption::query()
+                        ->whereIn('collection_style', $collections)
                         ->whereNotNull('collection_tag_primary')
-                        ->select(['collection_tag_primary', 'collection_tag_secondary'])
-                        ->first();
+                        ->get(['collection_style', 'collection_tag_primary', 'collection_tag_secondary'])
+                        ->mapWithKeys(function (DropdownOption $option): array {
+                            $tags = array_values(array_filter([
+                                $option->collection_tag_primary,
+                                $option->collection_tag_secondary,
+                            ], fn (?string $tag): bool => $tag !== null && trim($tag) !== ''));
 
-                    if (!$tagsRow) {
+                            return [trim((string) $option->collection_style) => $tags];
+                        })
+                        ->all();
+
+                    if ($collectionTags === []) {
                         return $query;
                     }
 
-                    $tags = array_filter([
-                        $tagsRow->collection_tag_primary,
-                        $tagsRow->collection_tag_secondary,
-                    ], fn (?string $tag): bool => $tag !== null && trim($tag) !== '');
+                    return $query->where(function (Builder $sub) use ($collections, $collectionTags): void {
+                        foreach ($collections as $collection) {
+                            $tags = $collectionTags[$collection] ?? [];
+                            if ($tags === []) {
+                                continue;
+                            }
 
-                    foreach ($tags as $tag) {
-                        $query->whereRaw(
-                            "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
-                            [$tag]
-                        );
-                    }
+                            $sub->orWhere(function (Builder $tagQuery) use ($tags): void {
+                                foreach ($tags as $tag) {
+                                    $tagQuery->whereRaw(
+                                        "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
+                                        [$tag]
+                                    );
+                                }
+                            });
+                        }
+                    });
 
-                    return $query;
                 }),
             SelectFilter::make('color_string')
                 ->label('Colors')
@@ -1172,8 +1208,31 @@ class ProductResource extends Resource
                 ),
             TernaryFilter::make('is_bundle')
                 ->label('Bundles'),
+            TernaryFilter::make('in_new_products')
+                ->label('In New Products')
+                ->queries(
+                    true: fn (Builder $query): Builder => $query->whereExists(function ($sub): void {
+                        $sub->selectRaw('1')
+                            ->from('new_product_drafts')
+                            ->whereColumn('new_product_drafts.handle', 'products.handle');
+                    }),
+                    false: fn (Builder $query): Builder => $query->whereNotExists(function ($sub): void {
+                        $sub->selectRaw('1')
+                            ->from('new_product_drafts')
+                            ->whereColumn('new_product_drafts.handle', 'products.handle');
+                    })
+                ),
+            Filter::make('missing_seo_information')
+                ->label('Missing SEO Info')
+                ->query(fn (Builder $query): Builder => self::applyMissingSeoInformationFilter($query)),
             TernaryFilter::make('has_errors')
                 ->label('Errors'),
+            Filter::make('awaiting_partial_approval')
+                ->label('Awaiting Partial Approval')
+                ->query(fn (Builder $query): Builder => $query->whereHas('partialApprovalRequests', function (Builder $sub): void {
+                    $sub->whereColumn('approval_version', 'products.approval_version')
+                        ->where('status', ProductPartialApprovalRequest::STATUS_PENDING);
+                })),
         ])->actions([
             Action::make('approve')
                 ->label('Approve')
@@ -1298,7 +1357,7 @@ class ProductResource extends Resource
 
                         self::sendNotification(Notification::make()
                             ->title('Shopify sync queued')
-                            ->body("Queued {$selectedCount} selected product(s). Only approved products will be synced.")
+                            ->body("Queued {$selectedCount} selected product(s). Active products will sync only fully approved or partially approved fields.")
                             ->success()
                         );
                     })
@@ -1384,7 +1443,7 @@ class ProductResource extends Resource
                             ->required()
                             ->live()
                             ->columns(2)
-                            ->helperText('Only the selected fields will be pushed to Shopify. Products still need 2 approvals.'),
+                            ->helperText('Only the selected fields will be pushed to Shopify. Active products can sync with approved partial fields; non-active products still need the existing full approval workflow.'),
                         CheckboxList::make('core_fields')
                             ->label('Product core fields')
                             ->options(ProductShopifyUpdater::coreFieldLabels())
@@ -1443,8 +1502,106 @@ class ProductResource extends Resource
 
                         self::sendNotification(Notification::make()
                             ->title('Partial Shopify sync queued')
-                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary} Only approved products will be synced.")
+                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary} Active products will sync only fully approved or partially approved fields.")
                             ->success()
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
+                BulkAction::make('requestPartialApproval')
+                    ->label('Request Partial Approval')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('warning')
+                    ->form(self::partialApprovalFormSchema())
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records, array $data): void {
+                        $normalized = app(ProductPartialApprovalService::class)->normalizeSelections(
+                            $data['scopes'] ?? [],
+                            $data['core_fields'] ?? [],
+                        );
+
+                        if ($normalized['scopes'] === []) {
+                            self::sendNotification(Notification::make()
+                                ->title('No fields selected')
+                                ->body('Choose at least one field group for partial approval.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $normalized['scopes'], true) && $normalized['core_fields'] === []) {
+                            self::sendNotification(Notification::make()
+                                ->title('No core fields selected')
+                                ->body('Choose at least one product core field or deselect Product core fields.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        $service = app(ProductPartialApprovalService::class);
+                        $summary = $service->request($records, (int) Auth::id(), $normalized['scopes'], $normalized['core_fields']);
+
+                        if (($summary['skipped_invalid'] ?? 0) > 0 && !($data['continue_on_invalid'] ?? false)) {
+                            $sample = collect($summary['invalid_products'])
+                                ->take(5)
+                                ->map(fn (array $item): string => "{$item['title']} (" . implode(', ', $item['errors']) . ")")
+                                ->implode(' | ');
+
+                            self::sendNotification(Notification::make()
+                                ->title('Some selected products failed partial validation')
+                                ->body("{$summary['skipped_invalid']} product(s) have errors in the selected fields. Enable 'Continue and skip invalid products' to continue. {$sample}")
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        $parts = [];
+                        if ($summary['requested'] > 0) {
+                            $parts[] = "Requested {$summary['requested']}.";
+                        }
+                        if ($summary['skipped_inactive'] > 0) {
+                            $parts[] = "Skipped {$summary['skipped_inactive']} inactive products.";
+                        }
+                        if ($summary['skipped_existing'] > 0) {
+                            $parts[] = "Skipped {$summary['skipped_existing']} with an existing pending partial request.";
+                        }
+                        if ($summary['skipped_invalid'] > 0) {
+                            $sample = collect($summary['invalid_products'])
+                                ->take(5)
+                                ->map(fn (array $item): string => "{$item['title']} (" . implode(', ', $item['errors']) . ")")
+                                ->implode(' | ');
+                            $parts[] = "Skipped {$summary['skipped_invalid']} with selected-field errors.";
+                            if ($sample !== '') {
+                                $parts[] = "Examples: {$sample}";
+                            }
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Partial approval request complete')
+                            ->body($parts ? implode(' ', $parts) : 'No partial approvals were requested.')
+                            ->status($summary['requested'] > 0 ? 'success' : 'warning')
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
+                BulkAction::make('approvePartialRequests')
+                    ->label('Approve Partial Requests')
+                    ->icon('heroicon-o-check-badge')
+                    ->color('success')
+                    ->requiresConfirmation()
+                    ->action(function (Collection $records): void {
+                        $summary = app(ProductPartialApprovalService::class)->approve($records, (int) Auth::id());
+
+                        $parts = [];
+                        if ($summary['approved'] > 0) {
+                            $parts[] = "Approved {$summary['approved']} partial request(s).";
+                        }
+                        if ($summary['skipped'] > 0) {
+                            $parts[] = "Skipped {$summary['skipped']} with no pending request or where you are the requester.";
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Partial approval complete')
+                            ->body($parts ? implode(' ', $parts) : 'No partial approvals were recorded.')
+                            ->status($summary['approved'] > 0 ? 'success' : 'warning')
                         );
                     })
                     ->deselectRecordsAfterCompletion(),
@@ -1607,6 +1764,33 @@ class ProductResource extends Resource
         AdminNotification::send($notification);
     }
 
+    private static function partialApprovalFormSchema(): array
+    {
+        return [
+            CheckboxList::make('scopes')
+                ->label('Fields to request approval for')
+                ->options(ProductShopifyUpdater::syncScopeLabels())
+                ->default([ProductShopifyUpdater::SYNC_SCOPE_SEO])
+                ->required()
+                ->live()
+                ->columns(2)
+                ->helperText('Partial approval applies only to active products. Non-active products still need the existing full approval workflow.'),
+            CheckboxList::make('core_fields')
+                ->label('Product core fields')
+                ->options(ProductShopifyUpdater::coreFieldLabels())
+                ->default(ProductShopifyUpdater::defaultCoreFields())
+                ->columns(2)
+                ->visible(fn (Get $get): bool => in_array(
+                    ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
+                    array_values(array_filter($get('scopes') ?? [], 'is_string')),
+                    true
+                )),
+            Checkbox::make('continue_on_invalid')
+                ->label('Continue and skip invalid products')
+                ->helperText('If some selected products have errors in the selected fields, they will be skipped instead of blocking the request.'),
+        ];
+    }
+
     private static function currentDeletionRequest(Product $record): ?DeletionRequest
     {
         return app(DeletionRequestWorkflowService::class)->openRequestFor($record);
@@ -1633,6 +1817,29 @@ class ProductResource extends Resource
         }
 
         return 'Pending ' . $request->approvalCount() . '/2';
+    }
+
+    private static function partialApprovalStatusLabel(Product $record): string
+    {
+        $pending = $record->partialApprovalRequests()
+            ->where('approval_version', $record->approval_version)
+            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+            ->count();
+
+        if ($pending > 0) {
+            return "Pending {$pending}";
+        }
+
+        $approved = $record->partialApprovalRequests()
+            ->where('approval_version', $record->approval_version)
+            ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+            ->count();
+
+        if ($approved > 0) {
+            return "Approved {$approved}";
+        }
+
+        return 'None';
     }
 
     public static function getPages(): array
@@ -1759,6 +1966,19 @@ class ProductResource extends Resource
             ->first();
 
         return (string) ($row?->get($header, '') ?? '');
+    }
+
+    public static function applyMissingSeoInformationFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $sub): void {
+            $sub->where(function (Builder $seo): void {
+                $seo->whereNull('seo_title')
+                    ->orWhere('seo_title', '');
+            })->where(function (Builder $seo): void {
+                $seo->whereNull('seo_description')
+                    ->orWhere('seo_description', '');
+            });
+        });
     }
 
     private static function sortProductsByApprovalCount(Builder $query, string $direction): Builder

@@ -57,6 +57,7 @@ use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
@@ -81,6 +82,59 @@ class NewProductDraftResource extends Resource
     private static function defaultBatch(): string
     {
         return 'batch' . now()->format('Ymd');
+    }
+
+    public static function applyMissingSeoReportFilter(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $sub): void {
+                $sub->whereDoesntHave('styleProfiles', function (Builder $styleProfileQuery): void {
+                    $styleProfileQuery->whereNotNull('draft_seo_title')
+                        ->where('draft_seo_title', '!=', '');
+                })->whereDoesntHave('product', function (Builder $productQuery): void {
+                    $productQuery->whereNotNull('seo_title')
+                        ->where('seo_title', '!=', '');
+                });
+            })
+            ->where(function (Builder $sub): void {
+                $sub->whereDoesntHave('styleProfiles', function (Builder $styleProfileQuery): void {
+                    $styleProfileQuery->whereNotNull('draft_seo_description')
+                        ->where('draft_seo_description', '!=', '');
+                })->whereDoesntHave('product', function (Builder $productQuery): void {
+                    $productQuery->whereNotNull('seo_description')
+                        ->where('seo_description', '!=', '');
+                });
+            });
+    }
+
+    public static function applyMissingUvpReportFilter(Builder $query): Builder
+    {
+        return self::applyMissingDraftStringColumnReportFilter($query, 'uvp_short_paragraph');
+    }
+
+    public static function applyMissingSiblingsReportFilter(Builder $query): Builder
+    {
+        return self::applyMissingDraftStringColumnReportFilter($query, 'siblings');
+    }
+
+    public static function applyMissingComplementaryProductsReportFilter(Builder $query): Builder
+    {
+        return self::applyMissingDraftStringColumnReportFilter($query, 'complementary_products');
+    }
+
+    public static function applyMissingRelatedProductsReportFilter(Builder $query): Builder
+    {
+        return self::applyMissingComplementaryProductsReportFilter(
+            self::applyMissingSiblingsReportFilter($query)
+        );
+    }
+
+    private static function applyMissingDraftStringColumnReportFilter(Builder $query, string $column): Builder
+    {
+        return $query->where(function (Builder $sub) use ($column): void {
+            $sub->whereNull($column)
+                ->orWhere($column, '');
+        });
     }
 
     public static function form(Forms\Form $form): Forms\Form

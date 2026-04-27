@@ -33,7 +33,8 @@ class RequiredFieldResource extends Resource
             Forms\Components\TextInput::make('scope')->disabled(),
             Forms\Components\TextInput::make('source')->disabled(),
             Forms\Components\TextInput::make('attribute')->disabled(),
-            Forms\Components\Toggle::make('required'),
+            Forms\Components\Toggle::make('required')
+                ->disabled(fn (): bool => !self::canManageRequiredFlag()),
             Forms\Components\Toggle::make('bulk_editable')
                 ->label('Bulk editable')
                 ->disabled(fn (?RequiredField $record): bool => $record ? self::isBulkEditLocked($record) : false),
@@ -56,7 +57,9 @@ class RequiredFieldResource extends Resource
                 TextColumn::make('label')->searchable()->wrap(),
                 TextColumn::make('source')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('attribute')->toggleable(isToggledHiddenByDefault: true),
-                ToggleColumn::make('required')->label('Required'),
+                ToggleColumn::make('required')
+                    ->label('Required')
+                    ->disabled(fn (): bool => !self::canManageRequiredFlag()),
                 ToggleColumn::make('bulk_editable')
                     ->label('Bulk editable')
                     ->disabled(fn (RequiredField $record): bool => self::isBulkEditLocked($record)),
@@ -154,5 +157,10 @@ class RequiredFieldResource extends Resource
     private static function isQuickEditLocked(RequiredField $record): bool
     {
         return $record->source === 'product' && $record->attribute === 'handle';
+    }
+
+    private static function canManageRequiredFlag(): bool
+    {
+        return Auth::user()?->hasRole(\App\Enums\RolesEnum::SuperAdmin->value) ?? false;
     }
 }
