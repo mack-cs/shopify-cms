@@ -5,16 +5,29 @@ namespace App\Services;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 
 class ProductPartialApprovalService
 {
+    public function actionableRequestsQuery(int $userId): Builder
+    {
+        return ProductPartialApprovalRequest::query()
+            ->with(['product', 'requester'])
+            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+            ->where('requested_by', '!=', $userId)
+            ->whereHas('product', function (Builder $query): void {
+                $query->whereColumn('products.approval_version', 'product_partial_approval_requests.approval_version');
+            });
+    }
+
     /**
      * @param array<int, string>|null $scopes
      * @param array<int, string>|null $coreFields
+     * @param array<int, string>|null $metafieldFields
      * @return array{scopes:array<int, string>,core_fields:array<int, string>}
      */
-    public function normalizeSelections(?array $scopes, ?array $coreFields): array
+    public function normalizeSelections(?array $scopes, ?array $coreFields, ?array $metafieldFields = null): array
     {
         $normalizedScopes = array_values(array_unique(array_filter(array_map(
             'strval',
@@ -24,15 +37,24 @@ class ProductPartialApprovalService
         $normalizedCoreFields = array_values(array_unique(array_filter(array_map(
             'strval',
             $coreFields ?? []
-        ), fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableCoreFields(), true))));
+        ), fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableProductCoreFields(), true))));
+
+        $normalizedMetafieldFields = array_values(array_unique(array_filter(array_map(
+            'strval',
+            $metafieldFields ?? []
+        ), fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true))));
 
         if (!in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $normalizedScopes, true)) {
             $normalizedCoreFields = [];
         }
 
+        if (!in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $normalizedScopes, true)) {
+            $normalizedMetafieldFields = [];
+        }
+
         return [
             'scopes' => $normalizedScopes,
-            'core_fields' => $normalizedCoreFields,
+            'core_fields' => array_values(array_unique(array_merge($normalizedCoreFields, $normalizedMetafieldFields))),
         ];
     }
 
@@ -166,6 +188,51 @@ class ProductPartialApprovalService
     }
 
     /**
+     * @param Collection<int, ProductPartialApprovalRequest> $requests
+     * @return array{approved:int,skipped:int}
+     */
+    public function approveRequests(Collection $requests, int $userId): array
+    {
+        $approved = 0;
+        $skipped = 0;
+
+        foreach ($requests as $request) {
+            if (!$request instanceof ProductPartialApprovalRequest) {
+                continue;
+            }
+
+            if ($request->status !== ProductPartialApprovalRequest::STATUS_PENDING) {
+                $skipped++;
+                continue;
+            }
+
+            $product = $request->product;
+            if (!$product instanceof Product || (int) $request->approval_version !== (int) ($product->approval_version ?? 0)) {
+                $skipped++;
+                continue;
+            }
+
+            if ((int) $request->requested_by === $userId) {
+                $skipped++;
+                continue;
+            }
+
+            $request->forceFill([
+                'status' => ProductPartialApprovalRequest::STATUS_APPROVED,
+                'approved_by' => $userId,
+                'approved_at' => now(),
+            ])->save();
+
+            $approved++;
+        }
+
+        return [
+            'approved' => $approved,
+            'skipped' => $skipped,
+        ];
+    }
+
+    /**
      * @param array<int, string> $requestedScopes
      * @param array<int, string> $requestedCoreFields
      * @return array{scopes:array<int,string>,core_fields:array<int,string>}
@@ -225,6 +292,46 @@ class ProductPartialApprovalService
      * @param array<int, string> $coreFields
      * @return array<int, string>
      */
+    public function requestFieldLabels(array $scopes, array $coreFields): array
+    {
+        $labels = [];
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)) {
+            foreach ($coreFields as $field) {
+                if (in_array($field, ProductShopifyUpdater::availableProductCoreFields(), true)) {
+                    $labels[] = ProductShopifyUpdater::productCoreFieldLabels()[$field] ?? $field;
+                }
+            }
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_SEO, $scopes, true)) {
+            $labels[] = 'SEO title and description';
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true)) {
+            foreach ($coreFields as $field) {
+                if (in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true)) {
+                    $labels[] = ProductShopifyUpdater::metafieldFieldLabels()[$field] ?? $field;
+                }
+            }
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_VARIANTS, $scopes, true)) {
+            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_VARIANTS];
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {
+            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES];
+        }
+
+        return array_values(array_unique(array_filter(array_map('strval', $labels))));
+    }
+
+    /**
+     * @param array<int, string> $scopes
+     * @param array<int, string> $coreFields
+     * @return array<int, string>
+     */
     public function selectedFieldErrors(Product $product, array $scopes, array $coreFields): array
     {
         $errorFields = $product->error_fields;
@@ -273,6 +380,9 @@ class ProductPartialApprovalService
             ProductShopifyUpdater::CORE_FIELD_BRACELET_DESIGN => HeaderStore::BRACELET_DESIGN,
             ProductShopifyUpdater::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
             ProductShopifyUpdater::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
+            ProductShopifyUpdater::CORE_FIELD_SIBLINGS => HeaderStore::SIBLINGS,
+            ProductShopifyUpdater::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
+            ProductShopifyUpdater::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
             ProductShopifyUpdater::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
 
@@ -304,12 +414,6 @@ class ProductPartialApprovalService
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {
             foreach ($this->requiredLabelsForSource('image') as $label) {
-                $labels[] = $label;
-            }
-        }
-
-        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true)) {
-            foreach ($this->requiredLabelsForSource('row') as $label) {
                 $labels[] = $label;
             }
         }

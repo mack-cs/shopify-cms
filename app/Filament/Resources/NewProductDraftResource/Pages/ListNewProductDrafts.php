@@ -57,31 +57,53 @@ class ListNewProductDrafts extends ListRecords
 
         $tabs = [
             'all' => Tab::make('All'),
-            'missing_related_products' => Tab::make('Missing Siblings + Complementary')
-                ->badge((string) $reportCounts['missing_related_products'])
-                ->badgeColor($reportCounts['missing_related_products'] > 0 ? 'warning' : 'gray')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingRelatedProductsReportFilter($query)),
-            'missing_seo' => Tab::make('Missing SEO')
-                ->badge((string) $reportCounts['missing_seo'])
-                ->badgeColor($reportCounts['missing_seo'] > 0 ? 'warning' : 'gray')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSeoReportFilter($query)),
-            'missing_uvp' => Tab::make('Missing UVP')
-                ->badge((string) $reportCounts['missing_uvp'])
-                ->badgeColor($reportCounts['missing_uvp'] > 0 ? 'warning' : 'gray')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingUvpReportFilter($query)),
-            'missing_siblings' => Tab::make('Missing Siblings')
-                ->badge((string) $reportCounts['missing_siblings'])
-                ->badgeColor($reportCounts['missing_siblings'] > 0 ? 'warning' : 'gray')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter($query)),
-            'missing_complementary' => Tab::make('Missing Complementary')
-                ->badge((string) $reportCounts['missing_complementary'])
-                ->badgeColor($reportCounts['missing_complementary'] > 0 ? 'warning' : 'gray')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingComplementaryProductsReportFilter($query)),
         ];
 
         foreach ($this->resolvedStatusTabs() as $key => $label) {
             $tabs[$key] = Tab::make($label)
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
+        }
+
+        if ($reportCounts['errors'] > 0) {
+            $tabs['errors'] = Tab::make('Errors')
+                ->badge((string) $reportCounts['errors'])
+                ->badgeColor('danger')
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereHas('product', fn (Builder $productQuery): Builder => $productQuery->where('has_errors', true)));
+        }
+
+        if ($reportCounts['missing_related_products'] > 0) {
+            $tabs['missing_related_products'] = Tab::make('Missing Siblings + Complementary')
+                ->badge((string) $reportCounts['missing_related_products'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingRelatedProductsReportFilter($query));
+        }
+
+        if ($reportCounts['missing_seo'] > 0) {
+            $tabs['missing_seo'] = Tab::make('Missing SEO')
+                ->badge((string) $reportCounts['missing_seo'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSeoReportFilter($query));
+        }
+
+        if ($reportCounts['missing_uvp'] > 0) {
+            $tabs['missing_uvp'] = Tab::make('Missing UVP')
+                ->badge((string) $reportCounts['missing_uvp'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingUvpReportFilter($query));
+        }
+
+        if ($reportCounts['missing_siblings'] > 0) {
+            $tabs['missing_siblings'] = Tab::make('Missing Siblings')
+                ->badge((string) $reportCounts['missing_siblings'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter($query));
+        }
+
+        if ($reportCounts['missing_complementary'] > 0) {
+            $tabs['missing_complementary'] = Tab::make('Missing Complementary')
+                ->badge((string) $reportCounts['missing_complementary'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingComplementaryProductsReportFilter($query));
         }
 
         return $tabs;
@@ -93,6 +115,9 @@ class ListNewProductDrafts extends ListRecords
     private function reportTabCounts(): array
     {
         return [
+            'errors' => NewProductDraft::query()
+                ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery->where('has_errors', true))
+                ->count(),
             'missing_related_products' => NewProductDraftResource::applyMissingRelatedProductsReportFilter(NewProductDraft::query())->count(),
             'missing_seo' => NewProductDraftResource::applyMissingSeoReportFilter(NewProductDraft::query())->count(),
             'missing_uvp' => NewProductDraftResource::applyMissingUvpReportFilter(NewProductDraft::query())->count(),
@@ -106,7 +131,7 @@ class ListNewProductDrafts extends ListRecords
      */
     private function resolvedStatusTabs(): array
     {
-        $preferred = ['active', 'draft', 'archived'];
+        $preferred = ['active', 'draft', 'archived', 'unlisted'];
         $resolved = [];
 
         $configuredStatuses = Status::query()

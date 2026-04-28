@@ -1446,17 +1446,34 @@ class ProductResource extends Resource
                             ->helperText('Only the selected fields will be pushed to Shopify. Active products can sync with approved partial fields; non-active products still need the existing full approval workflow.'),
                         CheckboxList::make('core_fields')
                             ->label('Product core fields')
-                            ->options(ProductShopifyUpdater::coreFieldLabels())
-                            ->default(ProductShopifyUpdater::defaultCoreFields())
-                            ->columns(2)
+                            ->options(ProductShopifyUpdater::productCoreFieldLabels())
+                            ->default(array_values(array_intersect(
+                                ProductShopifyUpdater::defaultCoreFields(),
+                                ProductShopifyUpdater::availableProductCoreFields()
+                            )))
+                            ->columns(5)
                             ->visible(fn (Get $get): bool => in_array(
                                 ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
                                 array_values(array_filter($get('scopes') ?? [], 'is_string')),
                                 true
                             ))
                             ->helperText('Choose the exact product columns to push when Product core fields is selected. URL changes are handled separately through Apply Approved URLs.'),
+                        CheckboxList::make('metafield_fields')
+                            ->label('Metafields')
+                            ->options(ProductShopifyUpdater::metafieldFieldLabels())
+                            ->columns(5)
+                            ->visible(fn (Get $get): bool => in_array(
+                                ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS,
+                                array_values(array_filter($get('scopes') ?? [], 'is_string')),
+                                true
+                            ))
+                            ->helperText('Choose the exact metafields to sync when Metafields is selected.'),
                     ])
                     ->requiresConfirmation()
+                    ->modalWidth('7xl')
+                    ->modalFooterActionsAlignment(\Filament\Support\Enums\Alignment::Start)
+                    ->modalSubmitAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
+                    ->modalCancelAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
                     ->action(function (Collection $records, array $data): void {
                         $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
                         $selectedCount = count($ids);
@@ -1479,6 +1496,11 @@ class ProductResource extends Resource
                             array_filter($data['core_fields'] ?? [], fn ($field): bool => is_string($field) && $field !== '')
                         )));
 
+                        $metafieldFields = array_values(array_unique(array_map(
+                            'strval',
+                            array_filter($data['metafield_fields'] ?? [], fn ($field): bool => is_string($field) && $field !== '')
+                        )));
+
                         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true) && empty($coreFields)) {
                             self::sendNotification(Notification::make()
                                 ->title('No core fields selected')
@@ -1488,7 +1510,18 @@ class ProductResource extends Resource
                             return;
                         }
 
-                        \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id(), $scopes, $coreFields);
+                        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true) && empty($metafieldFields)) {
+                            self::sendNotification(Notification::make()
+                                ->title('No metafields selected')
+                                ->body('Choose at least one metafield or deselect Metafields.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        $selectedFields = array_values(array_unique(array_merge($coreFields, $metafieldFields)));
+
+                        \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id(), $scopes, $selectedFields);
 
                         $scopeSummary = collect($scopes)
                             ->map(fn (string $scope): string => ProductShopifyUpdater::syncScopeLabels()[$scope] ?? $scope)
@@ -1496,13 +1529,19 @@ class ProductResource extends Resource
 
                         $coreSummary = in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)
                             ? ' Core fields: ' . collect($coreFields)
-                                ->map(fn (string $field): string => ProductShopifyUpdater::coreFieldLabels()[$field] ?? $field)
+                                ->map(fn (string $field): string => ProductShopifyUpdater::productCoreFieldLabels()[$field] ?? $field)
+                                ->implode(', ') . '.'
+                            : '';
+
+                        $metafieldSummary = in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true)
+                            ? ' Metafields: ' . collect($metafieldFields)
+                                ->map(fn (string $field): string => ProductShopifyUpdater::metafieldFieldLabels()[$field] ?? $field)
                                 ->implode(', ') . '.'
                             : '';
 
                         self::sendNotification(Notification::make()
                             ->title('Partial Shopify sync queued')
-                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary} Active products will sync only fully approved or partially approved fields.")
+                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary}{$metafieldSummary} Active products will sync only fully approved or partially approved fields.")
                             ->success()
                         );
                     })
@@ -1513,10 +1552,15 @@ class ProductResource extends Resource
                     ->color('warning')
                     ->form(self::partialApprovalFormSchema())
                     ->requiresConfirmation()
+                    ->modalWidth('7xl')
+                    ->modalFooterActionsAlignment(\Filament\Support\Enums\Alignment::Start)
+                    ->modalSubmitAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
+                    ->modalCancelAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
                     ->action(function (Collection $records, array $data): void {
                         $normalized = app(ProductPartialApprovalService::class)->normalizeSelections(
                             $data['scopes'] ?? [],
                             $data['core_fields'] ?? [],
+                            $data['metafield_fields'] ?? [],
                         );
 
                         if ($normalized['scopes'] === []) {
@@ -1532,6 +1576,18 @@ class ProductResource extends Resource
                             self::sendNotification(Notification::make()
                                 ->title('No core fields selected')
                                 ->body('Choose at least one product core field or deselect Product core fields.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        if (
+                            in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $normalized['scopes'], true)
+                            && empty(array_intersect($normalized['core_fields'], ProductShopifyUpdater::availableMetafieldFields()))
+                        ) {
+                            self::sendNotification(Notification::make()
+                                ->title('No metafields selected')
+                                ->body('Choose at least one metafield or deselect Metafields.')
                                 ->warning()
                             );
                             return;
@@ -1766,6 +1822,11 @@ class ProductResource extends Resource
 
     private static function partialApprovalFormSchema(): array
     {
+        $defaultCoreFields = array_values(array_intersect(
+            ProductShopifyUpdater::defaultCoreFields(),
+            ProductShopifyUpdater::availableProductCoreFields()
+        ));
+
         return [
             CheckboxList::make('scopes')
                 ->label('Fields to request approval for')
@@ -1777,11 +1838,20 @@ class ProductResource extends Resource
                 ->helperText('Partial approval applies only to active products. Non-active products still need the existing full approval workflow.'),
             CheckboxList::make('core_fields')
                 ->label('Product core fields')
-                ->options(ProductShopifyUpdater::coreFieldLabels())
-                ->default(ProductShopifyUpdater::defaultCoreFields())
-                ->columns(2)
+                ->options(ProductShopifyUpdater::productCoreFieldLabels())
+                ->default($defaultCoreFields)
+                ->columns(5)
                 ->visible(fn (Get $get): bool => in_array(
                     ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
+                    array_values(array_filter($get('scopes') ?? [], 'is_string')),
+                    true
+                )),
+            CheckboxList::make('metafield_fields')
+                ->label('Metafields')
+                ->options(ProductShopifyUpdater::metafieldFieldLabels())
+                ->columns(5)
+                ->visible(fn (Get $get): bool => in_array(
+                    ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS,
                     array_values(array_filter($get('scopes') ?? [], 'is_string')),
                     true
                 )),

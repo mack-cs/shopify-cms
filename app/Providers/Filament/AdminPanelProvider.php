@@ -3,6 +3,7 @@
 namespace App\Providers\Filament;
 
 use App\Http\Controllers\DeleteApprovalAlertController;
+use App\Http\Controllers\PartialApprovalAlertController;
 use App\Http\Middleware\AuthenticatePanelUser;
 use App\Http\Controllers\Auth\RedirectToLoginController;
 use Filament\Http\Controllers\Auth\LogoutController;
@@ -52,6 +53,8 @@ class AdminPanelProvider extends PanelProvider
                     ->name('delete-approval-alerts.approve');
                 Route::post('/delete-approval-alerts/{deletionRequest}/reject', [DeleteApprovalAlertController::class, 'reject'])
                     ->name('delete-approval-alerts.reject');
+                Route::get('/partial-approval-alerts', PartialApprovalAlertController::class)
+                    ->name('partial-approval-alerts');
             })
             ->colors([
                 'primary' => Color::Amber,
@@ -67,6 +70,10 @@ class AdminPanelProvider extends PanelProvider
             ->renderHook(
                 PanelsRenderHook::SCRIPTS_AFTER,
                 fn (): string => view('filament.partials.delete-approval-alert')->render(),
+            )
+            ->renderHook(
+                PanelsRenderHook::SCRIPTS_AFTER,
+                fn (): string => view('filament.partials.partial-approval-alert')->render(),
             )
             ->databaseNotifications()
             ->databaseNotificationsPolling('10s')

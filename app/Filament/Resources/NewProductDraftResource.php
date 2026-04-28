@@ -3185,6 +3185,21 @@ class NewProductDraftResource extends Resource
                         }),
                         blank: fn (Builder $query): Builder => $query,
                     ),
+                TernaryFilter::make('is_bundle')
+                    ->label('Bundles')
+                    ->placeholder('All')
+                    ->trueLabel('Bundles')
+                    ->falseLabel('Non-bundles')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery->where('is_bundle', true)),
+                        false: fn (Builder $query): Builder => $query->where(function (Builder $subQuery): void {
+                            $subQuery
+                                ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery->where('is_bundle', false))
+                                ->orWhereDoesntHave('product');
+                        }),
+                        blank: fn (Builder $query): Builder => $query,
+                    ),
                 TernaryFilter::make('has_errors')
                     ->label('Errors')
                     ->queries(

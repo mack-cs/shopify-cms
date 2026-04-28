@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\ProductResource\RelationManagers;
 
 use App\Models\Image;
+use App\Models\Product;
 use App\Models\Variant;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
@@ -161,6 +162,7 @@ class VariantsRelationManager extends RelationManager
                     /** @var Variant $variant */
                     $variant = $this->getRelationship()->create($data);
                     $this->syncVariantImage($variant, $imagePayload);
+                    $this->bumpOwnerApprovalVersion();
 
                     return $variant;
                 }),
@@ -170,6 +172,7 @@ class VariantsRelationManager extends RelationManager
                     $imagePayload = $this->pullVariantImagePayload($data);
                     $record->update($data);
                     $this->syncVariantImage($record, $imagePayload);
+                    $this->bumpOwnerApprovalVersion();
 
                     return $record;
                 }),
@@ -184,6 +187,8 @@ class VariantsRelationManager extends RelationManager
                         'sync_state' => Variant::SYNC_STATE_LOCAL_DELETED,
                         'local_dirty' => true,
                     ]);
+
+                    $this->bumpOwnerApprovalVersion();
                 }),
         ])->modifyQueryUsing(fn ($query) => $query->with('image'));
     }
@@ -324,5 +329,20 @@ class VariantsRelationManager extends RelationManager
         $trimmed = trim((string) $value);
 
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private function bumpOwnerApprovalVersion(): void
+    {
+        /** @var Product|null $product */
+        $product = $this->getOwnerRecord();
+        if (!$product) {
+            return;
+        }
+
+        Product::withoutEvents(function () use ($product): void {
+            $product->forceFill([
+                'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
+            ])->save();
+        });
     }
 }

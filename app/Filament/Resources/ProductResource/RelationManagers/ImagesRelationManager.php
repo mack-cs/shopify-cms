@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductResource\RelationManagers;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Models\Image;
+use App\Models\Product;
 use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
 use Filament\Forms;
@@ -172,7 +173,10 @@ class ImagesRelationManager extends RelationManager
                 ]),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
-                ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),
+                ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
+                ->after(function (): void {
+                    $this->bumpOwnerApprovalVersion();
+                }),
             Tables\Actions\Action::make('backupImages')
                 ->label('Queue Image Backup')
                 ->icon('heroicon-o-arrow-down-tray')
@@ -230,11 +234,15 @@ class ImagesRelationManager extends RelationManager
                 }),
         ])->actions([
             Tables\Actions\EditAction::make()
-                ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data)),
+                ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
+                ->after(function (): void {
+                    $this->bumpOwnerApprovalVersion();
+                }),
             Tables\Actions\DeleteAction::make()
                 ->action(function (Image $record): void {
                     if (blank($record->shopify_id)) {
                         $record->delete();
+                        $this->bumpOwnerApprovalVersion();
                         return;
                     }
 
@@ -242,6 +250,8 @@ class ImagesRelationManager extends RelationManager
                         'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
                         'local_dirty' => true,
                     ]);
+
+                    $this->bumpOwnerApprovalVersion();
                 }),
         ])->bulkActions([
             Tables\Actions\BulkAction::make('syncSelectedImages')
@@ -313,5 +323,20 @@ class ImagesRelationManager extends RelationManager
         $maxPosition = (int) ($this->getOwnerRecord()?->images()->max('position') ?? 0);
 
         return $maxPosition + 1;
+    }
+
+    private function bumpOwnerApprovalVersion(): void
+    {
+        /** @var Product|null $product */
+        $product = $this->getOwnerRecord();
+        if (!$product) {
+            return;
+        }
+
+        Product::withoutEvents(function () use ($product): void {
+            $product->forceFill([
+                'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
+            ])->save();
+        });
     }
 }

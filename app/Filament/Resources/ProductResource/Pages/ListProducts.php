@@ -84,6 +84,16 @@ class ListProducts extends ListRecords
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
         }
 
+        $tabs['approved'] = Tab::make('Approved')
+            ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw(
+                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
+            ));
+
+        $tabs['pending_approval'] = Tab::make('Pending Approval')
+            ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw(
+                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
+            ));
+
         return $tabs;
     }
 

@@ -37,6 +37,9 @@ final class ProductShopifyUpdater
     public const CORE_FIELD_BRACELET_DESIGN = 'bracelet_design';
     public const CORE_FIELD_PATTERN_CATEGORY = 'pattern_category';
     public const CORE_FIELD_PRODUCT_METALS = 'product_metals';
+    public const CORE_FIELD_SIBLINGS = 'siblings';
+    public const CORE_FIELD_COMPLEMENTARY_PRODUCTS = 'complementary_products';
+    public const CORE_FIELD_UVP_SHORT_PARAGRAPH = 'uvp_short_paragraph';
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
 
     /** @var array<string, string> */
@@ -263,6 +266,45 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * @return array<int, string>
+     */
+    public static function availableProductCoreFields(): array
+    {
+        return [
+            self::CORE_FIELD_TITLE,
+            self::CORE_FIELD_VENDOR,
+            self::CORE_FIELD_PRODUCT_TYPE,
+            self::CORE_FIELD_BODY_HTML,
+            self::CORE_FIELD_TAGS,
+            self::CORE_FIELD_STATUS,
+            self::CORE_FIELD_HANDLE,
+            self::CORE_FIELD_CATEGORY,
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function availableMetafieldFields(): array
+    {
+        return [
+            self::CORE_FIELD_COLOR,
+            self::CORE_FIELD_MATERIALS_AND_DIMENSIONS,
+            self::CORE_FIELD_JEWELRY_MATERIAL,
+            self::CORE_FIELD_JEWELRY_TYPE,
+            self::CORE_FIELD_TARGET_GENDER,
+            self::CORE_FIELD_AGE_GROUP,
+            self::CORE_FIELD_BRACELET_DESIGN,
+            self::CORE_FIELD_PATTERN_CATEGORY,
+            self::CORE_FIELD_PRODUCT_METALS,
+            self::CORE_FIELD_SIBLINGS,
+            self::CORE_FIELD_COMPLEMENTARY_PRODUCTS,
+            self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_SEO_DEINDEX,
+        ];
+    }
+
+    /**
      * Default product-field sync excludes handle changes.
      *
      * @return array<int, string>
@@ -298,8 +340,31 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_BRACELET_DESIGN => 'Bracelet design',
             self::CORE_FIELD_PATTERN_CATEGORY => 'Color Style',
             self::CORE_FIELD_PRODUCT_METALS => 'Product metals',
+            self::CORE_FIELD_SIBLINGS => 'Siblings',
+            self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => 'Complementary products',
+            self::CORE_FIELD_UVP_SHORT_PARAGRAPH => 'UVP short paragraph',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function productCoreFieldLabels(): array
+    {
+        $labels = self::coreFieldLabels();
+
+        return array_intersect_key($labels, array_flip(self::availableProductCoreFields()));
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function metafieldFieldLabels(): array
+    {
+        $labels = self::coreFieldLabels();
+
+        return array_intersect_key($labels, array_flip(self::availableMetafieldFields()));
     }
 
     /**
@@ -792,7 +857,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     if (($syncMetafields || !empty($selectedMetafieldHeaders)) && $primaryRow) {
         $metafieldRowData = $primaryData;
 
-        if (!$syncMetafields) {
+        if (!empty($selectedMetafieldHeaders)) {
             $metafieldRowData = [];
             foreach ($selectedMetafieldHeaders as $header) {
                 $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
@@ -5117,6 +5182,9 @@ GQL;
             self::CORE_FIELD_BRACELET_DESIGN => HeaderStore::BRACELET_DESIGN,
             self::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
+            self::CORE_FIELD_SIBLINGS => HeaderStore::SIBLINGS,
+            self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
+            self::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
             self::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
     }
@@ -5147,6 +5215,13 @@ GQL;
             $productValue = $this->nullIfEmpty($product->color_string);
             if ($productValue !== null) {
                 return str_replace(',', ';', $productValue);
+            }
+        }
+
+        if ($header === HeaderStore::UVP_SHORT_PARAGRAPH) {
+            $productValue = $this->nullIfEmpty($product->uvp_short_paragraph);
+            if ($productValue !== null) {
+                return $productValue;
             }
         }
 
