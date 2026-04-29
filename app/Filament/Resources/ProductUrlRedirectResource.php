@@ -280,6 +280,23 @@ class ProductUrlRedirectResource extends Resource
                             'last_error' => null,
                         ])->save();
                     }),
+                Action::make('deleteRecord')
+                    ->label('Delete')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->modalHeading('Delete redirect record')
+                    ->modalDescription('This deletes only the local redirect record from this app. It does not remove the redirect from Shopify.')
+                    ->action(function (ProductUrlRedirect $record): void {
+                        $path = $record->path;
+                        $record->delete();
+
+                        self::sendNotification(Notification::make()
+                            ->title('Redirect record deleted')
+                            ->body("Deleted local redirect record {$path}. Shopify was not changed.")
+                            ->success()
+                        );
+                    }),
             ])
             ->bulkActions([
                 BulkActionGroup::make([
@@ -314,6 +331,36 @@ class ProductUrlRedirectResource extends Resource
                                     'last_error' => null,
                                 ]);
                         }),
+                    BulkAction::make('deleteSelected')
+                        ->label('Delete Selected')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->modalHeading('Delete selected redirect records')
+                        ->modalDescription('This deletes only the selected local redirect records from this app. It does not remove redirects from Shopify.')
+                        ->action(function (Collection $records): void {
+                            $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
+                            $count = count($ids);
+
+                            if ($count === 0) {
+                                self::sendNotification(Notification::make()
+                                    ->title('Nothing deleted')
+                                    ->body('No redirect records were selected.')
+                                    ->warning()
+                                );
+                                return;
+                            }
+
+                            ProductUrlRedirect::query()
+                                ->whereIn('id', $ids)
+                                ->delete();
+
+                            self::sendNotification(Notification::make()
+                                ->title('Redirect records deleted')
+                                ->body("Deleted {$count} local redirect record(s). Shopify was not changed.")
+                                ->success()
+                            );
+                        }),
                 ]),
             ]);
     }
@@ -340,12 +387,12 @@ class ProductUrlRedirectResource extends Resource
 
     public static function canDelete($record): bool
     {
-        return false;
+        return Auth::user()?->can(PermissionEnum::ShopifyManage->value) ?? false;
     }
 
     public static function canDeleteAny(): bool
     {
-        return false;
+        return Auth::user()?->can(PermissionEnum::ShopifyManage->value) ?? false;
     }
 
     public static function getPages(): array
