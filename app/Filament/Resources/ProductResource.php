@@ -35,6 +35,7 @@ use Filament\Forms\Components\Tabs;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\RichEditor;
+use Filament\Forms\Components\DatePicker;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
@@ -1049,6 +1050,43 @@ class ProductResource extends Resource
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
+             Filter::make('recently_edited_today')
+                ->label('Recently Edited Today')
+                ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+            Filter::make('edited_last_7_days')
+                ->label('Edited in Last 7 Days')
+                ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+            Filter::make('pending_changes')
+                ->label('Pending Changes')
+                ->query(fn (Builder $query): Builder => $query->whereRaw(
+                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
+                )),
+            Filter::make('awaiting_approval')
+                ->label('Awaiting Approval')
+                ->query(fn (Builder $query): Builder => $query->whereRaw(
+                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
+                )),
+            Filter::make('awaiting_delete_approval')
+                ->label('Awaiting Delete Approval')
+                ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
+                    $deletionQuery->whereIn('status', ['pending', 'processing']);
+                })),
+            Filter::make('updated_at')
+                ->form([
+                    DatePicker::make('updated_from'),
+                    DatePicker::make('updated_until'),
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when(
+                            $data['updated_from'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '>=', $date),
+                        )
+                        ->when(
+                            $data['updated_until'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '<=', $date),
+                        );
+                }),
             SelectFilter::make('type')
                 ->label('Type')
                 ->options(fn () => Product::query()
@@ -1183,6 +1221,7 @@ class ProductResource extends Resource
                         }
                     });
                 }),
+
             TernaryFilter::make('approved')
                 ->label('Approved')
                 ->queries(
