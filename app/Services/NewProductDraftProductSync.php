@@ -183,6 +183,7 @@ final class NewProductDraftProductSync
             'published' => $draft->published,
             'color_string' => $draft->color_string,
             'uvp_short_paragraph' => $draft->uvp_short_paragraph,
+            'seo_deindex' => $draft->seo_deindex,
             'batch' => $draft->batch,
         ];
 
@@ -301,6 +302,9 @@ final class NewProductDraftProductSync
         $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $draft->sibling_collection, 'sibling_collection', $attributes);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
+        if ($this->shouldSyncDraftAttribute('seo_deindex', $attributes, $draft->seo_deindex)) {
+            $updates[HeaderStore::SEO_DEINDEX] = $draft->seo_deindex ? 'true' : 'false';
+        }
 
         if ($this->shouldSyncDraftAttribute('payload', $attributes, $draft->payload)) {
             foreach ($this->extraDraftPayloadHeaders($product) as $header) {

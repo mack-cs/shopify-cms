@@ -10,6 +10,7 @@ use Filament\Resources\Pages\EditRecord;
 class EditNewProductDraft extends EditRecord
 {
     protected static string $resource = NewProductDraftResource::class;
+    protected ?bool $hasUnsavedDataChangesAlert = true;
 
     protected function mutateFormDataBeforeSave(array $data): array
     {

@@ -77,6 +77,7 @@ class AdminPanelProvider extends PanelProvider
             )
             ->databaseNotifications()
             ->databaseNotificationsPolling('10s')
+            ->unsavedChangesAlerts()
             ->sidebarCollapsibleOnDesktop()
             ->navigationGroups([
                 NavigationGroup::make('Product Data'),

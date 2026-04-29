@@ -10,6 +10,17 @@ use Illuminate\Support\Collection;
 
 class ProductPartialApprovalService
 {
+    public function hasApprovedTitleForCurrentVersion(Product $product): bool
+    {
+        return ProductPartialApprovalRequest::query()
+            ->where('product_id', $product->id)
+            ->where('approval_version', $product->approval_version)
+            ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+            ->whereJsonContains('scopes', ProductShopifyUpdater::SYNC_SCOPE_PRODUCT)
+            ->whereJsonContains('core_fields', ProductShopifyUpdater::CORE_FIELD_TITLE)
+            ->exists();
+    }
+
     public function actionableRequestsQuery(int $userId): Builder
     {
         return ProductPartialApprovalRequest::query()
@@ -70,7 +81,9 @@ class ProductPartialApprovalService
      * @return array{
      *   requested:int,
      *   skipped_inactive:int,
+     *   inactive_products:array<int, array{id:int,title:string,status:string}>,
      *   skipped_existing:int,
+     *   existing_products:array<int, array{id:int,title:string}>,
      *   skipped_invalid:int,
      *   invalid_products:array<int, array{id:int,title:string,errors:array<int,string>}>,
      *   requested_products:array<int,int>
@@ -85,7 +98,9 @@ class ProductPartialApprovalService
         $summary = [
             'requested' => 0,
             'skipped_inactive' => 0,
+            'inactive_products' => [],
             'skipped_existing' => 0,
+            'existing_products' => [],
             'skipped_invalid' => 0,
             'invalid_products' => [],
             'requested_products' => [],
@@ -98,6 +113,11 @@ class ProductPartialApprovalService
 
             if (!$this->isActiveProduct($product)) {
                 $summary['skipped_inactive']++;
+                $summary['inactive_products'][] = [
+                    'id' => (int) $product->id,
+                    'title' => trim((string) ($product->title ?? '')) ?: ('Product #' . $product->id),
+                    'status' => trim((string) ($product->status ?? '')) ?: 'unknown',
+                ];
                 continue;
             }
 
@@ -121,6 +141,10 @@ class ProductPartialApprovalService
 
             if ($existing) {
                 $summary['skipped_existing']++;
+                $summary['existing_products'][] = [
+                    'id' => (int) $product->id,
+                    'title' => trim((string) ($product->title ?? '')) ?: ('Product #' . $product->id),
+                ];
                 continue;
             }
 
@@ -142,12 +166,19 @@ class ProductPartialApprovalService
 
     /**
      * @param Collection<int, Product> $products
-     * @return array{approved:int,skipped:int}
+     * @return array{
+     *   approved:int,
+     *   skipped:int,
+     *   skipped_no_pending:int,
+     *   skipped_own_request:int
+     * }
      */
     public function approve(Collection $products, int $userId): array
     {
         $approved = 0;
         $skipped = 0;
+        $skippedNoPending = 0;
+        $skippedOwnRequest = 0;
 
         foreach ($products as $product) {
             if (!$product instanceof Product) {
@@ -162,12 +193,14 @@ class ProductPartialApprovalService
 
             if ($requests->isEmpty()) {
                 $skipped++;
+                $skippedNoPending++;
                 continue;
             }
 
             foreach ($requests as $request) {
                 if ((int) $request->requested_by === $userId) {
                     $skipped++;
+                    $skippedOwnRequest++;
                     continue;
                 }
 
@@ -177,6 +210,7 @@ class ProductPartialApprovalService
                     'approved_at' => now(),
                 ])->save();
 
+                $this->syncApprovedHandleWhenTitleApproved($request);
                 $approved++;
             }
         }
@@ -184,17 +218,28 @@ class ProductPartialApprovalService
         return [
             'approved' => $approved,
             'skipped' => $skipped,
+            'skipped_no_pending' => $skippedNoPending,
+            'skipped_own_request' => $skippedOwnRequest,
         ];
     }
 
     /**
      * @param Collection<int, ProductPartialApprovalRequest> $requests
-     * @return array{approved:int,skipped:int}
+     * @return array{
+     *   approved:int,
+     *   skipped:int,
+     *   skipped_not_pending:int,
+     *   skipped_stale:int,
+     *   skipped_own_request:int
+     * }
      */
     public function approveRequests(Collection $requests, int $userId): array
     {
         $approved = 0;
         $skipped = 0;
+        $skippedNotPending = 0;
+        $skippedStale = 0;
+        $skippedOwnRequest = 0;
 
         foreach ($requests as $request) {
             if (!$request instanceof ProductPartialApprovalRequest) {
@@ -203,17 +248,20 @@ class ProductPartialApprovalService
 
             if ($request->status !== ProductPartialApprovalRequest::STATUS_PENDING) {
                 $skipped++;
+                $skippedNotPending++;
                 continue;
             }
 
             $product = $request->product;
             if (!$product instanceof Product || (int) $request->approval_version !== (int) ($product->approval_version ?? 0)) {
                 $skipped++;
+                $skippedStale++;
                 continue;
             }
 
             if ((int) $request->requested_by === $userId) {
                 $skipped++;
+                $skippedOwnRequest++;
                 continue;
             }
 
@@ -223,12 +271,16 @@ class ProductPartialApprovalService
                 'approved_at' => now(),
             ])->save();
 
+            $this->syncApprovedHandleWhenTitleApproved($request);
             $approved++;
         }
 
         return [
             'approved' => $approved,
             'skipped' => $skipped,
+            'skipped_not_pending' => $skippedNotPending,
+            'skipped_stale' => $skippedStale,
+            'skipped_own_request' => $skippedOwnRequest,
         ];
     }
 
@@ -260,6 +312,16 @@ class ProductPartialApprovalService
                     $allowedCoreFields[$field] = $field;
                 }
             }
+
+            if (
+                in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $requestedScopes, true)
+                && in_array(ProductShopifyUpdater::CORE_FIELD_HANDLE, $requestedCoreFields, true)
+                && in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, (array) ($request->scopes ?? []), true)
+                && in_array(ProductShopifyUpdater::CORE_FIELD_TITLE, (array) ($request->core_fields ?? []), true)
+            ) {
+                $allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT] = ProductShopifyUpdater::SYNC_SCOPE_PRODUCT;
+                $allowedCoreFields[ProductShopifyUpdater::CORE_FIELD_HANDLE] = ProductShopifyUpdater::CORE_FIELD_HANDLE;
+            }
         }
 
         if (!isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT])) {
@@ -270,6 +332,26 @@ class ProductPartialApprovalService
             'scopes' => array_values($allowedScopes),
             'core_fields' => array_values($allowedCoreFields),
         ];
+    }
+
+    private function syncApprovedHandleWhenTitleApproved(ProductPartialApprovalRequest $request): void
+    {
+        $scopes = is_array($request->scopes) ? $request->scopes : [];
+        $coreFields = is_array($request->core_fields) ? $request->core_fields : [];
+
+        if (
+            !in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)
+            || !in_array(ProductShopifyUpdater::CORE_FIELD_TITLE, $coreFields, true)
+        ) {
+            return;
+        }
+
+        $product = $request->product;
+        if (!$product instanceof Product) {
+            return;
+        }
+
+        app(ProductHandleService::class)->syncApprovedHandleToCurrentTitle($product);
     }
 
     public function pendingStatusLabel(Product $product): string

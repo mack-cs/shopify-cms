@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
+use App\Services\HeaderStore;
 use App\Models\StyleProfile;
 use App\Models\Product;
 
@@ -57,6 +58,7 @@ class NewProductDraft extends Model
         'sibling_collection',
         'uvp_short_paragraph',
         'complementary_products',
+        'seo_deindex',
         'variant_inventory_policy',
         'variant_fulfillment_service',
         'payload',
@@ -166,6 +168,27 @@ class NewProductDraft extends Model
             $this->attributes['title'] ?? null,
             $value
         );
+    }
+
+    public function getSeoDeindexAttribute(): bool
+    {
+        $payload = is_array($this->payload) ? $this->payload : [];
+        $value = $payload[HeaderStore::SEO_DEINDEX] ?? null;
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function setSeoDeindexAttribute(mixed $value): void
+    {
+        $payload = is_array($this->payload) ? $this->payload : [];
+
+        if ($value === null || $value === '') {
+            unset($payload[HeaderStore::SEO_DEINDEX]);
+        } else {
+            $payload[HeaderStore::SEO_DEINDEX] = filter_var($value, FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false';
+        }
+
+        $this->attributes['payload'] = $payload;
     }
 
     private static function resolvedSiblingOptionName(mixed $title, mixed $fallback = null): ?string

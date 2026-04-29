@@ -1222,6 +1222,16 @@ class ProductResource extends Resource
                             ->whereColumn('new_product_drafts.handle', 'products.handle');
                     })
                 ),
+            TernaryFilter::make('title_type_status')
+                ->label('Title Type')
+                ->placeholder('All')
+                ->trueLabel('Needs Update')
+                ->falseLabel('Good Title')
+                ->queries(
+                    true: fn (Builder $query): Builder => self::applyNeedsTitleUpdateFilter($query),
+                    false: fn (Builder $query): Builder => self::applyGoodTitleFilter($query),
+                    blank: fn (Builder $query): Builder => $query,
+                ),
             Filter::make('missing_seo_information')
                 ->label('Missing SEO Info')
                 ->query(fn (Builder $query): Builder => self::applyMissingSeoInformationFilter($query)),
@@ -1367,17 +1377,28 @@ class ProductResource extends Resource
                     ->icon('heroicon-o-link')
                     ->color('primary')
                     ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--url-sync'])
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
+                        $partialApprovalService = app(ProductPartialApprovalService::class);
+                        $handleService = app(\App\Services\ProductHandleService::class);
                         $eligibleIds = [];
                         $skippedNotApproved = 0;
                         $skippedNoChange = 0;
 
                         foreach ($records as $record) {
+                            $isFullyApproved = $record->isApprovedByTwo();
+                            $hasApprovedTitlePartial = !$isFullyApproved
+                                && $partialApprovalService->hasApprovedTitleForCurrentVersion($record);
+
+                            if ($hasApprovedTitlePartial) {
+                                $handleService->syncApprovedHandleToCurrentTitle($record);
+                            }
+
                             $approvedHandle = trim((string) ($record->approved_handle ?? ''));
                             $currentHandle = trim((string) ($record->handle ?? ''));
 
-                            if (!$record->isApprovedByTwo()) {
+                            if (!$isFullyApproved && !$hasApprovedTitlePartial) {
                                 $skippedNotApproved++;
                                 continue;
                             }
@@ -1615,10 +1636,24 @@ class ProductResource extends Resource
                             $parts[] = "Requested {$summary['requested']}.";
                         }
                         if ($summary['skipped_inactive'] > 0) {
-                            $parts[] = "Skipped {$summary['skipped_inactive']} inactive products.";
+                            $sample = collect($summary['inactive_products'] ?? [])
+                                ->take(5)
+                                ->map(fn (array $item): string => "{$item['title']} [status: {$item['status']}]")
+                                ->implode(' | ');
+                            $parts[] = "Skipped {$summary['skipped_inactive']} because partial approval requests only work for active products.";
+                            if ($sample !== '') {
+                                $parts[] = "Inactive examples: {$sample}";
+                            }
                         }
                         if ($summary['skipped_existing'] > 0) {
-                            $parts[] = "Skipped {$summary['skipped_existing']} with an existing pending partial request.";
+                            $sample = collect($summary['existing_products'] ?? [])
+                                ->take(5)
+                                ->map(fn (array $item): string => $item['title'])
+                                ->implode(' | ');
+                            $parts[] = "Skipped {$summary['skipped_existing']} because they already have a pending partial approval request.";
+                            if ($sample !== '') {
+                                $parts[] = "Existing request examples: {$sample}";
+                            }
                         }
                         if ($summary['skipped_invalid'] > 0) {
                             $sample = collect($summary['invalid_products'])
@@ -1650,8 +1685,11 @@ class ProductResource extends Resource
                         if ($summary['approved'] > 0) {
                             $parts[] = "Approved {$summary['approved']} partial request(s).";
                         }
-                        if ($summary['skipped'] > 0) {
-                            $parts[] = "Skipped {$summary['skipped']} with no pending request or where you are the requester.";
+                        if (($summary['skipped_no_pending'] ?? 0) > 0) {
+                            $parts[] = "Skipped {$summary['skipped_no_pending']} with no pending partial request.";
+                        }
+                        if (($summary['skipped_own_request'] ?? 0) > 0) {
+                            $parts[] = "Skipped {$summary['skipped_own_request']} because you cannot approve your own request.";
                         }
 
                         self::sendNotification(Notification::make()
@@ -3393,6 +3431,118 @@ class ProductResource extends Resource
         }
 
         return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
+    }
+
+    public static function applyNeedsTitleUpdateFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('type')
+            ->whereRaw("TRIM(type) != ''")
+            ->where(function (Builder $sub): void {
+                $sub->whereNull('title')
+                    ->orWhereRaw("TRIM(title) = ''")
+                    ->orWhere(function (Builder $missingMatch): void {
+                        self::applyTitleTypeMissingQuery($missingMatch);
+                    });
+            });
+    }
+
+    public static function applyGoodTitleFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('type')
+            ->whereRaw("TRIM(type) != ''")
+            ->whereNotNull('title')
+            ->whereRaw("TRIM(title) != ''")
+            ->where(function (Builder $sub): void {
+                self::applyTitleTypeMatchesQuery($sub);
+            });
+    }
+
+    private static function applyTitleTypeMatchesQuery(Builder $query): void
+    {
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('bracelet', 'bracelets')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%bracelet%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%bracelets%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('charm', 'charms')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%charm%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%charms%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('necklace', 'necklaces')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%necklace%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%necklaces%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('earring', 'earrings')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%earring%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%earrings%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('gift card', 'gift cards')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%gift card%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%gift cards%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) NOT IN ('bracelet', 'bracelets', 'charm', 'charms', 'necklace', 'necklaces', 'earring', 'earrings', 'gift card', 'gift cards')")
+                ->whereRaw("LOWER(TRIM(title)) LIKE CONCAT('%', LOWER(TRIM(type)), '%')");
+        });
+    }
+
+    private static function applyTitleTypeMissingQuery(Builder $query): void
+    {
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('bracelet', 'bracelets')")
+                ->whereRaw("LOWER(title) NOT LIKE '%bracelet%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%bracelets%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('charm', 'charms')")
+                ->whereRaw("LOWER(title) NOT LIKE '%charm%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%charms%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('necklace', 'necklaces')")
+                ->whereRaw("LOWER(title) NOT LIKE '%necklace%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%necklaces%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('earring', 'earrings')")
+                ->whereRaw("LOWER(title) NOT LIKE '%earring%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%earrings%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('gift card', 'gift cards')")
+                ->whereRaw("LOWER(title) NOT LIKE '%gift card%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%gift cards%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) NOT IN ('bracelet', 'bracelets', 'charm', 'charms', 'necklace', 'necklaces', 'earring', 'earrings', 'gift card', 'gift cards')")
+                ->whereRaw("LOWER(TRIM(title)) NOT LIKE CONCAT('%', LOWER(TRIM(type)), '%')");
+        });
     }
 
     private static function stateFromGet(Get $get, string $field): mixed

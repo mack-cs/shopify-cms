@@ -12,6 +12,21 @@ use Illuminate\Support\Str;
 
 class ProductHandleService
 {
+    public function syncApprovedHandleToCurrentTitle(Product $product): ?string
+    {
+        $approvedHandle = $this->generateUniqueApprovedHandle($product);
+
+        Product::withoutEvents(function () use ($product, $approvedHandle): void {
+            $product->forceFill([
+                'approved_handle' => $approvedHandle,
+            ])->save();
+        });
+
+        $product->forceFill(['approved_handle' => $approvedHandle]);
+
+        return $approvedHandle;
+    }
+
     public function lockInitialApprovedHandle(Product $product): ?string
     {
         $approvedHandle = trim((string) ($product->approved_handle ?? ''));

@@ -78,6 +78,9 @@ class ProductUrlRedirectResource extends Resource
                 TextColumn::make('created_at')
                     ->dateTime()
                     ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('updated_at')
+                    ->dateTime()
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('status')
@@ -177,6 +180,45 @@ class ProductUrlRedirectResource extends Resource
                             ->get();
 
                         self::notifyExport($service, $redirects, 'pending');
+                    }),
+                Action::make('exportHistory')
+                    ->label('Export History CSV')
+                    ->icon('heroicon-o-archive-box-arrow-down')
+                    ->color('gray')
+                    ->action(function (ProductUrlRedirectService $service): void {
+                        $redirects = ProductUrlRedirect::query()
+                            ->with(['product:id,handle,shopify_id', 'creator:id,email'])
+                            ->orderBy('id')
+                            ->get();
+
+                        self::notifyHistoryExport($service, $redirects, 'all');
+                    }),
+                Action::make('importHistory')
+                    ->label('Import History CSV')
+                    ->icon('heroicon-o-arrow-up-tray')
+                    ->color('info')
+                    ->form([
+                        \Filament\Forms\Components\FileUpload::make('file')
+                            ->label('CSV File')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports')
+                            ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                            ->helperText('Use a history export from URL Redirects. The import upserts by redirect path and preserves created and updated dates from the CSV.'),
+                    ])
+                    ->action(function (array $data, ProductUrlRedirectService $service): void {
+                        $path = Storage::disk('local')->path($data['file']);
+                        $result = $service->importHistoryFromPath($path);
+
+                        self::sendNotification(Notification::make()
+                            ->title('Redirect history import complete')
+                            ->body(
+                                "Total: {$result['total']}, Created: {$result['created']}, " .
+                                "Updated: {$result['updated']}, Missing product: {$result['skipped_missing_product']}, " .
+                                "Invalid rows: {$result['skipped_invalid']}."
+                            )
+                            ->success()
+                        );
                     }),
                 Action::make('syncPending')
                     ->label('Sync Pending to Shopify')
@@ -330,6 +372,32 @@ class ProductUrlRedirectResource extends Resource
         self::sendNotification(Notification::make()
             ->title('Redirect CSV created')
             ->body("Saved {$export['row_count']} redirect(s) to {$export['path']}")
+            ->success()
+            ->actions([
+                NotificationAction::make('download')
+                    ->label('Download')
+                    ->url($url, shouldOpenInNewTab: true),
+            ])
+        );
+    }
+
+    private static function notifyHistoryExport(ProductUrlRedirectService $service, Collection $redirects, string $scopeLabel): void
+    {
+        if ($redirects->isEmpty()) {
+            self::sendNotification(Notification::make()
+                ->title('Nothing to export')
+                ->body("There are no {$scopeLabel} redirect history rows to export.")
+                ->warning()
+            );
+            return;
+        }
+
+        $export = $service->exportHistory($redirects);
+        $url = Storage::disk($export['disk'])->url($export['path']);
+
+        self::sendNotification(Notification::make()
+            ->title('Redirect history CSV created')
+            ->body("Saved {$export['row_count']} redirect history row(s) to {$export['path']}")
             ->success()
             ->actions([
                 NotificationAction::make('download')

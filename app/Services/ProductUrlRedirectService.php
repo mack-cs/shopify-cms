@@ -2,9 +2,14 @@
 
 namespace App\Services;
 
+use App\Models\Product;
 use App\Models\ProductUrlRedirect;
+use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use League\Csv\Reader;
 use League\Csv\Writer;
 use SplTempFileObject;
 
@@ -140,9 +145,212 @@ class ProductUrlRedirectService
         ];
     }
 
+    /**
+     * @param Collection<int, ProductUrlRedirect> $redirects
+     * @return array{disk:string,path:string,filename:string,row_count:int}
+     */
+    public function exportHistory(Collection $redirects): array
+    {
+        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer->insertOne([
+            'product_id',
+            'product_handle',
+            'product_shopify_id',
+            'created_by_user_id',
+            'created_by_email',
+            'old_handle',
+            'new_handle',
+            'path',
+            'target',
+            'status',
+            'shopify_redirect_id',
+            'last_error',
+            'synced_at',
+            'created_at',
+            'updated_at',
+        ]);
+
+        $rowCount = 0;
+        foreach ($redirects as $redirect) {
+            if (!$redirect instanceof ProductUrlRedirect) {
+                continue;
+            }
+
+            $redirect->loadMissing(['product:id,handle,shopify_id', 'creator:id,email']);
+
+            $writer->insertOne([
+                $redirect->product_id,
+                $redirect->product?->handle,
+                $redirect->product?->shopify_id,
+                $redirect->created_by,
+                $redirect->creator?->email,
+                $redirect->old_handle,
+                $redirect->new_handle,
+                $redirect->path,
+                $redirect->target,
+                $redirect->status,
+                $redirect->shopify_redirect_id,
+                $redirect->last_error,
+                $redirect->synced_at?->format('Y-m-d H:i:s'),
+                $redirect->created_at?->format('Y-m-d H:i:s'),
+                $redirect->updated_at?->format('Y-m-d H:i:s'),
+            ]);
+            $rowCount++;
+        }
+
+        $filename = 'product-url-redirect-history-' . now()->format('Ymd_His') . '.csv';
+        $path = "redirect-exports/{$filename}";
+        Storage::disk('public')->put($path, $writer->toString());
+
+        return [
+            'disk' => 'public',
+            'path' => $path,
+            'filename' => $filename,
+            'row_count' => $rowCount,
+        ];
+    }
+
+    /**
+     * @return array{total:int,created:int,updated:int,skipped_missing_product:int,skipped_invalid:int}
+     */
+    public function importHistoryFromPath(string $absolutePath): array
+    {
+        $csv = Reader::createFromPath($absolutePath);
+        $csv->setHeaderOffset(0);
+
+        $result = [
+            'total' => 0,
+            'created' => 0,
+            'updated' => 0,
+            'skipped_missing_product' => 0,
+            'skipped_invalid' => 0,
+        ];
+
+        foreach ($csv->getRecords() as $row) {
+            $result['total']++;
+
+            $path = $this->nullableString($row['path'] ?? null)
+                ?? $this->pathFromHandle($row['old_handle'] ?? null);
+            $target = $this->nullableString($row['target'] ?? null)
+                ?? $this->targetFromHandle($row['new_handle'] ?? null);
+            $oldHandle = $this->nullableString($row['old_handle'] ?? null)
+                ?? $this->handleFromPath($path);
+            $newHandle = $this->nullableString($row['new_handle'] ?? null)
+                ?? $this->handleFromPath($target);
+
+            if ($path === null || $target === null || $oldHandle === null || $newHandle === null) {
+                $result['skipped_invalid']++;
+                continue;
+            }
+
+            $product = $this->resolveProductForHistoryImport($row, $newHandle);
+            if (!$product instanceof Product) {
+                $result['skipped_missing_product']++;
+                continue;
+            }
+
+            $existing = ProductUrlRedirect::query()
+                ->where('path', $path)
+                ->first(['id', 'created_at', 'created_by']);
+
+            $createdAt = $this->parseTimestamp($row['created_at'] ?? null)
+                ?? ($existing?->created_at?->format('Y-m-d H:i:s'))
+                ?? now()->format('Y-m-d H:i:s');
+            $updatedAt = $this->parseTimestamp($row['updated_at'] ?? null)
+                ?? $createdAt;
+
+            $createdBy = $this->resolveCreatedByForHistoryImport($row)
+                ?? $existing?->created_by;
+
+            DB::table('product_url_redirects')->updateOrInsert(
+                ['path' => $path],
+                [
+                    'product_id' => $product->id,
+                    'created_by' => $createdBy,
+                    'old_handle' => $oldHandle,
+                    'new_handle' => $newHandle,
+                    'target' => $target,
+                    'status' => $this->normalizeImportedStatus($row['status'] ?? null),
+                    'shopify_redirect_id' => $this->nullableString($row['shopify_redirect_id'] ?? null),
+                    'last_error' => $this->nullableString($row['last_error'] ?? null),
+                    'synced_at' => $this->parseTimestamp($row['synced_at'] ?? null),
+                    'created_at' => $createdAt,
+                    'updated_at' => $updatedAt,
+                ]
+            );
+
+            if ($existing) {
+                $result['updated']++;
+            } else {
+                $result['created']++;
+            }
+        }
+
+        return $result;
+    }
+
     private function client(): ShopifyApiClient
     {
         return app(ShopifyApiClient::class);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function resolveProductForHistoryImport(array $row, ?string $fallbackHandle): ?Product
+    {
+        $shopifyId = $this->nullableString($row['product_shopify_id'] ?? null);
+        if ($shopifyId !== null) {
+            $product = Product::query()->where('shopify_id', $shopifyId)->first();
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $handleCandidates = array_filter([
+            $this->nullableString($row['product_handle'] ?? null),
+            $fallbackHandle,
+            $this->handleFromPath($this->nullableString($row['target'] ?? null)),
+            $this->nullableString($row['new_handle'] ?? null),
+        ]);
+
+        foreach ($handleCandidates as $handle) {
+            $product = Product::query()->where('handle', $handle)->first();
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $productId = (int) ($row['product_id'] ?? 0);
+        if ($productId > 0) {
+            $product = Product::query()->find($productId);
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function resolveCreatedByForHistoryImport(array $row): ?int
+    {
+        $email = $this->nullableString($row['created_by_email'] ?? null);
+        if ($email !== null) {
+            $userId = User::query()->where('email', $email)->value('id');
+            if ($userId) {
+                return (int) $userId;
+            }
+        }
+
+        $userId = (int) ($row['created_by_user_id'] ?? 0);
+        if ($userId > 0 && User::query()->whereKey($userId)->exists()) {
+            return $userId;
+        }
+
+        return null;
     }
 
     private function updateRedirect(ProductUrlRedirect $redirect, string $shopifyRedirectId, string $path, string $target): ProductUrlRedirect
@@ -289,5 +497,71 @@ query UrlRedirectsByPath($query: String!) {
   }
 }
 GQL;
+    }
+
+    private function nullableString(mixed $value): ?string
+    {
+        $resolved = trim((string) ($value ?? ''));
+
+        return $resolved === '' ? null : $resolved;
+    }
+
+    private function normalizeImportedStatus(mixed $value): string
+    {
+        $status = strtolower(trim((string) ($value ?? '')));
+
+        return match ($status) {
+            ProductUrlRedirect::STATUS_SYNCED => ProductUrlRedirect::STATUS_SYNCED,
+            ProductUrlRedirect::STATUS_FAILED => ProductUrlRedirect::STATUS_FAILED,
+            ProductUrlRedirect::STATUS_IGNORED => ProductUrlRedirect::STATUS_IGNORED,
+            default => ProductUrlRedirect::STATUS_PENDING,
+        };
+    }
+
+    private function parseTimestamp(mixed $value): ?string
+    {
+        $resolved = $this->nullableString($value);
+        if ($resolved === null) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($resolved)->format('Y-m-d H:i:s');
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function handleFromPath(?string $path): ?string
+    {
+        $resolved = $this->nullableString($path);
+        if ($resolved === null) {
+            return null;
+        }
+
+        $resolved = preg_replace('#^https?://[^/]+#i', '', $resolved) ?? $resolved;
+        $resolved = trim($resolved, '/');
+        if ($resolved === '') {
+            return null;
+        }
+
+        $parts = explode('/', $resolved);
+        $handle = trim((string) end($parts));
+
+        return $handle === '' ? null : $handle;
+    }
+
+    private function pathFromHandle(mixed $handle): ?string
+    {
+        $resolved = $this->nullableString($handle);
+
+        return $resolved === null ? null : "/products/{$resolved}";
+    }
+
+    private function targetFromHandle(mixed $handle): ?string
+    {
+        $resolved = $this->nullableString($handle);
+
+        return $resolved === null ? null : "/products/{$resolved}";
     }
 }

@@ -73,9 +73,7 @@ class ProductPartialApprovalRequestResource extends Resource
 
                         Notification::make()
                             ->title('Partial approval complete')
-                            ->body(($summary['approved'] ?? 0) > 0
-                                ? 'The partial approval request was approved.'
-                                : 'No pending partial approval could be approved.')
+                            ->body(self::approvalNotificationBody($summary))
                             ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
                             ->send();
                     }),
@@ -94,8 +92,14 @@ class ProductPartialApprovalRequestResource extends Resource
                             if (($summary['approved'] ?? 0) > 0) {
                                 $parts[] = "Approved {$summary['approved']} partial request(s).";
                             }
-                            if (($summary['skipped'] ?? 0) > 0) {
-                                $parts[] = "Skipped {$summary['skipped']} with no pending request or where you are the requester.";
+                            if (($summary['skipped_not_pending'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_not_pending']} that were no longer pending.";
+                            }
+                            if (($summary['skipped_stale'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_stale']} because the product changed after the request was created.";
+                            }
+                            if (($summary['skipped_own_request'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_own_request']} because you cannot approve your own request.";
                             }
 
                             Notification::make()
@@ -172,5 +176,31 @@ class ProductPartialApprovalRequestResource extends Resource
             is_array($record->scopes) ? $record->scopes : [],
             is_array($record->core_fields) ? $record->core_fields : [],
         );
+    }
+
+    /**
+     * @param array<string, mixed> $summary
+     */
+    private static function approvalNotificationBody(array $summary): string
+    {
+        if (($summary['approved'] ?? 0) > 0) {
+            return 'The partial approval request was approved.';
+        }
+
+        $parts = [];
+
+        if (($summary['skipped_not_pending'] ?? 0) > 0) {
+            $parts[] = 'This request is no longer pending.';
+        }
+
+        if (($summary['skipped_stale'] ?? 0) > 0) {
+            $parts[] = 'The product changed after the request was created.';
+        }
+
+        if (($summary['skipped_own_request'] ?? 0) > 0) {
+            $parts[] = 'You cannot approve your own request.';
+        }
+
+        return $parts !== [] ? implode(' ', $parts) : 'No partial approval could be recorded.';
     }
 }

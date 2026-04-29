@@ -84,6 +84,12 @@ class ListProducts extends ListRecords
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
         }
 
+        $tabs['partially_approved'] = Tab::make('Partially Approved')
+            ->modifyQueryUsing(fn (Builder $query) => $query->whereHas('partialApprovalRequests', function (Builder $sub): void {
+                $sub->whereColumn('approval_version', 'products.approval_version')
+                    ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
+            }));
+
         $tabs['approved'] = Tab::make('Approved')
             ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw(
                 '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'

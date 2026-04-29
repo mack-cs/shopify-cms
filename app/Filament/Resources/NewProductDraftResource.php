@@ -69,6 +69,7 @@ use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
 use League\Csv\Writer;
 use SplTempFileObject;
+use Filament\Forms\Components\DatePicker;
 
 class NewProductDraftResource extends Resource
 {
@@ -127,6 +128,118 @@ class NewProductDraftResource extends Resource
         return self::applyMissingComplementaryProductsReportFilter(
             self::applyMissingSiblingsReportFilter($query)
         );
+    }
+
+    public static function applyNeedsTitleUpdateFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('type')
+            ->whereRaw("TRIM(type) != ''")
+            ->where(function (Builder $sub): void {
+                $sub->whereNull('title')
+                    ->orWhereRaw("TRIM(title) = ''")
+                    ->orWhere(function (Builder $missingMatch): void {
+                        self::applyTitleTypeMissingQuery($missingMatch);
+                    });
+            });
+    }
+
+    public static function applyGoodTitleFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('type')
+            ->whereRaw("TRIM(type) != ''")
+            ->whereNotNull('title')
+            ->whereRaw("TRIM(title) != ''")
+            ->where(function (Builder $sub): void {
+                self::applyTitleTypeMatchesQuery($sub);
+            });
+    }
+
+    private static function applyTitleTypeMatchesQuery(Builder $query): void
+    {
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('bracelet', 'bracelets')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%bracelet%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%bracelets%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('charm', 'charms')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%charm%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%charms%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('necklace', 'necklaces')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%necklace%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%necklaces%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('earring', 'earrings')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%earring%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%earrings%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('gift card', 'gift cards')")
+                ->where(function (Builder $title): void {
+                    $title->whereRaw("LOWER(title) LIKE '%gift card%'")
+                        ->orWhereRaw("LOWER(title) LIKE '%gift cards%'");
+                });
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) NOT IN ('bracelet', 'bracelets', 'charm', 'charms', 'necklace', 'necklaces', 'earring', 'earrings', 'gift card', 'gift cards')")
+                ->whereRaw("LOWER(TRIM(title)) LIKE CONCAT('%', LOWER(TRIM(type)), '%')");
+        });
+    }
+
+    private static function applyTitleTypeMissingQuery(Builder $query): void
+    {
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('bracelet', 'bracelets')")
+                ->whereRaw("LOWER(title) NOT LIKE '%bracelet%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%bracelets%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('charm', 'charms')")
+                ->whereRaw("LOWER(title) NOT LIKE '%charm%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%charms%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('necklace', 'necklaces')")
+                ->whereRaw("LOWER(title) NOT LIKE '%necklace%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%necklaces%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('earring', 'earrings')")
+                ->whereRaw("LOWER(title) NOT LIKE '%earring%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%earrings%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) IN ('gift card', 'gift cards')")
+                ->whereRaw("LOWER(title) NOT LIKE '%gift card%'")
+                ->whereRaw("LOWER(title) NOT LIKE '%gift cards%'");
+        });
+
+        $query->orWhere(function (Builder $sub): void {
+            $sub->whereRaw("LOWER(TRIM(type)) NOT IN ('bracelet', 'bracelets', 'charm', 'charms', 'necklace', 'necklaces', 'earring', 'earrings', 'gift card', 'gift cards')")
+                ->whereRaw("LOWER(TRIM(title)) NOT LIKE CONCAT('%', LOWER(TRIM(type)), '%')");
+        });
     }
 
     private static function applyMissingDraftStringColumnReportFilter(Builder $query, string $column): Builder
@@ -256,10 +369,8 @@ class NewProductDraftResource extends Resource
                                             }
 
                                             $variantQuery = Variant::query()->where('sku', $sku);
-                                            if ($record && $record->handle) {
-                                                $currentProductId = Product::query()
-                                                    ->where('handle', $record->handle)
-                                                    ->value('id');
+                                            if ($record) {
+                                                $currentProductId = self::linkedProductForDraft($record)?->id;
                                                 if ($currentProductId) {
                                                     $variantQuery->where('product_id', '!=', $currentProductId);
                                                 }
@@ -1001,6 +1112,10 @@ class NewProductDraftResource extends Resource
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
                         ->toolbarButtons(self::compactRichTextToolbarButtons()),
+                    Forms\Components\Toggle::make('seo_deindex')
+                        ->label('SEO: Deindex products')
+                        ->helperText('Stored as the `seo.hide_from_google` metafield for this draft.')
+                        ->inline(false),
                     Forms\Components\Grid::make(2)
                                 ->schema([
                                     Select::make('metal')
@@ -1514,14 +1629,9 @@ class NewProductDraftResource extends Resource
 
     private static function resolvedSkuForDraft(NewProductDraft $record): ?string
     {
-        $variantSku = null;
-        if ($record->handle) {
-            $variantSku = Product::query()
-                ->where('handle', $record->handle)
-                ->first()?->variants()
-                ->orderBy('id')
-                ->value('sku');
-        }
+        $variantSku = self::linkedProductForDraft($record)?->variants()
+            ->orderBy('id')
+            ->value('sku');
 
         $resolved = trim((string) ($variantSku ?? $record->sku ?? ''));
         return $resolved === '' ? null : $resolved;
@@ -1532,14 +1642,9 @@ class NewProductDraftResource extends Resource
      */
     private static function resolvedVariantDefaultsForDraft(NewProductDraft $record): array
     {
-        $variant = null;
-        if ($record->handle) {
-            $variant = Product::query()
-                ->where('handle', $record->handle)
-                ->first()?->variants()
-                ->orderBy('id')
-                ->first();
-        }
+        $variant = self::linkedProductForDraft($record)?->variants()
+            ->orderBy('id')
+            ->first();
 
         return [
             'variant_price' => $variant?->price !== null ? (string) $variant->price : null,
@@ -3025,6 +3130,23 @@ class NewProductDraftResource extends Resource
                     ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                         $deletionQuery->whereIn('status', ['pending', 'processing']);
                     })),
+
+                    Filter::make('updated_at')
+                        ->form([
+                            DatePicker::make('updated_from'),
+                            DatePicker::make('updated_until'),
+                        ])
+                        ->query(function (Builder $query, array $data): Builder {
+                            return $query
+                                ->when(
+                                    $data['updated_from'],
+                                    fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '>=', $date),
+                                )
+                                ->when(
+                                    $data['updated_until'],
+                                    fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '<=', $date),
+                                );
+                        }),
                 SelectFilter::make('status')
                     ->label('Status')
                     ->options(function (): array {
@@ -3198,6 +3320,16 @@ class NewProductDraftResource extends Resource
                                 ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery->where('is_bundle', false))
                                 ->orWhereDoesntHave('product');
                         }),
+                        blank: fn (Builder $query): Builder => $query,
+                    ),
+                TernaryFilter::make('title_type_status')
+                    ->label('Title Type')
+                    ->placeholder('All')
+                    ->trueLabel('Needs Update')
+                    ->falseLabel('Good Title')
+                    ->queries(
+                        true: fn (Builder $query): Builder => self::applyNeedsTitleUpdateFilter($query),
+                        false: fn (Builder $query): Builder => self::applyGoodTitleFilter($query),
                         blank: fn (Builder $query): Builder => $query,
                     ),
                 TernaryFilter::make('has_errors')
@@ -3494,27 +3626,12 @@ class NewProductDraftResource extends Resource
 
     private static function linkedProductExists(Get $get, ?NewProductDraft $record): bool
     {
-        $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
-        if ($handle === '') {
-            return false;
-        }
-
-        return Product::query()
-            ->where('handle', $handle)
-            ->exists();
+        return self::linkedProductFromState($get, $record) !== null;
     }
 
     private static function linkedProductFirstImageUrl(Get $get, ?NewProductDraft $record): ?string
     {
-        $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
-        if ($handle === '') {
-            return null;
-        }
-
-        $product = Product::query()
-            ->where('handle', $handle)
-            ->with(['images' => fn ($query) => $query->orderBy('position')])
-            ->first();
+        $product = self::linkedProductFromState($get, $record, withImages: true);
 
         $src = $product?->images->first()?->src;
         $src = is_string($src) ? trim($src) : '';
@@ -3524,11 +3641,47 @@ class NewProductDraftResource extends Resource
 
     private static function linkedProductForDraft(NewProductDraft $record): ?Product
     {
-        $product = $record->relationLoaded('product')
-            ? $record->product
-            : $record->product()->first();
+        $product = self::findLinkedProduct(
+            is_string($record->shopify_id ?? null) ? $record->shopify_id : null,
+            is_string($record->handle ?? null) ? $record->handle : null
+        );
 
         return $product instanceof Product ? $product : null;
+    }
+
+    private static function linkedProductFromState(Get $get, ?NewProductDraft $record, bool $withImages = false): ?Product
+    {
+        $shopifyId = trim((string) ($get('shopify_id') ?? $record?->shopify_id ?? ''));
+        $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
+
+        return self::findLinkedProduct($shopifyId !== '' ? $shopifyId : null, $handle !== '' ? $handle : null, $withImages);
+    }
+
+    private static function findLinkedProduct(?string $shopifyId, ?string $handle, bool $withImages = false): ?Product
+    {
+        $query = Product::query();
+
+        if ($withImages) {
+            $query->with(['images' => fn ($imageQuery) => $imageQuery->orderBy('position')]);
+        }
+
+        if ($shopifyId !== null && trim($shopifyId) !== '') {
+            $product = (clone $query)
+                ->where('shopify_id', trim($shopifyId))
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        if ($handle !== null && trim($handle) !== '') {
+            return $query
+                ->where('handle', trim($handle))
+                ->first();
+        }
+
+        return null;
     }
 
     private static function linkedProductEditUrl(NewProductDraft $record): ?string
@@ -3893,6 +4046,10 @@ class NewProductDraftResource extends Resource
             return Forms\Components\Toggle::make($name);
         }
 
+        if (($field['source'] ?? 'row') === 'row' && $field['attribute'] === HeaderStore::SEO_DEINDEX) {
+            return Forms\Components\Toggle::make($name);
+        }
+
         if (($field['source'] ?? 'product') === 'product' && $field['attribute'] === 'body_html') {
             return Textarea::make($name)->rows(4);
         }
@@ -4013,6 +4170,7 @@ class NewProductDraftResource extends Resource
             HeaderStore::SIBLING_COLLECTION => 'sibling_collection',
             HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
             HeaderStore::COMPLEMENTARY_PRODUCTS => 'complementary_products',
+            HeaderStore::SEO_DEINDEX => 'seo_deindex',
             default => null,
         };
     }
@@ -4056,6 +4214,8 @@ class NewProductDraftResource extends Resource
                     ))))
                     : [];
             } elseif ($attribute === 'published') {
+                $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+            } elseif ($attribute === 'seo_deindex') {
                 $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
             } elseif (in_array($attribute, ['siblings', 'complementary_products'], true)) {
                 $value = self::parseProductReferenceState($value);
@@ -4136,6 +4296,11 @@ class NewProductDraftResource extends Resource
                         continue;
                     }
 
+                    if ($draftAttribute === 'seo_deindex') {
+                        $updates[$draftAttribute] = (bool) $value;
+                        continue;
+                    }
+
                     $updates[$draftAttribute] = self::nullIfEmpty($value);
                 }
             }
@@ -4192,6 +4357,11 @@ class NewProductDraftResource extends Resource
 
                     if ($draftAttribute === 'sibling_collection') {
                         $updates[$draftAttribute] = self::normalizeSiblingCollectionValue($value);
+                        continue;
+                    }
+
+                    if ($draftAttribute === 'seo_deindex') {
+                        $updates[$draftAttribute] = (bool) $value;
                         continue;
                     }
 
@@ -4309,6 +4479,7 @@ class NewProductDraftResource extends Resource
                 'variant_inventory_qty',
                 'material_cost',
                 'uvp_short_paragraph',
+                'seo_deindex',
                 'batch',
             ], true);
         }
@@ -4340,7 +4511,7 @@ class NewProductDraftResource extends Resource
             'product_category' => 'category',
             'tags' => 'tags',
             'status' => 'status',
-            'published' => 'published',
+            'published', 'seo_deindex' => 'published',
             'body_html', 'seo_description', 'uvp_short_paragraph' => 'textarea',
             'variant_price', 'variant_compare_at_price', 'variant_inventory_qty', 'material_cost' => 'numeric',
             default => 'text',

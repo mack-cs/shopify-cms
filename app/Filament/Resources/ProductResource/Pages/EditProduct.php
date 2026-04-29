@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Auth;
 class EditProduct extends EditRecord
 {
     protected static string $resource = ProductResource::class;
+    protected ?bool $hasUnsavedDataChangesAlert = true;
 
     protected function getFormActions(): array
     {
