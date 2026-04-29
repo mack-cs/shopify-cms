@@ -6,10 +6,14 @@ use Illuminate\Support\Facades\Http;
 
 final class ShopifyApiClient
 {
+    public function __construct(
+        private readonly AwsSecretService $awsSecretService,
+    ) {}
+
     public function rest(string $method, string $path, array $payload = []): array
     {
         $shop = config('services.shopify.shop');
-        $token = config('services.shopify.admin_access_token');
+        $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
 
         if (!$shop || !$token) {
@@ -42,7 +46,7 @@ final class ShopifyApiClient
     public function graphql(string $query, array $variables = []): array
     {
         $shop = config('services.shopify.shop');
-        $token = config('services.shopify.admin_access_token');
+        $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
 
         if (!$shop || !$token) {

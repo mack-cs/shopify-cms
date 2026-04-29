@@ -39,6 +39,12 @@ return [
         'shop' => env('SHOPIFY_SHOP'),
         'admin_access_token' => env('SHOPIFY_ADMIN_ACCESS_TOKEN'),
         'api_version' => env('SHOPIFY_API_VERSION', '2026-01'),
+        'secret_id' => env('AWS_SHOPIFY_SECRET_ID', 'prod/leighavenue/shopify'),
+        'secret_cache_key' => env('AWS_SHOPIFY_SECRET_CACHE_KEY', 'shopify.admin_access_token'),
+        'secret_cache_ttl' => env('AWS_SHOPIFY_SECRET_CACHE_TTL', 900),
+        'secret_region' => env('AWS_SHOPIFY_SECRET_REGION', env('AWS_DEFAULT_REGION', 'us-east-1')),
+        'secret_version' => env('AWS_SHOPIFY_SECRET_VERSION', 'latest'),
+        'secret_profile' => env('AWS_SHOPIFY_SECRET_PROFILE'),
     ],
 
 ];

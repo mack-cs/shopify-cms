@@ -17,6 +17,7 @@ use App\Services\ShopifyCsvExporter;
 use App\Services\ShopifyApiImporter;
 use App\Services\ShopifySyncSnapshotService;
 use App\Services\AdminNotification;
+use App\Services\AwsSecretService;
 use App\Jobs\ShopifySyncJob;
 use App\Services\Normalizer;
 use Filament\Tables\Columns\TextColumn;
@@ -82,11 +83,11 @@ class ImportResource extends Resource
                         return;
                     }
 
-                    if (!config('services.shopify.shop') || !config('services.shopify.admin_access_token')) {
+                    if (!config('services.shopify.shop') || !app(AwsSecretService::class)->hasShopifyToken()) {
                         self::sendNotification(
                             Notification::make()
                                 ->title('Shopify credentials missing')
-                                ->body('Set SHOPIFY_SHOP and SHOPIFY_ADMIN_ACCESS_TOKEN in .env before syncing.')
+                                ->body('Set SHOPIFY_SHOP and configure SHOPIFY_ADMIN_ACCESS_TOKEN or AWS Secrets Manager before syncing.')
                                 ->danger()
                         );
                         return;

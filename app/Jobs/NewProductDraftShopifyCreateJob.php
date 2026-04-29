@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\NewProductDraft;
 use App\Models\Import;
 use App\Services\AdminNotification;
+use App\Services\AwsSecretService;
 use App\Services\NewProductDraftShopifyCreator;
 use App\Services\ShopifyApiImporter;
 use App\Jobs\ShopifySyncJob;
@@ -84,7 +85,7 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
 
             $syncQueued = false;
             if ($result['created'] > 0) {
-                $hasCredentials = config('services.shopify.shop') && config('services.shopify.admin_access_token');
+                $hasCredentials = config('services.shopify.shop') && app(AwsSecretService::class)->hasShopifyToken();
                 $current = Import::where('is_current', true)->first();
                 $syncAlreadyRunning = $current && $current->status === 'processing';
 

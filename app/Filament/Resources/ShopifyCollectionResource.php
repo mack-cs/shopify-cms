@@ -11,6 +11,7 @@ use App\Models\CollectionApproval;
 use App\Models\DeletionRequest;
 use App\Models\ShopifyCollection;
 use App\Services\AdminNotification;
+use App\Services\AwsSecretService;
 use App\Services\DeletionRequestWorkflowService;
 use App\Services\ShopifyCollectionsImporter;
 use App\Services\ShopifyCollectionSeoImporter;
@@ -468,11 +469,11 @@ class ShopifyCollectionResource extends Resource
                             return;
                         }
 
-                        if (!config('services.shopify.shop') || !config('services.shopify.admin_access_token')) {
+                        if (!config('services.shopify.shop') || !app(AwsSecretService::class)->hasShopifyToken()) {
                             self::sendNotification(
                                 Notification::make()
                                     ->title('Shopify credentials missing')
-                                    ->body('Set SHOPIFY_SHOP and SHOPIFY_ADMIN_ACCESS_TOKEN in .env before syncing.')
+                                    ->body('Set SHOPIFY_SHOP and configure SHOPIFY_ADMIN_ACCESS_TOKEN or AWS Secrets Manager before syncing.')
                                     ->danger()
                             );
                             return;
