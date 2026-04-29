@@ -223,6 +223,9 @@ final class NewProductDraftProductSync
         if ($this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty)) {
             $updates['inventory_qty'] = $draft->variant_inventory_qty;
         }
+        if ($this->shouldSyncDraftAttribute('variant_inventory_policy', $attributes, $draft->variant_inventory_policy)) {
+            $updates['inventory_policy'] = $draft->variant_inventory_policy;
+        }
 
         if (!empty($updates)) {
             $variant->update($updates);

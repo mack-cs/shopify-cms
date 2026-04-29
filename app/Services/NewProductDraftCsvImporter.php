@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\Setting;
 use App\Models\StyleProfile;
 use App\Models\Variant;
+use App\Services\NewProductDraftProductSync;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
@@ -226,6 +227,8 @@ final class NewProductDraftCsvImporter
                     }
                     $draft->payload = $mergedPayload;
                     $draft->save();
+                    $draft->touch();
+                    $this->syncImportedDraftToProduct($draft, $data, $payload);
                     $updated++;
                 } else {
                     $data['payload'] = $payload ?: null;
@@ -236,7 +239,8 @@ final class NewProductDraftCsvImporter
                     $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
                     $data['origin'] = $data['origin'] ?? NewProductDraft::ORIGIN_DRAFT_TOOL;
 
-                    NewProductDraft::create($data);
+                    $draft = NewProductDraft::create($data);
+                    $this->syncImportedDraftToProduct($draft, $data, $payload);
                     $created++;
                 }
 
@@ -265,6 +269,10 @@ final class NewProductDraftCsvImporter
                         $styleProfile->update($styleProfileData);
                     } else {
                         StyleProfile::create($styleProfileData);
+                    }
+
+                    if ($draft) {
+                        $draft->touch();
                     }
 
                     $seoDraftsUpserted++;
@@ -529,5 +537,30 @@ final class NewProductDraftCsvImporter
     private function complementaryMinimumCount(): int
     {
         return max(1, (int) Setting::getValue('new_product_drafts.complementary_minimum.count', 3));
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<string, mixed> $payload
+     */
+    private function syncImportedDraftToProduct(NewProductDraft $draft, array $data, array $payload): void
+    {
+        $attributes = array_keys($data);
+
+        if (!empty($payload)) {
+            $attributes[] = 'payload';
+        }
+
+        $attributes = array_values(array_unique(array_filter($attributes, 'is_string')));
+
+        if ($attributes === []) {
+            return;
+        }
+
+        app(NewProductDraftProductSync::class)->syncToExistingProduct(
+            $draft->fresh(),
+            ensureApprovalReset: true,
+            attributes: $attributes
+        );
     }
 }
