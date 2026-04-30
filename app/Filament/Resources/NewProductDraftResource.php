@@ -292,6 +292,9 @@ class NewProductDraftResource extends Resource
                     Group::make([
                         Section::make('Shopify Sync Warnings')
                             ->schema([
+                                Placeholder::make('shopify_sync_warnings_blocking_notice')
+                                    ->label('')
+                                    ->content(fn (?NewProductDraft $record): ?HtmlString => self::shopifySyncWarningsBlockingHtml($record)),
                                 Placeholder::make('shopify_sync_warnings_notice')
                                     ->label('')
                                     ->content(fn (?NewProductDraft $record): ?HtmlString => self::shopifySyncWarningsHtml($record)),
@@ -2543,6 +2546,10 @@ class NewProductDraftResource extends Resource
                     ->icon('heroicon-o-adjustments-horizontal')
                     ->color('gray')
                     ->tooltip('Quick Edit')
+                    ->disabled(fn (NewProductDraft $record): bool => self::draftHasBlockingShopifyWarnings($record))
+                    ->tooltip(fn (NewProductDraft $record): string => self::draftHasBlockingShopifyWarnings($record)
+                        ? self::draftBlockingWarningsTooltip($record)
+                        : 'Quick Edit')
                     ->form(self::draftQuickEditFormSchema())
                     ->fillForm(fn (NewProductDraft $record): array => self::draftQuickEditDefaults($record))
                     ->action(function (NewProductDraft $record, array $data): void {
@@ -2553,15 +2560,27 @@ class NewProductDraftResource extends Resource
                     ->icon('heroicon-o-document-text')
                     ->color('info')
                     ->tooltip(fn (NewProductDraft $record): string => filled(trim((string) ($record->handle ?? '')))
-                        ? 'SEO Draft'
+                        ? (self::draftHasBlockingShopifyWarnings($record)
+                            ? self::draftBlockingWarningsTooltip($record)
+                            : 'SEO Draft')
                         : 'Save a handle on this draft before editing the SEO Draft.')
-                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))))
+                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))) || self::draftHasBlockingShopifyWarnings($record))
                     ->modalWidth('4xl')
                     ->modalHeading(fn (NewProductDraft $record): string|HtmlString => self::seoDraftModalHeading($record))
                     ->modalSubmitActionLabel('Save SEO Draft')
                     ->form(fn (NewProductDraft $record): array => self::seoDraftFormSchema($record))
                     ->fillForm(fn (NewProductDraft $record): array => self::seoDraftFormData($record))
                     ->action(function (NewProductDraft $record, array $data): void {
+                        if (self::draftHasBlockingShopifyWarnings($record)) {
+                            self::sendNotification(Notification::make()
+                                ->title('Resolve Shopify conflicts first')
+                                ->body(self::draftBlockingWarningsMessage($record))
+                                ->warning()
+                            );
+
+                            return;
+                        }
+
                         self::saveSeoDraft($record, $data);
 
                         self::sendNotification(Notification::make()
@@ -2569,7 +2588,11 @@ class NewProductDraftResource extends Resource
                             ->success()
                         );
                     }),
-                Tables\Actions\EditAction::make()->color('warning'),
+                Tables\Actions\EditAction::make()
+                    ->color('warning')
+                    ->tooltip(fn (NewProductDraft $record): ?string => self::draftHasBlockingShopifyWarnings($record)
+                        ? self::draftBlockingWarningsTooltip($record)
+                        : null),
                 Tables\Actions\Action::make('investigateShopifyMissing')
                     ->label('Investigate')
                     ->icon('heroicon-o-magnifying-glass')
@@ -4235,8 +4258,8 @@ class NewProductDraftResource extends Resource
                 'product_category',
                 'google_product_category',
                 'status',
-                'color_string',
                 'batch',
+                'color_string',
             ], true);
         }
 
@@ -4329,6 +4352,16 @@ class NewProductDraftResource extends Resource
 
     private static function applyQuickEditsToDraft(NewProductDraft $record, array $data): void
     {
+        if (self::draftHasBlockingShopifyWarnings($record)) {
+            self::sendNotification(Notification::make()
+                ->title('Resolve Shopify conflicts first')
+                ->body(self::draftBlockingWarningsMessage($record))
+                ->warning()
+            );
+
+            return;
+        }
+
         self::applySelectedDraftEdits([$record], $data);
     }
 
@@ -4337,6 +4370,23 @@ class NewProductDraftResource extends Resource
         $selected = array_keys(array_filter($data['fields'] ?? []));
         $values = $data['values'] ?? [];
         if (!is_array($selected) || empty($selected)) {
+            return;
+        }
+
+        $blockedDrafts = [];
+        foreach ($records as $record) {
+            if ($record instanceof NewProductDraft && self::draftHasBlockingShopifyWarnings($record)) {
+                $blockedDrafts[] = trim((string) ($record->title ?? '')) ?: ('Draft #' . $record->id);
+            }
+        }
+
+        if ($blockedDrafts !== []) {
+            self::sendNotification(Notification::make()
+                ->title('Resolve Shopify conflicts first')
+                ->body('These drafts have unresolved Shopify sync warnings and were not bulk edited: ' . implode(' | ', array_slice($blockedDrafts, 0, 5)))
+                ->warning()
+            );
+
             return;
         }
 
@@ -4824,6 +4874,10 @@ class NewProductDraftResource extends Resource
 
     public static function saveSeoDraft(NewProductDraft $record, array $data): StyleProfile
     {
+        if (self::draftHasBlockingShopifyWarnings($record)) {
+            throw new \InvalidArgumentException(self::draftBlockingWarningsMessage($record));
+        }
+
         if (blank(trim((string) ($record->handle ?? '')))) {
             throw new \InvalidArgumentException('Draft needs a handle before an SEO draft can be saved.');
         }
@@ -5036,17 +5090,73 @@ class NewProductDraftResource extends Resource
             $draftValue = e((string) ($warning['draft_value'] ?? ''));
             $shopifyValue = e((string) ($warning['shopify_value'] ?? ''));
 
-            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but Shopify imported <code>{$shopifyValue}</code>.</li>";
+            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but <strong>Shopify</strong> imported <code>{$shopifyValue}</code>.</li>";
         }, $warnings);
 
         return new HtmlString(
             "<div class='rounded-xl border border-warning-300 bg-warning-50 p-4 text-sm text-warning-900'>"
-            . "<p class='font-semibold mb-2'>Draft values differ from the latest Shopify import.</p>"
+            . "<p class='font-semibold mb-2'>Draft values differ from the latest <strong>Shopify</strong> import.</p>"
             . "<ul class='list-disc pl-5 space-y-1'>"
             . implode('', $items)
             . '</ul>'
             . '</div>'
         );
+    }
+
+    private static function shopifySyncWarningsBlockingHtml(?NewProductDraft $record): ?HtmlString
+    {
+        if (!$record) {
+            return null;
+        }
+
+        $warningCount = $record->shopifySyncWarningCount();
+        if ($warningCount <= 0) {
+            return null;
+        }
+
+        $draftId = (int) $record->id;
+
+        return new HtmlString(
+            "<div id='draft-warning-block' class='rounded-xl border-2 border-danger-300 bg-danger-50 p-4 text-sm text-danger-900'>"
+            . "<p class='font-semibold mb-2'>Resolve <strong>Shopify</strong> conflicts before saving this draft.</p>"
+            . "<p>This draft has {$warningCount} unresolved <strong>Shopify</strong> sync warning(s). Choose <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> below first. Saving is blocked until those warnings are cleared.</p>"
+            . "</div>"
+            . "<script>
+                (function () {
+                    const run = function () {
+                        const block = document.getElementById('draft-warning-block');
+                        if (block) {
+                            block.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    };
+
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', run, { once: true });
+                    } else {
+                        run();
+                    }
+                })();
+            </script>"
+        );
+    }
+
+    private static function draftHasBlockingShopifyWarnings(?NewProductDraft $record): bool
+    {
+        return (($record?->shopifySyncWarningCount() ?? 0) > 0);
+    }
+
+    private static function draftBlockingWarningsMessage(?NewProductDraft $record): string
+    {
+        $count = (int) ($record?->shopifySyncWarningCount() ?? 0);
+
+        return $count > 0
+            ? "This draft has {$count} unresolved Shopify sync warning(s). Resolve them first using Keep Draft Values or Use Shopify Values."
+            : 'Resolve Shopify sync warnings before editing this draft.';
+    }
+
+    private static function draftBlockingWarningsTooltip(?NewProductDraft $record): string
+    {
+        return self::draftBlockingWarningsMessage($record);
     }
 
     /**

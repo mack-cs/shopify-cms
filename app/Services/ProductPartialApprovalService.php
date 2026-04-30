@@ -2,11 +2,14 @@
 
 namespace App\Services;
 
+use App\Enums\RolesEnum;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 class ProductPartialApprovalService
 {
@@ -24,12 +27,36 @@ class ProductPartialApprovalService
     public function actionableRequestsQuery(int $userId): Builder
     {
         return ProductPartialApprovalRequest::query()
-            ->with(['product', 'requester'])
+            ->with(['product', 'requester', 'targetApprover'])
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
             ->where('requested_by', '!=', $userId)
+            ->where(function (Builder $query) use ($userId): void {
+                $query->whereNull('target_approver_id')
+                    ->orWhere('target_approver_id', $userId);
+            })
             ->whereHas('product', function (Builder $query): void {
                 $query->whereColumn('products.approval_version', 'product_partial_approval_requests.approval_version');
             });
+    }
+
+    public function eligibleApproversQuery(?int $excludeUserId = null): Builder
+    {
+        $query = User::query()
+            ->where('is_active', true)
+            ->whereHas('roles', function (Builder $roleQuery): void {
+                $roleQuery->whereIn('name', [
+                    RolesEnum::SuperAdmin->value,
+                    RolesEnum::Admin->value,
+                    RolesEnum::SeoReviewer->value,
+                ]);
+            })
+            ->orderBy('name');
+
+        if ($excludeUserId !== null && $excludeUserId > 0) {
+            $query->whereKeyNot($excludeUserId);
+        }
+
+        return $query;
     }
 
     /**
@@ -86,7 +113,8 @@ class ProductPartialApprovalService
      *   existing_products:array<int, array{id:int,title:string}>,
      *   skipped_invalid:int,
      *   invalid_products:array<int, array{id:int,title:string,errors:array<int,string>}>,
-     *   requested_products:array<int,int>
+     *   requested_products:array<int,int>,
+     *   request_batch_id:string|null
      * }
      */
     public function request(
@@ -94,6 +122,8 @@ class ProductPartialApprovalService
         int $userId,
         array $scopes,
         array $coreFields,
+        ?int $targetApproverId = null,
+        ?string $requestNote = null,
     ): array {
         $summary = [
             'requested' => 0,
@@ -104,7 +134,12 @@ class ProductPartialApprovalService
             'skipped_invalid' => 0,
             'invalid_products' => [],
             'requested_products' => [],
+            'request_batch_id' => null,
         ];
+
+        $targetApproverId = $this->normalizeTargetApproverId($targetApproverId, $userId);
+        $requestNote = $this->normalizeRequestNote($requestNote);
+        $requestBatchId = (string) Str::uuid();
 
         foreach ($products as $product) {
             if (!$product instanceof Product) {
@@ -152,13 +187,17 @@ class ProductPartialApprovalService
                 'product_id' => $product->id,
                 'approval_version' => $product->approval_version,
                 'requested_by' => $userId,
+                'request_batch_id' => $requestBatchId,
+                'target_approver_id' => $targetApproverId,
                 'status' => ProductPartialApprovalRequest::STATUS_PENDING,
                 'scopes' => $scopes,
                 'core_fields' => $coreFields,
+                'request_note' => $requestNote,
             ]);
 
             $summary['requested']++;
             $summary['requested_products'][] = (int) $product->id;
+            $summary['request_batch_id'] = $requestBatchId;
         }
 
         return $summary;
@@ -170,7 +209,8 @@ class ProductPartialApprovalService
      *   approved:int,
      *   skipped:int,
      *   skipped_no_pending:int,
-     *   skipped_own_request:int
+     *   skipped_own_request:int,
+     *   skipped_targeted:int
      * }
      */
     public function approve(Collection $products, int $userId): array
@@ -179,6 +219,7 @@ class ProductPartialApprovalService
         $skipped = 0;
         $skippedNoPending = 0;
         $skippedOwnRequest = 0;
+        $skippedTargeted = 0;
 
         foreach ($products as $product) {
             if (!$product instanceof Product) {
@@ -204,6 +245,12 @@ class ProductPartialApprovalService
                     continue;
                 }
 
+                if ($request->target_approver_id !== null && (int) $request->target_approver_id !== $userId) {
+                    $skipped++;
+                    $skippedTargeted++;
+                    continue;
+                }
+
                 $request->forceFill([
                     'status' => ProductPartialApprovalRequest::STATUS_APPROVED,
                     'approved_by' => $userId,
@@ -220,6 +267,7 @@ class ProductPartialApprovalService
             'skipped' => $skipped,
             'skipped_no_pending' => $skippedNoPending,
             'skipped_own_request' => $skippedOwnRequest,
+            'skipped_targeted' => $skippedTargeted,
         ];
     }
 
@@ -230,7 +278,8 @@ class ProductPartialApprovalService
      *   skipped:int,
      *   skipped_not_pending:int,
      *   skipped_stale:int,
-     *   skipped_own_request:int
+     *   skipped_own_request:int,
+     *   skipped_targeted:int
      * }
      */
     public function approveRequests(Collection $requests, int $userId): array
@@ -240,6 +289,7 @@ class ProductPartialApprovalService
         $skippedNotPending = 0;
         $skippedStale = 0;
         $skippedOwnRequest = 0;
+        $skippedTargeted = 0;
 
         foreach ($requests as $request) {
             if (!$request instanceof ProductPartialApprovalRequest) {
@@ -265,6 +315,12 @@ class ProductPartialApprovalService
                 continue;
             }
 
+            if ($request->target_approver_id !== null && (int) $request->target_approver_id !== $userId) {
+                $skipped++;
+                $skippedTargeted++;
+                continue;
+            }
+
             $request->forceFill([
                 'status' => ProductPartialApprovalRequest::STATUS_APPROVED,
                 'approved_by' => $userId,
@@ -281,6 +337,7 @@ class ProductPartialApprovalService
             'skipped_not_pending' => $skippedNotPending,
             'skipped_stale' => $skippedStale,
             'skipped_own_request' => $skippedOwnRequest,
+            'skipped_targeted' => $skippedTargeted,
         ];
     }
 
@@ -367,6 +424,29 @@ class ProductPartialApprovalService
         }
 
         return "Pending {$pending}";
+    }
+
+    public function isHandleAffectingRequest(ProductPartialApprovalRequest $request): bool
+    {
+        $scopes = is_array($request->scopes) ? $request->scopes : [];
+        $coreFields = is_array($request->core_fields) ? $request->core_fields : [];
+
+        return in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)
+            && (
+                in_array(ProductShopifyUpdater::CORE_FIELD_HANDLE, $coreFields, true)
+                || in_array(ProductShopifyUpdater::CORE_FIELD_TITLE, $coreFields, true)
+            );
+    }
+
+    public function batchLabel(?string $batchId): string
+    {
+        $value = trim((string) $batchId);
+
+        if ($value === '') {
+            return 'Legacy';
+        }
+
+        return strtoupper(substr(str_replace('-', '', $value), 0, 8));
     }
 
     /**
@@ -544,5 +624,25 @@ class ProductPartialApprovalService
         }
 
         return null;
+    }
+
+    private function normalizeTargetApproverId(?int $targetApproverId, int $requesterId): ?int
+    {
+        if ($targetApproverId === null || $targetApproverId <= 0 || $targetApproverId === $requesterId) {
+            return null;
+        }
+
+        return $this->eligibleApproversQuery($requesterId)
+            ->whereKey($targetApproverId)
+            ->exists()
+            ? $targetApproverId
+            : null;
+    }
+
+    private function normalizeRequestNote(?string $requestNote): ?string
+    {
+        $value = trim((string) $requestNote);
+
+        return $value === '' ? null : $value;
     }
 }

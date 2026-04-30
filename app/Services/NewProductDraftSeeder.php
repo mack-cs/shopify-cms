@@ -113,7 +113,7 @@ final class NewProductDraftSeeder
 
         $identityFields = ['handle', 'shopify_id'];
         $skipFields = ['created_by'];
-        $nonWarningFields = ['origin', 'payload', 'image_url', 'image_path'];
+        $nonWarningFields = ['origin', 'payload', 'image_url', 'image_path', 'batch'];
 
         foreach ($data as $key => $incomingValue) {
             if (in_array($key, $skipFields, true)) {

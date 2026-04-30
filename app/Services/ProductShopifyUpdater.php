@@ -3100,7 +3100,7 @@ GQL;
         $map = [];
 
         ShopifyCollection::query()
-            ->select(['shopify_id', 'title', 'handle'])
+            ->select(['id', 'shopify_id', 'title', 'handle'])
             ->whereNotNull('shopify_id')
             ->where('shopify_id', '!=', '')
             ->chunkById(500, function ($collections) use (&$map): void {

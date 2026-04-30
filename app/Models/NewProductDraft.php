@@ -281,7 +281,7 @@ class NewProductDraft extends Model
             $field = is_array($warning) ? trim((string) ($warning['field'] ?? '')) : '';
 
             return is_array($warning)
-                && !in_array($field, ['image_url', 'image_path'], true)
+                && !in_array($field, ['image_url', 'image_path','batch'], true)
                 && is_string($warning['field'] ?? null)
                 && is_string($warning['label'] ?? null)
                 && array_key_exists('draft_value', $warning)

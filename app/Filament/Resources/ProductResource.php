@@ -1286,6 +1286,14 @@ class ProductResource extends Resource
                         }
                     });
                 }),
+            Filter::make('missing_image_alt_text')
+                ->label('Missing Image Alt Text')
+                ->query(fn (Builder $query): Builder => $query->whereHas('images', function (Builder $imageQuery): void {
+                    $imageQuery->where(function (Builder $altQuery): void {
+                        $altQuery->whereNull('alt_text')
+                            ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
+                    });
+                })),
 
             TernaryFilter::make('approved')
                 ->label('Approved')
@@ -1719,7 +1727,18 @@ class ProductResource extends Resource
                         }
 
                         $service = app(ProductPartialApprovalService::class);
-                        $summary = $service->request($records, (int) Auth::id(), $normalized['scopes'], $normalized['core_fields']);
+                        $targetApproverId = ($data['approval_target'] ?? 'any') === 'specific'
+                            ? (int) ($data['target_approver_id'] ?? 0)
+                            : null;
+
+                        $summary = $service->request(
+                            $records,
+                            (int) Auth::id(),
+                            $normalized['scopes'],
+                            $normalized['core_fields'],
+                            $targetApproverId,
+                            $data['request_note'] ?? null,
+                        );
 
                         if (($summary['skipped_invalid'] ?? 0) > 0 && !($data['continue_on_invalid'] ?? false)) {
                             $sample = collect($summary['invalid_products'])
@@ -1738,6 +1757,15 @@ class ProductResource extends Resource
                         $parts = [];
                         if ($summary['requested'] > 0) {
                             $parts[] = "Requested {$summary['requested']}.";
+                            if (!empty($summary['request_batch_id'])) {
+                                $parts[] = 'Batch ' . app(ProductPartialApprovalService::class)->batchLabel($summary['request_batch_id']) . '.';
+                            }
+                            if ($targetApproverId) {
+                                $approverName = self::partialApprovalApproverOptions()[$targetApproverId] ?? 'selected reviewer';
+                                $parts[] = "Assigned to {$approverName} only.";
+                            } else {
+                                $parts[] = 'Available to any eligible reviewer.';
+                            }
                         }
                         if ($summary['skipped_inactive'] > 0) {
                             $sample = collect($summary['inactive_products'] ?? [])
@@ -1794,6 +1822,9 @@ class ProductResource extends Resource
                         }
                         if (($summary['skipped_own_request'] ?? 0) > 0) {
                             $parts[] = "Skipped {$summary['skipped_own_request']} because you cannot approve your own request.";
+                        }
+                        if (($summary['skipped_targeted'] ?? 0) > 0) {
+                            $parts[] = "Skipped {$summary['skipped_targeted']} because they were assigned to a different reviewer.";
                         }
 
                         self::sendNotification(Notification::make()
@@ -2000,7 +2031,41 @@ class ProductResource extends Resource
             Checkbox::make('continue_on_invalid')
                 ->label('Continue and skip invalid products')
                 ->helperText('If some selected products have errors in the selected fields, they will be skipped instead of blocking the request.'),
+            Select::make('approval_target')
+                ->label('Approver routing')
+                ->options([
+                    'any' => 'Any eligible reviewer',
+                    'specific' => 'Specific reviewer only',
+                ])
+                ->default('any')
+                ->native(false)
+                ->live()
+                ->helperText('Choose whether any eligible reviewer can approve this request, or assign it to one specific reviewer.'),
+            Select::make('target_approver_id')
+                ->label('Specific reviewer')
+                ->options(fn (): array => self::partialApprovalApproverOptions())
+                ->searchable()
+                ->preload()
+                ->visible(fn (Get $get): bool => $get('approval_target') === 'specific')
+                ->required(fn (Get $get): bool => $get('approval_target') === 'specific'),
+            Textarea::make('request_note')
+                ->label('Review note')
+                ->rows(3)
+                ->maxLength(1000)
+                ->helperText('Optional context for the reviewer. This stays recorded with the request.'),
         ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function partialApprovalApproverOptions(): array
+    {
+        return app(ProductPartialApprovalService::class)
+            ->eligibleApproversQuery((int) Auth::id())
+            ->pluck('name', 'id')
+            ->mapWithKeys(fn (string $name, int|string $id): array => [(int) $id => $name])
+            ->all();
     }
 
     private static function currentDeletionRequest(Product $record): ?DeletionRequest

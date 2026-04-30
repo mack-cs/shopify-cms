@@ -15,6 +15,8 @@ class ProductPartialApprovalRequest extends Model
         'product_id',
         'approval_version',
         'requested_by',
+        'request_batch_id',
+        'target_approver_id',
         'approved_by',
         'status',
         'scopes',
@@ -42,5 +44,10 @@ class ProductPartialApprovalRequest extends Model
     public function approver(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function targetApprover(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'target_approver_id');
     }
 }
