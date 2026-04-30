@@ -87,7 +87,7 @@ class NewProductDraftResource extends Resource
 
     public static function applyMissingSeoReportFilter(Builder $query): Builder
     {
-        return $query
+        return self::applyWorkingDraftStatuses($query)
             ->where(function (Builder $sub): void {
                 $sub->whereDoesntHave('styleProfiles', function (Builder $styleProfileQuery): void {
                     $styleProfileQuery->whereNotNull('draft_seo_title')
@@ -132,7 +132,7 @@ class NewProductDraftResource extends Resource
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder
     {
-        return $query
+        return self::applyWorkingDraftStatuses($query)
             ->whereNotNull('type')
             ->whereRaw("TRIM(type) != ''")
             ->where(function (Builder $sub): void {
@@ -146,7 +146,7 @@ class NewProductDraftResource extends Resource
 
     public static function applyGoodTitleFilter(Builder $query): Builder
     {
-        return $query
+        return self::applyWorkingDraftStatuses($query)
             ->whereNotNull('type')
             ->whereRaw("TRIM(type) != ''")
             ->whereNotNull('title')
@@ -244,9 +244,17 @@ class NewProductDraftResource extends Resource
 
     private static function applyMissingDraftStringColumnReportFilter(Builder $query, string $column): Builder
     {
-        return $query->where(function (Builder $sub) use ($column): void {
+        return self::applyWorkingDraftStatuses($query)->where(function (Builder $sub) use ($column): void {
             $sub->whereNull($column)
                 ->orWhere($column, '');
+        });
+    }
+
+    public static function applyWorkingDraftStatuses(Builder $query): Builder
+    {
+        return $query->where(function (Builder $sub): void {
+            $sub->whereRaw('LOWER(status) = ?', ['active'])
+                ->orWhereRaw('LOWER(status) = ?', ['draft']);
         });
     }
 
@@ -3171,7 +3179,8 @@ class NewProductDraftResource extends Resource
                     ->preload(),
                 SelectFilter::make('type')
                     ->label('Type')
-                    ->options(fn () => NewProductDraft::query()
+                    ->multiple()
+                    ->options(fn () => ['__none__' => 'No type'] + NewProductDraft::query()
                         ->whereNotNull('type')
                         ->where('type', '!=', '')
                         ->distinct()
@@ -3179,7 +3188,39 @@ class NewProductDraftResource extends Resource
                         ->pluck('type', 'type')
                         ->all())
                     ->searchable()
-                    ->preload(),
+                    ->preload()
+                    ->query(function (Builder $query, array $data): Builder {
+                        $values = $data['values'] ?? [];
+                        if (!is_array($values) || empty($values)) {
+                            return $query;
+                        }
+
+                        $values = array_values(array_filter(array_map(
+                            fn ($value): string => trim((string) $value),
+                            $values
+                        )));
+
+                        if ($values === []) {
+                            return $query;
+                        }
+
+                        $includeNone = in_array('__none__', $values, true);
+                        $types = array_values(array_filter(
+                            $values,
+                            fn (string $value): bool => $value !== '__none__'
+                        ));
+
+                        return $query->where(function (Builder $sub) use ($includeNone, $types): void {
+                            if ($types !== []) {
+                                $sub->orWhereIn('type', $types);
+                            }
+
+                            if ($includeNone) {
+                                $sub->orWhereNull('type')
+                                    ->orWhereRaw("TRIM(COALESCE(type, '')) = ''");
+                            }
+                        });
+                    }),
                 SelectFilter::make('vendor')
                     ->label('Vendor')
                     ->options(fn () => NewProductDraft::query()
@@ -3217,9 +3258,10 @@ class NewProductDraftResource extends Resource
                     }),
                 SelectFilter::make('collection')
                     ->label('Collection')
+                    ->multiple()
                     ->searchable()
                     ->preload()
-                    ->options(fn () => DropdownOption::query()
+                    ->options(fn () => ['__none__' => 'No collection'] + DropdownOption::query()
                         ->whereNotNull('collection_style')
                         ->where('collection_style', '!=', '')
                         ->distinct()
@@ -3227,32 +3269,87 @@ class NewProductDraftResource extends Resource
                         ->pluck('collection_style', 'collection_style')
                         ->all())
                     ->query(function (Builder $query, array $data): Builder {
-                        $collection = $data['value'] ?? null;
-                        if (!is_string($collection) || trim($collection) === '') {
+                        $collections = $data['values'] ?? [];
+                        if (!is_array($collections) || empty($collections)) {
                             return $query;
                         }
 
-                        $tagsRow = DropdownOption::query()
-                            ->where('collection_style', $collection)
+                        $collections = array_values(array_filter(array_map(
+                            fn ($value): string => trim((string) $value),
+                            $collections
+                        )));
+
+                        if ($collections === []) {
+                            return $query;
+                        }
+
+                        $includeNone = in_array('__none__', $collections, true);
+                        $collections = array_values(array_filter(
+                            $collections,
+                            fn (string $value): bool => $value !== '__none__'
+                        ));
+
+                        $collectionTags = DropdownOption::query()
+                            ->whereIn('collection_style', $collections)
                             ->whereNotNull('collection_tag_primary')
-                            ->select(['collection_tag_primary', 'collection_tag_secondary'])
-                            ->first();
+                            ->get(['collection_style', 'collection_tag_primary', 'collection_tag_secondary'])
+                            ->reduce(function (array $carry, DropdownOption $option): array {
+                                $style = trim((string) $option->collection_style);
+                                if ($style === '') {
+                                    return $carry;
+                                }
 
-                        if (!$tagsRow) {
+                                $tags = array_values(array_filter([
+                                    $option->collection_tag_primary,
+                                    $option->collection_tag_secondary,
+                                ], fn (?string $tag): bool => $tag !== null && trim($tag) !== ''));
+
+                                $carry[$style] = array_values(array_unique(array_merge($carry[$style] ?? [], $tags)));
+
+                                return $carry;
+                            }, []);
+
+                        if ($collectionTags === [] && !$includeNone) {
                             return $query;
                         }
 
-                        $tags = array_filter([
-                            $tagsRow->collection_tag_primary,
-                            $tagsRow->collection_tag_secondary,
-                        ], fn (?string $tag): bool => $tag !== null && trim($tag) !== '');
+                        $allCollectionTags = self::allCollectionTags();
 
-                        foreach ($tags as $tag) {
-                            $query->whereRaw(
-                                "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
-                                [$tag]
-                            );
-                        }
+                        $query->where(function (Builder $sub) use ($collections, $collectionTags, $includeNone, $allCollectionTags): void {
+                            foreach ($collections as $collection) {
+                                $tags = $collectionTags[$collection] ?? [];
+                                if ($tags === []) {
+                                    continue;
+                                }
+
+                                $sub->orWhere(function (Builder $tagQuery) use ($tags): void {
+                                    foreach ($tags as $tag) {
+                                        $tagQuery->whereRaw(
+                                            "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
+                                            [$tag]
+                                        );
+                                    }
+                                });
+                            }
+
+                            if ($includeNone) {
+                                $sub->orWhere(function (Builder $noCollectionQuery) use ($allCollectionTags): void {
+                                    $noCollectionQuery->whereNull('tags')
+                                        ->orWhereRaw("TRIM(COALESCE(tags, '')) = ''");
+
+                                    if ($allCollectionTags !== []) {
+                                        $noCollectionQuery->orWhere(function (Builder $tagFreeQuery) use ($allCollectionTags): void {
+                                            foreach ($allCollectionTags as $tag) {
+                                                $tagFreeQuery->whereRaw(
+                                                    "NOT FIND_IN_SET(?, REPLACE(COALESCE(tags, ''), ', ', ','))",
+                                                    [$tag]
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                        });
 
                         return $query;
                     }),

@@ -1089,7 +1089,8 @@ class ProductResource extends Resource
                 }),
             SelectFilter::make('type')
                 ->label('Type')
-                ->options(fn () => Product::query()
+                ->multiple()
+                ->options(fn () => ['__none__' => 'No type'] + Product::query()
                     ->whereNotNull('type')
                     ->where('type', '!=', '')
                     ->distinct()
@@ -1097,7 +1098,39 @@ class ProductResource extends Resource
                     ->pluck('type', 'type')
                     ->all())
                 ->searchable()
-                ->preload(),
+                ->preload()
+                ->query(function (Builder $query, array $data): Builder {
+                    $values = $data['values'] ?? [];
+                    if (!is_array($values) || empty($values)) {
+                        return $query;
+                    }
+
+                    $values = array_values(array_filter(array_map(
+                        fn ($value): string => trim((string) $value),
+                        $values
+                    )));
+
+                    if ($values === []) {
+                        return $query;
+                    }
+
+                    $includeNone = in_array('__none__', $values, true);
+                    $types = array_values(array_filter(
+                        $values,
+                        fn (string $value): bool => $value !== '__none__'
+                    ));
+
+                    return $query->where(function (Builder $sub) use ($includeNone, $types): void {
+                        if ($types !== []) {
+                            $sub->orWhereIn('type', $types);
+                        }
+
+                        if ($includeNone) {
+                            $sub->orWhereNull('type')
+                                ->orWhereRaw("TRIM(COALESCE(type, '')) = ''");
+                        }
+                    });
+                }),
             SelectFilter::make('vendor')
                 ->label('Vendor')
                 ->options(fn () => Product::query()
@@ -1138,7 +1171,7 @@ class ProductResource extends Resource
                 ->multiple()
                 ->searchable()
                 ->preload()
-                ->options(fn () => DropdownOption::query()
+                ->options(fn () => ['__none__' => 'No collection'] + DropdownOption::query()
                     ->whereNotNull('collection_style')
                     ->where('collection_style', '!=', '')
                     ->distinct()
@@ -1160,25 +1193,39 @@ class ProductResource extends Resource
                         return $query;
                     }
 
+                    $includeNone = in_array('__none__', $collections, true);
+                    $collections = array_values(array_filter(
+                        $collections,
+                        fn (string $value): bool => $value !== '__none__'
+                    ));
+
                     $collectionTags = DropdownOption::query()
                         ->whereIn('collection_style', $collections)
                         ->whereNotNull('collection_tag_primary')
                         ->get(['collection_style', 'collection_tag_primary', 'collection_tag_secondary'])
-                        ->mapWithKeys(function (DropdownOption $option): array {
+                        ->reduce(function (array $carry, DropdownOption $option): array {
+                            $style = trim((string) $option->collection_style);
+                            if ($style === '') {
+                                return $carry;
+                            }
+
                             $tags = array_values(array_filter([
                                 $option->collection_tag_primary,
                                 $option->collection_tag_secondary,
                             ], fn (?string $tag): bool => $tag !== null && trim($tag) !== ''));
 
-                            return [trim((string) $option->collection_style) => $tags];
-                        })
-                        ->all();
+                            $carry[$style] = array_values(array_unique(array_merge($carry[$style] ?? [], $tags)));
 
-                    if ($collectionTags === []) {
+                            return $carry;
+                        }, []);
+
+                    if ($collectionTags === [] && !$includeNone) {
                         return $query;
                     }
 
-                    return $query->where(function (Builder $sub) use ($collections, $collectionTags): void {
+                    $allCollectionTags = self::allCollectionTags();
+
+                    return $query->where(function (Builder $sub) use ($collections, $collectionTags, $includeNone, $allCollectionTags): void {
                         foreach ($collections as $collection) {
                             $tags = $collectionTags[$collection] ?? [];
                             if ($tags === []) {
@@ -1191,6 +1238,24 @@ class ProductResource extends Resource
                                         "FIND_IN_SET(?, REPLACE(tags, ', ', ','))",
                                         [$tag]
                                     );
+                                }
+                            });
+                        }
+
+                        if ($includeNone) {
+                            $sub->orWhere(function (Builder $noCollectionQuery) use ($allCollectionTags): void {
+                                $noCollectionQuery->whereNull('tags')
+                                    ->orWhereRaw("TRIM(COALESCE(tags, '')) = ''");
+
+                                if ($allCollectionTags !== []) {
+                                    $noCollectionQuery->orWhere(function (Builder $tagFreeQuery) use ($allCollectionTags): void {
+                                        foreach ($allCollectionTags as $tag) {
+                                            $tagFreeQuery->whereRaw(
+                                                "NOT FIND_IN_SET(?, REPLACE(COALESCE(tags, ''), ', ', ','))",
+                                                [$tag]
+                                            );
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -3614,4 +3679,3 @@ class ProductResource extends Resource
         return null;
     }
 }
-
