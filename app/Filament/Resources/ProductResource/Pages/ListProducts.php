@@ -59,6 +59,7 @@ class ListProducts extends ListRecords
 
     public function getTabs(): array
     {
+        $reportCounts = $this->reportTabCounts();
         $tabs = [
             'all' => Tab::make('All'),
             'active' => Tab::make('Active')
@@ -100,7 +101,30 @@ class ListProducts extends ListRecords
                 '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
             ));
 
+           if ($reportCounts['needs_title_update'] > 0) {
+            $tabs['needs_title_update'] = Tab::make('Needs Title')
+                ->badge((string) $reportCounts['needs_title_update'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyNeedsTitleUpdateFilter($query));
+        }
+
+        if ($reportCounts['good_title'] > 0) {
+            $tabs['good_title'] = Tab::make('Good Title')
+                ->badge((string) $reportCounts['good_title'])
+                ->badgeColor('success')
+                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyGoodTitleFilter($query));
+        }
+
+
         return $tabs;
+    }
+
+    private function reportTabCounts(): array
+    {
+        return [
+            'needs_title_update' => ProductResource::applyNeedsTitleUpdateFilter(Product::query())->count(),
+            'good_title' => ProductResource::applyGoodTitleFilter(Product::query())->count(),
+        ];
     }
 
     private function isSyncRunning(): bool
