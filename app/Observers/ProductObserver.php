@@ -6,6 +6,7 @@ use App\Models\ChangeLog;
 use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Services\Normalizer;
+use App\Services\ProductSeoTracker;
 use App\Services\TagNormalizer;
 use App\Models\Tag;
 use App\Models\NewProductDraft;
@@ -34,10 +35,27 @@ class ProductObserver
             'first_handle_auto_lock_approval_version',
             'first_image_auto_rename_completed_at',
             'first_image_auto_rename_approval_version',
+            'sync_batch_id',
+            'last_synced_at',
+            'seo_updated_at',
+            'seo_updated_by',
         ];
 
         // 2) If any meaningful field changed, bump approval_version
         $dirtyKeys = array_keys($dirty);
+        $seoTrackedFields = [
+            'seo_title',
+            'seo_description',
+        ];
+
+        if (!empty(array_intersect($dirtyKeys, $seoTrackedFields))) {
+            $tracker = app(ProductSeoTracker::class);
+            $tracker->stampAttributes($product, Auth::id());
+            $dirty['seo_updated_at'] = $product->seo_updated_at;
+            $dirty['seo_updated_by'] = $product->seo_updated_by;
+            $dirtyKeys = array_keys($dirty);
+        }
+
         $meaningful = array_diff($dirtyKeys, $ignoreForApprovalReset);
 
         // IMPORTANT: don't treat approval_version itself as meaningful
@@ -60,6 +78,10 @@ class ProductObserver
             'first_handle_auto_lock_approval_version',
             'first_image_auto_rename_completed_at',
             'first_image_auto_rename_approval_version',
+            'sync_batch_id',
+            'last_synced_at',
+            'seo_updated_at',
+            'seo_updated_by',
         ];
 
         $userId = Auth::id();

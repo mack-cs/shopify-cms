@@ -113,11 +113,21 @@ class StyleProfileResource extends Resource
                         ->options([
                             'draft' => 'Draft',
                             'ready' => 'Ready to sync',
+                            'approved' => 'Approved for Shopify sync',
+                            'synced' => 'Synced to Shopify',
                         ])
                         ->required()
                         ->default('draft'),
+                    TextInput::make('seo_updated_at')
+                        ->label('Draft Updated')
+                        ->disabled()
+                        ->dehydrated(false),
+                    TextInput::make('seo_approved_at')
+                        ->label('Approved For Sync')
+                        ->disabled()
+                        ->dehydrated(false),
                     TextInput::make('seo_synced_at')
-                        ->label('Last Synced')
+                        ->label('Synced To Shopify')
                         ->disabled()
                         ->dehydrated(false),
                 ])->columns(2),
@@ -194,17 +204,50 @@ class StyleProfileResource extends Resource
                     ->label('Sync Status')
                     ->badge()
                     ->color(fn (string $state): string => match ($state) {
+                        'approved' => 'info',
                         'ready' => 'warning',
                         'synced' => 'success',
                         default => 'gray',
                     }),
+                TextColumn::make('seo_updated_at')
+                    ->label('Draft Updated')
+                    ->dateTime()
+                    ->toggleable(),
+                TextColumn::make('seoUpdatedBy.name')
+                    ->label('Draft By')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seo_approved_at')
+                    ->label('Approved')
+                    ->dateTime()
+                    ->toggleable(),
+                TextColumn::make('seoApprovedBy.name')
+                    ->label('Approved By')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seo_approval_source')
+                    ->label('Approval Source')
+                    ->formatStateUsing(fn (?string $state): string => match ($state) {
+                        'full_product_approval' => 'Full Product Approval',
+                        'partial_seo_approval' => 'Partial SEO Approval',
+                        default => '-',
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('seo_synced_at')
                     ->label('Synced At')
                     ->dateTime()
+                    ->toggleable(),
+                TextColumn::make('seoSyncedBy.name')
+                    ->label('Synced By')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seo_sync_batch_id')
+                    ->label('Sync Batch')
+                    ->placeholder('-')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('applied_at')
                     ->dateTime()
-                    ->label('Applied')
+                    ->label('Applied To Product')
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
@@ -557,7 +600,7 @@ class StyleProfileResource extends Resource
                             $fields = array_fill_keys($data['fields'] ?? [], true);
                             $synced = 0;
                             $syncedIds = [];
-                            $syncedAt = Carbon::now();
+                            $appliedAt = Carbon::now();
                             foreach ($records as $record) {
                                 if ($record->seo_sync_status !== 'ready') {
                                     continue;
@@ -605,14 +648,14 @@ class StyleProfileResource extends Resource
 
                             if (!empty($syncedIds)) {
                                 StyleProfile::whereIn('id', $syncedIds)->update([
-                                    'seo_sync_status' => 'synced',
-                                    'seo_synced_at' => $syncedAt,
+                                    'applied_at' => $appliedAt,
+                                    'applied_by' => Auth::id(),
                                 ]);
                             }
 
                             self::sendNotification(Notification::make()
-                                ->title('SEO sync complete')
-                                ->body("Synced {$synced} style(s).")
+                                ->title('SEO draft applied to product')
+                                ->body("Applied {$synced} style draft(s) to product data. Shopify sync happens later after approval.")
                                 ->success()
                             );
                         }),

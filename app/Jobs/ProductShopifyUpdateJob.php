@@ -11,6 +11,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Str;
 
 class ProductShopifyUpdateJob implements ShouldQueue
 {
@@ -24,6 +25,7 @@ class ProductShopifyUpdateJob implements ShouldQueue
         public ?int $userId = null,
         public ?array $scopes = null,
         public ?array $coreFields = null,
+        public ?string $syncBatchId = null,
     ) {}
 
     public function handle(ProductShopifyUpdater $updater): void
@@ -32,7 +34,8 @@ class ProductShopifyUpdateJob implements ShouldQueue
             ->whereIn('id', $this->productIds)
             ->get();
 
-        $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields);
+        $syncBatchId = $this->syncBatchId ?: (string) Str::uuid();
+        $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields, $syncBatchId, $this->userId);
 
         $updatedProductIds = array_values(array_unique(array_map('intval', $result['updated_product_ids'] ?? [])));
         $shouldQueueImageBackup = $this->scopes === null
@@ -65,6 +68,7 @@ class ProductShopifyUpdateJob implements ShouldQueue
             }
             if ($result['updated'] > 0) {
                 $parts[] = "Updated {$result['updated']}.";
+                $parts[] = 'Sync batch ' . substr(str_replace('-', '', $syncBatchId), 0, 8) . '.';
                 if ($shouldQueueImageBackup && !empty($updatedProductIds)) {
                     $parts[] = 'Image backup queued.';
                 }

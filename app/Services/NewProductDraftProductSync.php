@@ -13,6 +13,11 @@ use Illuminate\Support\Collection;
 
 final class NewProductDraftProductSync
 {
+    public function __construct(
+        private readonly ProductSeoTracker $seoTracker
+    ) {
+    }
+
     public function syncToExistingProduct(
         NewProductDraft $draft,
         bool $ensureApprovalReset = true,
@@ -326,11 +331,22 @@ final class NewProductDraftProductSync
             return;
         }
 
+        $seoDeindexChanged = false;
+        if (array_key_exists(HeaderStore::SEO_DEINDEX, $updates)) {
+            $currentSeoDeindex = (string) ($row->get(HeaderStore::SEO_DEINDEX, '') ?? '');
+            $nextSeoDeindex = (string) ($updates[HeaderStore::SEO_DEINDEX] ?? '');
+            $seoDeindexChanged = $currentSeoDeindex !== $nextSeoDeindex;
+        }
+
         foreach ($updates as $header => $value) {
             $row->set($header, $value);
         }
 
         $row->save();
+
+        if ($seoDeindexChanged) {
+            $this->seoTracker->markSeoUpdated($product);
+        }
     }
 
     private function addRowUpdate(

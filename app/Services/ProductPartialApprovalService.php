@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
 use App\Models\User;
+use App\Services\StyleProfileSeoTimelineService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
@@ -258,6 +259,7 @@ class ProductPartialApprovalService
                 ])->save();
 
                 $this->syncApprovedHandleWhenTitleApproved($request);
+                $this->markSeoApprovedWhenApplicable($request, $userId);
                 $approved++;
             }
         }
@@ -328,6 +330,7 @@ class ProductPartialApprovalService
             ])->save();
 
             $this->syncApprovedHandleWhenTitleApproved($request);
+            $this->markSeoApprovedWhenApplicable($request, $userId);
             $approved++;
         }
 
@@ -342,11 +345,9 @@ class ProductPartialApprovalService
     }
 
     /**
-     * @param array<int, string> $requestedScopes
-     * @param array<int, string> $requestedCoreFields
      * @return array{scopes:array<int,string>,core_fields:array<int,string>}
      */
-    public function allowedSelections(Product $product, array $requestedScopes, array $requestedCoreFields): array
+    public function allowedSelections(Product $product, array $requestedScopes = [], array $requestedCoreFields = []): array
     {
         $approved = ProductPartialApprovalRequest::query()
             ->where('product_id', $product->id)
@@ -359,25 +360,15 @@ class ProductPartialApprovalService
 
         foreach ($approved as $request) {
             foreach (($request->scopes ?? []) as $scope) {
-                if (is_string($scope) && in_array($scope, $requestedScopes, true)) {
+                if (is_string($scope) && in_array($scope, ProductShopifyUpdater::availableSyncScopes(), true)) {
                     $allowedScopes[$scope] = $scope;
                 }
             }
 
             foreach (($request->core_fields ?? []) as $field) {
-                if (is_string($field) && in_array($field, $requestedCoreFields, true)) {
+                if (is_string($field) && in_array($field, ProductShopifyUpdater::availableCoreFields(), true)) {
                     $allowedCoreFields[$field] = $field;
                 }
-            }
-
-            if (
-                in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $requestedScopes, true)
-                && in_array(ProductShopifyUpdater::CORE_FIELD_HANDLE, $requestedCoreFields, true)
-                && in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, (array) ($request->scopes ?? []), true)
-                && in_array(ProductShopifyUpdater::CORE_FIELD_TITLE, (array) ($request->core_fields ?? []), true)
-            ) {
-                $allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT] = ProductShopifyUpdater::SYNC_SCOPE_PRODUCT;
-                $allowedCoreFields[ProductShopifyUpdater::CORE_FIELD_HANDLE] = ProductShopifyUpdater::CORE_FIELD_HANDLE;
             }
         }
 
@@ -409,6 +400,26 @@ class ProductPartialApprovalService
         }
 
         app(ProductHandleService::class)->syncApprovedHandleToCurrentTitle($product);
+    }
+
+    private function markSeoApprovedWhenApplicable(ProductPartialApprovalRequest $request, int $userId): void
+    {
+        $scopes = is_array($request->scopes) ? $request->scopes : [];
+        if (!in_array(ProductShopifyUpdater::SYNC_SCOPE_SEO, $scopes, true)) {
+            return;
+        }
+
+        $product = $request->product;
+        if (!$product instanceof Product) {
+            return;
+        }
+
+        app(StyleProfileSeoTimelineService::class)->markApprovedForSync(
+            $product,
+            $userId,
+            (int) $request->id,
+            StyleProfileSeoTimelineService::APPROVAL_SOURCE_PARTIAL
+        );
     }
 
     public function pendingStatusLabel(Product $product): string

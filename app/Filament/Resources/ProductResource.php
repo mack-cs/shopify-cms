@@ -66,6 +66,7 @@ use App\Services\NewProductDraftSeeder;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
+use App\Services\ProductSeoTracker;
 use App\Models\Tag;
 use App\Models\Color;
 use App\Models\DropdownOption;
@@ -88,7 +89,7 @@ class ProductResource extends Resource
         return (bool) $record;
     }
 
-   
+
     public static function form(Forms\Form $form): Forms\Form
     {
         return $form->schema([
@@ -501,7 +502,13 @@ class ProductResource extends Resource
                                     ) && ($record?->styleProfiles()->exists() ?? false);
                                     return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
                                 }),
-                            Grid::make(3)->schema([
+                            Grid::make(5)->schema([
+                                Placeholder::make('seo_updated_at_display')
+                                    ->label('Last SEO update')
+                                    ->content(fn (?Product $record): string => $record?->seo_updated_at?->format('Y-m-d H:i') ?? 'Not tracked yet'),
+                                Placeholder::make('seo_updated_by_display')
+                                    ->label('SEO updated by')
+                                    ->content(fn (?Product $record): string => $record?->seoUpdatedBy?->name ?? 'System / not tracked'),
                                 Toggle::make('seo_deindex')
                                     ->label('SEO: Deindex products')
                                     ->helperText('Exported as true/false.')
@@ -953,6 +960,23 @@ class ProductResource extends Resource
                 ->label('SEO description')
                 ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('seo_updated_at')
+                ->label('SEO updated')
+                ->dateTime('Y-m-d H:i')
+                ->sortable()
+                ->toggleable(),
+            TextColumn::make('styleProfiles.seo_updated_at')
+                ->label('SEO draft updated')
+                ->state(fn (Product $record): ?string => $record->styleProfiles()
+                    ->orderByDesc('seo_updated_at')
+                    ->value('seo_updated_at'))
+                ->dateTime('Y-m-d H:i')
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('seoUpdatedBy.name')
+                ->label('SEO by')
+                ->placeholder('-')
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('color_string')
                 ->label('Colors')
                 ->sortable()
@@ -1042,6 +1066,27 @@ class ProductResource extends Resource
                     default => 'gray',
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('shopify_sync_state')
+                ->label('Shopify Sync')
+                ->state(fn (Product $record): string => $record->shopifySyncState())
+                ->badge()
+                ->color(fn (string $state): string => match ($state) {
+                    'Synced' => 'success',
+                    'Updated After Sync' => 'warning',
+                    default => 'gray',
+                })
+                ->toggleable(),
+            TextColumn::make('sync_batch_id')
+                ->label('Sync Batch')
+                ->state(fn (Product $record): string => self::syncBatchLabel($record->sync_batch_id))
+                ->placeholder('-')
+                ->sortable(query: fn (Builder $query, string $direction): Builder => $query->orderBy('sync_batch_id', $direction))
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('last_synced_at')
+                ->label('Last Synced')
+                ->dateTime()
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             IconColumn::make('approved')
                 ->label('Approved')
                 ->state(fn (Product $record) => $record->isApprovedByTwo())
@@ -1086,6 +1131,55 @@ class ProductResource extends Resource
                         ->when(
                             $data['updated_until'] ?? null,
                             fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '<=', $date),
+                        );
+                }),
+            SelectFilter::make('shopify_sync_state')
+                ->label('Shopify Sync')
+                ->options([
+                    'synced' => 'Synced',
+                    'updated_after_sync' => 'Updated After Sync',
+                    'no_sync' => 'No Sync',
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
+
+                    return match ($value) {
+                        'synced' => $query->whereNotNull('last_synced_at')
+                            ->whereColumn('updated_at', '<=', 'last_synced_at'),
+                        'updated_after_sync' => $query->whereNotNull('last_synced_at')
+                            ->whereColumn('updated_at', '>', 'last_synced_at'),
+                        'no_sync' => $query->whereNull('last_synced_at'),
+                        default => $query,
+                    };
+                }),
+            SelectFilter::make('sync_batch_id')
+                ->label('Sync Batch')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('sync_batch_id')
+                    ->where('sync_batch_id', '!=', '')
+                    ->get(['sync_batch_id', 'last_synced_at'])
+                    ->sortByDesc('last_synced_at')
+                    ->unique('sync_batch_id')
+                    ->mapWithKeys(fn (Product $product): array => [
+                        (string) $product->sync_batch_id => self::syncBatchLabel($product->sync_batch_id),
+                    ])
+                    ->all())
+                ->searchable()
+                ->preload(),
+            Filter::make('last_synced_at')
+                ->form([
+                    DatePicker::make('synced_from'),
+                    DatePicker::make('synced_until'),
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when(
+                            $data['synced_from'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->whereDate('last_synced_at', '>=', $date),
+                        )
+                        ->when(
+                            $data['synced_until'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->whereDate('last_synced_at', '<=', $date),
                         );
                 }),
             SelectFilter::make('type')
@@ -1295,7 +1389,6 @@ class ProductResource extends Resource
                             ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
                     });
                 })),
-
             TernaryFilter::make('approved')
                 ->label('Approved')
                 ->queries(
@@ -1348,6 +1441,35 @@ class ProductResource extends Resource
             Filter::make('missing_seo_information')
                 ->label('Missing SEO Info')
                 ->query(fn (Builder $query): Builder => self::applyMissingSeoInformationFilter($query)),
+            Filter::make('seo_updated_at')
+                ->label('SEO Updated Date')
+                ->form([
+                    DatePicker::make('from')->label('From'),
+                    DatePicker::make('to')->label('To'),
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->whereDate('seo_updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $sub, $to): Builder => $sub->whereDate('seo_updated_at', '<=', $to));
+                }),
+            Filter::make('seo_draft_updated_at')
+                ->label('SEO Draft Updated Date')
+                ->form([
+                    DatePicker::make('from')->label('From'),
+                    DatePicker::make('to')->label('To'),
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query->whereHas('styleProfiles', function (Builder $sub) use ($data): void {
+                        $sub
+                            ->when($data['from'] ?? null, fn (Builder $styleQuery, $from): Builder => $styleQuery->whereDate('seo_updated_at', '>=', $from))
+                            ->when($data['to'] ?? null, fn (Builder $styleQuery, $to): Builder => $styleQuery->whereDate('seo_updated_at', '<=', $to));
+                    });
+                }),
+            SelectFilter::make('seo_updated_by')
+                ->label('SEO Updated By')
+                ->relationship('seoUpdatedBy', 'name')
+                ->searchable()
+                ->preload(),
             TernaryFilter::make('has_errors')
                 ->label('Errors'),
             Filter::make('awaiting_partial_approval')
@@ -1548,7 +1670,7 @@ class ProductResource extends Resource
                             [ProductShopifyUpdater::CORE_FIELD_HANDLE]
                         );
 
-                        $parts = ["Queued " . count($eligibleIds) . " product(s) to apply approved URLs."];
+                        $parts = ["Will update " . count($eligibleIds) . " product(s) with approved URLs."];
                         $parts[] = 'Pending redirects will be created only for products whose live handle changes.';
                         if ($skippedNotApproved > 0) {
                             $parts[] = "Skipped {$skippedNotApproved} not approved.";
@@ -1560,122 +1682,6 @@ class ProductResource extends Resource
                         self::sendNotification(Notification::make()
                             ->title('Approved URL sync queued')
                             ->body(implode(' ', $parts))
-                            ->success()
-                        );
-                    })
-                    ->deselectRecordsAfterCompletion(),
-                BulkAction::make('bulkPartialSyncShopify')
-                    ->label('Sync Selected Fields to Shopify')
-                    ->icon('heroicon-o-adjustments-horizontal')
-                    ->color('warning')
-                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--partial-sync'])
-                    ->form([
-                        CheckboxList::make('scopes')
-                            ->label('Fields to sync')
-                            ->options(ProductShopifyUpdater::syncScopeLabels())
-                            ->default([ProductShopifyUpdater::SYNC_SCOPE_SEO])
-                            ->required()
-                            ->live()
-                            ->columns(2)
-                            ->helperText('Only the selected fields will be pushed to Shopify. Active products can sync with approved partial fields; non-active products still need the existing full approval workflow.'),
-                        CheckboxList::make('core_fields')
-                            ->label('Product core fields')
-                            ->options(ProductShopifyUpdater::productCoreFieldLabels())
-                            ->default(array_values(array_intersect(
-                                ProductShopifyUpdater::defaultCoreFields(),
-                                ProductShopifyUpdater::availableProductCoreFields()
-                            )))
-                            ->columns(5)
-                            ->visible(fn (Get $get): bool => in_array(
-                                ProductShopifyUpdater::SYNC_SCOPE_PRODUCT,
-                                array_values(array_filter($get('scopes') ?? [], 'is_string')),
-                                true
-                            ))
-                            ->helperText('Choose the exact product columns to push when Product core fields is selected. URL changes are handled separately through Apply Approved URLs.'),
-                        CheckboxList::make('metafield_fields')
-                            ->label('Metafields')
-                            ->options(ProductShopifyUpdater::metafieldFieldLabels())
-                            ->columns(5)
-                            ->visible(fn (Get $get): bool => in_array(
-                                ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS,
-                                array_values(array_filter($get('scopes') ?? [], 'is_string')),
-                                true
-                            ))
-                            ->helperText('Choose the exact metafields to sync when Metafields is selected.'),
-                    ])
-                    ->requiresConfirmation()
-                    ->modalWidth('7xl')
-                    ->modalFooterActionsAlignment(\Filament\Support\Enums\Alignment::Start)
-                    ->modalSubmitAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
-                    ->modalCancelAction(fn (\Filament\Actions\StaticAction $action) => $action->size(\Filament\Support\Enums\ActionSize::Medium))
-                    ->action(function (Collection $records, array $data): void {
-                        $ids = $records->pluck('id')->map(fn ($id): int => (int) $id)->all();
-                        $selectedCount = count($ids);
-                        $scopes = array_values(array_unique(array_map(
-                            'strval',
-                            array_filter($data['scopes'] ?? [], fn ($scope): bool => is_string($scope) && $scope !== '')
-                        )));
-
-                        if (empty($scopes)) {
-                            self::sendNotification(Notification::make()
-                                ->title('No fields selected')
-                                ->body('Choose at least one field group to sync.')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        $coreFields = array_values(array_unique(array_map(
-                            'strval',
-                            array_filter($data['core_fields'] ?? [], fn ($field): bool => is_string($field) && $field !== '')
-                        )));
-
-                        $metafieldFields = array_values(array_unique(array_map(
-                            'strval',
-                            array_filter($data['metafield_fields'] ?? [], fn ($field): bool => is_string($field) && $field !== '')
-                        )));
-
-                        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true) && empty($coreFields)) {
-                            self::sendNotification(Notification::make()
-                                ->title('No core fields selected')
-                                ->body('Choose at least one product core field or deselect Product core fields.')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true) && empty($metafieldFields)) {
-                            self::sendNotification(Notification::make()
-                                ->title('No metafields selected')
-                                ->body('Choose at least one metafield or deselect Metafields.')
-                                ->warning()
-                            );
-                            return;
-                        }
-
-                        $selectedFields = array_values(array_unique(array_merge($coreFields, $metafieldFields)));
-
-                        \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id(), $scopes, $selectedFields);
-
-                        $scopeSummary = collect($scopes)
-                            ->map(fn (string $scope): string => ProductShopifyUpdater::syncScopeLabels()[$scope] ?? $scope)
-                            ->implode(', ');
-
-                        $coreSummary = in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $scopes, true)
-                            ? ' Core fields: ' . collect($coreFields)
-                                ->map(fn (string $field): string => ProductShopifyUpdater::productCoreFieldLabels()[$field] ?? $field)
-                                ->implode(', ') . '.'
-                            : '';
-
-                        $metafieldSummary = in_array(ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS, $scopes, true)
-                            ? ' Metafields: ' . collect($metafieldFields)
-                                ->map(fn (string $field): string => ProductShopifyUpdater::metafieldFieldLabels()[$field] ?? $field)
-                                ->implode(', ') . '.'
-                            : '';
-
-                        self::sendNotification(Notification::make()
-                            ->title('Partial Shopify sync queued')
-                            ->body("Queued {$selectedCount} selected product(s). Scopes: {$scopeSummary}.{$coreSummary}{$metafieldSummary} Active products will sync only fully approved or partially approved fields.")
                             ->success()
                         );
                     })
@@ -2913,6 +2919,7 @@ class ProductResource extends Resource
 
         if ($row) {
             $rowUpdates = [];
+            $seoDeindexChanged = false;
             if ($googleShoppingAgeGroup !== null) {
                 $value = trim((string) $googleShoppingAgeGroup);
                 $rowUpdates[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] = $value === '' ? '' : strtolower($value);
@@ -2927,6 +2934,7 @@ class ProductResource extends Resource
             }
             if ($seoDeindex !== null) {
                 $rowUpdates[HeaderStore::SEO_DEINDEX] = $seoDeindex ? 'true' : 'false';
+                $seoDeindexChanged = (string) $row->get(HeaderStore::SEO_DEINDEX, '') !== (string) $rowUpdates[HeaderStore::SEO_DEINDEX];
             }
             $uvpShortParagraph = self::nullIfEmpty($data['uvp_short_paragraph'] ?? null);
             if ($uvpShortParagraph !== null) {
@@ -2978,6 +2986,9 @@ class ProductResource extends Resource
             if ($rowChanged && !$approvalBumped) {
                 self::bumpApprovalVersion($product);
                 $approvalBumped = true;
+            }
+            if ($seoDeindexChanged) {
+                app(ProductSeoTracker::class)->markSeoUpdated($product, Auth::id());
             }
         }
 
@@ -3560,6 +3571,16 @@ class ProductResource extends Resource
         }
 
         return $options;
+    }
+
+    private static function syncBatchLabel(?string $batchId): string
+    {
+        $value = trim((string) $batchId);
+        if ($value === '') {
+            return '-';
+        }
+
+        return strtoupper(substr(str_replace('-', '', $value), 0, 8));
     }
 
     private static function normalizeTagList(mixed $value): array

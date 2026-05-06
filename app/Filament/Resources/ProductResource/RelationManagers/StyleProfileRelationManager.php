@@ -8,7 +8,10 @@ use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\ImageColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Forms\Components\DatePicker;
 use Illuminate\Support\HtmlString;
+use Illuminate\Database\Eloquent\Builder;
 use App\Models\StyleProfile;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
@@ -118,7 +121,22 @@ class StyleProfileRelationManager extends RelationManager
             Tables\Columns\TextColumn::make('product.color_string')->label('Colors')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_title')->label('SEO Title')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_description')->label('SEO Desc')->limit(80)->wrap(),
-            Tables\Columns\TextColumn::make('applied_at')->dateTime()->label('Applied')->toggleable(),
+            Tables\Columns\TextColumn::make('seo_updated_at')->dateTime()->label('Draft Updated')->toggleable(),
+            Tables\Columns\TextColumn::make('seo_approved_at')->dateTime()->label('Approved')->toggleable(),
+            Tables\Columns\TextColumn::make('seo_synced_at')->dateTime()->label('Synced')->toggleable(),
+            Tables\Columns\TextColumn::make('applied_at')->dateTime()->label('Applied To Product')->toggleable(),
+        ])->filters([
+            Filter::make('seo_updated_at')
+                ->label('SEO Draft Updated Date')
+                ->form([
+                    DatePicker::make('from')->label('From'),
+                    DatePicker::make('to')->label('To'),
+                ])
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->whereDate('seo_updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $sub, $to): Builder => $sub->whereDate('seo_updated_at', '<=', $to));
+                }),
         ])->headerActions([
             // Read-only on Products. Edit SEO drafts from New Products instead.
         ])->actions([

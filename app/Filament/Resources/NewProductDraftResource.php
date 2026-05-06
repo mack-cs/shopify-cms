@@ -2468,6 +2468,13 @@ class NewProductDraftResource extends Resource
                     ->wrap()
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('styleProfiles.seo_updated_at')
+                    ->label('SEO Draft Updated')
+                    ->state(fn (NewProductDraft $record): ?string => $record->styleProfiles()
+                        ->orderByDesc('seo_updated_at')
+                        ->value('seo_updated_at'))
+                    ->dateTime('Y-m-d H:i')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variant_price')
                     ->label('Price')
                     ->sortable()
@@ -3161,23 +3168,36 @@ class NewProductDraftResource extends Resource
                     ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                         $deletionQuery->whereIn('status', ['pending', 'processing']);
                     })),
-
-                    Filter::make('updated_at')
-                        ->form([
-                            DatePicker::make('updated_from'),
-                            DatePicker::make('updated_until'),
-                        ])
-                        ->query(function (Builder $query, array $data): Builder {
-                            return $query
-                                ->when(
-                                    $data['updated_from'],
-                                    fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '>=', $date),
-                                )
-                                ->when(
-                                    $data['updated_until'],
-                                    fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '<=', $date),
-                                );
-                        }),
+                Filter::make('updated_at')
+                    ->label('Updated')
+                    ->form([
+                        DatePicker::make('updated_from')->label('Updated from'),
+                        DatePicker::make('updated_until')->label('Updated until'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query
+                            ->when(
+                                $data['updated_from'] ?? null,
+                                fn (Builder $sub, $from): Builder => $sub->whereDate('updated_at', '>=', $from),
+                            )
+                            ->when(
+                                $data['updated_until'] ?? null,
+                                fn (Builder $sub, $to): Builder => $sub->whereDate('updated_at', '<=', $to),
+                            );
+                    }),
+                Filter::make('seo_updated_at')
+                    ->label('SEO Updated')
+                    ->form([
+                        DatePicker::make('from')->label('SEO Update From'),
+                        DatePicker::make('to')->label('SEO Update To'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query->whereHas('styleProfiles', function (Builder $styleProfileQuery) use ($data): void {
+                            $styleProfileQuery
+                                ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->whereDate('seo_updated_at', '>=', $from))
+                                ->when($data['to'] ?? null, fn (Builder $sub, $to): Builder => $sub->whereDate('seo_updated_at', '<=', $to));
+                        });
+                    }),
                 SelectFilter::make('status')
                     ->label('Status')
                     ->options(function (): array {

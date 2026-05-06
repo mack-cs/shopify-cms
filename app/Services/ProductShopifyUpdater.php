@@ -102,10 +102,12 @@ final class ProductShopifyUpdater
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
      * }
      */
-    public function updateApprovedProducts(Collection $products, ?array $scopes = null, ?array $coreFields = null): array
+    public function updateApprovedProducts(Collection $products, ?array $scopes = null, ?array $coreFields = null, ?string $syncBatchId = null, ?int $userId = null): array
     {
         $resolvedScopes = $this->normalizeSyncScopes($scopes);
         $resolvedCoreFields = $this->normalizeCoreFields($coreFields);
+        $fullSyncScopes = $this->normalizeSyncScopes(null);
+        $fullSyncCoreFields = $this->normalizeCoreFields(null);
         if ($scopes !== null && empty($resolvedScopes)) {
             return [
                 'updated' => 0,
@@ -143,10 +145,13 @@ final class ProductShopifyUpdater
                 continue;
             }
 
-            $effectiveScopes = $resolvedScopes;
-            $effectiveCoreFields = $resolvedCoreFields;
+            if ($product->isApprovedByTwo()) {
+                $effectiveScopes = $fullSyncScopes;
+                $effectiveCoreFields = $fullSyncCoreFields;
+            } else {
+                $effectiveScopes = $resolvedScopes;
+                $effectiveCoreFields = $resolvedCoreFields;
 
-            if (!$product->isApprovedByTwo()) {
                 if (!$this->partialApprovalService->isActiveProduct($product)) {
                     $skippedNotApproved++;
                     continue;
@@ -181,6 +186,10 @@ final class ProductShopifyUpdater
 
             try {
                 $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
+                $this->markProductAsSynced($product, $syncBatchId);
+                if (in_array(self::SYNC_SCOPE_SEO, $effectiveScopes, true)) {
+                    app(StyleProfileSeoTimelineService::class)->markSynced($product, $userId, $syncBatchId);
+                }
                 $updated++;
                 $updatedProductIds[] = $product->id;
             } catch (\Throwable $e) {
@@ -208,6 +217,16 @@ final class ProductShopifyUpdater
             'warnings' => $warnings,
             'failures' => $failures,
         ];
+    }
+
+    private function markProductAsSynced(Product $product, ?string $syncBatchId): void
+    {
+        Product::withoutTimestamps(function () use ($product, $syncBatchId): void {
+            $product->forceFill([
+                'sync_batch_id' => $syncBatchId,
+                'last_synced_at' => now(),
+            ])->saveQuietly();
+        });
     }
 
     /**

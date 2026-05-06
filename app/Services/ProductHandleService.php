@@ -8,13 +8,20 @@ use App\Models\ProductUrlRedirect;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\StyleProfile;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 
 class ProductHandleService
 {
+    public function __construct(
+        private readonly ProductSeoTracker $seoTracker
+    ) {
+    }
+
     public function syncApprovedHandleToCurrentTitle(Product $product): ?string
     {
         $approvedHandle = $this->generateUniqueApprovedHandle($product);
+        $currentApprovedHandle = trim((string) ($product->approved_handle ?? ''));
 
         Product::withoutEvents(function () use ($product, $approvedHandle): void {
             $product->forceFill([
@@ -24,11 +31,16 @@ class ProductHandleService
 
         $product->forceFill(['approved_handle' => $approvedHandle]);
 
+        if ($approvedHandle !== $currentApprovedHandle) {
+            $this->seoTracker->markSeoUpdated($product, Auth::id());
+        }
+
         return $approvedHandle;
     }
 
     public function lockInitialApprovedHandle(Product $product): ?string
     {
+        $currentApprovedHandle = trim((string) ($product->approved_handle ?? ''));
         $approvedHandle = trim((string) ($product->approved_handle ?? ''));
         if ($approvedHandle === '') {
             $approvedHandle = $this->generateUniqueApprovedHandle($product);
@@ -41,6 +53,10 @@ class ProductHandleService
                 'first_handle_auto_lock_approval_version' => (int) ($product->approval_version ?? 1),
             ])->save();
         });
+
+        if ($approvedHandle !== $currentApprovedHandle) {
+            $this->seoTracker->markSeoUpdated($product, Auth::id());
+        }
 
         return $approvedHandle;
     }

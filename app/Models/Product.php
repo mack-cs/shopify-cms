@@ -17,7 +17,7 @@ class Product extends Model
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
         'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
         'first_handle_auto_lock_completed_at','first_handle_auto_lock_approval_version',
-        'batch','is_bundle','you_save',
+        'batch','sync_batch_id','last_synced_at','is_bundle','you_save',
         'has_errors','error_fields',
     ];
 
@@ -26,6 +26,8 @@ class Product extends Model
         'you_save' => 'decimal:2',
         'has_errors' => 'boolean',
         'error_fields' => 'array',
+        'last_synced_at' => 'datetime',
+        'seo_updated_at' => 'datetime',
         'first_image_auto_rename_completed_at' => 'datetime',
         'first_handle_auto_lock_completed_at' => 'datetime',
     ];
@@ -73,6 +75,11 @@ class Product extends Model
     public function import(): BelongsTo
     {
         return $this->belongsTo(Import::class);
+    }
+
+    public function seoUpdatedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'seo_updated_by');
     }
 
     public function variants(): HasMany
@@ -156,6 +163,19 @@ class Product extends Model
     public function hasLockedApprovedHandle(): bool
     {
         return $this->first_handle_auto_lock_completed_at !== null;
+    }
+
+    public function shopifySyncState(): string
+    {
+        if ($this->last_synced_at === null) {
+            return 'No Sync';
+        }
+
+        if ($this->updated_at !== null && $this->updated_at->gt($this->last_synced_at)) {
+            return 'Updated After Sync';
+        }
+
+        return 'Synced';
     }
 
 
