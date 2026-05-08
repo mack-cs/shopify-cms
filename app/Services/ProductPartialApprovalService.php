@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\RolesEnum;
+use App\Jobs\SendProductPartialApprovalRequestEmailJob;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
@@ -11,6 +12,7 @@ use App\Services\StyleProfileSeoTimelineService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use Throwable;
 
 class ProductPartialApprovalService
 {
@@ -199,6 +201,10 @@ class ProductPartialApprovalService
             $summary['requested']++;
             $summary['requested_products'][] = (int) $product->id;
             $summary['request_batch_id'] = $requestBatchId;
+        }
+
+        if ($summary['requested'] > 0 && $summary['request_batch_id']) {
+            SendProductPartialApprovalRequestEmailJob::dispatch($summary['request_batch_id']);
         }
 
         return $summary;
@@ -461,6 +467,35 @@ class ProductPartialApprovalService
     }
 
     /**
+     * @return array<int, string>
+     */
+    public function approvalRequestRecipientEmails(ProductPartialApprovalRequest $request, int $requestedBy): array
+    {
+        if ($request->targetApprover && $this->userCanReceiveApprovalEmail($request->targetApprover, $requestedBy)) {
+            return [$request->targetApprover->email];
+        }
+
+        return $this->eligibleApproversQuery($requestedBy)
+            ->get(['email'])
+            ->map(fn (User $user): string => trim((string) $user->email))
+            ->filter(fn (string $email): bool => $email !== '')
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    public function partialApprovalQueueUrl(): string
+    {
+        try {
+            return \App\Filament\Resources\ProductPartialApprovalRequestResource::getUrl('index');
+        } catch (Throwable) {
+            $base = rtrim((string) config('app.url'), '/');
+
+            return $base !== '' ? $base . '/admin/product-partial-approval-requests' : '';
+        }
+    }
+
+    /**
      * @param array<int, string> $scopes
      * @param array<int, string> $coreFields
      * @return array<int, string>
@@ -648,6 +683,20 @@ class ProductPartialApprovalService
             ->exists()
             ? $targetApproverId
             : null;
+    }
+
+    private function userCanReceiveApprovalEmail(?User $user, int $requestedBy): bool
+    {
+        if (!$user instanceof User) {
+            return false;
+        }
+
+        if ((int) $user->id === $requestedBy) {
+            return false;
+        }
+
+        return (bool) $user->is_active
+            && trim((string) $user->email) !== '';
     }
 
     private function normalizeRequestNote(?string $requestNote): ?string

@@ -260,24 +260,22 @@ class ShopifyCollectionResource extends Resource
                     ->dateTime()
                     ->sortable()
                     ->toggleable(),
-                Tables\Columns\TextColumn::make('deindex')
+                Tables\Columns\ToggleColumn::make('deindex')
                     ->label('Deindex')
-                    ->state(function (ShopifyCollection $record): string {
-                        if ($record->deindex === null) {
-                            return 'Undecided';
-                        }
-
-                        return $record->deindex ? 'True' : 'False';
+                    ->sortable()
+                    ->tooltip(fn (ShopifyCollection $record): string => $record->deindex
+                        ? 'Deindexed. Click to keep indexed.'
+                        : 'Indexed. Click to deindex.')
+                    ->afterStateUpdated(function (ShopifyCollection $record, bool $state): void {
+                        self::sendNotification(Notification::make()
+                            ->title('Collection deindex updated')
+                            ->body($state
+                                ? 'Collection marked as deindexed and queued as pending.'
+                                : 'Collection marked as indexed and queued as pending.')
+                            ->success()
+                        );
                     })
-                    ->badge()
-                    ->color(function (string $state): string {
-                        return match ($state) {
-                            'True' => 'danger',
-                            'False' => 'success',
-                            default => 'warning',
-                        };
-                    })
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(),
                 Tables\Columns\IconColumn::make('published_on_online_store_only')
                     ->label('Online Only')
                     ->boolean()
