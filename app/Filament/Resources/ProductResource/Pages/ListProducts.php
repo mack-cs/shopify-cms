@@ -86,33 +86,40 @@ class ListProducts extends ListRecords
         }
 
         $tabs['partially_approved'] = Tab::make('Partially Approved')
-            ->modifyQueryUsing(fn (Builder $query) => $query->whereHas('partialApprovalRequests', function (Builder $sub): void {
-                $sub->whereColumn('approval_version', 'products.approval_version')
-                    ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
-            }));
+            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+                ->whereHas('partialApprovalRequests', function (Builder $sub): void {
+                    $sub->whereColumn('approval_version', 'products.approval_version')
+                        ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
+                }));
 
         $tabs['approved'] = Tab::make('Approved')
-            ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw(
-                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
-            ));
+            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+                ->whereRaw(
+                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
+                ));
 
         $tabs['pending_approval'] = Tab::make('Pending Approval')
-            ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw(
-                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
-            ));
+            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+                ->whereRaw(
+                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
+                ));
 
            if ($reportCounts['needs_title_update'] > 0) {
             $tabs['needs_title_update'] = Tab::make('Needs Title')
                 ->badge((string) $reportCounts['needs_title_update'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyNeedsTitleUpdateFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyNeedsTitleUpdateFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['good_title'] > 0) {
             $tabs['good_title'] = Tab::make('Good Title')
                 ->badge((string) $reportCounts['good_title'])
                 ->badgeColor('success')
-                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyGoodTitleFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => ProductResource::applyGoodTitleFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
 
@@ -122,9 +129,21 @@ class ListProducts extends ListRecords
     private function reportTabCounts(): array
     {
         return [
-            'needs_title_update' => ProductResource::applyNeedsTitleUpdateFilter(Product::query())->count(),
-            'good_title' => ProductResource::applyGoodTitleFilter(Product::query())->count(),
+            'needs_title_update' => ProductResource::applyNeedsTitleUpdateFilter(
+                self::applyHeaderReportScope(Product::query())
+            )->count(),
+            'good_title' => ProductResource::applyGoodTitleFilter(
+                self::applyHeaderReportScope(Product::query())
+            )->count(),
         ];
+    }
+
+    private static function applyHeaderReportScope(Builder $query): Builder
+    {
+        return $query
+            ->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft'])
+            ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%'])
+            ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
     }
 
     private function isSyncRunning(): bool

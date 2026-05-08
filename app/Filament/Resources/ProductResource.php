@@ -1399,6 +1399,36 @@ class ProductResource extends Resource
                         '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
                     )
                 ),
+            SelectFilter::make('status')
+                ->label('Status')
+                ->options(function (): array {
+                    $configured = Status::query()
+                        ->whereNotNull('name')
+                        ->where('name', '!=', '')
+                        ->orderBy('name')
+                        ->pluck('name', 'name')
+                        ->all();
+
+                    $present = Product::query()
+                        ->whereNotNull('status')
+                        ->where('status', '!=', '')
+                        ->orderBy('status')
+                        ->pluck('status', 'status')
+                        ->all();
+
+                    return $configured + $present;
+                })
+                ->searchable()
+                ->preload()
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
+
+                    if ($value === '') {
+                        return $query;
+                    }
+
+                    return $query->whereRaw('LOWER(status) = ?', [strtolower($value)]);
+                }),
             TernaryFilter::make('url_update_pending')
                 ->label('URL Update Pending')
                 ->queries(

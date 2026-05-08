@@ -68,42 +68,54 @@ class ListNewProductDrafts extends ListRecords
             $tabs['missing_seo'] = Tab::make('No SEO')
                 ->badge((string) $reportCounts['missing_seo'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSeoReportFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSeoReportFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['missing_uvp'] > 0) {
             $tabs['missing_uvp'] = Tab::make('No UVP')
                 ->badge((string) $reportCounts['missing_uvp'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingUvpReportFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingUvpReportFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['missing_siblings'] > 0) {
             $tabs['missing_siblings'] = Tab::make('No Siblings')
                 ->badge((string) $reportCounts['missing_siblings'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['missing_complementary'] > 0) {
             $tabs['missing_complementary'] = Tab::make('No Complementary')
                 ->badge((string) $reportCounts['missing_complementary'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingComplementaryProductsReportFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['needs_title_update'] > 0) {
             $tabs['needs_title_update'] = Tab::make('Needs Title')
                 ->badge((string) $reportCounts['needs_title_update'])
                 ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyNeedsTitleUpdateFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyNeedsTitleUpdateFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         if ($reportCounts['good_title'] > 0) {
             $tabs['good_title'] = Tab::make('Good Title')
                 ->badge((string) $reportCounts['good_title'])
                 ->badgeColor('success')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyGoodTitleFilter($query));
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyGoodTitleFilter(
+                    self::applyHeaderReportScope($query)
+                ));
         }
 
         return $tabs;
@@ -115,13 +127,33 @@ class ListNewProductDrafts extends ListRecords
     private function reportTabCounts(): array
     {
         return [
-            'missing_seo' => NewProductDraftResource::applyMissingSeoReportFilter(NewProductDraft::query())->count(),
-            'missing_uvp' => NewProductDraftResource::applyMissingUvpReportFilter(NewProductDraft::query())->count(),
-            'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(NewProductDraft::query())->count(),
-            'missing_complementary' => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(NewProductDraft::query())->count(),
-            'needs_title_update' => NewProductDraftResource::applyNeedsTitleUpdateFilter(NewProductDraft::query())->count(),
-            'good_title' => NewProductDraftResource::applyGoodTitleFilter(NewProductDraft::query())->count(),
+            'missing_seo' => NewProductDraftResource::applyMissingSeoReportFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
+            'missing_uvp' => NewProductDraftResource::applyMissingUvpReportFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
+            'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
+            'missing_complementary' => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
+            'needs_title_update' => NewProductDraftResource::applyNeedsTitleUpdateFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
+            'good_title' => NewProductDraftResource::applyGoodTitleFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
         ];
+    }
+
+    private static function applyHeaderReportScope(Builder $query): Builder
+    {
+        return $query
+            ->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft'])
+            ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%'])
+            ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
     }
 
     /**
