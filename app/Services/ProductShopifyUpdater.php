@@ -790,7 +790,12 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
         $input['status'] = $this->mapStatus((string) $statusRaw);
     }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE) && $targetHandle !== '' && $targetHandle !== $currentHandle) {
+    $handleChangeRequested = $syncProduct
+        && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE)
+        && $targetHandle !== ''
+        && $targetHandle !== $currentHandle;
+
+    if ($handleChangeRequested) {
         $input['handle'] = $targetHandle;
     }
 
@@ -849,10 +854,20 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                 throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
             }
         }
+
+        if ($handleChangeRequested) {
+            $remoteHandle = trim((string) data_get($data, 'productUpdate.product.handle', ''));
+
+            if ($remoteHandle === '' || $remoteHandle !== $targetHandle) {
+                throw new \RuntimeException(
+                    "Shopify did not confirm the requested handle change. Expected '{$targetHandle}', got '" . ($remoteHandle !== '' ? $remoteHandle : 'empty') . "'."
+                );
+            }
+        }
     }
 
     // 2) Fetch latest details
-    $detailsHandle = ($syncProduct && $targetHandle !== '') ? $targetHandle : $currentHandle;
+    $detailsHandle = $handleChangeRequested ? $targetHandle : $currentHandle;
     $details = $this->productDetails($product, $detailsHandle, $productId);
 
     $currentCategoryId = trim((string) data_get($details, 'category.id', ''));
@@ -868,7 +883,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     // 3) Pull current metafields from Shopify for fallback reference support
     $shopifyRawMetafields = $this->productMetafieldRawValues($product, $detailsHandle, $productId);
 
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE) && $targetHandle !== '' && $targetHandle !== $currentHandle) {
+    if ($handleChangeRequested) {
         $this->handleService->promoteApprovedHandle($product);
     }
 
@@ -1744,7 +1759,7 @@ GQL;
         return <<<'GQL'
 mutation ProductUpdate($input: ProductInput!) {
   productUpdate(input: $input) {
-    product { id }
+    product { id handle }
     userErrors { field message }
   }
 }
