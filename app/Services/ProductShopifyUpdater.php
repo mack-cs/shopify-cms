@@ -135,19 +135,40 @@ final class ProductShopifyUpdater
                 continue;
             }
 
+            logger()->info('Shopify product sync candidate', [
+                'product_id' => $product->id,
+                'current_handle' => $product->handle,
+                'approved_handle' => $product->approved_handle,
+                'requested_scopes' => $scopes,
+                'requested_core_fields' => $coreFields,
+                'is_fully_approved' => $product->isApprovedByTwo(),
+            ]);
+
             if (!$product->handle) {
                 $skippedMissingHandle++;
+                logger()->warning('Shopify product sync skipped: missing handle', [
+                    'product_id' => $product->id,
+                ]);
                 continue;
             }
 
             if ($this->isBlockedByShopifyMissingDraft($product)) {
                 $skippedBlocked++;
+                logger()->warning('Shopify product sync skipped: blocked by Shopify missing draft', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                ]);
                 continue;
             }
 
             if ($product->isApprovedByTwo()) {
-                $effectiveScopes = $fullSyncScopes;
-                $effectiveCoreFields = $fullSyncCoreFields;
+                if ($scopes === null) {
+                    $effectiveScopes = $fullSyncScopes;
+                    $effectiveCoreFields = $fullSyncCoreFields;
+                } else {
+                    $effectiveScopes = $resolvedScopes;
+                    $effectiveCoreFields = $resolvedCoreFields;
+                }
             } else {
                 $effectiveScopes = $resolvedScopes;
                 $effectiveCoreFields = $resolvedCoreFields;
@@ -160,6 +181,15 @@ final class ProductShopifyUpdater
                 $allowed = $this->partialApprovalService->allowedSelections($product, $resolvedScopes, $resolvedCoreFields);
                 $effectiveScopes = $allowed['scopes'];
                 $effectiveCoreFields = $allowed['core_fields'];
+
+                if (
+                    $resolvedScopes === [self::SYNC_SCOPE_PRODUCT]
+                    && $resolvedCoreFields === [self::CORE_FIELD_HANDLE]
+                    && $this->partialApprovalService->hasApprovedTitleForCurrentVersion($product)
+                ) {
+                    $effectiveScopes = [self::SYNC_SCOPE_PRODUCT];
+                    $effectiveCoreFields = [self::CORE_FIELD_HANDLE];
+                }
 
                 if ($effectiveScopes === []) {
                     $skippedNotApproved++;
@@ -181,8 +211,24 @@ final class ProductShopifyUpdater
 
             if (in_array(self::SYNC_SCOPE_PRODUCT, $effectiveScopes, true) && empty($effectiveCoreFields)) {
                 $skippedNotApproved++;
+                logger()->warning('Shopify product sync skipped: empty effective core fields', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'effective_scopes' => $effectiveScopes,
+                    'effective_core_fields' => $effectiveCoreFields,
+                ]);
                 continue;
             }
+
+            logger()->info('Shopify product sync plan resolved', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'desired_handle' => $product->desiredHandle(),
+                'effective_scopes' => $effectiveScopes,
+                'effective_core_fields' => $effectiveCoreFields,
+                'handle_only_sync' => $effectiveScopes === [self::SYNC_SCOPE_PRODUCT]
+                    && $effectiveCoreFields === [self::CORE_FIELD_HANDLE],
+            ]);
 
             try {
                 $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
@@ -795,6 +841,15 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         && $targetHandle !== ''
         && $targetHandle !== $currentHandle;
 
+    logger()->info('Shopify product update prepared', [
+        'product_id' => $product->id,
+        'current_handle' => $currentHandle,
+        'target_handle' => $targetHandle,
+        'scopes' => $scopes,
+        'core_fields' => $coreFields,
+        'handle_change_requested' => $handleChangeRequested,
+    ]);
+
     if ($handleChangeRequested) {
         $input['handle'] = $targetHandle;
     }
@@ -858,6 +913,13 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         if ($handleChangeRequested) {
             $remoteHandle = trim((string) data_get($data, 'productUpdate.product.handle', ''));
 
+            logger()->info('Shopify handle update response', [
+                'product_id' => $product->id,
+                'current_handle' => $currentHandle,
+                'target_handle' => $targetHandle,
+                'remote_handle' => $remoteHandle,
+            ]);
+
             if ($remoteHandle === '' || $remoteHandle !== $targetHandle) {
                 throw new \RuntimeException(
                     "Shopify did not confirm the requested handle change. Expected '{$targetHandle}', got '" . ($remoteHandle !== '' ? $remoteHandle : 'empty') . "'."
@@ -885,6 +947,11 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
     if ($handleChangeRequested) {
         $this->handleService->promoteApprovedHandle($product);
+        logger()->info('Shopify handle update promoted locally', [
+            'product_id' => $product->id,
+            'old_handle' => $currentHandle,
+            'new_handle' => $targetHandle,
+        ]);
     }
 
     // 4) Metafields — pass $primaryData (now has GID if resolved)
