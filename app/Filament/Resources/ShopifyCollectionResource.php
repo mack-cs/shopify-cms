@@ -360,6 +360,50 @@ class ShopifyCollectionResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
+                TernaryFilter::make('deindex')
+                    ->label('Deindexed')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query->where('deindex', true),
+                        false: fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                            $sub->whereNull('deindex')
+                                ->orWhere('deindex', false);
+                        }),
+                    ),
+                TernaryFilter::make('has_seo')
+                    ->label('Has SEO')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_description', 'seo_description')),
+                        false: fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                            $sub->whereRaw(self::collectionEffectiveTextBlankSql('draft_seo_title', 'seo_title'))
+                                ->orWhereRaw(self::collectionEffectiveTextBlankSql('draft_seo_description', 'seo_description'));
+                        }),
+                    ),
+                TernaryFilter::make('has_description')
+                    ->label('Has Description')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveHtmlNotBlankSql('draft_description_html', 'description_html')),
+                        false: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveHtmlBlankSql('draft_description_html', 'description_html')),
+                    ),
+                TernaryFilter::make('has_footer_title')
+                    ->label('Has Footer Title')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_footer_title', 'footer_title')),
+                        false: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveTextBlankSql('draft_footer_title', 'footer_title')),
+                    ),
+                TernaryFilter::make('has_footer_description')
+                    ->label('Has Footer Description')
+                    ->queries(
+                        true: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_elegant_footer_description', 'elegant_footer_description')),
+                        false: fn (Builder $query): Builder => $query
+                            ->whereRaw(self::collectionEffectiveTextBlankSql('draft_elegant_footer_description', 'elegant_footer_description')),
+                    ),
                 Filter::make('recently_edited_today')
                     ->label('Recently Edited Today')
                     ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
@@ -413,19 +457,12 @@ class ShopifyCollectionResource extends Resource
                     ->label('Missing SEO')
                     ->queries(
                         true: fn ($query) => $query->where(function ($sub): void {
-                            $sub->whereNull('draft_title')
-                                ->orWhere('draft_title', '')
-                                ->orWhereNull('draft_seo_title')
-                                ->orWhere('draft_seo_title', '')
-                                ->orWhereNull('draft_seo_description')
-                                ->orWhere('draft_seo_description', '');
+                            $sub->whereRaw(self::collectionEffectiveTextBlankSql('draft_seo_title', 'seo_title'))
+                                ->orWhereRaw(self::collectionEffectiveTextBlankSql('draft_seo_description', 'seo_description'));
                         }),
-                        false: fn ($query) => $query->whereNotNull('draft_title')
-                            ->where('draft_title', '!=', '')
-                            ->whereNotNull('draft_seo_title')
-                            ->where('draft_seo_title', '!=', '')
-                            ->whereNotNull('draft_seo_description')
-                            ->where('draft_seo_description', '!=', '')
+                        false: fn ($query) => $query
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
+                            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_description', 'seo_description'))
                     ),
                 TernaryFilter::make('synced')
                     ->label('Synced')
@@ -913,6 +950,66 @@ class ShopifyCollectionResource extends Resource
         return $query->where('import_id', $importId);
     }
 
+    public static function applyApprovedFilter(Builder $query): Builder
+    {
+        return $query->whereRaw(
+            '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) >= 2'
+        );
+    }
+
+    public static function applyHasSeoFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
+            ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_description', 'seo_description'));
+    }
+
+    public static function applyNeedsSeoFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $sub): void {
+            $sub->whereRaw(self::collectionEffectiveTextBlankSql('draft_seo_title', 'seo_title'))
+                ->orWhereRaw(self::collectionEffectiveTextBlankSql('draft_seo_description', 'seo_description'));
+        });
+    }
+
+    public static function applyHasDescriptionFilter(Builder $query): Builder
+    {
+        return $query->whereRaw(
+            self::collectionEffectiveHtmlNotBlankSql('draft_description_html', 'description_html')
+        );
+    }
+
+    public static function applyNoDescriptionFilter(Builder $query): Builder
+    {
+        return $query->whereRaw(
+            self::collectionEffectiveHtmlBlankSql('draft_description_html', 'description_html')
+        );
+    }
+
+    public static function applyIndexedFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $sub): void {
+            $sub->whereNull('deindex')
+                ->orWhere('deindex', false);
+        });
+    }
+
+    public static function applyDeindexedFilter(Builder $query): Builder
+    {
+        return $query->where('deindex', true);
+    }
+
+    public static function applyGoodFilter(Builder $query): Builder
+    {
+        return self::applyIndexedFilter(
+            self::applyHasDescriptionFilter(
+                self::applyHasSeoFilter(
+                    self::applyApprovedFilter($query)
+                )
+            )
+        );
+    }
+
     public static function pushToShopifyFormSchema(): array
     {
         return [
@@ -1039,6 +1136,11 @@ class ShopifyCollectionResource extends Resource
         return self::draftSeoComplete($record);
     }
 
+    public static function canApproveRecord(ShopifyCollection $record): bool
+    {
+        return self::canApprove($record);
+    }
+
     private static function approvalBlockMessage(ShopifyCollection $record): string
     {
         if ($record->deindex === true) {
@@ -1062,6 +1164,11 @@ class ShopifyCollectionResource extends Resource
         );
 
         return 'Missing ' . implode(', ', $labels) . '. Set Deindex to true if you want approval without draft SEO.';
+    }
+
+    public static function approvalBlockMessageForRecord(ShopifyCollection $record): string
+    {
+        return self::approvalBlockMessage($record);
     }
 
     private static function applyApprovedDrafts(ShopifyCollection $record): void
@@ -1092,6 +1199,46 @@ class ShopifyCollectionResource extends Resource
         return $draftValue ?? $currentValue;
     }
 
+    private static function collectionEffectiveValueSql(string $draftColumn, string $currentColumn): string
+    {
+        return "COALESCE(NULLIF(TRIM({$draftColumn}), ''), {$currentColumn}, '')";
+    }
+
+    private static function collectionEffectiveTextBlankSql(string $draftColumn, string $currentColumn): string
+    {
+        $effective = self::collectionEffectiveValueSql($draftColumn, $currentColumn);
+
+        return "TRIM({$effective}) = ''";
+    }
+
+    private static function collectionEffectiveTextNotBlankSql(string $draftColumn, string $currentColumn): string
+    {
+        $effective = self::collectionEffectiveValueSql($draftColumn, $currentColumn);
+
+        return "TRIM({$effective}) <> ''";
+    }
+
+    private static function collectionEffectiveHtmlNormalizedSql(string $draftColumn, string $currentColumn): string
+    {
+        $effective = self::collectionEffectiveValueSql($draftColumn, $currentColumn);
+
+        return "TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE({$effective}, '&nbsp;', ''), '<p>', ''), '</p>', ''), '<br>', ''), '<br/>', ''), '<br />', ''), CHAR(10), ''), CHAR(13), ''))";
+    }
+
+    private static function collectionEffectiveHtmlBlankSql(string $draftColumn, string $currentColumn): string
+    {
+        $normalized = self::collectionEffectiveHtmlNormalizedSql($draftColumn, $currentColumn);
+
+        return "{$normalized} = ''";
+    }
+
+    private static function collectionEffectiveHtmlNotBlankSql(string $draftColumn, string $currentColumn): string
+    {
+        $normalized = self::collectionEffectiveHtmlNormalizedSql($draftColumn, $currentColumn);
+
+        return "{$normalized} <> ''";
+    }
+
     private static function storeApproval(ShopifyCollection $record): void
     {
         CollectionApproval::create([
@@ -1103,6 +1250,49 @@ class ShopifyCollectionResource extends Resource
         if ($record->approvalsForCurrentVersionCount() >= 2) {
             self::applyApprovedDrafts($record);
         }
+    }
+
+    public static function approveRecord(ShopifyCollection $record, ?int $userId = null): array
+    {
+        $userId = $userId ?? (int) Auth::id();
+
+        if (!self::canApprove($record)) {
+            return [
+                'status' => 'blocked',
+                'message' => self::approvalBlockMessage($record),
+            ];
+        }
+
+        $exists = CollectionApproval::query()
+            ->where('collection_id', $record->id)
+            ->where('user_id', $userId)
+            ->where('approval_version', $record->approval_version)
+            ->exists();
+
+        if ($exists) {
+            return [
+                'status' => 'already-approved',
+                'message' => 'You already approved this version.',
+            ];
+        }
+
+        CollectionApproval::create([
+            'collection_id' => $record->id,
+            'user_id' => $userId,
+            'approval_version' => $record->approval_version,
+        ]);
+
+        $record->refresh();
+
+        if ($record->approvalsForCurrentVersionCount() >= 2) {
+            self::applyApprovedDrafts($record);
+            $record->refresh();
+        }
+
+        return [
+            'status' => 'approved',
+            'message' => "Approvals: {$record->approvalsForCurrentVersionCount()}/2.",
+        ];
     }
 
     /**
@@ -1301,7 +1491,7 @@ class ShopifyCollectionResource extends Resource
         return 'Pending ' . $request->approvalCount() . '/2';
     }
 
-    private static function currentImportId(): ?int
+    public static function currentImportId(): ?int
     {
         return \App\Models\Import::where('filename', 'shopify-collections')
             ->orderByDesc('id')

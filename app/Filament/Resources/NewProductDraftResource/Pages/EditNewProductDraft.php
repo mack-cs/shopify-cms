@@ -7,7 +7,6 @@ use App\Filament\Resources\ProductResource;
 use Filament\Notifications\Notification;
 use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
-use Filament\Support\Exceptions\Halt;
 
 class EditNewProductDraft extends EditRecord
 {
@@ -20,8 +19,8 @@ class EditNewProductDraft extends EditRecord
 
         if ($this->hasBlockingShopifyWarnings()) {
             Notification::make()
-                ->title('Resolve Shopify conflicts first')
-                ->body('This draft has unresolved Shopify sync warnings. Use Keep Draft Values or Use Shopify Values at the top before saving.')
+                ->title('Shopify conflicts detected')
+                ->body('This draft has unresolved Shopify sync warnings. Non-conflicting changes can still be saved, but conflicting field changes will not be applied until you resolve them at the top.')
                 ->warning()
                 ->persistent()
                 ->send();
@@ -30,31 +29,14 @@ class EditNewProductDraft extends EditRecord
 
     protected function mutateFormDataBeforeSave(array $data): array
     {
-        return NewProductDraftResource::mutateDraftFormData($data);
-    }
-
-    protected function beforeSave(): void
-    {
-        if (!$this->hasBlockingShopifyWarnings()) {
-            return;
-        }
-
-        Notification::make()
-            ->title('Resolve Shopify conflicts first')
-            ->body('Saving is blocked until the Shopify sync warnings at the top of the draft are resolved.')
-            ->danger()
-            ->persistent()
-            ->send();
-
-        throw new Halt();
+        return NewProductDraftResource::mutateDraftFormData($data, $this->record);
     }
 
     protected function getSaveFormAction(): Actions\Action
     {
         return parent::getSaveFormAction()
-            ->disabled(fn (): bool => $this->hasBlockingShopifyWarnings())
             ->tooltip(fn (): ?string => $this->hasBlockingShopifyWarnings()
-                ? 'Resolve the Shopify sync warnings at the top of the draft before saving.'
+                ? 'Conflicting field changes will not be applied until you resolve the Shopify warnings at the top. Non-conflicting changes can still be saved.'
                 : null);
     }
 

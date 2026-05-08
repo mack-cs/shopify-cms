@@ -2553,11 +2553,10 @@ class NewProductDraftResource extends Resource
                     ->icon('heroicon-o-adjustments-horizontal')
                     ->color('gray')
                     ->tooltip('Quick Edit')
-                    ->disabled(fn (NewProductDraft $record): bool => self::draftHasBlockingShopifyWarnings($record))
                     ->tooltip(fn (NewProductDraft $record): string => self::draftHasBlockingShopifyWarnings($record)
                         ? self::draftBlockingWarningsTooltip($record)
                         : 'Quick Edit')
-                    ->form(self::draftQuickEditFormSchema())
+                    ->form(fn (NewProductDraft $record): array => self::draftQuickEditFormSchema($record))
                     ->fillForm(fn (NewProductDraft $record): array => self::draftQuickEditDefaults($record))
                     ->action(function (NewProductDraft $record, array $data): void {
                         self::applyQuickEditsToDraft($record, $data);
@@ -2571,23 +2570,13 @@ class NewProductDraftResource extends Resource
                             ? self::draftBlockingWarningsTooltip($record)
                             : 'SEO Draft')
                         : 'Save a handle on this draft before editing the SEO Draft.')
-                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))) || self::draftHasBlockingShopifyWarnings($record))
+                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))))
                     ->modalWidth('4xl')
                     ->modalHeading(fn (NewProductDraft $record): string|HtmlString => self::seoDraftModalHeading($record))
                     ->modalSubmitActionLabel('Save SEO Draft')
                     ->form(fn (NewProductDraft $record): array => self::seoDraftFormSchema($record))
                     ->fillForm(fn (NewProductDraft $record): array => self::seoDraftFormData($record))
                     ->action(function (NewProductDraft $record, array $data): void {
-                        if (self::draftHasBlockingShopifyWarnings($record)) {
-                            self::sendNotification(Notification::make()
-                                ->title('Resolve Shopify conflicts first')
-                                ->body(self::draftBlockingWarningsMessage($record))
-                                ->warning()
-                            );
-
-                            return;
-                        }
-
                         self::saveSeoDraft($record, $data);
 
                         self::sendNotification(Notification::make()
@@ -3898,7 +3887,7 @@ class NewProductDraftResource extends Resource
      * @param array<string, mixed> $data
      * @return array<string, mixed>
      */
-    public static function mutateDraftFormData(array $data): array
+    public static function mutateDraftFormData(array $data, ?NewProductDraft $record = null): array
     {
         $title = is_string($data['title'] ?? null)
             ? trim($data['title'])
@@ -3910,6 +3899,10 @@ class NewProductDraftResource extends Resource
 
         $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
         unset($data['extra_shopify_fields']);
+
+        if ($record) {
+            $data = self::removeConflictingDraftInputs($data, $record);
+        }
 
         return $data;
     }
@@ -4042,12 +4035,15 @@ class NewProductDraftResource extends Resource
         return $schema;
     }
 
-    private static function draftQuickEditFormSchema(): array
+    private static function draftQuickEditFormSchema(?NewProductDraft $record = null): array
     {
-        return self::draftEditSelectionSchema('Quick edit hint - (Tick the fields to edit for this draft, then enter the new values.)');
+        return self::draftEditSelectionSchema(
+            'Quick edit hint - (Tick the fields to edit for this draft, then enter the new values.)',
+            $record
+        );
     }
 
-    private static function draftEditSelectionSchema(string $hint): array
+    private static function draftEditSelectionSchema(string $hint, ?NewProductDraft $record = null): array
     {
         $fields = self::draftQuickEditableFields();
         if (empty($fields)) {
@@ -4063,23 +4059,39 @@ class NewProductDraftResource extends Resource
                 ->content(''),
         ];
 
+        if (self::draftHasBlockingShopifyWarnings($record)) {
+            $schema[] = Placeholder::make('draft_edit_conflict_notice')
+                ->label('')
+                ->content(fn (): HtmlString => self::draftConflictEditingNoticeHtml());
+        }
+
         $schema[] = Forms\Components\Grid::make(1)
-            ->schema(array_map(function (array $field) {
+            ->schema(array_map(function (array $field) use ($record) {
                 $safeKey = $field['safe_key'];
+                $hasConflict = self::draftQuickFieldHasShopifyConflict($record, $field);
+                $rowSchema = [
+                    Forms\Components\Checkbox::make("fields.{$safeKey}")
+                        ->label($field['label'])
+                        ->live()
+                        ->disabled($hasConflict)
+                        ->columnSpan(4),
+                    self::draftBulkEditComponent($field)
+                        ->label('')
+                        ->statePath("values.{$safeKey}")
+                        ->columnSpan(8)
+                        ->disabled(fn (Get $get): bool => $hasConflict || !($get("fields.{$safeKey}") ?? false))
+                        ->dehydrated(fn (Get $get): bool => !$hasConflict && (bool) ($get("fields.{$safeKey}") ?? false)),
+                ];
+
+                if ($hasConflict) {
+                    $rowSchema[] = Placeholder::make("conflict_notice_{$safeKey}")
+                        ->label('')
+                        ->content(fn (): HtmlString => self::draftConflictFieldNoticeHtml($field['label']))
+                        ->columnSpan(12);
+                }
 
                 return Forms\Components\Grid::make(12)
-                    ->schema([
-                        Forms\Components\Checkbox::make("fields.{$safeKey}")
-                            ->label($field['label'])
-                            ->live()
-                            ->columnSpan(4),
-                        self::draftBulkEditComponent($field)
-                            ->label('')
-                            ->statePath("values.{$safeKey}")
-                            ->columnSpan(8)
-                            ->disabled(fn (Get $get): bool => !($get("fields.{$safeKey}") ?? false))
-                            ->dehydrated(fn (Get $get): bool => (bool) ($get("fields.{$safeKey}") ?? false)),
-                    ]);
+                    ->schema($rowSchema);
             }, $fields));
 
         return $schema;
@@ -4372,16 +4384,6 @@ class NewProductDraftResource extends Resource
 
     private static function applyQuickEditsToDraft(NewProductDraft $record, array $data): void
     {
-        if (self::draftHasBlockingShopifyWarnings($record)) {
-            self::sendNotification(Notification::make()
-                ->title('Resolve Shopify conflicts first')
-                ->body(self::draftBlockingWarningsMessage($record))
-                ->warning()
-            );
-
-            return;
-        }
-
         self::applySelectedDraftEdits([$record], $data);
     }
 
@@ -4393,27 +4395,13 @@ class NewProductDraftResource extends Resource
             return;
         }
 
-        $blockedDrafts = [];
-        foreach ($records as $record) {
-            if ($record instanceof NewProductDraft && self::draftHasBlockingShopifyWarnings($record)) {
-                $blockedDrafts[] = trim((string) ($record->title ?? '')) ?: ('Draft #' . $record->id);
-            }
-        }
-
-        if ($blockedDrafts !== []) {
-            self::sendNotification(Notification::make()
-                ->title('Resolve Shopify conflicts first')
-                ->body('These drafts have unresolved Shopify sync warnings and were not bulk edited: ' . implode(' | ', array_slice($blockedDrafts, 0, 5)))
-                ->warning()
-            );
-
-            return;
-        }
-
         $fieldMap = [];
         foreach (self::draftBulkEditableFields() as $field) {
             $fieldMap[$field['safe_key']] = $field;
         }
+
+        $savedDrafts = 0;
+        $skippedConflicts = 0;
 
         foreach ($records as $record) {
             if (!$record instanceof NewProductDraft) {
@@ -4425,6 +4413,11 @@ class NewProductDraftResource extends Resource
             foreach ($selected as $safeKey) {
                 $field = $fieldMap[$safeKey] ?? null;
                 if (!$field) {
+                    continue;
+                }
+
+                if (self::draftQuickFieldHasShopifyConflict($record, $field)) {
+                    $skippedConflicts++;
                     continue;
                 }
 
@@ -4477,7 +4470,21 @@ class NewProductDraftResource extends Resource
             }
 
             $record->fill($updates)->save();
+            $savedDrafts++;
         }
+
+        $notification = Notification::make()
+            ->title($savedDrafts > 0 ? 'Bulk draft edits saved' : 'No bulk draft edits saved');
+
+        if ($skippedConflicts > 0) {
+            $notification
+                ->warning()
+                ->body("{$savedDrafts} draft(s) were updated. {$skippedConflicts} conflicting field update(s) were skipped. Scroll up and resolve Shopify conflicts first for the locked fields.");
+        } else {
+            $notification->success();
+        }
+
+        self::sendNotification($notification);
     }
 
     private static function applySelectedDraftEdits(iterable $records, array $data): void
@@ -4493,6 +4500,9 @@ class NewProductDraftResource extends Resource
             $fieldMap[$field['safe_key']] = $field;
         }
 
+        $savedDrafts = 0;
+        $skippedConflicts = 0;
+
         foreach ($records as $record) {
             if (!$record instanceof NewProductDraft) {
                 continue;
@@ -4504,6 +4514,11 @@ class NewProductDraftResource extends Resource
             foreach ($selected as $safeKey) {
                 $field = $fieldMap[$safeKey] ?? null;
                 if (!$field) {
+                    continue;
+                }
+
+                if (self::draftQuickFieldHasShopifyConflict($record, $field)) {
+                    $skippedConflicts++;
                     continue;
                 }
 
@@ -4609,19 +4624,35 @@ class NewProductDraftResource extends Resource
                 }
             }
 
+            $recordUpdated = false;
+
             if ($updates !== []) {
                 $record->fill($updates)->save();
+                $recordUpdated = true;
             }
 
             if ($styleProfileUpdates !== []) {
                 self::upsertDraftStyleProfile($record, $styleProfileUpdates);
+                $recordUpdated = true;
+            }
+
+            if ($recordUpdated) {
+                $savedDrafts++;
             }
         }
 
-        self::sendNotification(Notification::make()
-            ->title('Draft edits saved')
-            ->success()
-        );
+        $notification = Notification::make()
+            ->title($savedDrafts > 0 ? 'Draft edits saved' : 'No draft edits saved');
+
+        if ($skippedConflicts > 0) {
+            $notification
+                ->warning()
+                ->body("{$skippedConflicts} conflicting field update(s) were skipped. Scroll up and resolve Shopify conflicts first for the locked fields.");
+        } else {
+            $notification->success();
+        }
+
+        self::sendNotification($notification);
     }
 
     private static function supportsDraftQuickField(string $source, string $attribute): bool
@@ -4710,7 +4741,15 @@ class NewProductDraftResource extends Resource
 
     public static function seoDraftFormSchema(?NewProductDraft $ownerRecord): array
     {
-        return [
+        $schema = [];
+
+        if (self::draftHasBlockingShopifyWarnings($ownerRecord)) {
+            $schema[] = Placeholder::make('seo_draft_conflict_notice')
+                ->label('')
+                ->content(fn (): HtmlString => self::draftConflictEditingNoticeHtml());
+        }
+
+        $schema = array_merge($schema, [
             Forms\Components\Grid::make(2)
                 ->schema([
                     Forms\Components\TextInput::make('sku')
@@ -4801,6 +4840,7 @@ class NewProductDraftResource extends Resource
                 ->label('SEO Title')
                 ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'draft_seo_title'))
                 ->live(debounce: 500)
+                ->disabled(self::draftAttributeHasShopifyConflict($ownerRecord, 'seo_title'))
                 ->helperText(fn (Forms\Get $get): string => StyleProfile::seoTitleLengthHint($get('draft_seo_title')))
                 ->maxLength(StyleProfile::SEO_TITLE_RECOMMENDED_MAX)
                 ->rules([
@@ -4819,6 +4859,7 @@ class NewProductDraftResource extends Resource
                 ->label('SEO Description (150-160 chars)')
                 ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'draft_seo_description'))
                 ->live(debounce: 500)
+                ->disabled(self::draftAttributeHasShopifyConflict($ownerRecord, 'seo_description'))
                 ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
                 ->rows(2)
                 ->maxLength(StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX)
@@ -4833,7 +4874,9 @@ class NewProductDraftResource extends Resource
                     },
                 ])
                 ->columnSpanFull(),
-        ];
+        ]);
+
+        return $schema;
     }
 
     public static function seoDraftFormData(NewProductDraft $record): array
@@ -4894,10 +4937,6 @@ class NewProductDraftResource extends Resource
 
     public static function saveSeoDraft(NewProductDraft $record, array $data): StyleProfile
     {
-        if (self::draftHasBlockingShopifyWarnings($record)) {
-            throw new \InvalidArgumentException(self::draftBlockingWarningsMessage($record));
-        }
-
         if (blank(trim((string) ($record->handle ?? '')))) {
             throw new \InvalidArgumentException('Draft needs a handle before an SEO draft can be saved.');
         }
@@ -4907,6 +4946,14 @@ class NewProductDraftResource extends Resource
 
         foreach (['materials', 'components', 'colour_prompt', 'draft_seo_title', 'draft_seo_description'] as $field) {
             if (array_key_exists($field, $normalized)) {
+                if ($field === 'draft_seo_title' && self::draftAttributeHasShopifyConflict($record, 'seo_title')) {
+                    continue;
+                }
+
+                if ($field === 'draft_seo_description' && self::draftAttributeHasShopifyConflict($record, 'seo_description')) {
+                    continue;
+                }
+
                 $updates[$field] = $normalized[$field];
             }
         }
@@ -5138,8 +5185,8 @@ class NewProductDraftResource extends Resource
 
         return new HtmlString(
             "<div id='draft-warning-block' class='rounded-xl border-2 border-danger-300 bg-danger-50 p-4 text-sm text-danger-900'>"
-            . "<p class='font-semibold mb-2'>Resolve <strong>Shopify</strong> conflicts before saving this draft.</p>"
-            . "<p>This draft has {$warningCount} unresolved <strong>Shopify</strong> sync warning(s). Choose <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> below first. Saving is blocked until those warnings are cleared.</p>"
+            . "<p class='font-semibold mb-2'>Resolve <strong>Shopify</strong> conflicts before changing the conflicting fields in this draft.</p>"
+            . "<p>This draft has {$warningCount} unresolved <strong>Shopify</strong> sync warning(s). Non-conflicting changes can still be saved, but conflicting fields must be resolved first using <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> below. Scroll up and resolve those conflicts first.</p>"
             . "</div>"
             . "<script>
                 (function () {
@@ -5170,13 +5217,98 @@ class NewProductDraftResource extends Resource
         $count = (int) ($record?->shopifySyncWarningCount() ?? 0);
 
         return $count > 0
-            ? "This draft has {$count} unresolved Shopify sync warning(s). Resolve them first using Keep Draft Values or Use Shopify Values."
-            : 'Resolve Shopify sync warnings before editing this draft.';
+            ? "This draft has {$count} unresolved Shopify sync warning(s). Conflicting fields must be resolved first. Scroll up and use Keep Draft Values or Use Shopify Values."
+            : 'Resolve Shopify sync warnings for the conflicting fields before editing them.';
     }
 
     private static function draftBlockingWarningsTooltip(?NewProductDraft $record): string
     {
         return self::draftBlockingWarningsMessage($record);
+    }
+
+    private static function draftShopifyConflictFields(?NewProductDraft $record): array
+    {
+        if (!$record) {
+            return [];
+        }
+
+        $fields = array_map(
+            static fn (array $warning): string => trim((string) ($warning['field'] ?? '')),
+            $record->shopifySyncWarnings()
+        );
+
+        return array_values(array_unique(array_filter($fields)));
+    }
+
+    private static function draftAttributeHasShopifyConflict(?NewProductDraft $record, string $attribute): bool
+    {
+        return in_array($attribute, self::draftShopifyConflictFields($record), true);
+    }
+
+    private static function draftQuickFieldHasShopifyConflict(?NewProductDraft $record, array $field): bool
+    {
+        $attribute = $field['attribute'] ?? null;
+        $source = $field['source'] ?? 'product';
+
+        if (!is_string($attribute) || $attribute === '') {
+            return false;
+        }
+
+        if ($source === 'product') {
+            return self::draftAttributeHasShopifyConflict($record, $attribute);
+        }
+
+        if ($source === 'row') {
+            $draftAttribute = self::draftAttributeForQuickField($source, $attribute);
+
+            if ($draftAttribute !== null) {
+                return self::draftAttributeHasShopifyConflict($record, $draftAttribute);
+            }
+
+            return self::draftAttributeHasShopifyConflict($record, $attribute);
+        }
+
+        if ($source === 'variant') {
+            $draftAttribute = self::draftAttributeForQuickField($source, $attribute);
+
+            return $draftAttribute !== null
+                && self::draftAttributeHasShopifyConflict($record, $draftAttribute);
+        }
+
+        return false;
+    }
+
+    private static function draftConflictEditingNoticeHtml(): HtmlString
+    {
+        return new HtmlString(
+            "<div class='rounded-xl border border-danger-300 bg-danger-50 p-3 text-sm text-danger-900'>"
+            . "<p class='font-semibold'>Some fields are locked because they conflict with the latest Shopify import.</p>"
+            . "<p>Scroll up, review the Shopify conflict warning, then use <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> to unlock them.</p>"
+            . '</div>'
+        );
+    }
+
+    private static function draftConflictFieldNoticeHtml(string $label): HtmlString
+    {
+        return new HtmlString(
+            "<div class='text-sm text-danger-700'>"
+            . e($label)
+            . " is locked because it conflicts with the latest Shopify import. Scroll up and resolve the conflict first."
+            . '</div>'
+        );
+    }
+
+    private static function removeConflictingDraftInputs(array $data, NewProductDraft $record): array
+    {
+        foreach (self::draftShopifyConflictFields($record) as $attribute) {
+            unset($data[$attribute]);
+
+            if ($attribute === 'title') {
+                unset($data['siblings_collection_name']);
+            }
+        }
+
+        return $data;
     }
 
     /**
