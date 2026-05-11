@@ -15,6 +15,8 @@ use Illuminate\Support\Collection;
 
 final class ProductShopifyUpdater
 {
+    private const COMPLEMENTARY_PRODUCTS_SYNC_LIMIT = 3;
+
     public const SYNC_SCOPE_PRODUCT = 'product';
     public const SYNC_SCOPE_SEO = 'seo';
     public const SYNC_SCOPE_METAFIELDS = 'metafields';
@@ -2414,6 +2416,7 @@ GQL;
                     }
                     $items = array_values(array_unique($resolved));
                 }
+                $items = $this->limitReferenceItemsForLookup($lookup, $items);
                 return empty($items) ? null : json_encode($items);
             }
 
@@ -2421,6 +2424,7 @@ GQL;
 
             $items = array_values(array_filter($parts, fn ($item) => str_starts_with($item, 'gid://')));
             if (!empty($items)) {
+                $items = $this->limitReferenceItemsForLookup($lookup, $items);
                 return json_encode($items);
             }
 
@@ -2689,7 +2693,7 @@ GQL;
                     $resolved[] = $gid;
                 }
             }
-            $resolved = array_values(array_unique($resolved));
+            $resolved = $this->limitReferenceItemsForLookup($lookup, $resolved);
             return empty($resolved) ? null : json_encode($resolved);
         }
 
@@ -3236,6 +3240,24 @@ GQL;
         $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
         $parts = array_map(static fn ($item) => trim((string) $item), $parts);
         return array_values(array_filter($parts, static fn ($item) => $item !== ''));
+    }
+
+    /**
+     * @param array<int, string> $items
+     * @return array<int, string>
+     */
+    private function limitReferenceItemsForLookup(?string $lookup, array $items): array
+    {
+        $normalized = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $item): string => trim((string) $item),
+            $items
+        ), static fn (string $item): bool => $item !== '')));
+
+        if ($lookup === 'shopify--discovery--product_recommendation.complementary_products') {
+            return array_slice($normalized, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
+        }
+
+        return $normalized;
     }
 
     /**

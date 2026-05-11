@@ -180,7 +180,7 @@ class Image extends Model
             return true;
         }
 
-        return trim((string) $this->preferredFilename()) !== trim((string) $this->last_shopify_synced_filename);
+        return false;
     }
 
     public function hasManagedSource(): bool
