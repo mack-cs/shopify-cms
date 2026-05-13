@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\ProductImageBackupImagesJob;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\Category;
@@ -23,7 +24,9 @@ final class Normalizer
 {
     public function buildNormalizedTables(Import $import): void
     {
-        DB::transaction(function () use ($import) {
+        $imageIdsNeedingBackup = [];
+
+        DB::transaction(function () use ($import, &$imageIdsNeedingBackup) {
             $rows = ShopifyRow::where('import_id', $import->id)
                 ->whereNotNull('handle')
                 ->orderBy('row_index')
@@ -158,7 +161,10 @@ final class Normalizer
                 $imageUrl = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_SRC, null));
                 $imageAlt = $this->normalizeValue($imageRow?->get(HeaderStore::IMAGE_ALT_TEXT, null));
 
-                $this->reconcileImages($product, $imageRows);
+                $imageIdsNeedingBackup = array_merge(
+                    $imageIdsNeedingBackup,
+                    $this->reconcileImages($product, $imageRows)
+                );
 
                 $existingStyleProfile = StyleProfile::where('handle', $handle)->first();
                 if ($existingStyleProfile) {
@@ -204,6 +210,11 @@ final class Normalizer
                 });
             }
         });
+
+        $imageIdsNeedingBackup = array_values(array_unique(array_map('intval', $imageIdsNeedingBackup)));
+        foreach (array_chunk($imageIdsNeedingBackup, 100) as $chunk) {
+            ProductImageBackupImagesJob::dispatch($chunk, $import->created_by, 'Shopify image change backup');
+        }
     }
 
     /**
@@ -284,7 +295,7 @@ final class Normalizer
     /**
      * @param \Illuminate\Support\Collection<int, ShopifyRow> $imageRows
      */
-    private function reconcileImages(Product $product, $imageRows): void
+    private function reconcileImages(Product $product, $imageRows): array
     {
         $existingImages = $product->allImages()
             ->orderBy('id')
@@ -292,6 +303,7 @@ final class Normalizer
 
         $seenImageIds = [];
         $syncedAt = now();
+        $imageIdsNeedingBackup = [];
 
         foreach ($imageRows as $ir) {
             $shopifyId = $this->normalizeValue($ir->get(HeaderStore::INTERNAL_IMAGE_SHOPIFY_ID, null));
@@ -306,7 +318,9 @@ final class Normalizer
             $existingImage = $this->resolveExistingImage($existingImages, $ir, $shopifyId, $seenImageIds);
 
             if ($existingImage) {
-                $this->syncInboundImage($existingImage, $payload, $syncedAt);
+                if ($this->syncInboundImage($existingImage, $payload, $syncedAt)) {
+                    $imageIdsNeedingBackup[] = $existingImage->id;
+                }
                 $seenImageIds[] = $existingImage->id;
                 continue;
             }
@@ -316,6 +330,10 @@ final class Normalizer
                 $createdImage = Image::create(array_merge($payload, [
                     'sync_state' => Image::SYNC_STATE_SYNCED,
                     'local_dirty' => false,
+                    'image_asset_id' => null,
+                    'backup_status' => Image::BACKUP_STATUS_PENDING,
+                    'backup_completed_at' => null,
+                    'backup_error' => null,
                     'last_shopify_seen_at' => $syncedAt,
                     'last_synced_at' => $syncedAt,
                 ]));
@@ -324,14 +342,19 @@ final class Normalizer
             if ($createdImage) {
                 $seenImageIds[] = $createdImage->id;
                 $existingImages->push($createdImage);
+                $imageIdsNeedingBackup[] = $createdImage->id;
             }
         }
 
         $existingImages
             ->whereNotIn('id', $seenImageIds)
-            ->each(function (Image $image) use ($syncedAt): void {
-                $this->markImageMissingFromShopify($image, $syncedAt);
+            ->each(function (Image $image) use ($syncedAt, &$imageIdsNeedingBackup): void {
+                if ($this->markImageMissingFromShopify($image, $syncedAt)) {
+                    $imageIdsNeedingBackup[] = $image->id;
+                }
             });
+
+        return $imageIdsNeedingBackup;
     }
 
     /**
@@ -372,8 +395,12 @@ final class Normalizer
     /**
      * @param array<string, mixed> $payload
      */
-    private function syncInboundImage(Image $image, array $payload, $syncedAt): void
+    private function syncInboundImage(Image $image, array $payload, $syncedAt): bool
     {
+        $wasLocalDirty = (bool) $image->local_dirty;
+        $sourceChanged = $this->normalizeComparableValue($image->getAttribute('src')) !== $this->normalizeComparableValue($payload['src'] ?? null);
+        $shopifyIdChanged = $this->normalizeComparableValue($image->getAttribute('shopify_id')) !== $this->normalizeComparableValue($payload['shopify_id'] ?? null);
+
         Image::withoutEvents(function () use ($image, $payload, $syncedAt): void {
             if ($image->local_dirty) {
                 $updates = [
@@ -400,6 +427,35 @@ final class Normalizer
                 'last_synced_at' => $syncedAt,
             ]))->save();
         });
+
+        if ($wasLocalDirty) {
+            return false;
+        }
+
+        $needsBackup = $sourceChanged
+            || $shopifyIdChanged
+            || (int) ($image->image_asset_id ?? 0) === 0
+            || $image->backup_status !== Image::BACKUP_STATUS_BACKED_UP;
+
+        if (!$needsBackup) {
+            return false;
+        }
+
+        Image::withoutEvents(function () use ($image, $sourceChanged, $shopifyIdChanged): void {
+            $updates = [
+                'backup_status' => Image::BACKUP_STATUS_PENDING,
+                'backup_completed_at' => null,
+                'backup_error' => null,
+            ];
+
+            if ($sourceChanged || $shopifyIdChanged) {
+                $updates['image_asset_id'] = null;
+            }
+
+            $image->forceFill($updates)->save();
+        });
+
+        return true;
     }
 
     private function markVariantMissingFromShopify(Variant $variant, $syncedAt): void
@@ -425,11 +481,13 @@ final class Normalizer
         });
     }
 
-    private function markImageMissingFromShopify(Image $image, $syncedAt): void
+    private function markImageMissingFromShopify(Image $image, $syncedAt): bool
     {
         if ($this->normalizeValue($image->shopify_id) === null) {
-            return;
+            return false;
         }
+
+        $needsBackup = !$image->local_dirty && (int) ($image->image_asset_id ?? 0) === 0;
 
         Image::withoutEvents(function () use ($image, $syncedAt): void {
             if ($image->local_dirty) {
@@ -446,6 +504,8 @@ final class Normalizer
                 'last_synced_at' => $syncedAt,
             ])->save();
         });
+
+        return $needsBackup;
     }
 
     /**

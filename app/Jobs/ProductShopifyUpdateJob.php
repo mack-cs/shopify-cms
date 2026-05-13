@@ -37,16 +37,6 @@ class ProductShopifyUpdateJob implements ShouldQueue
         $syncBatchId = $this->syncBatchId ?: (string) Str::uuid();
         $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields, $syncBatchId, $this->userId);
 
-        $updatedProductIds = array_values(array_unique(array_map('intval', $result['updated_product_ids'] ?? [])));
-        $shouldQueueImageBackup = $this->scopes === null
-            || in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $this->scopes, true);
-
-        if ($shouldQueueImageBackup) {
-            foreach (array_chunk($updatedProductIds, 100) as $chunk) {
-                ProductImageBackupJob::dispatch($chunk, $this->userId, 'Post-product sync image backup');
-            }
-        }
-
         if ($this->userId) {
             $parts = [];
             $scopeLabels = ProductShopifyUpdater::syncScopeLabels();
@@ -69,9 +59,6 @@ class ProductShopifyUpdateJob implements ShouldQueue
             if ($result['updated'] > 0) {
                 $parts[] = "Updated {$result['updated']}.";
                 $parts[] = 'Sync batch ' . substr(str_replace('-', '', $syncBatchId), 0, 8) . '.';
-                if ($shouldQueueImageBackup && !empty($updatedProductIds)) {
-                    $parts[] = 'Image backup queued.';
-                }
             }
             if ($result['skipped_not_approved'] > 0) {
                 $parts[] = "Skipped {$result['skipped_not_approved']} not approved.";

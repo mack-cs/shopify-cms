@@ -28,6 +28,7 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
         public array $imageIds,
         public ?int $userId = null,
         public ?string $reason = null,
+        public bool $allowRemoteDeletedRestore = false,
     ) {}
 
     public function handle(
@@ -46,7 +47,7 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
             ->get();
 
         $backupResult = $backupService->backupImages($images);
-        $result = $updater->syncSelectedProductImages($product->fresh(), $imageIds);
+        $result = $updater->syncSelectedProductImages($product->fresh(), $imageIds, $this->allowRemoteDeletedRestore);
 
         if (!$this->userId) {
             return;
@@ -69,7 +70,9 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
             $parts[] = "Missing source {$backupResult['missing_source']}.";
         }
         if ($result['synced'] > 0) {
-            $parts[] = 'Shopify selected image sync complete.';
+            $parts[] = $this->allowRemoteDeletedRestore
+                ? 'Shopify remote-deleted image restore complete.'
+                : 'Shopify selected image sync complete.';
         }
         if ($result['skipped_not_approved'] > 0) {
             $parts[] = 'Skipped because product is not approved.';
@@ -95,7 +98,7 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
         }
 
         $notification = Notification::make()
-            ->title('Selected image sync complete')
+            ->title($this->allowRemoteDeletedRestore ? 'Remote-deleted image restore complete' : 'Selected image sync complete')
             ->body(implode(' ', $parts));
 
         if ($result['failed'] > 0 || $backupResult['failed'] > 0) {

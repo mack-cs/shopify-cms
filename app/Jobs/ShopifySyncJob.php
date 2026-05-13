@@ -3,7 +3,6 @@
 namespace App\Jobs;
 
 use App\Models\Import;
-use App\Models\Product;
 use App\Models\Setting;
 use App\Services\AdminNotification;
 use App\Services\ShopifyApiImporter;
@@ -62,23 +61,11 @@ class ShopifySyncJob implements ShouldQueue
             $draftSync->syncApprovedDrafts();
             Setting::putValue('shopify_last_sync_at', now()->toISOString());
 
-            Product::query()
-                ->where('import_id', $import->id)
-                ->pluck('id')
-                ->chunk(100)
-                ->each(function ($chunk) use ($import): void {
-                    ProductImageBackupJob::dispatch(
-                        $chunk->map(fn ($id): int => (int) $id)->all(),
-                        $import->created_by,
-                        'Post-import image backup'
-                    );
-                });
-
             AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Shopify sync complete')
                     ->body(
-                        "Import #{$import->id} is ready. Image backup is queued and the Shopify snapshot CSV is ready." .
+                        "Import #{$import->id} is ready. Shopify image changes were queued for backup and the Shopify snapshot CSV is ready." .
                         ($missingCount > 0 ? " {$missingCount} product(s) were missing from the latest Shopify sync. See Audit & History -> Shopify Missing Products." : '') .
                         ($blockedDraftCount > 0 ? " {$blockedDraftCount} draft recovery record(s) were blocked from automatic re-sync. Review them in New Products." : '')
                     )

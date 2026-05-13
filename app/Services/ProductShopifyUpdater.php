@@ -528,7 +528,7 @@ final class ProductShopifyUpdater
      *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
      * }
      */
-    public function syncSelectedProductImages(Product $product, array $selectedImageIds): array
+    public function syncSelectedProductImages(Product $product, array $selectedImageIds, bool $allowRemoteDeletedRestore = false): array
     {
         $selectedImageIds = array_values(array_unique(array_map('intval', $selectedImageIds)));
 
@@ -564,7 +564,7 @@ final class ProductShopifyUpdater
             return $result;
         }
 
-        if (!$product->isApprovedByTwo()) {
+        if (!$allowRemoteDeletedRestore && !$product->isApprovedByTwo()) {
             $result['skipped_not_approved'] = 1;
             return $result;
         }
@@ -576,7 +576,7 @@ final class ProductShopifyUpdater
             }
 
             $details = $this->productDetails($product, null, $productId);
-            $result['warnings'] = $this->updateImages($product, $productId, [], $details, $selectedImageIds);
+            $result['warnings'] = $this->updateImages($product, $productId, [], $details, $selectedImageIds, $allowRemoteDeletedRestore);
             $result['synced'] = 1;
         } catch (\Throwable $e) {
             $result['failed'] = 1;
@@ -3604,6 +3604,7 @@ GQL;
         array $_rowDataList,
         array $details,
         ?array $selectedImageIds = null,
+        bool $allowRemoteDeletedRestore = false,
     ): array
     {
         $warnings = [];
@@ -3672,6 +3673,10 @@ GQL;
         $imageQuery = $product->allImages()
             ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED);
 
+        if (!$allowRemoteDeletedRestore) {
+            $imageQuery->where('sync_state', '!=', Image::SYNC_STATE_REMOTE_DELETED);
+        }
+
         if ($selectedImageIdMap !== null) {
             $imageQuery->whereIn('id', array_keys($selectedImageIdMap));
         }
@@ -3683,7 +3688,7 @@ GQL;
             ->orderBy('id')
             ->get()
             ->values()
-            ->map(function (Image $image, int $index) use ($existingEntriesById, $existingEntriesByUrl): array {
+            ->map(function (Image $image, int $index) use ($existingEntriesById, $existingEntriesByUrl, $allowRemoteDeletedRestore): array {
                 $previousMatch = $this->findExistingImageMatch(
                     $this->nullIfEmpty($image->shopify_id),
                     $this->normalizeMediaUrl($image->src),
@@ -3702,7 +3707,8 @@ GQL;
                     'position' => $this->normalizeImagePosition($image->position),
                     'index' => $index,
                     'matched_media_id' => null,
-                    'requires_republish' => $image->needsShopifyRepublish(),
+                    'requires_republish' => $image->needsShopifyRepublish()
+                        || ($allowRemoteDeletedRestore && $image->sync_state === Image::SYNC_STATE_REMOTE_DELETED),
                     'previous_media_id' => trim((string) ($previousMatch['id'] ?? '')) ?: null,
                     'previous_media_mode' => trim((string) ($previousMatch['mode'] ?? '')) ?: null,
                 ];

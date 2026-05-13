@@ -330,7 +330,6 @@ Approvals are stored in `approvals` with `approval_version`.
 - Example: choose `Product core fields` and then tick only `Title` and `Body HTML` to send those two fields without vendor, tags, status, handle, or category.
 - Handle promotion only happens during the `product core fields` scope, never during SEO-only sync.
 - Handle promotion only happens when the `Handle` core field is explicitly included.
-- Post-sync image backup is only queued when the image scope is part of the sync.
 
 ### Product URL redirect workflow
 
@@ -352,10 +351,12 @@ Approvals are stored in `approvals` with `approval_version`.
 ### Product image workflow
 
 - Product images are backed up into `image_assets` and can be republished from backup when Shopify loses the original image.
+- Shopify-origin images are now backed up when they are first seen or when their remote source changes.
+- The app preserves remotely removed Shopify images as recoverable local records instead of deleting them silently.
 - The first time a product reaches `2/2` approval, image filenames are generated once from the approved product title plus image position.
 - That first automatic rename only happens once per product. Later approval cycles do not auto-rename again.
 - After the first full approval, any later image rename is manual via the product actions.
-- Replacing an image locally marks that image for backup rebuild and Shopify image re-sync, but does not auto-rename it again.
+- Replacing an image locally remains the normal editing workflow. A local replacement marks that image for backup rebuild and Shopify image re-sync, but does not auto-rename it again.
 - First full approval does not auto-sync images to Shopify. Outbound image sync is manual only.
 
 Example filename pattern:
@@ -363,6 +364,56 @@ Example filename pattern:
 pot-of-wisdom-bracelets-01.jpg
 pot-of-wisdom-bracelets-02.jpg
 ```
+
+### Image backup and recovery policy
+
+This app treats Shopify image deletion as a recoverable event.
+
+- Local image edits are the normal workflow.
+- Shopify-side image deletion or replacement is treated as an exception path that must remain recoverable.
+- The app keeps its own backup assets in `image_assets`.
+- Recovery is explicit and admin-driven. The app does not automatically republish remotely removed images during ordinary sync.
+
+Backup triggers:
+
+- A newly imported Shopify image is queued for backup when it is first seen.
+- An existing Shopify image is queued for backup again when its inbound Shopify source URL changes.
+- A local image replacement still marks that image for backup rebuild through the normal image observer workflow.
+- Manual product-level `Queue Image Backup` remains available as an operational fallback.
+- The nightly reconcile job remains available as a safety net for pending, failed, missing-source, or remote-deleted image records.
+
+Operational intent:
+
+- Unchanged images should keep the existing backup asset and should not be needlessly re-backed up.
+- New or changed Shopify-origin images should be backed up before a later Shopify-side removal can make them unrecoverable.
+- This closes the gap where a merchant could add an image directly in Shopify and then delete it before the app ever stored a safe copy.
+
+### Remote-deleted Shopify images
+
+When Shopify sync detects that an image previously known to this app no longer exists remotely, the app does not delete the local image record.
+
+- The image record is preserved locally.
+- Its `sync_state` is set to `remote_deleted`.
+- The row remains visible in the product Images manager because that view now uses all images, not only active images.
+- Remote-deleted images are excluded from the normal active image set so they do not silently flow back into ordinary sync work.
+
+This gives the super admin a traceable recovery list for accidental Shopify removals.
+
+### Restore workflow for remote-deleted images
+
+Remote-deleted images are restored only on demand.
+
+- Only super admins can restore remote-deleted Shopify images.
+- Restore can be done per image or in bulk from the Images relation manager.
+- Restore first runs the image backup path so the app reuses an existing backup asset or attempts to create one if needed.
+- Restore then republishes only the selected remote-deleted images to Shopify.
+- Normal `Sync Selected Images to Shopify` refuses remote-deleted images and instructs the user to use the restore action instead.
+
+Important recovery rule:
+
+- If an image was already backed up before it was removed from Shopify, restore is reliable from the stored asset.
+- If an image was never backed up and Shopify has already invalidated the original remote URL, the row may still exist locally but the binary file may no longer be recoverable.
+- That is why backup-on-first-seen and backup-on-change are part of the protection model.
 
 ### Sync Images To Shopify
 
@@ -374,6 +425,7 @@ Products sync images to Shopify from the Images relation manager using a selecte
 - Selected image sync preserves unselected Shopify product images.
 - If selected image content changes locally, that image is republished.
 - If the approved/manual filename changes, that image is republished and the stale previous Shopify image for that selected slot is removed from the product.
+- It does not restore `remote_deleted` images. That is a separate super-admin recovery action.
 
 This action is available from the product Images relation manager.
 

@@ -21,7 +21,7 @@ use Illuminate\Support\Str;
 
 class ImagesRelationManager extends RelationManager
 {
-    protected static string $relationship = 'images';
+    protected static string $relationship = 'allImages';
 
     public function form(Forms\Form $form): Forms\Form
     {
@@ -164,6 +164,15 @@ class ImagesRelationManager extends RelationManager
                 ->wrap()
                 ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
+            Tables\Filters\SelectFilter::make('sync_state')
+                ->options([
+                    Image::SYNC_STATE_SYNCED => 'Synced',
+                    Image::SYNC_STATE_LOCAL_NEW => 'Local New',
+                    Image::SYNC_STATE_LOCAL_UPDATED => 'Local Updated',
+                    Image::SYNC_STATE_LOCAL_DELETED => 'Local Deleted',
+                    Image::SYNC_STATE_REMOTE_DELETED => 'Remote Deleted',
+                    Image::SYNC_STATE_CONFLICT => 'Conflict',
+                ]),
             Tables\Filters\SelectFilter::make('backup_status')
                 ->options([
                     Image::BACKUP_STATUS_PENDING => 'Pending',
@@ -234,11 +243,23 @@ class ImagesRelationManager extends RelationManager
                 }),
         ])->actions([
             Tables\Actions\EditAction::make()
+                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED)
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
                 ->after(function (): void {
                     $this->bumpOwnerApprovalVersion();
                 }),
+            Tables\Actions\Action::make('restoreRemoteDeletedImage')
+                ->label('Restore to Shopify')
+                ->icon('heroicon-o-arrow-path')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn (Image $record): bool => $record->sync_state === Image::SYNC_STATE_REMOTE_DELETED
+                    && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
+                ->action(function (Image $record): void {
+                    ProductResource::queueRemoteDeletedImageRestore($this->getOwnerRecord(), [$record->id]);
+                }),
             Tables\Actions\DeleteAction::make()
+                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED)
                 ->action(function (Image $record): void {
                     if (blank($record->shopify_id)) {
                         $record->delete();
@@ -262,6 +283,20 @@ class ImagesRelationManager extends RelationManager
                 ->visible(fn (): bool => $this->getOwnerRecord()->isApprovedByTwo() && filled($this->getOwnerRecord()->handle))
                 ->action(function (Collection $records): void {
                     ProductResource::queueSelectedImageSync(
+                        $this->getOwnerRecord(),
+                        $records->pluck('id')->map(fn ($id): int => (int) $id)->all()
+                    );
+                })
+                ->deselectRecordsAfterCompletion(),
+            Tables\Actions\BulkAction::make('restoreRemoteDeletedImages')
+                ->label('Restore Remote-Deleted Images')
+                ->icon('heroicon-o-arrow-path')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    && filled($this->getOwnerRecord()->handle))
+                ->action(function (Collection $records): void {
+                    ProductResource::queueRemoteDeletedImageRestore(
                         $this->getOwnerRecord(),
                         $records->pluck('id')->map(fn ($id): int => (int) $id)->all()
                     );

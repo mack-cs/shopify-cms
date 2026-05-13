@@ -1978,6 +1978,22 @@ class ProductResource extends Resource
             return;
         }
 
+        $remoteDeletedIds = $record->allImages()
+            ->whereIn('id', $imageIds)
+            ->where('sync_state', Image::SYNC_STATE_REMOTE_DELETED)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        if (!empty($remoteDeletedIds)) {
+            self::sendNotification(Notification::make()
+                ->title('Remote-deleted images require restore')
+                ->body('Use the restore action for images that were removed from Shopify and need to be republished explicitly.')
+                ->warning()
+            );
+            return;
+        }
+
         if (!$record->isApprovedByTwo()) {
             self::sendNotification(Notification::make()
                 ->title('Approval required')
@@ -2006,6 +2022,71 @@ class ProductResource extends Resource
         self::sendNotification(Notification::make()
             ->title('Selected image sync queued')
             ->body('Shopify image sync has been queued for the selected images.')
+            ->success()
+        );
+    }
+
+    /**
+     * @param array<int, int> $imageIds
+     */
+    public static function queueRemoteDeletedImageRestore(Product $record, array $imageIds): void
+    {
+        $imageIds = array_values(array_unique(array_map('intval', $imageIds)));
+
+        if (empty($imageIds)) {
+            self::sendNotification(Notification::make()
+                ->title('No images selected')
+                ->body('Select at least one remote-deleted image to restore.')
+                ->warning()
+            );
+            return;
+        }
+
+        if (!(Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)) {
+            self::sendNotification(Notification::make()
+                ->title('Super admin required')
+                ->body('Only super admins can restore remote-deleted Shopify images.')
+                ->warning()
+            );
+            return;
+        }
+
+        if (!$record->handle) {
+            self::sendNotification(Notification::make()
+                ->title('Missing handle')
+                ->body('This product must have a handle before image restore.')
+                ->warning()
+            );
+            return;
+        }
+
+        $restorableIds = $record->allImages()
+            ->whereIn('id', $imageIds)
+            ->where('sync_state', Image::SYNC_STATE_REMOTE_DELETED)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        if (empty($restorableIds)) {
+            self::sendNotification(Notification::make()
+                ->title('No remote-deleted images selected')
+                ->body('Select images marked as remote deleted to restore them to Shopify.')
+                ->warning()
+            );
+            return;
+        }
+
+        \App\Jobs\SelectedProductImageShopifySyncJob::dispatch(
+            $record->id,
+            $restorableIds,
+            Auth::id(),
+            'Manual remote-deleted image restore',
+            true,
+        );
+
+        self::sendNotification(Notification::make()
+            ->title('Remote-deleted image restore queued')
+            ->body('The selected remote-deleted images will be backed up if needed and then restored to Shopify.')
             ->success()
         );
     }
