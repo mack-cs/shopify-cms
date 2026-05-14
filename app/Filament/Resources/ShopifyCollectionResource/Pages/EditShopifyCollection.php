@@ -46,6 +46,15 @@ class EditShopifyCollection extends EditRecord
                 ->action(function (array $data): void {
                     ShopifyCollectionResource::queuePushToShopify($this->getRecord(), $data);
                 }),
+            Actions\Action::make('requestApproval')
+                ->label('Request Approval')
+                ->icon('heroicon-o-clipboard-document-check')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->form(ShopifyCollectionResource::approvalRequestFormSchema())
+                ->action(function (array $data): void {
+                    ShopifyCollectionResource::requestApprovalForRecords(collect([$this->getRecord()]), $data);
+                }),
         ];
     }
 }

@@ -62,6 +62,11 @@ class ShopifyCollection extends Model
         return $this->hasMany(CollectionApproval::class, 'collection_id');
     }
 
+    public function approvalRequests(): HasMany
+    {
+        return $this->hasMany(CollectionApprovalRequest::class, 'collection_id');
+    }
+
     public function urlRedirects(): HasMany
     {
         return $this->hasMany(CollectionUrlRedirect::class, 'collection_id');

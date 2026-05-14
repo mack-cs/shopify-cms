@@ -2,241 +2,190 @@
 
 namespace App\Filament\Resources;
 
-use App\Enums\RolesEnum;
 use App\Filament\Resources\CollectionApprovalQueueResource\Pages;
-use App\Models\ShopifyCollection;
+use App\Models\CollectionApprovalRequest;
+use App\Models\User;
+use App\Services\CollectionApprovalRequestService;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
-use Filament\Tables\Table;
-use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
-use Filament\Forms\Components\DatePicker;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\HtmlString;
 
 class CollectionApprovalQueueResource extends Resource
 {
-    protected static ?string $model = ShopifyCollection::class;
-
-    protected static ?string $navigationIcon = 'heroicon-o-inbox-stack';
-    protected static ?string $navigationLabel = 'Collection Approval Queue';
-    protected static ?string $navigationGroup = 'SEO';
-    protected static ?int $navigationSort = 2;
+    protected static ?string $model = CollectionApprovalRequest::class;
+    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationLabel = 'Collection Approval';
+    protected static ?string $navigationIcon = 'heroicon-o-clipboard-document-check';
+    protected static ?int $navigationSort = 5;
 
     public static function table(Table $table): Table
     {
         return $table
-            ->defaultSort('updated_at', 'desc')
+            ->defaultSort('created_at', 'desc')
             ->columns([
-                TextColumn::make('effective_title')
-                    ->label('Collection')
-                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_title, $record->title))
-                    ->searchable(query: function (Builder $query, string $search): Builder {
-                        return $query->where(function (Builder $sub) use ($search): void {
-                            $sub->where('title', 'like', "%{$search}%")
-                                ->orWhere('draft_title', 'like', "%{$search}%");
-                        });
-                    })
-                    ->sortable()
-                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_title, $record->title, 'Shopify'))
-                    ->wrap(),
-                TextColumn::make('effective_handle')
-                    ->label('Handle')
-                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayCollectionHandle($record))
-                    ->searchable(query: function (Builder $query, string $search): Builder {
-                        return $query->where(function (Builder $sub) use ($search): void {
-                            $sub->where('handle', 'like', "%{$search}%")
-                                ->orWhere('draft_handle', 'like', "%{$search}%");
-                        });
-                    })
-                    ->sortable()
-                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_handle, $record->handle, 'Live'))
-                    ->wrap(),
-                TextColumn::make('draft_handle')
-                    ->label('Proposed URL')
-                    ->placeholder('-')
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('effective_seo_title')
-                    ->label('SEO Title')
-                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_seo_title, $record->seo_title))
-                    ->limit(60)
-                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_seo_title, $record->seo_title, 'Shopify'))
-                    ->wrap(),
-                TextColumn::make('effective_seo_description')
-                    ->label('SEO Desc')
-                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_seo_description, $record->seo_description))
-                    ->limit(80)
-                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_seo_description, $record->seo_description, 'Shopify'))
-                    ->wrap()
-                    ->toggleable(),
-                IconColumn::make('missing_seo')
-                    ->label('Missing SEO')
-                    ->boolean()
-                    ->state(fn (ShopifyCollection $record): bool => ShopifyCollectionResource::hasMissingSeoFields($record) && $record->deindex !== true)
-                    ->trueColor('warning')
-                    ->falseColor('success'),
-                TextColumn::make('approvals_current')
-                    ->label('Approvals')
-                    ->state(fn (ShopifyCollection $record): int => $record->approvalsForCurrentVersionCount())
-                    ->formatStateUsing(fn (int $state): string => "{$state}/2")
-                    ->badge()
-                    ->color(fn (int $state): string => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray')),
-                TextColumn::make('updated_at')
-                    ->label('Updated')
+                TextColumn::make('created_at')
+                    ->label('Requested')
                     ->dateTime()
                     ->sortable(),
+                TextColumn::make('request_batch_id')
+                    ->label('Batch')
+                    ->state(fn (CollectionApprovalRequest $record): string => app(CollectionApprovalRequestService::class)->batchLabel($record->request_batch_id))
+                    ->sortable()
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        $term = trim($search);
+                        if ($term === '') {
+                            return $query;
+                        }
+
+                        return $query->where('request_batch_id', 'like', '%' . strtolower($term) . '%');
+                    }),
+                TextColumn::make('collection.title')
+                    ->label('Collection')
+                    ->searchable()
+                    ->description(fn (CollectionApprovalRequest $record): string => self::reviewSummary($record))
+                    ->url(fn (CollectionApprovalRequest $record): ?string => $record->collection
+                        ? ShopifyCollectionResource::getUrl('edit', ['record' => $record->collection])
+                        : null)
+                    ->openUrlInNewTab(),
+                TextColumn::make('collection.handle')
+                    ->label('Handle')
+                    ->searchable()
+                    ->toggleable(),
+                TextColumn::make('requester.name')
+                    ->label('Requested By')
+                    ->sortable()
+                    ->toggleable(),
+                TextColumn::make('targetApprover.name')
+                    ->label('Approver')
+                    ->state(fn (CollectionApprovalRequest $record): string => $record->targetApprover?->name ?: 'Any reviewer')
+                    ->description(fn (CollectionApprovalRequest $record): string => $record->targetApprover ? 'Assigned reviewer only' : 'Open queue')
+                    ->toggleable(),
+                TextColumn::make('request_note')
+                    ->label('Review Note')
+                    ->state(fn (CollectionApprovalRequest $record): string => trim((string) ($record->request_note ?? '')) ?: 'None')
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 Filter::make('recently_edited_today')
                     ->label('Recently Edited Today')
-                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                    ->query(fn (Builder $query): Builder => $query->whereDate('created_at', today())),
                 Filter::make('edited_last_7_days')
                     ->label('Edited in Last 7 Days')
-                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
-                Filter::make('updated_date')
-                    ->label('Updated Date')
-                    ->form([
-                        DatePicker::make('updated_from')->label('Updated From'),
-                        DatePicker::make('updated_until')->label('Updated To'),
-                    ])
+                    ->query(fn (Builder $query): Builder => $query->where('created_at', '>=', now()->subDays(7))),
+                SelectFilter::make('request_batch_id')
+                    ->label('Batch')
+                    ->options(fn (): array => CollectionApprovalRequest::query()
+                        ->where('status', CollectionApprovalRequest::STATUS_PENDING)
+                        ->whereNotNull('request_batch_id')
+                        ->orderByDesc('created_at')
+                        ->get(['request_batch_id'])
+                        ->unique('request_batch_id')
+                        ->mapWithKeys(fn (CollectionApprovalRequest $request): array => [
+                            (string) $request->request_batch_id => app(CollectionApprovalRequestService::class)->batchLabel($request->request_batch_id),
+                        ])
+                        ->all())
+                    ->searchable()
+                    ->preload(),
+                SelectFilter::make('requested_by')
+                    ->label('Requested By')
+                    ->options(fn (): array => User::query()
+                        ->orderBy('name')
+                        ->pluck('name', 'id')
+                        ->all()),
+                SelectFilter::make('target_approver_id')
+                    ->label('Approver')
+                    ->options(fn (): array => ['__any__' => 'Any reviewer'] + app(CollectionApprovalRequestService::class)
+                        ->eligibleApproversQuery()
+                        ->pluck('name', 'id')
+                        ->all())
                     ->query(function (Builder $query, array $data): Builder {
-                        return $query
-                            ->when(
-                                $data['updated_from'] ?? null,
-                                fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from),
-                            )
-                            ->when(
-                                $data['updated_until'] ?? null,
-                                fn (Builder $q, $until): Builder => $q->whereDate('updated_at', '<=', $until),
-                            );
+                        $value = $data['value'] ?? null;
+                        if ($value === '__any__') {
+                            return $query->whereNull('target_approver_id');
+                        }
+
+                        if ($value === null || $value === '') {
+                            return $query;
+                        }
+
+                        return $query->where('target_approver_id', (int) $value);
                     }),
             ])
             ->actions([
-                Tables\Actions\Action::make('review')
+                Tables\Actions\Action::make('reviewRequest')
                     ->label('Review')
                     ->icon('heroicon-o-eye')
-                    ->url(fn (ShopifyCollection $record): string => ShopifyCollectionResource::getUrl('edit', ['record' => $record])),
-                Tables\Actions\Action::make('approve')
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close')
+                    ->modalHeading(fn (CollectionApprovalRequest $record): string => 'Review Collection Approval: ' . trim((string) ($record->collection?->title ?? 'Collection')))
+                    ->modalContent(fn (CollectionApprovalRequest $record): HtmlString => new HtmlString(self::reviewModalHtml($record))),
+                Tables\Actions\Action::make('openCollection')
+                    ->label('Open Collection')
+                    ->icon('heroicon-o-arrow-top-right-on-square')
+                    ->url(fn (CollectionApprovalRequest $record): ?string => $record->collection
+                        ? ShopifyCollectionResource::getUrl('edit', ['record' => $record->collection])
+                        : null)
+                    ->openUrlInNewTab(),
+                Tables\Actions\Action::make('approveRequest')
                     ->label('Approve')
                     ->icon('heroicon-o-check-badge')
                     ->color('success')
                     ->requiresConfirmation()
-                    ->action(function (ShopifyCollection $record): void {
-                        $result = ShopifyCollectionResource::approveRecord($record, (int) Auth::id());
-
-                        $notification = Notification::make()->title(match ($result['status']) {
-                            'approved' => 'Collection approved',
-                            'already-approved' => 'Already approved',
-                            default => 'Approval blocked',
-                        })->body($result['message']);
-
-                        match ($result['status']) {
-                            'approved' => $notification->success(),
-                            'already-approved' => $notification->warning(),
-                            default => $notification->danger(),
-                        };
-
-                        $notification->send();
-                    }),
-                Tables\Actions\Action::make('removeFromQueue')
-                    ->label('Remove From Queue')
-                    ->icon('heroicon-o-x-mark')
-                    ->color('gray')
-                    ->requiresConfirmation()
-                    ->action(function (ShopifyCollection $record): void {
-                        ShopifyCollectionResource::dismissFromApprovalQueue($record);
+                    ->action(function (CollectionApprovalRequest $record): void {
+                        $summary = app(CollectionApprovalRequestService::class)->approveRequests(collect([$record]), (int) Auth::id());
 
                         Notification::make()
-                            ->title('Collection removed from queue')
-                            ->body('This collection version was dismissed from the approval queue. It will reappear if it changes again.')
-                            ->success()
+                            ->title('Collection approval complete')
+                            ->body(self::approvalNotificationBody($summary))
+                            ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
                             ->send();
                     }),
             ])
             ->bulkActions([
                 BulkActionGroup::make([
-                    BulkAction::make('approveSelected')
+                    BulkAction::make('approveSelectedRequests')
                         ->label('Approve Selected')
                         ->icon('heroicon-o-check-badge')
+                        ->color('success')
                         ->requiresConfirmation()
                         ->action(function (Collection $records): void {
-                            $approved = 0;
-                            $alreadyApproved = 0;
-                            $blocked = 0;
-
-                            foreach ($records as $record) {
-                                if (!$record instanceof ShopifyCollection) {
-                                    continue;
-                                }
-
-                                $result = ShopifyCollectionResource::approveRecord($record, (int) Auth::id());
-                                if ($result['status'] === 'approved') {
-                                    $approved++;
-                                    continue;
-                                }
-
-                                if ($result['status'] === 'already-approved') {
-                                    $alreadyApproved++;
-                                    continue;
-                                }
-
-                                $blocked++;
-                            }
+                            $summary = app(CollectionApprovalRequestService::class)->approveRequests($records, (int) Auth::id());
 
                             $parts = [];
-                            if ($approved > 0) {
-                                $parts[] = "Approved {$approved}.";
+                            if (($summary['approved'] ?? 0) > 0) {
+                                $parts[] = "Approved {$summary['approved']} collection request(s).";
                             }
-                            if ($alreadyApproved > 0) {
-                                $parts[] = "Skipped {$alreadyApproved} already approved by you.";
+                            if (($summary['skipped_not_pending'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_not_pending']} that were no longer pending.";
                             }
-                            if ($blocked > 0) {
-                                $parts[] = "Blocked {$blocked}.";
+                            if (($summary['skipped_stale'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_stale']} because the collection changed after the request was created.";
                             }
-
-                            $notification = Notification::make()
-                                ->title('Collection approval queue processed')
-                                ->body($parts === [] ? 'No collections were processed.' : implode(' ', $parts));
-
-                            if ($blocked > 0) {
-                                $notification->warning();
-                            } elseif ($approved > 0) {
-                                $notification->success();
-                            } else {
-                                $notification->warning();
+                            if (($summary['skipped_own_request'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_own_request']} because you cannot approve your own request.";
                             }
-
-                            $notification->send();
-                        })
-                        ->deselectRecordsAfterCompletion(),
-                    BulkAction::make('removeSelectedFromQueue')
-                        ->label('Remove Selected From Queue')
-                        ->icon('heroicon-o-x-mark')
-                        ->color('gray')
-                        ->requiresConfirmation()
-                        ->action(function (Collection $records): void {
-                            $removed = 0;
-
-                            foreach ($records as $record) {
-                                if (!$record instanceof ShopifyCollection) {
-                                    continue;
-                                }
-
-                                ShopifyCollectionResource::dismissFromApprovalQueue($record);
-                                $removed++;
+                            if (($summary['skipped_targeted'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_targeted']} because they were assigned to a different reviewer.";
+                            }
+                            if (($summary['skipped_already_approved'] ?? 0) > 0) {
+                                $parts[] = "Skipped {$summary['skipped_already_approved']} because you already approved that collection version.";
                             }
 
                             Notification::make()
-                                ->title('Collections removed from queue')
-                                ->body($removed > 0
-                                    ? "Removed {$removed} collection(s) from the approval queue for the current version."
-                                    : 'No collections were removed.')
-                                ->success()
+                                ->title('Collection approval complete')
+                                ->body($parts ? implode(' ', $parts) : 'No collection approvals were recorded.')
+                                ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
                                 ->send();
                         })
                         ->deselectRecordsAfterCompletion(),
@@ -246,46 +195,29 @@ class CollectionApprovalQueueResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery();
-        $importId = ShopifyCollectionResource::currentImportId();
         $userId = (int) Auth::id();
 
-        if (!$importId || $userId <= 0) {
-            return $query->whereRaw('1 = 0');
-        }
-
-        $query = ShopifyCollectionResource::applyApprovalQueueVisibilityFilter(
-            $query->where('import_id', $importId)
-        );
-
-        return $query
-            ->whereNotExists(function ($sub) use ($userId): void {
-                $sub->selectRaw('1')
-                    ->from('collection_approvals')
-                    ->whereColumn('collection_approvals.collection_id', 'collections.id')
-                    ->whereColumn('collection_approvals.approval_version', 'collections.approval_version')
-                    ->where('collection_approvals.user_id', $userId);
-            });
+        return app(CollectionApprovalRequestService::class)
+            ->actionableRequestsQuery($userId);
     }
 
     public static function getNavigationBadge(): ?string
     {
-        if (!Auth::check()) {
+        $userId = (int) Auth::id();
+        if ($userId <= 0) {
             return null;
         }
 
-        $count = static::getEloquentQuery()->count();
+        $count = app(CollectionApprovalRequestService::class)
+            ->actionableRequestsQuery($userId)
+            ->count();
 
         return $count > 0 ? (string) $count : null;
     }
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasAnyRole([
-            RolesEnum::SuperAdmin->value,
-            RolesEnum::Admin->value,
-            RolesEnum::SeoReviewer->value,
-        ]) ?? false;
+        return Auth::check();
     }
 
     public static function canCreate(): bool
@@ -313,5 +245,86 @@ class CollectionApprovalQueueResource extends Resource
         return [
             'index' => Pages\ListCollectionApprovalQueues::route('/'),
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $summary
+     */
+    private static function approvalNotificationBody(array $summary): string
+    {
+        if (($summary['approved'] ?? 0) > 0) {
+            return 'The collection approval request was approved.';
+        }
+
+        $parts = [];
+
+        if (($summary['skipped_not_pending'] ?? 0) > 0) {
+            $parts[] = 'This request is no longer pending.';
+        }
+        if (($summary['skipped_stale'] ?? 0) > 0) {
+            $parts[] = 'The collection changed after the request was created.';
+        }
+        if (($summary['skipped_own_request'] ?? 0) > 0) {
+            $parts[] = 'You cannot approve your own request.';
+        }
+        if (($summary['skipped_targeted'] ?? 0) > 0) {
+            $parts[] = 'This request is assigned to a different reviewer.';
+        }
+        if (($summary['skipped_already_approved'] ?? 0) > 0) {
+            $parts[] = 'You already approved this collection version.';
+        }
+
+        return $parts !== [] ? implode(' ', $parts) : 'No collection approval could be recorded.';
+    }
+
+    private static function reviewSummary(CollectionApprovalRequest $record): string
+    {
+        $parts = [];
+
+        $collection = $record->collection;
+        if ($collection?->sync_status) {
+            $parts[] = 'Sync: ' . trim((string) $collection->sync_status);
+        }
+
+        $proposedHandle = trim((string) ($collection?->draft_handle ?? ''));
+        $currentHandle = trim((string) ($collection?->handle ?? ''));
+        if ($proposedHandle !== '' && $proposedHandle !== $currentHandle) {
+            $parts[] = "URL: {$currentHandle} -> {$proposedHandle}";
+        }
+
+        if ($collection && ShopifyCollectionResource::hasMissingSeoFields($collection)) {
+            $parts[] = 'Missing SEO';
+        }
+
+        return $parts !== [] ? implode(' | ', $parts) : 'Pending review';
+    }
+
+    private static function reviewModalHtml(CollectionApprovalRequest $record): string
+    {
+        $collection = $record->collection;
+        $currentHandle = trim((string) ($collection?->handle ?? ''));
+        $proposedHandle = trim((string) ($collection?->draft_handle ?? ''));
+        $handleImpact = $proposedHandle !== '' && $proposedHandle !== $currentHandle
+            ? e($currentHandle) . ' &rarr; ' . e($proposedHandle)
+            : 'No URL change requested';
+
+        $lines = [
+            '<div class="space-y-3 text-sm">',
+            '<div><strong>Requested by:</strong> ' . e($record->requester?->name ?: 'Unknown') . '</div>',
+            '<div><strong>Approver routing:</strong> ' . e($record->targetApprover?->name ?: 'Any eligible reviewer') . '</div>',
+            '<div><strong>Collection handle:</strong> ' . e($currentHandle !== '' ? $currentHandle : 'Unknown') . '</div>',
+            '<div><strong>Requested version:</strong> ' . e((string) $record->approval_version) . '</div>',
+            '<div><strong>Handle impact:</strong> ' . $handleImpact . '</div>',
+            '<div><strong>Missing SEO:</strong> ' . ($collection && ShopifyCollectionResource::hasMissingSeoFields($collection) ? 'Yes' : 'No') . '</div>',
+        ];
+
+        $note = trim((string) ($record->request_note ?? ''));
+        if ($note !== '') {
+            $lines[] = '<div><strong>Review note:</strong><br>' . nl2br(e($note)) . '</div>';
+        }
+
+        $lines[] = '</div>';
+
+        return implode('', $lines);
     }
 }

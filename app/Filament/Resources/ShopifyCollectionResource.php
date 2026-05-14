@@ -12,6 +12,7 @@ use App\Models\DeletionRequest;
 use App\Models\ShopifyCollection;
 use App\Services\AdminNotification;
 use App\Services\AwsSecretService;
+use App\Services\CollectionApprovalRequestService;
 use App\Services\DeletionRequestWorkflowService;
 use App\Services\ShopifyCollectionsImporter;
 use App\Services\ShopifyCollectionSeoImporter;
@@ -613,6 +614,16 @@ class ShopifyCollectionResource extends Resource
                 BulkActionGroup::make([
                     ExportBulkAction::make()
                         ->exporter(ShopifyCollectionExporter::class),
+                    BulkAction::make('requestApproval')
+                        ->label('Request Approval')
+                        ->icon('heroicon-o-clipboard-document-check')
+                        ->color('warning')
+                        ->form(self::approvalRequestFormSchema())
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records, array $data): void {
+                            self::requestApprovalForRecords($records, $data);
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('bulkApprove')
                         ->label('Bulk Approve')
                         ->icon('heroicon-o-check-badge')
@@ -999,6 +1010,49 @@ class ShopifyCollectionResource extends Resource
                     self::applyApprovedFilter($query)
                 )
             )
+        );
+    }
+
+    public static function approvalRequestFormSchema(): array
+    {
+        return [
+            Forms\Components\Select::make('target_approver_id')
+                ->label('Approver')
+                ->options(fn (): array => ['' => 'Any reviewer'] + app(CollectionApprovalRequestService::class)
+                    ->eligibleApproversQuery(Auth::id())
+                    ->pluck('name', 'id')
+                    ->all())
+                ->searchable()
+                ->preload(),
+            Forms\Components\Textarea::make('request_note')
+                ->label('Review Note')
+                ->rows(3)
+                ->maxLength(1000),
+        ];
+    }
+
+    public static function requestApprovalForRecords(Collection $records, array $data): void
+    {
+        $summary = app(CollectionApprovalRequestService::class)->request(
+            $records,
+            (int) Auth::id(),
+            filled($data['target_approver_id'] ?? null) ? (int) $data['target_approver_id'] : null,
+            $data['request_note'] ?? null,
+        );
+
+        $parts = [];
+        if (($summary['requested'] ?? 0) > 0) {
+            $parts[] = "Requested {$summary['requested']} collection approval request(s).";
+        }
+        if (($summary['skipped_existing'] ?? 0) > 0) {
+            $parts[] = "Skipped {$summary['skipped_existing']} with an existing pending request.";
+        }
+
+        self::sendNotification(
+            Notification::make()
+                ->title('Collection approval request queued')
+                ->body($parts !== [] ? implode(' ', $parts) : 'No collection approval requests were created.')
+                ->status(($summary['requested'] ?? 0) > 0 ? 'success' : 'warning')
         );
     }
 
