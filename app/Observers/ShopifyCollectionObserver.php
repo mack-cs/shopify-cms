@@ -19,6 +19,7 @@ class ShopifyCollectionObserver
             'batch',
             'sync_status',
             'last_synced_at',
+            'approval_queue_dismissed_version',
         ];
 
         $dirtyKeys = array_keys($dirty);

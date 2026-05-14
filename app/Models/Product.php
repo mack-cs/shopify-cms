@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Support\Facades\DB;
 use App\Services\CategoryTypeMap;
 
 class Product extends Model
@@ -176,6 +177,24 @@ class Product extends Model
         }
 
         return 'Synced';
+    }
+
+    public function hasDuplicateImagePositions(): bool
+    {
+        $duplicatePositions = Image::query()
+            ->where('product_id', $this->getKey())
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->select('position')
+            ->groupBy('position')
+            ->havingRaw('COUNT(*) > 1');
+
+        return DB::query()
+            ->fromSub($duplicatePositions, 'duplicate_image_positions')
+            ->exists();
     }
 
 

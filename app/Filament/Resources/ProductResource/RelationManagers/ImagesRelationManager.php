@@ -86,13 +86,23 @@ class ImagesRelationManager extends RelationManager
     {
         return $table->columns([
             Tables\Columns\TextColumn::make('position')
-                ->sortable(),
+                ->sortable()
+                ->description(fn (Image $record): ?string => $this->hasDuplicatePosition($record)
+                    ? 'Duplicate position'
+                    : null)
+                ->color(fn (Image $record): string => $this->hasDuplicatePosition($record) ? 'danger' : 'gray'),
             ImageColumn::make('thumbnail')
                 ->label('Thumbnail')
                 ->square()
                 ->size(50)
                 ->checkFileExistence(false)
                 ->getStateUsing(fn ($record) => $this->normalizeImageUrl($record->src)),
+            Tables\Columns\IconColumn::make('duplicate_position')
+                ->label('Duplicate')
+                ->boolean()
+                ->state(fn (Image $record): bool => $this->hasDuplicatePosition($record))
+                ->trueColor('danger')
+                ->falseColor('success'),
             Tables\Columns\TextColumn::make('shopify_id')
                 ->label('Shopify ID')
                 ->wrap()
@@ -373,5 +383,23 @@ class ImagesRelationManager extends RelationManager
                 'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
             ])->save();
         });
+    }
+
+    private function hasDuplicatePosition(Image $record): bool
+    {
+        $position = $record->position;
+        if ($position === null) {
+            return false;
+        }
+
+        return $this->getOwnerRecord()
+            ?->allImages()
+            ->whereKeyNot($record->id)
+            ->where('position', $position)
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->exists() ?? false;
     }
 }

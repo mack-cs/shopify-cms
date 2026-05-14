@@ -87,3 +87,71 @@ it('keeps existing draft values when a collection seo csv row leaves a mapped fi
 
     @unlink($path);
 });
+
+it('matches collection seo imports by shopify id before falling back to handle', function () {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-collections',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $collection = ShopifyCollection::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Collection/55',
+        'handle' => 'current-handle',
+        'title' => 'Current Title',
+        'approval_version' => 1,
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'collection-seo-id-');
+    file_put_contents($path, "shopify_id,handle,seo_title\ngid://shopify/Collection/55,wrong-handle,Matched by ID\n");
+
+    $result = app(ShopifyCollectionSeoImporter::class)->importFromPath($import, $path);
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['skipped_not_found'])->toBe(0);
+
+    $collection->refresh();
+
+    expect($collection->draft_seo_title)->toBe('Matched by ID');
+
+    @unlink($path);
+});
+
+it('falls back to handle when shopify id does not match anything', function () {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-collections',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $collection = ShopifyCollection::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Collection/88',
+        'handle' => 'fallback-handle',
+        'title' => 'Fallback Title',
+        'approval_version' => 1,
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'collection-seo-fallback-');
+    file_put_contents($path, "shopify_id,handle,seo_title\ngid://shopify/Collection/999,fallback-handle,Matched by Handle\n");
+
+    $result = app(ShopifyCollectionSeoImporter::class)->importFromPath($import, $path);
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['skipped_not_found'])->toBe(0);
+
+    $collection->refresh();
+
+    expect($collection->draft_seo_title)->toBe('Matched by Handle');
+
+    @unlink($path);
+});

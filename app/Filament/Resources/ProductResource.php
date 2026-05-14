@@ -934,6 +934,16 @@ class ProductResource extends Resource
                 ->size(40)
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByThumbnail($query, $direction))
                 ->toggleable(),
+            IconColumn::make('duplicate_image_positions')
+                ->label('Duplicate Images')
+                ->boolean()
+                ->state(fn (Product $record): bool => $record->hasDuplicateImagePositions())
+                ->trueColor('danger')
+                ->falseColor('success')
+                ->tooltip(fn (Product $record): string => $record->hasDuplicateImagePositions()
+                    ? 'This product has at least two active images sharing the same position.'
+                    : 'No duplicate active image positions detected.')
+                ->toggleable(),
             TextColumn::make('handle')
                 ->searchable(query: function (Builder $query, string $search): Builder {
                     return $query->where('handle', 'like', "%{$search}%")
@@ -1389,6 +1399,12 @@ class ProductResource extends Resource
                             ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
                     });
                 })),
+            TernaryFilter::make('duplicate_image_positions')
+                ->label('Duplicate Image Positions')
+                ->queries(
+                    true: fn (Builder $query): Builder => self::applyDuplicateImagePositionsFilter($query),
+                    false: fn (Builder $query): Builder => self::applyNoDuplicateImagePositionsFilter($query),
+                ),
             TernaryFilter::make('approved')
                 ->label('Approved')
                 ->queries(
@@ -2373,6 +2389,38 @@ class ProductResource extends Resource
                 $seo->whereNull('seo_description')
                     ->orWhere('seo_description', '');
             });
+        });
+    }
+
+    public static function applyDuplicateImagePositionsFilter(Builder $query): Builder
+    {
+        return $query->whereExists(function ($sub): void {
+            $sub->selectRaw('1')
+                ->from('images')
+                ->whereColumn('images.product_id', 'products.id')
+                ->whereNotNull('images.position')
+                ->whereNotIn('images.sync_state', [
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED,
+                ])
+                ->groupBy('images.position')
+                ->havingRaw('COUNT(*) > 1');
+        });
+    }
+
+    public static function applyNoDuplicateImagePositionsFilter(Builder $query): Builder
+    {
+        return $query->whereNotExists(function ($sub): void {
+            $sub->selectRaw('1')
+                ->from('images')
+                ->whereColumn('images.product_id', 'products.id')
+                ->whereNotNull('images.position')
+                ->whereNotIn('images.sync_state', [
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED,
+                ])
+                ->groupBy('images.position')
+                ->havingRaw('COUNT(*) > 1');
         });
     }
 

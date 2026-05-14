@@ -387,6 +387,21 @@ class ShopifyCollectionResource extends Resource
                     ->toggleable(),
             ])
             ->filters([
+                Filter::make('recently_edited_today')
+                    ->label('Recently Edited Today')
+                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                Filter::make('edited_last_7_days')
+                    ->label('Edited in Last 7 Days')
+                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('updated_date')
+                    ->label('Updated Date')
+                    ->form([
+                        Forms\Components\DatePicker::make('from')->label('Updated From'),
+                        Forms\Components\DatePicker::make('to')->label('Updated To'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query
+                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('updated_at', '<=', $to))),
                 TernaryFilter::make('deindex')
                     ->label('Deindexed')
                     ->queries(
@@ -431,12 +446,6 @@ class ShopifyCollectionResource extends Resource
                         false: fn (Builder $query): Builder => $query
                             ->whereRaw(self::collectionEffectiveTextBlankSql('draft_elegant_footer_description', 'elegant_footer_description')),
                     ),
-                Filter::make('recently_edited_today')
-                    ->label('Recently Edited Today')
-                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
-                Filter::make('edited_last_7_days')
-                    ->label('Edited in Last 7 Days')
-                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
                 Filter::make('pending_changes')
                     ->label('Pending Changes')
                     ->query(fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
@@ -490,7 +499,8 @@ class ShopifyCollectionResource extends Resource
                         false: fn ($query) => $query
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_description', 'seo_description'))
-                    ),
+                    )
+                    ->indicator('Missing SEO (informational)'),
                 TernaryFilter::make('synced')
                     ->label('Synced')
                     ->queries(
@@ -500,15 +510,6 @@ class ShopifyCollectionResource extends Resource
                                 ->orWhere('sync_status', '!=', ShopifyCollection::SYNC_STATUS_SYNCED);
                         }),
                     ),
-                Filter::make('updated_date')
-                    ->label('Updated Date')
-                    ->form([
-                        Forms\Components\DatePicker::make('from')->label('Updated From'),
-                        Forms\Components\DatePicker::make('to')->label('Updated To'),
-                    ])
-                    ->query(fn (Builder $query, array $data): Builder => $query
-                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from))
-                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('updated_at', '<=', $to))),
                 Filter::make('synced_date')
                     ->label('Sync Date')
                     ->form([
@@ -600,7 +601,7 @@ class ShopifyCollectionResource extends Resource
                                 ->title('Collection SEO import complete')
                                 ->body(
                                     "Total: {$result['total']}, Updated: {$result['updated']}, " .
-                                    "Missing Handle: {$result['skipped_missing_handle']}, " .
+                                    "Missing ID/Handle: " . ($result['skipped_missing_identifier'] ?? 0) . ", " .
                                     "Not Found: {$result['skipped_not_found']}, " .
                                     "Batch: {$result['batch']}"
                                 )
@@ -619,30 +620,9 @@ class ShopifyCollectionResource extends Resource
                         ->action(function (Collection $records): void {
                             $approvedCount = 0;
                             $skippedCount = 0;
-                            $blockedCount = 0;
                             $failedCount = 0;
-                            $missingDraftTitleCount = 0;
-                            $missingDraftSeoTitleCount = 0;
-                            $missingDraftSeoDescriptionCount = 0;
 
                             foreach ($records as $record) {
-                                if (!self::canApprove($record)) {
-                                    $blockedCount++;
-
-                                    $missingFields = self::missingDraftSeoFields($record);
-                                    if (in_array('draft_title', $missingFields, true)) {
-                                        $missingDraftTitleCount++;
-                                    }
-                                    if (in_array('draft_seo_title', $missingFields, true)) {
-                                        $missingDraftSeoTitleCount++;
-                                    }
-                                    if (in_array('draft_seo_description', $missingFields, true)) {
-                                        $missingDraftSeoDescriptionCount++;
-                                    }
-
-                                    continue;
-                                }
-
                                 $exists = CollectionApproval::where('collection_id', $record->id)
                                     ->where('user_id', Auth::id())
                                     ->where('approval_version', $record->approval_version)
@@ -675,19 +655,6 @@ class ShopifyCollectionResource extends Resource
                             if ($skippedCount > 0) {
                                 $parts[] = "Skipped {$skippedCount} already approved by you.";
                             }
-                            if ($blockedCount > 0) {
-                                $parts[] = "Blocked {$blockedCount}.";
-                                if ($missingDraftTitleCount > 0) {
-                                    $parts[] = "Missing draft title: {$missingDraftTitleCount}.";
-                                }
-                                if ($missingDraftSeoTitleCount > 0) {
-                                    $parts[] = "Missing draft SEO title: {$missingDraftSeoTitleCount}.";
-                                }
-                                if ($missingDraftSeoDescriptionCount > 0) {
-                                    $parts[] = "Missing draft SEO description: {$missingDraftSeoDescriptionCount}.";
-                                }
-                                $parts[] = 'Set Deindex to true if you want approval without draft SEO.';
-                            }
                             if ($failedCount > 0) {
                                 $parts[] = "Failed {$failedCount}; check logs for the underlying error.";
                             }
@@ -698,8 +665,6 @@ class ShopifyCollectionResource extends Resource
 
                             if ($failedCount > 0) {
                                 $notification->danger();
-                            } elseif ($blockedCount > 0) {
-                                $notification->warning();
                             } else {
                                 $notification->success();
                             }
@@ -1037,6 +1002,27 @@ class ShopifyCollectionResource extends Resource
         );
     }
 
+    public static function applyApprovalQueueVisibilityFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereRaw(
+                '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) < 2'
+            )
+            ->where(function (Builder $sub): void {
+                $sub->whereNull('approval_queue_dismissed_version')
+                    ->orWhereColumn('approval_queue_dismissed_version', '!=', 'approval_version');
+            });
+    }
+
+    public static function dismissFromApprovalQueue(ShopifyCollection $record): void
+    {
+        ShopifyCollection::withoutEvents(function () use ($record): void {
+            $record->forceFill([
+                'approval_queue_dismissed_version' => (int) ($record->approval_version ?? 1),
+            ])->save();
+        });
+    }
+
     public static function pushToShopifyFormSchema(): array
     {
         return [
@@ -1149,18 +1135,9 @@ class ShopifyCollectionResource extends Resource
         return $handle === '' ? null : $handle;
     }
 
-    private static function draftSeoComplete(ShopifyCollection $record): bool
-    {
-        return self::missingDraftSeoFields($record) === [];
-    }
-
     private static function canApprove(ShopifyCollection $record): bool
     {
-        if ($record->deindex === true) {
-            return true;
-        }
-
-        return self::draftSeoComplete($record);
+        return true;
     }
 
     public static function canApproveRecord(ShopifyCollection $record): bool
@@ -1168,29 +1145,14 @@ class ShopifyCollectionResource extends Resource
         return self::canApprove($record);
     }
 
+    public static function hasMissingSeoFields(ShopifyCollection $record): bool
+    {
+        return self::missingDraftSeoFields($record) !== [];
+    }
+
     private static function approvalBlockMessage(ShopifyCollection $record): string
     {
-        if ($record->deindex === true) {
-            return 'Approval is blocked unexpectedly. Please retry.';
-        }
-
-        $missingFields = self::missingDraftSeoFields($record);
-
-        if ($missingFields === []) {
-            return 'Approval is blocked unexpectedly. Please retry.';
-        }
-
-        $labels = array_map(
-            fn (string $field): string => match ($field) {
-                'draft_title' => 'draft title',
-                'draft_seo_title' => 'draft SEO title',
-                'draft_seo_description' => 'draft SEO description',
-                default => $field,
-            },
-            $missingFields,
-        );
-
-        return 'Missing ' . implode(', ', $labels) . '. Set Deindex to true if you want approval without draft SEO.';
+        return 'Approval is available for this collection version.';
     }
 
     public static function approvalBlockMessageForRecord(ShopifyCollection $record): string

@@ -19,23 +19,23 @@ final class ShopifyCollectionSeoImporter
 
         $total = 0;
         $updated = 0;
-        $skippedMissingHandle = 0;
+        $skippedMissingIdentifier = 0;
         $skippedNotFound = 0;
 
         foreach ($csv->getRecords() as $row) {
             $total++;
 
-            $handle = trim((string) $this->mappedValue($row, $map['handle']));
-            if ($handle === '') {
-                $skippedMissingHandle++;
-                continue;
-            }
-
-            $collection = ShopifyCollection::where('import_id', $import->id)
-                ->where('handle', $handle)
-                ->first();
+            $collection = $this->resolveCollection($import, $row, $map);
             if (!$collection) {
-                $skippedNotFound++;
+                $shopifyId = trim((string) $this->mappedValue($row, $map['shopify_id']));
+                $handle = trim((string) $this->mappedValue($row, $map['handle']));
+
+                if ($shopifyId === '' && $handle === '') {
+                    $skippedMissingIdentifier++;
+                } else {
+                    $skippedNotFound++;
+                }
+
                 continue;
             }
 
@@ -72,13 +72,17 @@ final class ShopifyCollectionSeoImporter
             if ($collection->isDirty()) {
                 $collection->save();
                 $updated++;
+                continue;
             }
+
+            $collection->touch();
+            $updated++;
         }
 
         return [
             'total' => $total,
             'updated' => $updated,
-            'skipped_missing_handle' => $skippedMissingHandle,
+            'skipped_missing_identifier' => $skippedMissingIdentifier,
             'skipped_not_found' => $skippedNotFound,
             'batch' => $importBatch,
         ];
@@ -102,6 +106,7 @@ final class ShopifyCollectionSeoImporter
         };
 
         return [
+            'shopify_id' => $find(['shopify_id', 'shopify id', 'collection_shopify_id', 'collection shopify id', 'gid']),
             'handle' => $find(['handle', 'collection_handle', 'collection handle']),
             'title' => $find(['title', 'collection_title', 'collection title', 'page title']),
             'description_html' => $find(['description_html', 'description html', 'description', 'body_html', 'body html']),
@@ -160,5 +165,30 @@ final class ShopifyCollectionSeoImporter
         }
 
         return trim((string) $value) !== '';
+    }
+
+    private function resolveCollection(Import $import, array $row, array $map): ?ShopifyCollection
+    {
+        $shopifyId = trim((string) $this->mappedValue($row, $map['shopify_id'] ?? null));
+        if ($shopifyId !== '') {
+            $collection = ShopifyCollection::query()
+                ->where('import_id', $import->id)
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($collection) {
+                return $collection;
+            }
+        }
+
+        $handle = trim((string) $this->mappedValue($row, $map['handle'] ?? null));
+        if ($handle === '') {
+            return null;
+        }
+
+        return ShopifyCollection::query()
+            ->where('import_id', $import->id)
+            ->where('handle', $handle)
+            ->first();
     }
 }

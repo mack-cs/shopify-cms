@@ -13,6 +13,8 @@ use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Forms\Components\DatePicker;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
@@ -75,8 +77,8 @@ class CollectionApprovalQueueResource extends Resource
                 IconColumn::make('missing_seo')
                     ->label('Missing SEO')
                     ->boolean()
-                    ->state(fn (ShopifyCollection $record): bool => !ShopifyCollectionResource::canApproveRecord($record) && $record->deindex !== true)
-                    ->trueColor('danger')
+                    ->state(fn (ShopifyCollection $record): bool => ShopifyCollectionResource::hasMissingSeoFields($record) && $record->deindex !== true)
+                    ->trueColor('warning')
                     ->falseColor('success'),
                 TextColumn::make('approvals_current')
                     ->label('Approvals')
@@ -88,6 +90,31 @@ class CollectionApprovalQueueResource extends Resource
                     ->label('Updated')
                     ->dateTime()
                     ->sortable(),
+            ])
+            ->filters([
+                Filter::make('recently_edited_today')
+                    ->label('Recently Edited Today')
+                    ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                Filter::make('edited_last_7_days')
+                    ->label('Edited in Last 7 Days')
+                    ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('updated_date')
+                    ->label('Updated Date')
+                    ->form([
+                        DatePicker::make('updated_from')->label('Updated From'),
+                        DatePicker::make('updated_until')->label('Updated To'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query
+                            ->when(
+                                $data['updated_from'] ?? null,
+                                fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from),
+                            )
+                            ->when(
+                                $data['updated_until'] ?? null,
+                                fn (Builder $q, $until): Builder => $q->whereDate('updated_at', '<=', $until),
+                            );
+                    }),
             ])
             ->actions([
                 Tables\Actions\Action::make('review')
@@ -115,6 +142,20 @@ class CollectionApprovalQueueResource extends Resource
                         };
 
                         $notification->send();
+                    }),
+                Tables\Actions\Action::make('removeFromQueue')
+                    ->label('Remove From Queue')
+                    ->icon('heroicon-o-x-mark')
+                    ->color('gray')
+                    ->requiresConfirmation()
+                    ->action(function (ShopifyCollection $record): void {
+                        ShopifyCollectionResource::dismissFromApprovalQueue($record);
+
+                        Notification::make()
+                            ->title('Collection removed from queue')
+                            ->body('This collection version was dismissed from the approval queue. It will reappear if it changes again.')
+                            ->success()
+                            ->send();
                     }),
             ])
             ->bulkActions([
@@ -173,6 +214,32 @@ class CollectionApprovalQueueResource extends Resource
                             $notification->send();
                         })
                         ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('removeSelectedFromQueue')
+                        ->label('Remove Selected From Queue')
+                        ->icon('heroicon-o-x-mark')
+                        ->color('gray')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $removed = 0;
+
+                            foreach ($records as $record) {
+                                if (!$record instanceof ShopifyCollection) {
+                                    continue;
+                                }
+
+                                ShopifyCollectionResource::dismissFromApprovalQueue($record);
+                                $removed++;
+                            }
+
+                            Notification::make()
+                                ->title('Collections removed from queue')
+                                ->body($removed > 0
+                                    ? "Removed {$removed} collection(s) from the approval queue for the current version."
+                                    : 'No collections were removed.')
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
                 ]),
             ]);
     }
@@ -187,11 +254,11 @@ class CollectionApprovalQueueResource extends Resource
             return $query->whereRaw('1 = 0');
         }
 
+        $query = ShopifyCollectionResource::applyApprovalQueueVisibilityFilter(
+            $query->where('import_id', $importId)
+        );
+
         return $query
-            ->where('import_id', $importId)
-            ->whereRaw(
-                '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) < 2'
-            )
             ->whereNotExists(function ($sub) use ($userId): void {
                 $sub->selectRaw('1')
                     ->from('collection_approvals')

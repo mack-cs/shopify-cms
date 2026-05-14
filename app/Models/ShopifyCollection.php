@@ -34,6 +34,7 @@ class ShopifyCollection extends Model
         'sync_status',
         'last_synced_at',
         'approval_version',
+        'approval_queue_dismissed_version',
         'draft_handle',
         'draft_title',
         'draft_description_html',
