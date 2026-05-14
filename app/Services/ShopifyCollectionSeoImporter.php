@@ -40,32 +40,33 @@ final class ShopifyCollectionSeoImporter
             }
 
             $payload = [];
-            if ($map['title'] !== null) {
+            if ($this->hasMappedValue($row, $map['title'])) {
                 $payload['draft_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['title']));
             }
-            if ($map['description_html'] !== null) {
+            if ($this->hasMappedValue($row, $map['description_html'])) {
                 $payload['draft_description_html'] = $this->nullIfEmpty($this->mappedValue($row, $map['description_html']));
             }
-            if ($map['seo_title'] !== null) {
+            if ($this->hasMappedValue($row, $map['seo_title'])) {
                 $payload['draft_seo_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['seo_title']));
             }
-            if ($map['seo_description'] !== null) {
+            if ($this->hasMappedValue($row, $map['seo_description'])) {
                 $payload['draft_seo_description'] = $this->nullIfEmpty($this->mappedValue($row, $map['seo_description']));
             }
-            if ($map['footer_title'] !== null) {
+            if ($this->hasMappedValue($row, $map['footer_title'])) {
                 $payload['draft_footer_title'] = $this->nullIfEmpty($this->mappedValue($row, $map['footer_title']));
             }
-            if ($map['elegant_footer_description'] !== null) {
+            if ($this->hasMappedValue($row, $map['elegant_footer_description'])) {
                 $payload['draft_elegant_footer_description'] = $this->nullIfEmpty($this->mappedValue($row, $map['elegant_footer_description']));
             }
-            if ($map['deindex'] !== null) {
+            if ($this->hasMappedValue($row, $map['deindex'])) {
                 $payload['deindex'] = $this->nullableBool($this->mappedValue($row, $map['deindex']));
             }
-            $payload['batch'] = $this->nullIfEmpty($this->mappedValue($row, $map['batch'])) ?? $importBatch;
 
             if ($payload === []) {
                 continue;
             }
+
+            $payload['batch'] = $this->nullIfEmpty($this->mappedValue($row, $map['batch'])) ?? $importBatch;
 
             $collection->fill($payload);
             if ($collection->isDirty()) {
@@ -148,5 +149,16 @@ final class ShopifyCollectionSeoImporter
         }
 
         return $row[$header] ?? null;
+    }
+
+    private function hasMappedValue(array $row, ?string $header): bool
+    {
+        $value = $this->mappedValue($row, $header);
+
+        if ($value === null) {
+            return false;
+        }
+
+        return trim((string) $value) !== '';
     }
 }

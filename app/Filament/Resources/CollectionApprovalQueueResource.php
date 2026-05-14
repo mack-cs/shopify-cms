@@ -31,33 +31,47 @@ class CollectionApprovalQueueResource extends Resource
         return $table
             ->defaultSort('updated_at', 'desc')
             ->columns([
-                TextColumn::make('title')
+                TextColumn::make('effective_title')
                     ->label('Collection')
-                    ->searchable()
+                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_title, $record->title))
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->where(function (Builder $sub) use ($search): void {
+                            $sub->where('title', 'like', "%{$search}%")
+                                ->orWhere('draft_title', 'like', "%{$search}%");
+                        });
+                    })
                     ->sortable()
+                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_title, $record->title, 'Shopify'))
                     ->wrap(),
-                TextColumn::make('handle')
+                TextColumn::make('effective_handle')
                     ->label('Handle')
-                    ->searchable()
-                    ->sortable(),
+                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayCollectionHandle($record))
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->where(function (Builder $sub) use ($search): void {
+                            $sub->where('handle', 'like', "%{$search}%")
+                                ->orWhere('draft_handle', 'like', "%{$search}%");
+                        });
+                    })
+                    ->sortable()
+                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_handle, $record->handle, 'Live'))
+                    ->wrap(),
                 TextColumn::make('draft_handle')
                     ->label('Proposed URL')
                     ->placeholder('-')
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('draft_title')
-                    ->label('Draft Title')
-                    ->limit(50)
-                    ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('draft_seo_title')
-                    ->label('Draft SEO Title')
+                TextColumn::make('effective_seo_title')
+                    ->label('SEO Title')
+                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_seo_title, $record->seo_title))
                     ->limit(60)
+                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_seo_title, $record->seo_title, 'Shopify'))
                     ->wrap(),
-                TextColumn::make('draft_seo_description')
-                    ->label('Draft SEO Desc')
+                TextColumn::make('effective_seo_description')
+                    ->label('SEO Desc')
+                    ->state(fn (ShopifyCollection $record): string => ShopifyCollectionResource::displayDraftValue($record->draft_seo_description, $record->seo_description))
                     ->limit(80)
+                    ->description(fn (ShopifyCollection $record): ?string => ShopifyCollectionResource::draftChangeDescription($record->draft_seo_description, $record->seo_description, 'Shopify'))
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(),
                 IconColumn::make('missing_seo')
                     ->label('Missing SEO')
                     ->boolean()

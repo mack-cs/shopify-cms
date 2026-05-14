@@ -282,6 +282,19 @@ class NewProductDraftResource extends Resource
                     </div>
                 HTML))
                 ->columnSpanFull(),
+            Placeholder::make('draft_edit_lock_status')
+                ->label('')
+                ->content(function ($livewire): HtmlString {
+                    if (method_exists($livewire, 'editLockStatusHtml')) {
+                        return $livewire->editLockStatusHtml();
+                    }
+
+                    return new HtmlString('');
+                })
+                ->extraAttributes([
+                    'wire:poll.30s' => 'refreshEditorLockStatus',
+                ])
+                ->columnSpanFull(),
             Forms\Components\Tabs::make('NewProductDraftTabs')
                 ->columnSpanFull()
                 ->schema([
@@ -356,7 +369,6 @@ class NewProductDraftResource extends Resource
                     Forms\Components\Grid::make(3)
                         ->schema([
                             TextInput::make('title')
-                                ->required()
                                 ->maxLength(255)
                                 ->live(onBlur: true)
                                 ->afterStateUpdated(function ($state, callable $set): void {
@@ -1213,15 +1225,13 @@ class NewProductDraftResource extends Resource
                                             'active' => 'active',
                                             'archived' => 'archived',
                                         ])
-                                        ->default('draft')
-                                        ->required(),
+                                        ->default('draft'),
                                     Select::make('published')
                                         ->options([
                                             'true' => 'true',
                                             'false' => 'false',
                                         ])
-                                        ->default('false')
-                                        ->required(),
+                                        ->default('false'),
                                 ])
                                 ->columnSpanFull(),
 

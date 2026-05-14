@@ -6,12 +6,14 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
 use App\Services\HeaderStore;
 use App\Models\StyleProfile;
 use App\Models\Product;
+use App\Models\User;
 
 class NewProductDraft extends Model
 {
@@ -69,6 +71,9 @@ class NewProductDraft extends Model
         'shopify_missing_sync_blocked',
         'approval_version',
         'created_by',
+        'editing_user_id',
+        'editing_started_at',
+        'editing_expires_at',
     ];
 
     protected $casts = [
@@ -80,6 +85,8 @@ class NewProductDraft extends Model
         'variant_compare_at_price' => 'decimal:2',
         'variant_inventory_qty' => 'integer',
         'material_cost' => 'decimal:2',
+        'editing_started_at' => 'datetime',
+        'editing_expires_at' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -218,6 +225,11 @@ class NewProductDraft extends Model
         return $this->hasMany(StyleProfile::class, 'handle', 'handle');
     }
 
+    public function editingUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'editing_user_id');
+    }
+
     public function deletionRequests(): MorphMany
     {
         return $this->morphMany(DeletionRequest::class, 'deletable');
@@ -260,6 +272,83 @@ class NewProductDraft extends Model
     public function isBlockedFromShopifyMissing(): bool
     {
         return (bool) ($this->shopify_missing_sync_blocked ?? false);
+    }
+
+    public function isActivelyEditedByAnotherUser(?int $userId, int $ttlMinutes = 15): bool
+    {
+        $this->clearExpiredEditLock($ttlMinutes);
+
+        $editingUserId = (int) ($this->editing_user_id ?? 0);
+        if ($editingUserId <= 0) {
+            return false;
+        }
+
+        if ($userId !== null && $editingUserId === $userId) {
+            return false;
+        }
+
+        return $this->editing_expires_at !== null && $this->editing_expires_at->isFuture();
+    }
+
+    public function acquireEditLock(int $userId, int $ttlMinutes = 15): bool
+    {
+        return (bool) static::query()
+            ->whereKey($this->getKey())
+            ->where(function ($query) use ($userId): void {
+                $query->whereNull('editing_user_id')
+                    ->orWhere('editing_user_id', $userId)
+                    ->orWhereNull('editing_expires_at')
+                    ->orWhere('editing_expires_at', '<=', now());
+            })
+            ->update([
+                'editing_user_id' => $userId,
+                'editing_started_at' => $this->editing_user_id === $userId && $this->editing_started_at
+                    ? $this->editing_started_at
+                    : now(),
+                'editing_expires_at' => now()->addMinutes($ttlMinutes),
+                'updated_at' => $this->updated_at,
+            ]) > 0;
+    }
+
+    public function refreshEditLock(int $userId, int $ttlMinutes = 15): bool
+    {
+        return (bool) static::query()
+            ->whereKey($this->getKey())
+            ->where('editing_user_id', $userId)
+            ->update([
+                'editing_expires_at' => now()->addMinutes($ttlMinutes),
+                'updated_at' => $this->updated_at,
+            ]) > 0;
+    }
+
+    public function releaseEditLock(?int $userId = null): bool
+    {
+        $query = static::query()->whereKey($this->getKey());
+        if ($userId !== null) {
+            $query->where('editing_user_id', $userId);
+        }
+
+        return (bool) $query->update([
+            'editing_user_id' => null,
+            'editing_started_at' => null,
+            'editing_expires_at' => null,
+            'updated_at' => $this->updated_at,
+        ]) > 0;
+    }
+
+    public function clearExpiredEditLock(int $ttlMinutes = 15): void
+    {
+        $expiresAt = $this->editing_expires_at;
+        if ($this->editing_user_id === null) {
+            return;
+        }
+
+        if ($expiresAt !== null && $expiresAt->isFuture()) {
+            return;
+        }
+
+        $this->releaseEditLock();
+        $this->refresh();
     }
 
     /**

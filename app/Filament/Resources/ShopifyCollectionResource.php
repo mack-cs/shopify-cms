@@ -33,6 +33,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
+use Illuminate\Support\Str;
 
 class ShopifyCollectionResource extends Resource
 {
@@ -227,14 +228,32 @@ class ShopifyCollectionResource extends Resource
         return $table
             ->defaultSort('title')
             ->columns([
-                Tables\Columns\TextColumn::make('title')
-                    ->searchable()
-                    ->sortable()
+                Tables\Columns\TextColumn::make('effective_title')
+                    ->label('Title')
+                    ->state(fn (ShopifyCollection $record): string => self::displayDraftValue($record->draft_title, $record->title))
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->where(function (Builder $sub) use ($search): void {
+                            $sub->where('title', 'like', "%{$search}%")
+                                ->orWhere('draft_title', 'like', "%{$search}%");
+                        });
+                    })
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => $query->orderByRaw(
+                        self::collectionEffectiveValueSql('draft_title', 'title') . " {$direction}"
+                    ))
+                    ->description(fn (ShopifyCollection $record): ?string => self::draftChangeDescription($record->draft_title, $record->title, 'Shopify'))
                     ->wrap(),
-                Tables\Columns\TextColumn::make('handle')
+                Tables\Columns\TextColumn::make('effective_handle')
                     ->label('Handle')
-                    ->searchable()
-                    ->sortable(),
+                    ->state(fn (ShopifyCollection $record): string => self::displayCollectionHandle($record))
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->where(function (Builder $sub) use ($search): void {
+                            $sub->where('handle', 'like', "%{$search}%")
+                                ->orWhere('draft_handle', 'like', "%{$search}%");
+                        });
+                    })
+                    ->sortable()
+                    ->description(fn (ShopifyCollection $record): ?string => self::draftChangeDescription($record->draft_handle, $record->handle, 'Live'))
+                    ->wrap(),
                 Tables\Columns\TextColumn::make('draft_handle')
                     ->label('Proposed URL')
                     ->searchable()
@@ -311,16 +330,20 @@ class ShopifyCollectionResource extends Resource
                     ->trueColor('success')
                     ->falseColor('gray')
                     ->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('draft_seo_title')
-                    ->label('Draft SEO Title')
+                Tables\Columns\TextColumn::make('effective_seo_title')
+                    ->label('SEO Title')
+                    ->state(fn (ShopifyCollection $record): string => self::displayDraftValue($record->draft_seo_title, $record->seo_title))
                     ->limit(60)
+                    ->description(fn (ShopifyCollection $record): ?string => self::draftChangeDescription($record->draft_seo_title, $record->seo_title, 'Shopify'))
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('draft_seo_description')
-                    ->label('Draft SEO Desc')
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('effective_seo_description')
+                    ->label('SEO Desc')
+                    ->state(fn (ShopifyCollection $record): string => self::displayDraftValue($record->draft_seo_description, $record->seo_description))
                     ->limit(80)
+                    ->description(fn (ShopifyCollection $record): ?string => self::draftChangeDescription($record->draft_seo_description, $record->seo_description, 'Shopify'))
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(),
                 Tables\Columns\TextColumn::make('draft_footer_title')
                     ->label('Draft Footer Title')
                     ->limit(60)
@@ -351,11 +374,17 @@ class ShopifyCollectionResource extends Resource
                     ->limit(80)
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('description_html')
+                Tables\Columns\TextColumn::make('effective_description_html')
                     ->label('Description')
+                    ->state(fn (ShopifyCollection $record): string => self::displayPlainTextDraftValue($record->draft_description_html, $record->description_html))
                     ->limit(60)
+                    ->description(fn (ShopifyCollection $record): ?string => self::draftChangeDescription(
+                        self::displayPlainTextDraftValue($record->draft_description_html, null),
+                        self::displayPlainTextDraftValue(null, $record->description_html),
+                        'Shopify'
+                    ))
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(),
             ])
             ->filters([
                 TernaryFilter::make('deindex')
@@ -1171,7 +1200,9 @@ class ShopifyCollectionResource extends Resource
 
     private static function applyApprovedDrafts(ShopifyCollection $record): void
     {
-        ShopifyCollection::withoutEvents(function () use ($record): void {
+        $approvedHandle = self::approvedDraftHandle($record);
+
+        ShopifyCollection::withoutEvents(function () use ($record, $approvedHandle): void {
             $record->forceFill([
                 'title' => self::preferredDraftValue($record->draft_title, $record->title),
                 'description_html' => self::preferredDraftValue($record->draft_description_html, $record->description_html),
@@ -1179,6 +1210,7 @@ class ShopifyCollectionResource extends Resource
                 'seo_description' => self::preferredDraftValue($record->draft_seo_description, $record->seo_description),
                 'footer_title' => self::preferredDraftValue($record->draft_footer_title, $record->footer_title),
                 'elegant_footer_description' => self::preferredDraftValue($record->draft_elegant_footer_description, $record->elegant_footer_description),
+                'draft_handle' => $approvedHandle,
                 'sync_status' => ShopifyCollection::SYNC_STATUS_PENDING,
             ]);
 
@@ -1195,6 +1227,100 @@ class ShopifyCollectionResource extends Resource
         }
 
         return $draftValue ?? $currentValue;
+    }
+
+    public static function displayDraftValue(mixed $draftValue, mixed $currentValue): string
+    {
+        $value = self::preferredDraftValue($draftValue, $currentValue);
+
+        return trim((string) ($value ?? ''));
+    }
+
+    public static function displayPlainTextDraftValue(mixed $draftValue, mixed $currentValue): string
+    {
+        return trim(strip_tags(self::displayDraftValue($draftValue, $currentValue)));
+    }
+
+    public static function draftChangeDescription(mixed $draftValue, mixed $currentValue, string $prefix = 'Current'): ?string
+    {
+        $draft = trim((string) ($draftValue ?? ''));
+        $current = trim((string) ($currentValue ?? ''));
+
+        if ($draft === '' || $draft === $current) {
+            return null;
+        }
+
+        if ($current === '') {
+            return "{$prefix}: empty";
+        }
+
+        return "{$prefix}: {$current}";
+    }
+
+    public static function displayCollectionHandle(ShopifyCollection $record): string
+    {
+        return self::displayDraftValue(
+            self::proposedHandleForSync($record) ?? $record->draft_handle,
+            $record->handle,
+        );
+    }
+
+    private static function approvedDraftHandle(ShopifyCollection $record): ?string
+    {
+        $explicitDraftHandle = self::normalizeHandleInput($record->draft_handle);
+        $currentHandle = trim((string) ($record->handle ?? ''));
+
+        if ($explicitDraftHandle !== null) {
+            return $explicitDraftHandle === $currentHandle ? null : $explicitDraftHandle;
+        }
+
+        $draftTitle = trim((string) ($record->draft_title ?? ''));
+        $currentTitle = trim((string) ($record->title ?? ''));
+
+        if ($draftTitle === '' || $draftTitle === $currentTitle) {
+            return null;
+        }
+
+        $generatedHandle = self::generateUniqueCollectionHandle($record, $draftTitle);
+
+        return $generatedHandle === $currentHandle ? null : $generatedHandle;
+    }
+
+    private static function generateUniqueCollectionHandle(ShopifyCollection $record, string $title): string
+    {
+        $base = Str::slug($title);
+
+        if ($base === '') {
+            $base = trim((string) ($record->handle ?? ''));
+        }
+
+        if ($base === '') {
+            $base = 'collection-' . $record->getKey();
+        }
+
+        $maxLength = 255;
+        $base = substr($base, 0, $maxLength);
+        $candidate = $base;
+        $suffix = 2;
+
+        while (self::collectionHandleExistsElsewhere($record, $candidate)) {
+            $suffixLabel = '-' . $suffix;
+            $candidate = substr($base, 0, max(1, $maxLength - strlen($suffixLabel))) . $suffixLabel;
+            $suffix++;
+        }
+
+        return $candidate;
+    }
+
+    private static function collectionHandleExistsElsewhere(ShopifyCollection $record, string $candidate): bool
+    {
+        return ShopifyCollection::query()
+            ->whereKeyNot($record->getKey())
+            ->where(function (Builder $query) use ($candidate): void {
+                $query->where('handle', $candidate)
+                    ->orWhere('draft_handle', $candidate);
+            })
+            ->exists();
     }
 
     private static function collectionEffectiveValueSql(string $draftColumn, string $currentColumn): string
