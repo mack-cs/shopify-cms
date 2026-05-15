@@ -196,6 +196,22 @@ class ImagesRelationManager extends RelationManager
                 ->after(function (): void {
                     $this->bumpOwnerApprovalVersion();
                 }),
+            Tables\Actions\Action::make('removeDuplicatePositions')
+                ->label('Remove Duplicate Positions')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => $this->canManageDuplicateRemoval() && $this->ownerHasDuplicatePositions())
+                ->action(function (): void {
+                    $summary = $this->removeDuplicatePositionImages();
+
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Duplicate images removed')
+                            ->body("Removed {$summary['removed']} duplicate image(s). Kept {$summary['kept']} primary image(s) across {$summary['positions']} duplicate position(s).")
+                            ->status($summary['removed'] > 0 ? 'success' : 'warning')
+                    );
+                }),
             Tables\Actions\Action::make('backupImages')
                 ->label('Queue Image Backup')
                 ->icon('heroicon-o-arrow-down-tray')
@@ -271,18 +287,25 @@ class ImagesRelationManager extends RelationManager
             Tables\Actions\DeleteAction::make()
                 ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED)
                 ->action(function (Image $record): void {
-                    if (blank($record->shopify_id)) {
-                        $record->delete();
-                        $this->bumpOwnerApprovalVersion();
-                        return;
-                    }
+                    $this->removeImageRecord($record);
+                }),
+            Tables\Actions\Action::make('removeDuplicate')
+                ->label('Remove Duplicate')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->visible(fn (Image $record): bool => $this->canManageDuplicateRemoval()
+                    && $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED
+                    && $this->hasDuplicatePosition($record))
+                ->action(function (Image $record): void {
+                    $this->removeImageRecord($record);
 
-                    $record->update([
-                        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
-                        'local_dirty' => true,
-                    ]);
-
-                    $this->bumpOwnerApprovalVersion();
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Duplicate image removed')
+                            ->body('The selected duplicate image was removed.')
+                            ->success()
+                    );
                 }),
         ])->bulkActions([
             Tables\Actions\BulkAction::make('syncSelectedImages')
@@ -309,6 +332,38 @@ class ImagesRelationManager extends RelationManager
                     ProductResource::queueRemoteDeletedImageRestore(
                         $this->getOwnerRecord(),
                         $records->pluck('id')->map(fn ($id): int => (int) $id)->all()
+                    );
+                })
+                ->deselectRecordsAfterCompletion(),
+            Tables\Actions\BulkAction::make('removeSelectedDuplicates')
+                ->label('Remove Selected Duplicates')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => $this->canManageDuplicateRemoval())
+                ->action(function (Collection $records): void {
+                    $removed = 0;
+
+                    foreach ($records as $record) {
+                        if (!$record instanceof Image || !$this->hasDuplicatePosition($record)) {
+                            continue;
+                        }
+
+                        $this->removeImageRecord($record, false);
+                        $removed++;
+                    }
+
+                    if ($removed > 0) {
+                        $this->bumpOwnerApprovalVersion();
+                    }
+
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Duplicate images removed')
+                            ->body($removed > 0
+                                ? "Removed {$removed} selected duplicate image(s)."
+                                : 'No selected images were removable duplicates.')
+                            ->status($removed > 0 ? 'success' : 'warning')
                     );
                 })
                 ->deselectRecordsAfterCompletion(),
@@ -401,5 +456,124 @@ class ImagesRelationManager extends RelationManager
                 Image::SYNC_STATE_REMOTE_DELETED,
             ])
             ->exists() ?? false;
+    }
+
+    private function canManageDuplicateRemoval(): bool
+    {
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    private function ownerHasDuplicatePositions(): bool
+    {
+        $product = $this->getOwnerRecord();
+        if (!$product instanceof Product) {
+            return false;
+        }
+
+        return $product->allImages()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->select('position')
+            ->groupBy('position')
+            ->havingRaw('COUNT(*) > 1')
+            ->exists();
+    }
+
+    /**
+     * @return array{removed:int,kept:int,positions:int}
+     */
+    private function removeDuplicatePositionImages(): array
+    {
+        $product = $this->getOwnerRecord();
+        if (!$product instanceof Product) {
+            return ['removed' => 0, 'kept' => 0, 'positions' => 0];
+        }
+
+        $duplicateGroups = $product->allImages()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->groupBy(fn (Image $image): string => (string) $image->position)
+            ->filter(fn (Collection $images): bool => $images->count() > 1);
+
+        $removed = 0;
+        $kept = 0;
+
+        foreach ($duplicateGroups as $images) {
+            $primary = $this->preferredImageToKeep($images);
+            if (!$primary instanceof Image) {
+                continue;
+            }
+
+            $kept++;
+
+            foreach ($images as $image) {
+                if (!$image instanceof Image || $image->is($primary)) {
+                    continue;
+                }
+
+                $this->removeImageRecord($image, false);
+                $removed++;
+            }
+        }
+
+        if ($removed > 0) {
+            $this->bumpOwnerApprovalVersion();
+        }
+
+        return [
+            'removed' => $removed,
+            'kept' => $kept,
+            'positions' => $duplicateGroups->count(),
+        ];
+    }
+
+    private function preferredImageToKeep(Collection $images): ?Image
+    {
+        /** @var Collection<int, Image> $sorted */
+        $sorted = $images->sort(function (Image $left, Image $right): int {
+            $leftRank = [
+                $left->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                $left->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                blank($left->shopify_id) ? 1 : 0,
+                (int) $left->id,
+            ];
+            $rightRank = [
+                $right->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                $right->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                blank($right->shopify_id) ? 1 : 0,
+                (int) $right->id,
+            ];
+
+            return $leftRank <=> $rightRank;
+        });
+
+        $first = $sorted->first();
+
+        return $first instanceof Image ? $first : null;
+    }
+
+    private function removeImageRecord(Image $record, bool $bumpApprovalVersion = true): void
+    {
+        if (blank($record->shopify_id)) {
+            $record->delete();
+        } else {
+            $record->update([
+                'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+                'local_dirty' => true,
+            ]);
+        }
+
+        if ($bumpApprovalVersion) {
+            $this->bumpOwnerApprovalVersion();
+        }
     }
 }

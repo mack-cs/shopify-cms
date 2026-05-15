@@ -6,6 +6,7 @@ use Filament\Forms;
 use Filament\Tables;
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
+use App\Models\User;
 use App\Models\Status;
 use App\Models\Product;
 use App\Models\Approval;
@@ -13,6 +14,7 @@ use App\Models\DeletionRequest;
 use App\Models\Image;
 use App\Models\Import;
 use App\Models\ProductPartialApprovalRequest;
+use App\Models\ShopifyAudit;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
@@ -36,6 +38,7 @@ use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\RichEditor;
 use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\DateTimePicker;
 use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
@@ -46,6 +49,7 @@ use Filament\Notifications\Notification;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\Indicator;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Actions\DeleteBulkAction;
@@ -67,6 +71,7 @@ use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductSeoTracker;
+use App\Services\ComplementaryProductAuditService;
 use App\Models\Tag;
 use App\Models\Color;
 use App\Models\DropdownOption;
@@ -74,6 +79,7 @@ use League\Csv\Reader;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Arr;
+use Carbon\Carbon;
 
 class ProductResource extends Resource
 {
@@ -1076,6 +1082,17 @@ class ProductResource extends Resource
                     default => 'gray',
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('complementaryProductsAudit.status')
+                ->label('Complementary Audit')
+                ->state(fn (Product $record): string => self::productComplementaryAuditStatusLabel($record))
+                ->badge()
+                ->color(fn (Product $record): string => self::productComplementaryAuditStatusColor($record))
+                ->toggleable(),
+            TextColumn::make('complementaryProductsAudit.details')
+                ->label('Complementary Audit Issues')
+                ->state(fn (Product $record): string => self::productComplementaryAuditIssuesSummary($record))
+                ->wrap()
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('shopify_sync_state')
                 ->label('Shopify Sync')
                 ->state(fn (Product $record): string => $record->shopifySyncState())
@@ -1108,39 +1125,130 @@ class ProductResource extends Resource
         ])->filters([
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
+                ->indicator('Recently Edited Today')
                 ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
             Filter::make('edited_last_7_days')
                 ->label('Edited in Last 7 Days')
+                ->indicator('Edited in Last 7 Days')
                 ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+            SelectFilter::make('local_complementary_status')
+                ->label('Local Complementary')
+                ->options([
+                    'good' => 'Good Local (4+ saved)',
+                    'bad' => 'Bad Local (below 4)',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Local Complementary',
+                    [
+                        'good' => 'Good Local (4+ saved)',
+                        'bad' => 'Bad Local (below 4)',
+                    ]
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
+                    if ($value === '') {
+                        return $query;
+                    }
+
+                    $ids = app(ComplementaryProductAuditService::class)->productIdsMatchingLocalStatus($value);
+
+                    return $ids === [] ? $query->whereRaw('1 = 0') : $query->whereKey($ids);
+                }),
+            SelectFilter::make('shopify_complementary_status')
+                ->label('Shopify Complementary')
+                ->options([
+                    'healthy' => 'Healthy on Shopify (exactly 3 valid)',
+                    'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Shopify Complementary',
+                    [
+                        'healthy' => 'Healthy on Shopify (exactly 3 valid)',
+                        'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                    ]
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
+                    if ($value === '') {
+                        return $query;
+                    }
+
+                    $ids = app(ComplementaryProductAuditService::class)->productIdsMatchingShopifyStatus($value);
+
+                    return $ids === [] ? $query->whereRaw('1 = 0') : $query->whereKey($ids);
+                }),
+            SelectFilter::make('complementary_audit_status')
+                ->label('Complementary Audit')
+                ->options([
+                    'flagged' => 'Needs Audit',
+                    'healthy' => 'Healthy',
+                    'missing' => 'Not Checked',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Complementary Audit',
+                    [
+                        'flagged' => 'Needs Audit',
+                        'healthy' => 'Healthy',
+                        'missing' => 'Not Checked',
+                    ]
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
+
+                    return match ($value) {
+                        'flagged' => $query->whereHas('shopifyAudits', fn (Builder $sub): Builder => $sub
+                            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                            ->where('status', ShopifyAudit::STATUS_FLAGGED)),
+                        'healthy' => $query->whereHas('shopifyAudits', fn (Builder $sub): Builder => $sub
+                            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                            ->where('status', ShopifyAudit::STATUS_HEALTHY)),
+                        'missing' => $query->whereDoesntHave('shopifyAudits', fn (Builder $sub): Builder => $sub
+                            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)),
+                        default => $query,
+                    };
+                }),
             Filter::make('pending_changes')
                 ->label('Pending Changes')
+                ->indicator('Pending Changes')
                 ->query(fn (Builder $query): Builder => $query->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
                 )),
             Filter::make('awaiting_approval')
                 ->label('Awaiting Approval')
+                ->indicator('Awaiting Approval')
                 ->query(fn (Builder $query): Builder => $query->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
                 )),
             Filter::make('awaiting_delete_approval')
                 ->label('Awaiting Delete Approval')
+                ->indicator('Awaiting Delete Approval')
                 ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                     $deletionQuery->whereIn('status', ['pending', 'processing']);
                 })),
             Filter::make('updated_at')
                 ->form([
-                    DatePicker::make('updated_from'),
-                    DatePicker::make('updated_until'),
+                    DateTimePicker::make('updated_from'),
+                    DateTimePicker::make('updated_until'),
                 ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'updated_from',
+                    'updated_until',
+                    'Updated From',
+                    'Updated Until'
+                ))
                 ->query(function (Builder $query, array $data): Builder {
                     return $query
                         ->when(
                             $data['updated_from'] ?? null,
-                            fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '>=', $date),
+                            fn (Builder $query, $date): Builder => $query->where('updated_at', '>=', $date),
                         )
                         ->when(
                             $data['updated_until'] ?? null,
-                            fn (Builder $query, $date): Builder => $query->whereDate('updated_at', '<=', $date),
+                            fn (Builder $query, $date): Builder => $query->where('updated_at', '<=', $date),
                         );
                 }),
             SelectFilter::make('shopify_sync_state')
@@ -1150,6 +1258,15 @@ class ProductResource extends Resource
                     'updated_after_sync' => 'Updated After Sync',
                     'no_sync' => 'No Sync',
                 ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Shopify Sync',
+                    [
+                        'synced' => 'Synced',
+                        'updated_after_sync' => 'Updated After Sync',
+                        'no_sync' => 'No Sync',
+                    ]
+                ))
                 ->query(function (Builder $query, array $data): Builder {
                     $value = trim((string) ($data['value'] ?? ''));
 
@@ -1174,22 +1291,30 @@ class ProductResource extends Resource
                         (string) $product->sync_batch_id => self::syncBatchLabel($product->sync_batch_id),
                     ])
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Sync Batch'))
                 ->searchable()
                 ->preload(),
             Filter::make('last_synced_at')
                 ->form([
-                    DatePicker::make('synced_from'),
-                    DatePicker::make('synced_until'),
+                    DateTimePicker::make('synced_from'),
+                    DateTimePicker::make('synced_until'),
                 ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'synced_from',
+                    'synced_until',
+                    'Synced From',
+                    'Synced Until'
+                ))
                 ->query(function (Builder $query, array $data): Builder {
                     return $query
                         ->when(
                             $data['synced_from'] ?? null,
-                            fn (Builder $query, $date): Builder => $query->whereDate('last_synced_at', '>=', $date),
+                            fn (Builder $query, $date): Builder => $query->where('last_synced_at', '>=', $date),
                         )
                         ->when(
                             $data['synced_until'] ?? null,
-                            fn (Builder $query, $date): Builder => $query->whereDate('last_synced_at', '<=', $date),
+                            fn (Builder $query, $date): Builder => $query->where('last_synced_at', '<=', $date),
                         );
                 }),
             SelectFilter::make('type')
@@ -1202,6 +1327,7 @@ class ProductResource extends Resource
                     ->orderBy('type')
                     ->pluck('type', 'type')
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::multiValueIndicators($data, 'Type'))
                 ->searchable()
                 ->preload()
                 ->query(function (Builder $query, array $data): Builder {
@@ -1245,6 +1371,7 @@ class ProductResource extends Resource
                     ->orderBy('vendor')
                     ->pluck('vendor', 'vendor')
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Vendor'))
                 ->searchable()
                 ->preload(),
             SelectFilter::make('tags')
@@ -1256,6 +1383,7 @@ class ProductResource extends Resource
                     ->orderBy('name')
                     ->pluck('name', 'name')
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::multiValueIndicators($data, 'Tags'))
                 ->query(function (Builder $query, array $data): Builder {
                     $values = $data['values'] ?? [];
                     if (!is_array($values) || empty($values)) {
@@ -1283,6 +1411,7 @@ class ProductResource extends Resource
                     ->orderBy('collection_style')
                     ->pluck('collection_style', 'collection_style')
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::multiValueIndicators($data, 'Collection'))
                 ->query(function (Builder $query, array $data): Builder {
                     $collections = $data['values'] ?? [];
                     if (!is_array($collections) || empty($collections)) {
@@ -1376,6 +1505,7 @@ class ProductResource extends Resource
                     ->orderBy('name')
                     ->pluck('name', 'name')
                     ->all())
+                ->indicateUsing(fn (array $data): array => self::multiValueIndicators($data, 'Colors'))
                 ->query(function (Builder $query, array $data): Builder {
                     $values = $data['values'] ?? [];
                     if (!is_array($values) || empty($values)) {
@@ -1393,6 +1523,7 @@ class ProductResource extends Resource
                 }),
             Filter::make('missing_image_alt_text')
                 ->label('Missing Image Alt Text')
+                ->indicator('Missing Image Alt Text')
                 ->query(fn (Builder $query): Builder => $query->whereHas('images', function (Builder $imageQuery): void {
                     $imageQuery->where(function (Builder $altQuery): void {
                         $altQuery->whereNull('alt_text')
@@ -1401,12 +1532,22 @@ class ProductResource extends Resource
                 })),
             TernaryFilter::make('duplicate_image_positions')
                 ->label('Duplicate Image Positions')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Duplicate Image Positions',
+                    'No Duplicate Image Positions'
+                ))
                 ->queries(
                     true: fn (Builder $query): Builder => self::applyDuplicateImagePositionsFilter($query),
                     false: fn (Builder $query): Builder => self::applyNoDuplicateImagePositionsFilter($query),
                 ),
             TernaryFilter::make('approved')
                 ->label('Approved')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Approved',
+                    'Not Approved'
+                ))
                 ->queries(
                     true: fn ($query) => $query->whereRaw(
                         '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
@@ -1434,6 +1575,7 @@ class ProductResource extends Resource
 
                     return $configured + $present;
                 })
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Status'))
                 ->searchable()
                 ->preload()
                 ->query(function (Builder $query, array $data): Builder {
@@ -1447,6 +1589,11 @@ class ProductResource extends Resource
                 }),
             TernaryFilter::make('url_update_pending')
                 ->label('URL Update Pending')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'URL Update Pending',
+                    'No URL Update Pending'
+                ))
                 ->queries(
                     true: fn (Builder $query): Builder => $query
                         ->whereNotNull('approved_handle')
@@ -1459,9 +1606,19 @@ class ProductResource extends Resource
                     })
                 ),
             TernaryFilter::make('is_bundle')
-                ->label('Bundles'),
+                ->label('Bundles')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Bundles Only',
+                    'Exclude Bundles'
+                )),
             TernaryFilter::make('in_new_products')
                 ->label('In New Products')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'In New Products',
+                    'Not In New Products'
+                ))
                 ->queries(
                     true: fn (Builder $query): Builder => $query->whereExists(function ($sub): void {
                         $sub->selectRaw('1')
@@ -1479,6 +1636,11 @@ class ProductResource extends Resource
                 ->placeholder('All')
                 ->trueLabel('Needs Update')
                 ->falseLabel('Good Title')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Needs Title Update',
+                    'Good Title'
+                ))
                 ->queries(
                     true: fn (Builder $query): Builder => self::applyNeedsTitleUpdateFilter($query),
                     false: fn (Builder $query): Builder => self::applyGoodTitleFilter($query),
@@ -1486,40 +1648,62 @@ class ProductResource extends Resource
                 ),
             Filter::make('missing_seo_information')
                 ->label('Missing SEO Info')
+                ->indicator('Missing SEO Info')
                 ->query(fn (Builder $query): Builder => self::applyMissingSeoInformationFilter($query)),
             Filter::make('seo_updated_at')
                 ->label('SEO Updated Date')
                 ->form([
-                    DatePicker::make('from')->label('From'),
-                    DatePicker::make('to')->label('To'),
+                    DateTimePicker::make('from')->label('From'),
+                    DateTimePicker::make('to')->label('To'),
                 ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'from',
+                    'to',
+                    'SEO Updated From',
+                    'SEO Updated To'
+                ))
                 ->query(function (Builder $query, array $data): Builder {
                     return $query
-                        ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->whereDate('seo_updated_at', '>=', $from))
-                        ->when($data['to'] ?? null, fn (Builder $sub, $to): Builder => $sub->whereDate('seo_updated_at', '<=', $to));
+                        ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->where('seo_updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $sub, $to): Builder => $sub->where('seo_updated_at', '<=', $to));
                 }),
             Filter::make('seo_draft_updated_at')
                 ->label('SEO Draft Updated Date')
                 ->form([
-                    DatePicker::make('from')->label('From'),
-                    DatePicker::make('to')->label('To'),
+                    DateTimePicker::make('from')->label('From'),
+                    DateTimePicker::make('to')->label('To'),
                 ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'from',
+                    'to',
+                    'SEO Draft Updated From',
+                    'SEO Draft Updated To'
+                ))
                 ->query(function (Builder $query, array $data): Builder {
                     return $query->whereHas('styleProfiles', function (Builder $sub) use ($data): void {
                         $sub
-                            ->when($data['from'] ?? null, fn (Builder $styleQuery, $from): Builder => $styleQuery->whereDate('seo_updated_at', '>=', $from))
-                            ->when($data['to'] ?? null, fn (Builder $styleQuery, $to): Builder => $styleQuery->whereDate('seo_updated_at', '<=', $to));
+                            ->when($data['from'] ?? null, fn (Builder $styleQuery, $from): Builder => $styleQuery->where('seo_updated_at', '>=', $from))
+                            ->when($data['to'] ?? null, fn (Builder $styleQuery, $to): Builder => $styleQuery->where('seo_updated_at', '<=', $to));
                     });
                 }),
             SelectFilter::make('seo_updated_by')
                 ->label('SEO Updated By')
                 ->relationship('seoUpdatedBy', 'name')
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'SEO Updated By', User::query()->pluck('name', 'id')->all()))
                 ->searchable()
                 ->preload(),
             TernaryFilter::make('has_errors')
-                ->label('Errors'),
+                ->label('Errors')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Has Errors',
+                    'No Errors'
+                )),
             Filter::make('awaiting_partial_approval')
                 ->label('Awaiting Partial Approval')
+                ->indicator('Awaiting Partial Approval')
                 ->query(fn (Builder $query): Builder => $query->whereHas('partialApprovalRequests', function (Builder $sub): void {
                     $sub->whereColumn('approval_version', 'products.approval_version')
                         ->where('status', ProductPartialApprovalRequest::STATUS_PENDING);
@@ -3923,5 +4107,175 @@ class ProductResource extends Resource
         }
 
         return null;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, Indicator>
+     */
+    private static function dateTimeRangeIndicators(array $data, string $fromField, string $toField, string $fromLabel, string $toLabel): array
+    {
+        $indicators = [];
+
+        if (filled($data[$fromField] ?? null)) {
+            $indicators[] = Indicator::make($fromLabel . ': ' . self::formatFilterDateTime($data[$fromField]))
+                ->removeField($fromField);
+        }
+
+        if (filled($data[$toField] ?? null)) {
+            $indicators[] = Indicator::make($toLabel . ': ' . self::formatFilterDateTime($data[$toField]))
+                ->removeField($toField);
+        }
+
+        return $indicators;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<int|string, string> $options
+     * @return array<int, Indicator>
+     */
+    private static function singleValueIndicators(array $data, string $label, array $options = [], string $field = 'value'): array
+    {
+        $value = $data[$field] ?? null;
+
+        if (!filled($value)) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label . ': ' . ($options[$value] ?? (string) $value))
+                ->removeField($field),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<int|string, string> $options
+     * @return array<int, Indicator>
+     */
+    private static function multiValueIndicators(array $data, string $label, array $options = [], string $field = 'values'): array
+    {
+        $values = $data[$field] ?? [];
+
+        if (!is_array($values) || $values === []) {
+            return [];
+        }
+
+        $labels = array_map(
+            fn ($value): string => $options[$value] ?? (string) $value,
+            array_values($values)
+        );
+
+        return [
+            Indicator::make($label . ': ' . implode(', ', $labels))
+                ->removeField($field),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, Indicator>
+     */
+    private static function ternaryValueIndicators(array $data, string $trueLabel, ?string $falseLabel = null, string $field = 'value'): array
+    {
+        $value = self::normalizeTernaryFilterValue($data[$field] ?? null);
+
+        if ($value === null) {
+            return [];
+        }
+
+        $label = $value ? $trueLabel : $falseLabel;
+
+        if ($label === null) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label)
+                ->removeField($field),
+        ];
+    }
+
+    private static function normalizeTernaryFilterValue(mixed $value): ?bool
+    {
+        return match (strtolower(trim((string) $value))) {
+            '1', 'true' => true,
+            '0', 'false' => false,
+            default => null,
+        };
+    }
+
+    private static function formatFilterDateTime(mixed $value): string
+    {
+        try {
+            return Carbon::parse((string) $value)->format('Y-m-d H:i');
+        } catch (\Throwable $e) {
+            return (string) $value;
+        }
+    }
+
+    private static function productComplementaryAuditStatusLabel(Product $record): string
+    {
+        $audit = $record->complementaryProductsAudit;
+
+        if (!$audit instanceof ShopifyAudit) {
+            return 'Not Checked';
+        }
+
+        return $audit->status === ShopifyAudit::STATUS_HEALTHY ? 'Healthy' : 'Needs Audit';
+    }
+
+    private static function productComplementaryAuditStatusColor(Product $record): string
+    {
+        $audit = $record->complementaryProductsAudit;
+
+        if (!$audit instanceof ShopifyAudit) {
+            return 'gray';
+        }
+
+        return $audit->status === ShopifyAudit::STATUS_HEALTHY ? 'success' : 'danger';
+    }
+
+    private static function productComplementaryAuditIssuesSummary(Product $record): string
+    {
+        return self::complementaryAuditIssuesSummaryFromDetails(
+            $record->complementaryProductsAudit?->details
+        );
+    }
+
+    private static function complementaryAuditIssuesSummaryFromDetails(mixed $details): string
+    {
+        if (!is_array($details)) {
+            return 'None';
+        }
+
+        $parts = [];
+
+        foreach (($details['local_ineligible'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            $reason = trim((string) ($item['reason'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Local ref invalid on Shopify: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        foreach (($details['shopify_ineligible'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            $reason = trim((string) ($item['reason'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Shopify ref invalid: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        return $parts !== [] ? implode(' | ', $parts) : 'None';
     }
 }

@@ -1,0 +1,841 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\NewProductDraft;
+use App\Models\Product;
+use App\Models\ShopifyRow;
+use App\Models\Variant;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
+
+class ComplementaryProductAuditService
+{
+    public const LOCAL_TARGET_COUNT = 4;
+    public const SHOPIFY_TARGET_COUNT = 3;
+    public const APP_NAMESPACE = '$app';
+    public const APP_KEY = 'complementary_products';
+    public const STANDARD_NAMESPACE = 'shopify--discovery--product_recommendation';
+    public const STANDARD_KEY = 'complementary_products';
+
+    /** @var array<string, int>|null */
+    private ?array $productReferenceMap = null;
+
+    /** @var array<string, array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>> */
+    private array $liveComplementaryStatesByHandle = [];
+
+    /** @var array<string, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}> */
+    private array $liveProductStatesByGid = [];
+
+    public function __construct(
+        private readonly ShopifyApiClient $shopifyApiClient,
+    ) {
+    }
+
+    /**
+     * @return array{
+     *   local_total:int,
+     *   local_good:bool,
+     *   local_ids:array<int, int>,
+     *   local_eligible_ids:array<int, int>,
+     *   local_eligible_gids:array<int, string>,
+     *   local_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
+     *   shopify_total:int,
+     *   shopify_eligible:int,
+     *   shopify_good:bool,
+     *   shopify_ids:array<int, int>,
+     *   shopify_eligible_ids:array<int, int>,
+     *   shopify_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
+     *   desired_shopify_gids:array<int, string>
+     * }
+     */
+    public function analyzeProduct(
+        Product $product,
+        ?string $localValue = null,
+    ): array {
+        $localTokens = $this->parseReferenceTokens($localValue ?? $this->localComplementaryValueForProduct($product));
+
+        $localIds = $this->resolveProductIdsFromTokens($localTokens);
+        $localStatesById = $this->liveStatesForProductIds($localIds);
+        $localEligibleIds = array_values(array_map(
+            fn (int $productId): int => $productId,
+            array_keys(array_filter(
+                $localStatesById,
+                static fn (array $state): bool => (bool) ($state['available'] ?? false)
+            ))
+        ));
+        $localIneligible = array_values(array_filter(
+            array_map(
+                fn (int $productId): ?array => ($localStatesById[$productId]['available'] ?? false) ? null : ($localStatesById[$productId] ?? null),
+                $localIds
+            )
+        ));
+
+        $shopifyStates = $this->liveComplementaryStatesForProduct($product);
+        $shopifyIds = [];
+        $shopifyEligibleIds = [];
+        $shopifyIneligible = [];
+
+        foreach ($shopifyStates as $state) {
+            $resolvedId = $this->resolveProductIdFromLiveState($state);
+            if ($resolvedId !== null && !in_array($resolvedId, $shopifyIds, true)) {
+                $shopifyIds[] = $resolvedId;
+            }
+
+            if (($state['available'] ?? false) === true) {
+                if ($resolvedId !== null && !in_array($resolvedId, $shopifyEligibleIds, true)) {
+                    $shopifyEligibleIds[] = $resolvedId;
+                }
+            } else {
+                $shopifyIneligible[] = $state;
+            }
+        }
+
+        return [
+            'local_total' => count($localIds),
+            'local_good' => count($localIds) >= self::LOCAL_TARGET_COUNT,
+            'local_ids' => $localIds,
+            'local_eligible_ids' => $localEligibleIds,
+            'local_eligible_gids' => $this->productIdsToShopifyGids($localEligibleIds),
+            'local_ineligible' => $localIneligible,
+            'shopify_total' => count($shopifyStates),
+            'shopify_eligible' => count($shopifyEligibleIds),
+            'shopify_good' => count($shopifyStates) === self::SHOPIFY_TARGET_COUNT
+                && count($shopifyEligibleIds) === self::SHOPIFY_TARGET_COUNT,
+            'shopify_ids' => $shopifyIds,
+            'shopify_eligible_ids' => $shopifyEligibleIds,
+            'shopify_ineligible' => $shopifyIneligible,
+            'desired_shopify_gids' => array_slice(
+                $this->productIdsToShopifyGids($localEligibleIds),
+                0,
+                self::SHOPIFY_TARGET_COUNT
+            ),
+        ];
+    }
+
+    /**
+     * @return array{
+     *   local_total:int,
+     *   local_good:bool,
+     *   local_ids:array<int, int>,
+     *   local_eligible_ids:array<int, int>,
+     *   local_eligible_gids:array<int, string>,
+     *   local_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
+     *   shopify_total:int,
+     *   shopify_eligible:int,
+     *   shopify_good:bool,
+     *   shopify_ids:array<int, int>,
+     *   shopify_eligible_ids:array<int, int>,
+     *   shopify_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
+     *   desired_shopify_gids:array<int, string>
+     * }
+     */
+    public function analyzeDraft(NewProductDraft $draft): array
+    {
+        $localTokens = $this->parseReferenceTokens($draft->complementary_products);
+        $localIds = $this->resolveProductIdsFromTokens($localTokens);
+        $localStatesById = $this->liveStatesForProductIds($localIds);
+        $localEligibleIds = array_values(array_map(
+            fn (int $productId): int => $productId,
+            array_keys(array_filter(
+                $localStatesById,
+                static fn (array $state): bool => (bool) ($state['available'] ?? false)
+            ))
+        ));
+        $localIneligible = array_values(array_filter(
+            array_map(
+                fn (int $productId): ?array => ($localStatesById[$productId]['available'] ?? false) ? null : ($localStatesById[$productId] ?? null),
+                $localIds
+            )
+        ));
+
+        $linkedProduct = $this->linkedProductForDraft($draft);
+        if (!$linkedProduct instanceof Product) {
+            return [
+                'local_total' => count($localIds),
+                'local_good' => count($localIds) >= self::LOCAL_TARGET_COUNT,
+                'local_ids' => $localIds,
+                'local_eligible_ids' => $localEligibleIds,
+                'local_eligible_gids' => $this->productIdsToShopifyGids($localEligibleIds),
+                'local_ineligible' => $localIneligible,
+                'shopify_total' => 0,
+                'shopify_eligible' => 0,
+                'shopify_good' => false,
+                'shopify_ids' => [],
+                'shopify_eligible_ids' => [],
+                'shopify_ineligible' => [],
+                'desired_shopify_gids' => array_slice(
+                    $this->productIdsToShopifyGids($localEligibleIds),
+                    0,
+                    self::SHOPIFY_TARGET_COUNT
+                ),
+            ];
+        }
+
+        $analysis = $this->analyzeProduct($linkedProduct, $draft->complementary_products);
+        $analysis['local_total'] = count($localIds);
+        $analysis['local_good'] = count($localIds) >= self::LOCAL_TARGET_COUNT;
+        $analysis['local_ids'] = $localIds;
+        $analysis['local_eligible_ids'] = $localEligibleIds;
+        $analysis['local_eligible_gids'] = $this->productIdsToShopifyGids($localEligibleIds);
+        $analysis['local_ineligible'] = $localIneligible;
+        $analysis['desired_shopify_gids'] = array_slice(
+            $this->productIdsToShopifyGids($localEligibleIds),
+            0,
+            self::SHOPIFY_TARGET_COUNT
+        );
+
+        return $analysis;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function productIdsMatchingLocalStatus(string $status): array
+    {
+        $matchingIds = [];
+
+        Product::query()
+            ->select(['id', 'import_id', 'handle', 'shopify_id', 'status'])
+            ->chunkById(200, function (Collection $products) use (&$matchingIds, $status): void {
+                $localValues = $this->localComplementaryValuesForProducts($products);
+
+                foreach ($products as $product) {
+                    if (!$product instanceof Product) {
+                        continue;
+                    }
+
+                    $analysis = $this->analyzeProduct($product, $localValues[$this->productKey($product)] ?? null);
+
+                    if ($this->matchesLocalStatus($analysis['local_good'], $status)) {
+                        $matchingIds[] = (int) $product->id;
+                    }
+                }
+            });
+
+        return $matchingIds;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function productIdsMatchingShopifyStatus(string $status): array
+    {
+        $matchingIds = [];
+
+        Product::query()
+            ->select(['id', 'import_id', 'handle', 'shopify_id', 'status'])
+            ->chunkById(200, function (Collection $products) use (&$matchingIds, $status): void {
+                $localValues = $this->localComplementaryValuesForProducts($products);
+
+                foreach ($products as $product) {
+                    if (!$product instanceof Product) {
+                        continue;
+                    }
+
+                    $analysis = $this->analyzeProduct($product, $localValues[$this->productKey($product)] ?? null);
+
+                    if ($this->matchesShopifyStatus($analysis['shopify_good'], $status)) {
+                        $matchingIds[] = (int) $product->id;
+                    }
+                }
+            });
+
+        return $matchingIds;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function draftIdsMatchingLocalStatus(string $status): array
+    {
+        $matchingIds = [];
+
+        NewProductDraft::query()
+            ->select(['id', 'handle', 'shopify_id', 'complementary_products'])
+            ->chunkById(200, function (Collection $drafts) use (&$matchingIds, $status): void {
+                foreach ($drafts as $draft) {
+                    if (!$draft instanceof NewProductDraft) {
+                        continue;
+                    }
+
+                    $analysis = $this->analyzeDraft($draft);
+
+                    if ($this->matchesLocalStatus($analysis['local_good'], $status)) {
+                        $matchingIds[] = (int) $draft->id;
+                    }
+                }
+            });
+
+        return $matchingIds;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function draftIdsMatchingShopifyStatus(string $status): array
+    {
+        $matchingIds = [];
+
+        NewProductDraft::query()
+            ->select(['id', 'handle', 'shopify_id', 'complementary_products'])
+            ->chunkById(200, function (Collection $drafts) use (&$matchingIds, $status): void {
+                foreach ($drafts as $draft) {
+                    if (!$draft instanceof NewProductDraft) {
+                        continue;
+                    }
+
+                    $linkedProduct = $this->linkedProductForDraft($draft);
+                    if (!$linkedProduct instanceof Product) {
+                        continue;
+                    }
+
+                    $analysis = $this->analyzeDraft($draft);
+
+                    if ($this->matchesShopifyStatus($analysis['shopify_good'], $status)) {
+                        $matchingIds[] = (int) $draft->id;
+                    }
+                }
+            });
+
+        return $matchingIds;
+    }
+
+    /**
+     * @return array<int, Product>
+     */
+    public function productsNeedingShopifyComplementaryAttention(): array
+    {
+        $products = [];
+
+        Product::query()
+            ->select(['id', 'import_id', 'handle', 'shopify_id', 'status'])
+            ->whereRaw('LOWER(COALESCE(status, "")) = ?', ['active'])
+            ->chunkById(200, function (Collection $chunk) use (&$products): void {
+                $localValues = $this->localComplementaryValuesForProducts($chunk);
+
+                foreach ($chunk as $product) {
+                    if (!$product instanceof Product) {
+                        continue;
+                    }
+
+                    $analysis = $this->analyzeProduct($product, $localValues[$this->productKey($product)] ?? null);
+
+                    if (!$analysis['shopify_good']) {
+                        $products[] = $product;
+                    }
+                }
+            });
+
+        return $products;
+    }
+
+    public function localComplementaryValueForProduct(Product $product): ?string
+    {
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if (!$row instanceof ShopifyRow) {
+            return null;
+        }
+
+        $value = trim((string) ($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, '') ?? ''));
+
+        return $value !== '' ? $value : null;
+    }
+
+    public function shopifyComplementaryValueForProduct(Product $product): ?string
+    {
+        $states = $this->liveComplementaryStatesForProduct($product);
+
+        if ($states === []) {
+            return null;
+        }
+
+        return json_encode(array_values(array_filter(array_map(
+            static fn (array $state): ?string => trim((string) ($state['gid'] ?? '')) ?: trim((string) ($state['handle'] ?? '')),
+            $states
+        ))));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function parseReferenceTokens(?string $value): array
+    {
+        $raw = trim((string) ($value ?? ''));
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            return $this->parseReferenceTokens(implode('; ', array_map('strval', $decoded)));
+        }
+
+        $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn (mixed $item): string => trim((string) $item),
+            $parts
+        ), static fn (string $item): bool => $item !== '')));
+    }
+
+    /**
+     * @param array<int, string> $tokens
+     * @return array<int, int>
+     */
+    public function resolveProductIdsFromTokens(array $tokens): array
+    {
+        $resolved = [];
+        $referenceMap = $this->productReferenceMap();
+
+        foreach ($tokens as $token) {
+            $normalized = $this->normalizeReferenceToken($token);
+            if ($normalized === '') {
+                continue;
+            }
+
+            $productId = $referenceMap[$normalized] ?? null;
+            if ($productId === null) {
+                continue;
+            }
+
+            if (!in_array($productId, $resolved, true)) {
+                $resolved[] = $productId;
+            }
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param array<int, int> $productIds
+     * @return array<int, string>
+     */
+    public function productIdsToShopifyGids(array $productIds): array
+    {
+        if ($productIds === []) {
+            return [];
+        }
+
+        $gidById = Product::query()
+            ->whereKey($productIds)
+            ->whereNotNull('shopify_id')
+            ->pluck('shopify_id', 'id')
+            ->all();
+
+        $resolved = [];
+        foreach ($productIds as $productId) {
+            $gid = trim((string) ($gidById[$productId] ?? ''));
+            if ($gid !== '') {
+                $resolved[] = $gid;
+            }
+        }
+
+        return array_values(array_unique($resolved));
+    }
+
+    private function matchesLocalStatus(bool $isGood, string $status): bool
+    {
+        return match ($status) {
+            'good' => $isGood,
+            'bad' => !$isGood,
+            default => false,
+        };
+    }
+
+    private function matchesShopifyStatus(bool $isGood, string $status): bool
+    {
+        return match ($status) {
+            'healthy' => $isGood,
+            'flagged' => !$isGood,
+            default => false,
+        };
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function productReferenceMap(): array
+    {
+        if ($this->productReferenceMap !== null) {
+            return $this->productReferenceMap;
+        }
+
+        $map = [];
+
+        Product::query()
+            ->select(['id', 'shopify_id', 'handle', 'title'])
+            ->chunkById(500, function (Collection $products) use (&$map): void {
+                foreach ($products as $product) {
+                    if (!$product instanceof Product) {
+                        continue;
+                    }
+
+                    foreach ([
+                        trim((string) ($product->shopify_id ?? '')),
+                        trim((string) ($product->handle ?? '')),
+                        trim((string) ($product->title ?? '')),
+                    ] as $value) {
+                        $normalized = $this->normalizeReferenceToken($value);
+                        if ($normalized !== '' && !isset($map[$normalized])) {
+                            $map[$normalized] = (int) $product->id;
+                        }
+                    }
+                }
+            });
+
+        Variant::query()
+            ->select(['product_id', 'sku'])
+            ->whereNotNull('sku')
+            ->where('sku', '!=', '')
+            ->orderBy('id')
+            ->chunk(500, function (Collection $variants) use (&$map): void {
+                foreach ($variants as $variant) {
+                    if (!$variant instanceof Variant) {
+                        continue;
+                    }
+
+                    $normalized = $this->normalizeReferenceToken($variant->sku);
+                    if ($normalized !== '' && !isset($map[$normalized])) {
+                        $map[$normalized] = (int) $variant->product_id;
+                    }
+                }
+            });
+
+        $this->productReferenceMap = $map;
+
+        return $map;
+    }
+
+    /**
+     * @param Collection<int, Product> $products
+     * @return array<string, string>
+     */
+    private function localComplementaryValuesForProducts(Collection $products): array
+    {
+        $handles = $products
+            ->map(fn (Product $product): string => trim((string) ($product->handle ?? '')))
+            ->filter()
+            ->values()
+            ->all();
+
+        $importIds = $products
+            ->map(fn (Product $product): int => (int) ($product->import_id ?? 0))
+            ->filter(fn (int $importId): bool => $importId > 0)
+            ->values()
+            ->all();
+
+        if ($handles === [] || $importIds === []) {
+            return [];
+        }
+
+        return ShopifyRow::query()
+            ->whereIn('import_id', $importIds)
+            ->whereIn('handle', $handles)
+            ->where('row_type', 'product_primary')
+            ->get(['import_id', 'handle', 'data'])
+            ->mapWithKeys(function (ShopifyRow $row): array {
+                $value = trim((string) ($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, '') ?? ''));
+                if ($value === '') {
+                    return [];
+                }
+
+                return [
+                    ((int) $row->import_id) . '|' . trim((string) $row->handle) => $value,
+                ];
+            })
+            ->all();
+    }
+
+    private function linkedProductForDraft(NewProductDraft $draft): ?Product
+    {
+        $shopifyId = trim((string) ($draft->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $product = Product::query()->where('shopify_id', $shopifyId)->first();
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $handle = trim((string) ($draft->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $product = Product::query()->where('handle', $handle)->first();
+
+        return $product instanceof Product ? $product : null;
+    }
+
+    private function normalizeReferenceToken(?string $value): string
+    {
+        $trimmed = trim((string) ($value ?? ''));
+        if ($trimmed === '') {
+            return '';
+        }
+
+        if (preg_match('#gid://shopify/Product/([0-9]+)#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#/products/([0-9]+)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            $trimmed = $matches[1];
+        }
+
+        $trimmed = strtolower($trimmed);
+        $trimmed = str_replace('&', 'and', $trimmed);
+        $trimmed = preg_replace('/[^a-z0-9]+/', '-', $trimmed) ?? $trimmed;
+        $trimmed = preg_replace('/-+/', '-', $trimmed) ?? $trimmed;
+
+        return trim($trimmed, '-');
+    }
+
+    private function productKey(Product $product): string
+    {
+        return ((int) ($product->import_id ?? 0)) . '|' . trim((string) ($product->handle ?? ''));
+    }
+
+    /**
+     * @param array<int, int> $productIds
+     * @return array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>
+     */
+    private function liveStatesForProductIds(array $productIds): array
+    {
+        if ($productIds === []) {
+            return [];
+        }
+
+        $gidByProductId = Product::query()
+            ->whereKey($productIds)
+            ->whereNotNull('shopify_id')
+            ->pluck('shopify_id', 'id')
+            ->all();
+
+        $missingGids = [];
+        foreach ($productIds as $productId) {
+            $gid = trim((string) ($gidByProductId[$productId] ?? ''));
+            if ($gid !== '' && !isset($this->liveProductStatesByGid[$gid])) {
+                $missingGids[] = $gid;
+            }
+        }
+
+        foreach (array_chunk(array_values(array_unique($missingGids)), 50) as $gidChunk) {
+            if ($gidChunk === []) {
+                continue;
+            }
+
+            $data = $this->shopifyApiClient->graphql($this->productsByIdsQuery(), [
+                'ids' => array_values($gidChunk),
+            ]);
+
+            $nodes = data_get($data, 'nodes', []);
+            foreach ($nodes as $node) {
+                if (($node['id'] ?? null) === null) {
+                    continue;
+                }
+
+                $state = $this->stateFromShopifyProductNode($node);
+                $this->liveProductStatesByGid[$state['gid']] = $state;
+            }
+        }
+
+        $resolved = [];
+        foreach ($productIds as $productId) {
+            $gid = trim((string) ($gidByProductId[$productId] ?? ''));
+            if ($gid === '') {
+                $resolved[$productId] = [
+                    'gid' => '',
+                    'handle' => '',
+                    'title' => '',
+                    'status' => 'missing',
+                    'available' => false,
+                    'reason' => 'Missing Shopify product ID',
+                ];
+                continue;
+            }
+
+            $resolved[$productId] = $this->liveProductStatesByGid[$gid] ?? [
+                'gid' => $gid,
+                'handle' => '',
+                'title' => '',
+                'status' => 'missing',
+                'available' => false,
+                'reason' => 'Product not returned by Shopify',
+            ];
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @return array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>
+     */
+    private function liveComplementaryStatesForProduct(Product $product): array
+    {
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return [];
+        }
+
+        if (isset($this->liveComplementaryStatesByHandle[$handle])) {
+            return $this->liveComplementaryStatesByHandle[$handle];
+        }
+
+        $data = $this->shopifyApiClient->graphql($this->productComplementaryQuery(), [
+            'handle' => $handle,
+        ]);
+
+        $standardNodes = data_get($data, 'productByHandle.standardComplementary.references.nodes', []);
+        $appNodes = data_get($data, 'productByHandle.appComplementary.references.nodes', []);
+        $nodes = $standardNodes !== [] ? $standardNodes : $appNodes;
+
+        $states = [];
+        foreach ($nodes as $node) {
+            if (($node['id'] ?? null) === null) {
+                continue;
+            }
+
+            $state = $this->stateFromShopifyProductNode($node);
+            $states[] = $state;
+            $this->liveProductStatesByGid[$state['gid']] = $state;
+        }
+
+        $this->liveComplementaryStatesByHandle[$handle] = $states;
+
+        return $states;
+    }
+
+    /**
+     * @param array<string, mixed> $node
+     * @return array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}
+     */
+    private function stateFromShopifyProductNode(array $node): array
+    {
+        $gid = trim((string) ($node['id'] ?? ''));
+        $status = strtolower(trim((string) ($node['status'] ?? '')));
+        $title = trim((string) ($node['title'] ?? ''));
+        $handle = trim((string) ($node['handle'] ?? ''));
+        $variantNodes = data_get($node, 'variants.nodes', []);
+        $hasSellableVariant = collect($variantNodes)->contains(
+            fn (array $variant): bool => (bool) ($variant['availableForSale'] ?? false)
+        );
+
+        $available = $status === 'active' && $hasSellableVariant;
+
+        $reason = null;
+        if ($status !== 'active') {
+            $reason = $status === '' ? 'Not active on Shopify' : 'Shopify status: ' . strtoupper($status);
+        } elseif (!$hasSellableVariant) {
+            $reason = 'Out of stock on Shopify';
+        }
+
+        return [
+            'gid' => $gid,
+            'handle' => $handle,
+            'title' => $title,
+            'status' => $status,
+            'available' => $available,
+            'reason' => $reason,
+        ];
+    }
+
+    /**
+     * @param array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null} $state
+     */
+    private function resolveProductIdFromLiveState(array $state): ?int
+    {
+        $referenceMap = $this->productReferenceMap();
+
+        foreach ([
+            trim((string) ($state['gid'] ?? '')),
+            trim((string) ($state['handle'] ?? '')),
+            trim((string) ($state['title'] ?? '')),
+        ] as $value) {
+            $normalized = $this->normalizeReferenceToken($value);
+            if ($normalized !== '' && isset($referenceMap[$normalized])) {
+                return (int) $referenceMap[$normalized];
+            }
+        }
+
+        return null;
+    }
+
+    private function productComplementaryQuery(): string
+    {
+        return <<<'GRAPHQL'
+query ComplementaryProductAudit($handle: String!) {
+  productByHandle(handle: $handle) {
+    standardComplementary: metafield(namespace: "shopify--discovery--product_recommendation", key: "complementary_products") {
+      references(first: 10) {
+        nodes {
+          ... on Product {
+            id
+            handle
+            title
+            status
+            variants(first: 50) {
+              nodes {
+                availableForSale
+              }
+            }
+          }
+        }
+      }
+    }
+    appComplementary: metafield(namespace: "$app", key: "complementary_products") {
+      references(first: 10) {
+        nodes {
+          ... on Product {
+            id
+            handle
+            title
+            status
+            variants(first: 50) {
+              nodes {
+                availableForSale
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL;
+    }
+
+    private function productsByIdsQuery(): string
+    {
+        return <<<'GRAPHQL'
+query ComplementaryProductStates($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      handle
+      title
+      status
+      variants(first: 50) {
+        nodes {
+          availableForSale
+        }
+      }
+    }
+  }
+}
+GRAPHQL;
+    }
+}

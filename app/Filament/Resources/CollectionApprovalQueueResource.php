@@ -13,6 +13,7 @@ use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\Indicator;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
@@ -79,9 +80,11 @@ class CollectionApprovalQueueResource extends Resource
             ->filters([
                 Filter::make('recently_edited_today')
                     ->label('Recently Edited Today')
+                    ->indicator('Recently Edited Today')
                     ->query(fn (Builder $query): Builder => $query->whereDate('created_at', today())),
                 Filter::make('edited_last_7_days')
                     ->label('Edited in Last 7 Days')
+                    ->indicator('Edited in Last 7 Days')
                     ->query(fn (Builder $query): Builder => $query->where('created_at', '>=', now()->subDays(7))),
                 SelectFilter::make('request_batch_id')
                     ->label('Batch')
@@ -95,6 +98,7 @@ class CollectionApprovalQueueResource extends Resource
                             (string) $request->request_batch_id => app(CollectionApprovalRequestService::class)->batchLabel($request->request_batch_id),
                         ])
                         ->all())
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Batch'))
                     ->searchable()
                     ->preload(),
                 SelectFilter::make('requested_by')
@@ -102,13 +106,22 @@ class CollectionApprovalQueueResource extends Resource
                     ->options(fn (): array => User::query()
                         ->orderBy('name')
                         ->pluck('name', 'id')
-                        ->all()),
+                        ->all())
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Requested By', User::query()->pluck('name', 'id')->all())),
                 SelectFilter::make('target_approver_id')
                     ->label('Approver')
                     ->options(fn (): array => ['__any__' => 'Any reviewer'] + app(CollectionApprovalRequestService::class)
                         ->eligibleApproversQuery()
                         ->pluck('name', 'id')
                         ->all())
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                        $data,
+                        'Approver',
+                        ['__any__' => 'Any reviewer'] + app(CollectionApprovalRequestService::class)
+                            ->eligibleApproversQuery()
+                            ->pluck('name', 'id')
+                            ->all()
+                    ))
                     ->query(function (Builder $query, array $data): Builder {
                         $value = $data['value'] ?? null;
                         if ($value === '__any__') {
@@ -327,4 +340,24 @@ class CollectionApprovalQueueResource extends Resource
 
         return implode('', $lines);
     }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<int|string, string> $options
+     * @return array<int, Indicator>
+     */
+    private static function singleValueIndicators(array $data, string $label, array $options = [], string $field = 'value'): array
+    {
+        $value = $data[$field] ?? null;
+
+        if (!filled($value)) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label . ': ' . ($options[$value] ?? (string) $value))
+                ->removeField($field),
+        ];
+    }
+
 }

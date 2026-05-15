@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyCollectionResource;
-use App\Models\CollectionApproval;
 use App\Models\CollectionApprovalRequest;
 use App\Models\ShopifyCollection;
 use App\Models\User;

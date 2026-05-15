@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\DB;
@@ -111,6 +112,17 @@ class Product extends Model
     public function partialApprovalRequests(): HasMany
     {
         return $this->hasMany(ProductPartialApprovalRequest::class);
+    }
+
+    public function shopifyAudits(): HasMany
+    {
+        return $this->hasMany(ShopifyAudit::class);
+    }
+
+    public function complementaryProductsAudit(): HasOne
+    {
+        return $this->hasOne(ShopifyAudit::class)
+            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS);
     }
 
     public function approvalsForCurrentVersion(): HasMany

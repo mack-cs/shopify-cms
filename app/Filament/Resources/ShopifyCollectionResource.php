@@ -28,6 +28,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\Indicator;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Illuminate\Support\Collection;
@@ -35,6 +36,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
+use Carbon\Carbon;
 
 class ShopifyCollectionResource extends Resource
 {
@@ -390,21 +392,35 @@ class ShopifyCollectionResource extends Resource
             ->filters([
                 Filter::make('recently_edited_today')
                     ->label('Recently Edited Today')
+                    ->indicator('Recently Edited Today')
                     ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
                 Filter::make('edited_last_7_days')
                     ->label('Edited in Last 7 Days')
+                    ->indicator('Edited in Last 7 Days')
                     ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
                 Filter::make('updated_date')
                     ->label('Updated Date')
                     ->form([
-                        Forms\Components\DatePicker::make('from')->label('Updated From'),
-                        Forms\Components\DatePicker::make('to')->label('Updated To'),
+                        Forms\Components\DateTimePicker::make('from')->label('Updated From'),
+                        Forms\Components\DateTimePicker::make('to')->label('Updated To'),
                     ])
+                    ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                        $data,
+                        'from',
+                        'to',
+                        'Updated From',
+                        'Updated To'
+                    ))
                     ->query(fn (Builder $query, array $data): Builder => $query
-                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('updated_at', '>=', $from))
-                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('updated_at', '<=', $to))),
+                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->where('updated_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->where('updated_at', '<=', $to))),
                 TernaryFilter::make('deindex')
                     ->label('Deindexed')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Deindexed',
+                        'Not Deindexed'
+                    ))
                     ->queries(
                         true: fn (Builder $query): Builder => $query->where('deindex', true),
                         false: fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
@@ -414,6 +430,11 @@ class ShopifyCollectionResource extends Resource
                     ),
                 TernaryFilter::make('has_seo')
                     ->label('Has SEO')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Has SEO',
+                        'Missing SEO'
+                    ))
                     ->queries(
                         true: fn (Builder $query): Builder => $query
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
@@ -425,6 +446,11 @@ class ShopifyCollectionResource extends Resource
                     ),
                 TernaryFilter::make('has_description')
                     ->label('Has Description')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Has Description',
+                        'Missing Description'
+                    ))
                     ->queries(
                         true: fn (Builder $query): Builder => $query
                             ->whereRaw(self::collectionEffectiveHtmlNotBlankSql('draft_description_html', 'description_html')),
@@ -433,6 +459,11 @@ class ShopifyCollectionResource extends Resource
                     ),
                 TernaryFilter::make('has_footer_title')
                     ->label('Has Footer Title')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Has Footer Title',
+                        'Missing Footer Title'
+                    ))
                     ->queries(
                         true: fn (Builder $query): Builder => $query
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_footer_title', 'footer_title')),
@@ -441,6 +472,11 @@ class ShopifyCollectionResource extends Resource
                     ),
                 TernaryFilter::make('has_footer_description')
                     ->label('Has Footer Description')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Has Footer Description',
+                        'Missing Footer Description'
+                    ))
                     ->queries(
                         true: fn (Builder $query): Builder => $query
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_elegant_footer_description', 'elegant_footer_description')),
@@ -449,6 +485,7 @@ class ShopifyCollectionResource extends Resource
                     ),
                 Filter::make('pending_changes')
                     ->label('Pending Changes')
+                    ->indicator('Pending Changes')
                     ->query(fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
                         $sub->whereNull('sync_status')
                             ->orWhere('sync_status', '!=', ShopifyCollection::SYNC_STATUS_SYNCED)
@@ -458,6 +495,7 @@ class ShopifyCollectionResource extends Resource
                     })),
                 Filter::make('awaiting_approval')
                     ->label('Awaiting Approval')
+                    ->indicator('Awaiting Approval')
                     ->query(fn (Builder $query): Builder => $query->whereRaw(
                         '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) < 2'
                     )),
@@ -478,10 +516,16 @@ class ShopifyCollectionResource extends Resource
                             ->pluck('batch', 'batch')
                             ->all();
                     })
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Batch'))
                     ->searchable()
                     ->preload(),
                 TernaryFilter::make('approved')
                     ->label('Approved')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Approved',
+                        'Not Approved'
+                    ))
                     ->queries(
                         true: fn ($query) => $query->whereRaw(
                             '(select count(distinct user_id) from collection_approvals where collection_approvals.collection_id = collections.id and collection_approvals.approval_version = collections.approval_version) >= 2'
@@ -492,6 +536,11 @@ class ShopifyCollectionResource extends Resource
                     ),
                 TernaryFilter::make('missing_seo')
                     ->label('Missing SEO')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Missing SEO',
+                        'SEO Complete'
+                    ))
                     ->queries(
                         true: fn ($query) => $query->where(function ($sub): void {
                             $sub->whereRaw(self::collectionEffectiveTextBlankSql('draft_seo_title', 'seo_title'))
@@ -500,10 +549,14 @@ class ShopifyCollectionResource extends Resource
                         false: fn ($query) => $query
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_title', 'seo_title'))
                             ->whereRaw(self::collectionEffectiveTextNotBlankSql('draft_seo_description', 'seo_description'))
-                    )
-                    ->indicator('Missing SEO (informational)'),
+                    ),
                 TernaryFilter::make('synced')
                     ->label('Synced')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Synced',
+                        'Not Synced'
+                    ))
                     ->queries(
                         true: fn (Builder $query) => $query->where('sync_status', ShopifyCollection::SYNC_STATUS_SYNCED),
                         false: fn (Builder $query) => $query->where(function (Builder $sub): void {
@@ -514,12 +567,19 @@ class ShopifyCollectionResource extends Resource
                 Filter::make('synced_date')
                     ->label('Sync Date')
                     ->form([
-                        Forms\Components\DatePicker::make('from')->label('Synced From'),
-                        Forms\Components\DatePicker::make('to')->label('Synced To'),
+                        Forms\Components\DateTimePicker::make('from')->label('Synced From'),
+                        Forms\Components\DateTimePicker::make('to')->label('Synced To'),
                     ])
+                    ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                        $data,
+                        'from',
+                        'to',
+                        'Synced From',
+                        'Synced To'
+                    ))
                     ->query(fn (Builder $query, array $data): Builder => $query
-                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->whereDate('last_synced_at', '>=', $from))
-                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->whereDate('last_synced_at', '<=', $to))),
+                        ->when($data['from'] ?? null, fn (Builder $q, $from): Builder => $q->where('last_synced_at', '>=', $from))
+                        ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->where('last_synced_at', '<=', $to))),
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
@@ -1033,16 +1093,29 @@ class ShopifyCollectionResource extends Resource
 
     public static function requestApprovalForRecords(Collection $records, array $data): void
     {
+        $targetApproverId = filled($data['target_approver_id'] ?? null) ? (int) $data['target_approver_id'] : null;
         $summary = app(CollectionApprovalRequestService::class)->request(
             $records,
             (int) Auth::id(),
-            filled($data['target_approver_id'] ?? null) ? (int) $data['target_approver_id'] : null,
+            $targetApproverId,
             $data['request_note'] ?? null,
         );
 
         $parts = [];
         if (($summary['requested'] ?? 0) > 0) {
             $parts[] = "Requested {$summary['requested']} collection approval request(s).";
+            if (!empty($summary['request_batch_id'])) {
+                $parts[] = 'Batch ' . app(CollectionApprovalRequestService::class)->batchLabel($summary['request_batch_id']) . '.';
+            }
+            if ($targetApproverId) {
+                $approverName = app(CollectionApprovalRequestService::class)
+                    ->eligibleApproversQuery(Auth::id())
+                    ->whereKey($targetApproverId)
+                    ->value('name') ?: 'selected reviewer';
+                $parts[] = "Assigned to {$approverName} only.";
+            } else {
+                $parts[] = 'Available to any eligible reviewer.';
+            }
         }
         if (($summary['skipped_existing'] ?? 0) > 0) {
             $parts[] = "Skipped {$summary['skipped_existing']} with an existing pending request.";
@@ -1636,5 +1709,82 @@ class ShopifyCollectionResource extends Resource
         return \App\Models\Import::where('filename', 'shopify-collections')
             ->orderByDesc('id')
             ->value('id');
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, Indicator>
+     */
+    private static function dateTimeRangeIndicators(array $data, string $fromField, string $toField, string $fromLabel, string $toLabel): array
+    {
+        $indicators = [];
+
+        if (filled($data[$fromField] ?? null)) {
+            $indicators[] = Indicator::make($fromLabel . ': ' . self::formatFilterDateTime($data[$fromField]))
+                ->removeField($fromField);
+        }
+
+        if (filled($data[$toField] ?? null)) {
+            $indicators[] = Indicator::make($toLabel . ': ' . self::formatFilterDateTime($data[$toField]))
+                ->removeField($toField);
+        }
+
+        return $indicators;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<int|string, string> $options
+     * @return array<int, Indicator>
+     */
+    private static function singleValueIndicators(array $data, string $label, array $options = [], string $field = 'value'): array
+    {
+        $value = $data[$field] ?? null;
+
+        if (!filled($value)) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label . ': ' . ($options[$value] ?? (string) $value))
+                ->removeField($field),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, Indicator>
+     */
+    private static function ternaryValueIndicators(array $data, string $trueLabel, ?string $falseLabel = null, string $field = 'value'): array
+    {
+        $value = match (strtolower(trim((string) ($data[$field] ?? '')))) {
+            '1', 'true' => true,
+            '0', 'false' => false,
+            default => null,
+        };
+
+        if ($value === null) {
+            return [];
+        }
+
+        $label = $value ? $trueLabel : $falseLabel;
+
+        if ($label === null) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label)
+                ->removeField($field),
+        ];
+    }
+
+    private static function formatFilterDateTime(mixed $value): string
+    {
+        try {
+            return Carbon::parse((string) $value)->format('Y-m-d H:i');
+        } catch (\Throwable $e) {
+            return (string) $value;
+        }
     }
 }

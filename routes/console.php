@@ -1,8 +1,11 @@
 <?php
 
 use App\Jobs\ReconcileProductImageBackupsJob;
+use App\Jobs\DailyComplementaryProductCheckJob;
 use App\Services\ShopifyApiClient;
+use App\Services\ComplementaryProductMaintenanceService;
 use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
 
@@ -10,9 +13,143 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-Schedule::job(new ReconcileProductImageBackupsJob())
-    ->dailyAt('02:00')
-    ->withoutOverlapping();
+if (!config('queue.disable_background_jobs')) {
+    Schedule::job(new ReconcileProductImageBackupsJob())
+        ->dailyAt('02:00')
+        ->withoutOverlapping();
+
+    Schedule::job(new DailyComplementaryProductCheckJob())
+        ->dailyAt('03:00')
+        ->withoutOverlapping();
+}
+
+Artisan::command(
+    'queue:flush-local-pending
+    {--queue= : Only delete pending jobs for one queue name}
+    {--include-failed : Also delete rows from failed_jobs}
+    {--include-batches : Also delete rows from job_batches}
+    {--force : Skip the safety confirmation in local}',
+    function (): int {
+        if (!app()->environment('local')) {
+            $this->error('This command is restricted to the local environment.');
+
+            return self::FAILURE;
+        }
+
+        $queueName = trim((string) ($this->option('queue') ?? ''));
+        $includeFailed = (bool) $this->option('include-failed');
+        $includeBatches = (bool) $this->option('include-batches');
+        $force = (bool) $this->option('force');
+
+        $jobsQuery = DB::table('jobs');
+        if ($queueName !== '') {
+            $jobsQuery->where('queue', $queueName);
+        }
+
+        $pendingCount = (clone $jobsQuery)->count();
+        $failedCount = $includeFailed && DB::getSchemaBuilder()->hasTable('failed_jobs')
+            ? DB::table('failed_jobs')->count()
+            : 0;
+        $batchCount = $includeBatches && DB::getSchemaBuilder()->hasTable('job_batches')
+            ? DB::table('job_batches')->count()
+            : 0;
+
+        if ($pendingCount === 0 && $failedCount === 0 && $batchCount === 0) {
+            $this->info('Nothing to delete.');
+
+            return self::SUCCESS;
+        }
+
+        $parts = ["pending jobs: {$pendingCount}"];
+        if ($includeFailed) {
+            $parts[] = "failed jobs: {$failedCount}";
+        }
+        if ($includeBatches) {
+            $parts[] = "job batches: {$batchCount}";
+        }
+
+        if (!$force) {
+            $confirmed = $this->confirm(
+                'Delete ' . implode(', ', $parts) . ($queueName !== '' ? " for queue '{$queueName}'" : '') . '?'
+            );
+
+            if (!$confirmed) {
+                $this->warn('Aborted.');
+
+                return self::SUCCESS;
+            }
+        }
+
+        $deletedPending = $jobsQuery->delete();
+        $deletedFailed = 0;
+        $deletedBatches = 0;
+
+        if ($includeFailed && DB::getSchemaBuilder()->hasTable('failed_jobs')) {
+            $deletedFailed = DB::table('failed_jobs')->delete();
+        }
+
+        if ($includeBatches && DB::getSchemaBuilder()->hasTable('job_batches')) {
+            $deletedBatches = DB::table('job_batches')->delete();
+        }
+
+        $summary = ["Deleted {$deletedPending} pending job(s)."];
+        if ($includeFailed) {
+            $summary[] = "Deleted {$deletedFailed} failed job(s).";
+        }
+        if ($includeBatches) {
+            $summary[] = "Deleted {$deletedBatches} job batch row(s).";
+        }
+
+        $this->info(implode(' ', $summary));
+
+        return self::SUCCESS;
+    }
+)->purpose('Local only: delete old queued jobs so they cannot run later when the worker starts.');
+
+Artisan::command(
+    'shopify:audit-complementary-products',
+    function (): int {
+        $maintenance = app(ComplementaryProductMaintenanceService::class);
+        $summary = $maintenance->runDailyCheck();
+
+        $this->info('Complementary audit complete.');
+        $this->line("Checked: {$summary['checked']}");
+        $this->line("Recorded: {$summary['recorded']}");
+        $this->line("Healthy: {$summary['healthy']}");
+        $this->line("Flagged: {$summary['flagged']}");
+        $this->line("Alerted: {$summary['notified']}");
+
+        $flagged = \App\Models\ShopifyAudit::query()
+            ->with('product')
+            ->where('audit_type', \App\Models\ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+            ->where('status', \App\Models\ShopifyAudit::STATUS_FLAGGED)
+            ->orderByDesc('last_checked_at')
+            ->get();
+
+        if ($flagged->isEmpty()) {
+            $this->info('No products currently need complementary-product audit attention.');
+
+            return self::SUCCESS;
+        }
+
+        $this->warn('Products still needing complementary-product audit attention:');
+        foreach ($flagged as $audit) {
+            $product = $audit->product;
+            $title = trim((string) ($product?->title ?? '')) ?: ('Product #' . $audit->product_id);
+            $this->line(sprintf(
+                '- %s | %s | local=%d | shopify=%d | valid=%d | checked=%s',
+                $title,
+                trim((string) ($product?->handle ?? '')),
+                (int) ($audit->local_saved_count ?? 0),
+                (int) ($audit->shopify_current_count ?? 0),
+                (int) ($audit->shopify_valid_count ?? 0),
+                optional($audit->last_checked_at)?->format('Y-m-d H:i:s') ?? 'never',
+            ));
+        }
+
+        return self::SUCCESS;
+    }
+)->purpose('Run the complementary-product Shopify audit now and print the current audit state.');
 
 Artisan::command(
     'shopify:list-metaobjects-for-definition

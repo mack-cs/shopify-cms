@@ -8,4 +8,9 @@ use Filament\Resources\Pages\ListRecords;
 class ListCollectionApprovalQueues extends ListRecords
 {
     protected static string $resource = CollectionApprovalQueueResource::class;
+
+    protected function getHeaderActions(): array
+    {
+        return [];
+    }
 }
