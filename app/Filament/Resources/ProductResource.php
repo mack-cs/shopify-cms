@@ -950,6 +950,17 @@ class ProductResource extends Resource
                     ? 'This product has at least two active images sharing the same position.'
                     : 'No duplicate active image positions detected.')
                 ->toggleable(),
+            IconColumn::make('removed_images_pending_sync')
+                ->label('Image Deletions Pending')
+                ->boolean()
+                ->state(fn (Product $record): bool => $record->allImages()
+                    ->where('sync_state', Image::SYNC_STATE_LOCAL_DELETED)
+                    ->where('local_dirty', true)
+                    ->exists()
+                )
+                ->trueColor('warning')
+                ->falseColor('success')
+                ->toggleable(),
             TextColumn::make('handle')
                 ->searchable(query: function (Builder $query, string $search): Builder {
                     return $query->where('handle', 'like', "%{$search}%")
@@ -1530,6 +1541,17 @@ class ProductResource extends Resource
                             ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
                     });
                 })),
+            TernaryFilter::make('has_removed_images_pending_shopify_sync')
+            ->label('Removed Images Pending Shopify Sync')
+            ->queries(
+                true: fn (Builder $query): Builder => $query->whereHas('allImages', fn (Builder $imageQuery) => $imageQuery
+                    ->where('sync_state', Image::SYNC_STATE_LOCAL_DELETED)
+                    ->where('local_dirty', true)
+                ),
+                false: fn (Builder $query): Builder => $query->whereDoesntHave('allImages', fn (Builder $imageQuery) => $imageQuery
+                    ->where('sync_state', Image::SYNC_STATE_LOCAL_DELETED)
+                    ->where('local_dirty', true)
+                )),
             TernaryFilter::make('duplicate_image_positions')
                 ->label('Duplicate Image Positions')
                 ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
@@ -2071,6 +2093,34 @@ class ProductResource extends Resource
                         );
                     })
                     ->deselectRecordsAfterCompletion(),
+                 BulkAction::make('bulkRemoveDuplicateImages')
+                    ->label('Remove Duplicate Images')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->modalHeading('Remove duplicate images')
+                    ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false)
+                    ->modalDescription('This will keep one image per duplicate position and mark the extra images for Shopify deletion where needed.')
+                    ->action(function (Collection $records): void {
+                        $productsProcessed = 0;
+                        $imagesRemoved = 0;
+
+                        foreach ($records as $product) {
+                            $removedForProduct = self::removeDuplicateImagesForProduct($product);
+
+                            if ($removedForProduct > 0) {
+                                $productsProcessed++;
+                                $imagesRemoved += $removedForProduct;
+                            }
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Duplicate image cleanup complete')
+                            ->body("Processed {$productsProcessed} product(s). Removed {$imagesRemoved} duplicate image(s).")
+                            ->success()
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkBackupImages')
                     ->label('Queue Image Backup')
                     ->icon('heroicon-o-arrow-down-tray')
@@ -2099,10 +2149,58 @@ class ProductResource extends Resource
                     ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--export'])
                     ->exporter(ProductExporter::class)
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
+
             ]),
         ]);
     }
 
+    private static function removeDuplicateImagesForProduct(Product $product): int
+    {
+        $groups = $product->images()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->groupBy('position');
+
+        $removed = 0;
+
+        foreach ($groups as $images) {
+            if ($images->count() <= 1) {
+                continue;
+            }
+
+            $imagesToRemove = $images->slice(1);
+
+            foreach ($imagesToRemove as $image) {
+                self::removeImageRecordForBulkCleanup($image);
+                $removed++;
+            }
+        }
+        if ($removed > 0) {
+            $product->touch();
+        }
+
+        return $removed;
+    }
+private static function removeImageRecordForBulkCleanup(Image $image): void
+{
+    if ($image->shopify_image_id) {
+        $image->forceFill([
+            'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+            'local_dirty' => true,
+            'deleted_at' => now(),
+        ])->save();
+
+        return;
+    }
+
+    $image->delete();
+}
     public static function getRelations(): array
     {
         return [
