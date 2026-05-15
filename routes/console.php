@@ -13,15 +13,13 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-if (!config('queue.disable_background_jobs')) {
-    Schedule::job(new ReconcileProductImageBackupsJob())
-        ->dailyAt('02:00')
-        ->withoutOverlapping();
+Schedule::job(new ReconcileProductImageBackupsJob())
+    ->dailyAt('02:00')
+    ->withoutOverlapping();
 
-    Schedule::job(new DailyComplementaryProductCheckJob())
-        ->dailyAt('03:00')
-        ->withoutOverlapping();
-}
+Schedule::job(new DailyComplementaryProductCheckJob())
+    ->dailyAt('03:00')
+    ->withoutOverlapping();
 
 Artisan::command(
     'queue:flush-local-pending

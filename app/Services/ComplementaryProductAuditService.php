@@ -22,7 +22,7 @@ class ComplementaryProductAuditService
     private ?array $productReferenceMap = null;
 
     /** @var array<string, array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>> */
-    private array $liveComplementaryStatesByHandle = [];
+    private array $liveComplementaryStatesByShopifyId = [];
 
     /** @var array<string, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}> */
     private array $liveProductStatesByGid = [];
@@ -686,21 +686,21 @@ class ComplementaryProductAuditService
      */
     private function liveComplementaryStatesForProduct(Product $product): array
     {
-        $handle = trim((string) ($product->handle ?? ''));
-        if ($handle === '') {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId === '') {
             return [];
         }
 
-        if (isset($this->liveComplementaryStatesByHandle[$handle])) {
-            return $this->liveComplementaryStatesByHandle[$handle];
+        if (isset($this->liveComplementaryStatesByShopifyId[$shopifyId])) {
+            return $this->liveComplementaryStatesByShopifyId[$shopifyId];
         }
 
         $data = $this->shopifyApiClient->graphql($this->productComplementaryQuery(), [
-            'handle' => $handle,
+            'id' => $shopifyId,
         ]);
 
-        $standardNodes = data_get($data, 'productByHandle.standardComplementary.references.nodes', []);
-        $appNodes = data_get($data, 'productByHandle.appComplementary.references.nodes', []);
+        $standardNodes = data_get($data, 'product.standardComplementary.references.nodes', []);
+        $appNodes = data_get($data, 'product.appComplementary.references.nodes', []);
         $nodes = $standardNodes !== [] ? $standardNodes : $appNodes;
 
         $states = [];
@@ -714,7 +714,7 @@ class ComplementaryProductAuditService
             $this->liveProductStatesByGid[$state['gid']] = $state;
         }
 
-        $this->liveComplementaryStatesByHandle[$handle] = $states;
+        $this->liveComplementaryStatesByShopifyId[$shopifyId] = $states;
 
         return $states;
     }
@@ -777,8 +777,9 @@ class ComplementaryProductAuditService
     private function productComplementaryQuery(): string
     {
         return <<<'GRAPHQL'
-query ComplementaryProductAudit($handle: String!) {
-  productByHandle(handle: $handle) {
+query ComplementaryProductAudit($id: ID!) {
+  product: node(id: $id) {
+    ... on Product {
     standardComplementary: metafield(namespace: "shopify--discovery--product_recommendation", key: "complementary_products") {
       references(first: 10) {
         nodes {
@@ -812,6 +813,7 @@ query ComplementaryProductAudit($handle: String!) {
           }
         }
       }
+    }
     }
   }
 }
