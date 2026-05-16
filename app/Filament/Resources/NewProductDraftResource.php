@@ -257,10 +257,9 @@ class NewProductDraftResource extends Resource
 
     public static function applyWorkingDraftStatuses(Builder $query): Builder
     {
-        return $query->where(function (Builder $sub): void {
-            $sub->whereRaw('LOWER(status) = ?', ['active'])
-                ->orWhereRaw('LOWER(status) = ?', ['draft']);
-        });
+        return $query
+            ->whereIn(\DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
+            ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%']);
     }
 
     public static function form(Forms\Form $form): Forms\Form

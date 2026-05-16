@@ -162,8 +162,7 @@ class ListNewProductDrafts extends ListRecords
 
     private static function applyHeaderReportScope(Builder $query): Builder
     {
-        return $query
-            ->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft'])
+        return NewProductDraftResource::applyWorkingDraftStatuses($query)
             ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%'])
             ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
     }
@@ -237,7 +236,7 @@ class ListNewProductDrafts extends ListRecords
 
     private static function applyShopifyClashFilter(Builder $query): Builder
     {
-        return $query
+        return NewProductDraftResource::applyWorkingDraftStatuses($query)
             ->whereNotNull('shopify_sync_warnings')
             ->where('shopify_sync_warnings', '!=', '[]');
     }
