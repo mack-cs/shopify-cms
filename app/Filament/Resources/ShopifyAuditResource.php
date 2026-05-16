@@ -168,7 +168,12 @@ class ShopifyAuditResource extends Resource
     {
         return parent::getEloquentQuery()
             ->with('product')
-            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS);
+
+            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+             ->whereHas('product',
+             function (Builder $query): void {
+            $query->where('status','=','active')->whereRaw('LOWER(title) NOT LIKE ?', ['%test%']);
+        });;
     }
 
     public static function canViewAny(): bool
