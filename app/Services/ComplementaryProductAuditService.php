@@ -45,6 +45,8 @@ class ComplementaryProductAuditService
      *   shopify_good:bool,
      *   shopify_ids:array<int, int>,
      *   shopify_eligible_ids:array<int, int>,
+     *   shopify_missing_local_ids:array<int, int>,
+     *   shopify_missing_local:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
      *   shopify_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
      *   desired_shopify_gids:array<int, string>
      * }
@@ -91,6 +93,21 @@ class ComplementaryProductAuditService
             }
         }
 
+        $shopifyMissingLocalIds = [];
+        $shopifyMissingLocal = [];
+
+        foreach ($shopifyStates as $state) {
+            $resolvedId = $this->resolveProductIdFromLiveState($state);
+            if ($resolvedId === null || in_array($resolvedId, $localIds, true)) {
+                continue;
+            }
+
+            if (!in_array($resolvedId, $shopifyMissingLocalIds, true)) {
+                $shopifyMissingLocalIds[] = $resolvedId;
+                $shopifyMissingLocal[] = $state;
+            }
+        }
+
         return [
             'local_total' => count($localIds),
             'local_good' => count($localIds) >= self::LOCAL_TARGET_COUNT,
@@ -100,10 +117,11 @@ class ComplementaryProductAuditService
             'local_ineligible' => $localIneligible,
             'shopify_total' => count($shopifyStates),
             'shopify_eligible' => count($shopifyEligibleIds),
-            'shopify_good' => count($shopifyStates) === self::SHOPIFY_TARGET_COUNT
-                && count($shopifyEligibleIds) === self::SHOPIFY_TARGET_COUNT,
+            'shopify_good' => $shopifyIneligible === [] && $shopifyMissingLocalIds === [],
             'shopify_ids' => $shopifyIds,
             'shopify_eligible_ids' => $shopifyEligibleIds,
+            'shopify_missing_local_ids' => $shopifyMissingLocalIds,
+            'shopify_missing_local' => $shopifyMissingLocal,
             'shopify_ineligible' => $shopifyIneligible,
             'desired_shopify_gids' => array_slice(
                 $this->productIdsToShopifyGids($localEligibleIds),
@@ -126,6 +144,8 @@ class ComplementaryProductAuditService
      *   shopify_good:bool,
      *   shopify_ids:array<int, int>,
      *   shopify_eligible_ids:array<int, int>,
+     *   shopify_missing_local_ids:array<int, int>,
+     *   shopify_missing_local:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
      *   shopify_ineligible:array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>,
      *   desired_shopify_gids:array<int, string>
      * }
@@ -163,6 +183,8 @@ class ComplementaryProductAuditService
                 'shopify_good' => false,
                 'shopify_ids' => [],
                 'shopify_eligible_ids' => [],
+                'shopify_missing_local_ids' => [],
+                'shopify_missing_local' => [],
                 'shopify_ineligible' => [],
                 'desired_shopify_gids' => array_slice(
                     $this->productIdsToShopifyGids($localEligibleIds),

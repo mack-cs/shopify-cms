@@ -1169,15 +1169,15 @@ class ProductResource extends Resource
             SelectFilter::make('shopify_complementary_status')
                 ->label('Shopify Complementary')
                 ->options([
-                    'healthy' => 'Healthy on Shopify (exactly 3 valid)',
-                    'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                    'healthy' => 'Healthy on Shopify (valid refs already in local list)',
+                    'flagged' => 'Flagged on Shopify (invalid or missing from local list)',
                 ])
                 ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
                     $data,
                     'Shopify Complementary',
                     [
-                        'healthy' => 'Healthy on Shopify (exactly 3 valid)',
-                        'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                        'healthy' => 'Healthy on Shopify (valid refs already in local list)',
+                        'flagged' => 'Flagged on Shopify (invalid or missing from local list)',
                     ]
                 ))
                 ->query(function (Builder $query, array $data): Builder {
@@ -4371,6 +4371,17 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
             $reason = trim((string) ($item['reason'] ?? ''));
             if ($label !== '') {
                 $parts[] = 'Shopify ref invalid: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        foreach (($details['shopify_missing_local'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Shopify ref missing from local list: ' . $label;
             }
         }
 

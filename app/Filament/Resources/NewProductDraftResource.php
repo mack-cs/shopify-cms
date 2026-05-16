@@ -3197,15 +3197,15 @@ class NewProductDraftResource extends Resource
                 SelectFilter::make('shopify_complementary_status')
                     ->label('Shopify Complementary')
                     ->options([
-                        'healthy' => 'Healthy on Shopify (exactly 3 valid)',
-                        'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                        'healthy' => 'Healthy on Shopify (valid refs already in local list)',
+                        'flagged' => 'Flagged on Shopify (invalid or missing from local list)',
                     ])
                     ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
                         $data,
                         'Shopify Complementary',
                         [
-                            'healthy' => 'Healthy on Shopify (exactly 3 valid)',
-                            'flagged' => 'Flagged on Shopify (not exactly 3 valid)',
+                            'healthy' => 'Healthy on Shopify (valid refs already in local list)',
+                            'flagged' => 'Flagged on Shopify (invalid or missing from local list)',
                         ]
                     ))
                     ->query(function (Builder $query, array $data): Builder {
@@ -5373,16 +5373,26 @@ class NewProductDraftResource extends Resource
         }
 
         $items = array_map(function (array $warning): string {
+            $field = trim((string) ($warning['field'] ?? ''));
             $label = e((string) ($warning['label'] ?? $warning['field'] ?? 'Field'));
             $draftValue = e((string) ($warning['draft_value'] ?? ''));
             $shopifyValue = e((string) ($warning['shopify_value'] ?? ''));
+            $encodedField = e($field);
 
-            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but <strong>Shopify</strong> imported <code>{$shopifyValue}</code>.</li>";
+            $actions = $field === ''
+                ? ''
+                : "<div class='mt-2 flex flex-wrap gap-2'>"
+                    . "<button type='button' wire:click=\"resolveSingleShopifyWarningUsingShopify('{$encodedField}')\" wire:loading.attr='disabled' class='inline-flex items-center rounded-lg bg-warning-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-warning-500'>Use Shopify For This Field</button>"
+                    . "<button type='button' wire:click=\"resolveSingleShopifyWarningKeepingDraft('{$encodedField}')\" wire:loading.attr='disabled' class='inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50'>Keep Draft For This Field</button>"
+                    . "</div>";
+
+            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but <strong>Shopify</strong> imported <code>{$shopifyValue}</code>.{$actions}</li>";
         }, $warnings);
 
         return new HtmlString(
             "<div class='rounded-xl border border-warning-300 bg-warning-50 p-4 text-sm text-warning-900'>"
             . "<p class='font-semibold mb-2'>Draft values differ from the latest <strong>Shopify</strong> import.</p>"
+            . "<p class='mb-3'>Resolve each conflicting field separately below, or use the bulk actions underneath to apply one decision to every warning.</p>"
             . "<ul class='list-disc pl-5 space-y-1'>"
             . implode('', $items)
             . '</ul>'
@@ -5406,7 +5416,7 @@ class NewProductDraftResource extends Resource
         return new HtmlString(
             "<div id='draft-warning-block' class='rounded-xl border-2 border-danger-300 bg-danger-50 p-4 text-sm text-danger-900'>"
             . "<p class='font-semibold mb-2'>Resolve <strong>Shopify</strong> conflicts before changing the conflicting fields in this draft.</p>"
-            . "<p>This draft has {$warningCount} unresolved <strong>Shopify</strong> sync warning(s). Non-conflicting changes can still be saved, but conflicting fields must be resolved first using <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> below. Scroll up and resolve those conflicts first.</p>"
+            . "<p>This draft has {$warningCount} unresolved <strong>Shopify</strong> sync warning(s). Non-conflicting changes can still be saved, but conflicting fields must be resolved first using the per-field choices below or the bulk <strong>Use Shopify Values</strong> / <strong>Keep Draft Values</strong> actions.</p>"
             . "</div>"
             . "<script>
                 (function () {
@@ -5437,7 +5447,7 @@ class NewProductDraftResource extends Resource
         $count = (int) ($record?->shopifySyncWarningCount() ?? 0);
 
         return $count > 0
-            ? "This draft has {$count} unresolved Shopify sync warning(s). Conflicting fields must be resolved first. Scroll up and use Keep Draft Values or Use Shopify Values."
+            ? "This draft has {$count} unresolved Shopify sync warning(s). Conflicting fields must be resolved first. Scroll up and choose per-field actions or use the bulk keep/apply actions."
             : 'Resolve Shopify sync warnings for the conflicting fields before editing them.';
     }
 
@@ -5503,7 +5513,7 @@ class NewProductDraftResource extends Resource
         return new HtmlString(
             "<div class='rounded-xl border border-danger-300 bg-danger-50 p-3 text-sm text-danger-900'>"
             . "<p class='font-semibold'>Some fields are locked because they conflict with the latest Shopify import.</p>"
-            . "<p>Scroll up, review the Shopify conflict warning, then use <strong>Use Shopify Values</strong> or <strong>Keep Draft Values</strong> to unlock them.</p>"
+            . "<p>Scroll up, review the Shopify conflict warning, then resolve that field with its per-field action or the bulk actions.</p>"
             . '</div>'
         );
     }
@@ -5631,6 +5641,74 @@ class NewProductDraftResource extends Resource
             'synced' => $synced,
             'skipped' => $skipped,
         ];
+    }
+
+    /**
+     * @return array{resolved:bool,synced:bool}
+     */
+    public static function resolveSingleShopifyWarning(NewProductDraft $record, string $field, string $strategy): array
+    {
+        $field = trim($field);
+        if ($field === '') {
+            return ['resolved' => false, 'synced' => false];
+        }
+
+        $warnings = $record->shopifySyncWarnings();
+        $warning = collect($warnings)->first(
+            fn (array $item): bool => trim((string) ($item['field'] ?? '')) === $field
+        );
+
+        if (!is_array($warning)) {
+            return ['resolved' => false, 'synced' => false];
+        }
+
+        $remainingWarnings = array_values(array_filter(
+            $warnings,
+            static fn (array $item): bool => trim((string) ($item['field'] ?? '')) !== $field
+        ));
+
+        if ($strategy === 'shopify') {
+            $updates = [
+                $field => self::draftWarningResolvedValue(
+                    $field,
+                    (string) ($warning['shopify_value'] ?? '')
+                ),
+            ];
+
+            if (NewProductDraft::supportsShopifySyncWarningsColumn()) {
+                $updates['shopify_sync_warnings'] = $remainingWarnings === [] ? null : $remainingWarnings;
+            }
+
+            NewProductDraft::withoutEvents(function () use ($record, $updates): void {
+                $record->fill($updates)->save();
+            });
+
+            return ['resolved' => true, 'synced' => false];
+        }
+
+        if ($strategy === 'draft') {
+            $updates = [];
+
+            if (NewProductDraft::supportsShopifySyncWarningsColumn()) {
+                $updates['shopify_sync_warnings'] = $remainingWarnings === [] ? null : $remainingWarnings;
+            }
+
+            if ($updates !== []) {
+                NewProductDraft::withoutEvents(function () use ($record, $updates): void {
+                    $record->forceFill($updates)->save();
+                });
+            }
+
+            $synced = app(NewProductDraftProductSync::class)->syncToExistingProduct(
+                $record->fresh() ?? $record,
+                ensureApprovalReset: true,
+                attributes: [$field]
+            );
+
+            return ['resolved' => true, 'synced' => $synced];
+        }
+
+        return ['resolved' => false, 'synced' => false];
     }
 
     private static function draftWarningResolvedValue(string $field, string $value): mixed
@@ -5883,6 +5961,17 @@ class NewProductDraftResource extends Resource
             $reason = trim((string) ($item['reason'] ?? ''));
             if ($label !== '') {
                 $parts[] = 'Shopify ref invalid: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        foreach (($details['shopify_missing_local'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Shopify ref missing from local list: ' . $label;
             }
         }
 

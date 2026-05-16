@@ -1,5 +1,6 @@
 <?php
 
+use App\Filament\Resources\NewProductDraftResource;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -99,6 +100,81 @@ it('backfills empty draft fields from shopify sync and records warnings for conf
     expect($seeded->shopifySyncWarnings()[0]['field'])->toBe('vendor');
     expect($seeded->shopifySyncWarnings()[0]['draft_value'])->toBe('Draft Vendor');
     expect($seeded->shopifySyncWarnings()[0]['shopify_value'])->toBe('Shopify Vendor');
+});
+
+it('does not flag uvp short paragraph conflicts when only rich text formatting and punctuation differ', function (): void {
+    $product = createWorkflowTestProduct([
+        'uvp_short_paragraph' => '<p><strong>A Night in Barcelona</strong> is vibrant playful sophistication. For women who embody <strong>passion</strong>, <strong>confidence</strong>, and radiant <strong>allure</strong>.</p>',
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'uvp_short_paragraph' => '<p><strong>A Night in Barcelona</strong> is vibrant playful sophistication. For women who embody <strong>passion</strong>/<strong>confidence</strong>, and radiant <strong>allure</strong>. </p>',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->uvp_short_paragraph)->toBe($draft->uvp_short_paragraph);
+    expect($seeded->shopifySyncWarnings())->toBe([]);
+    expect($seeded->shopifySyncWarningCount())->toBe(0);
+});
+
+it('allows resolving shopify warnings one field at a time with different decisions', function (): void {
+    $product = createWorkflowTestProduct([
+        'vendor' => 'Shopify Vendor',
+        'type' => 'Bracelets',
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'vendor' => 'Draft Vendor',
+        'type' => 'Draft Type',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'shopify_sync_warnings' => [
+            [
+                'field' => 'vendor',
+                'label' => 'Vendor',
+                'draft_value' => 'Draft Vendor',
+                'shopify_value' => 'Shopify Vendor',
+            ],
+            [
+                'field' => 'type',
+                'label' => 'Type',
+                'draft_value' => 'Draft Type',
+                'shopify_value' => 'Bracelets',
+            ],
+        ],
+    ]));
+
+    $keepResult = NewProductDraftResource::resolveSingleShopifyWarning($draft->fresh(), 'vendor', 'draft');
+
+    $draft->refresh();
+    $product->refresh();
+
+    expect($keepResult['resolved'])->toBeTrue();
+    expect($keepResult['synced'])->toBeTrue();
+    expect($draft->vendor)->toBe('Draft Vendor');
+    expect($product->vendor)->toBe('Draft Vendor');
+    expect($draft->shopifySyncWarningCount())->toBe(1);
+    expect($draft->shopifySyncWarnings()[0]['field'])->toBe('type');
+
+    $shopifyResult = NewProductDraftResource::resolveSingleShopifyWarning($draft->fresh(), 'type', 'shopify');
+
+    $draft->refresh();
+
+    expect($shopifyResult['resolved'])->toBeTrue();
+    expect($shopifyResult['synced'])->toBeFalse();
+    expect($draft->type)->toBe('Bracelets');
+    expect($draft->shopifySyncWarningCount())->toBe(0);
 });
 
 it('keeps sibling option name exactly in sync with the draft title', function (): void {

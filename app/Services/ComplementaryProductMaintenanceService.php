@@ -64,6 +64,8 @@ class ComplementaryProductMaintenanceService
                                 'local_ineligible' => $analysis['local_ineligible'] ?? [],
                                 'shopify_ids' => $analysis['shopify_ids'] ?? [],
                                 'shopify_eligible_ids' => $analysis['shopify_eligible_ids'] ?? [],
+                                'shopify_missing_local_ids' => $analysis['shopify_missing_local_ids'] ?? [],
+                                'shopify_missing_local' => $analysis['shopify_missing_local'] ?? [],
                                 'shopify_ineligible' => $analysis['shopify_ineligible'] ?? [],
                                 'desired_shopify_gids' => $analysis['desired_shopify_gids'] ?? [],
                                 'audit_source' => 'live_shopify_admin_graphql',

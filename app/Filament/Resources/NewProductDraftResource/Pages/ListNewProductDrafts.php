@@ -82,6 +82,15 @@ class ListNewProductDrafts extends ListRecords
                 ));
         }
 
+        if ($reportCounts['shopify_clash'] > 0) {
+            $tabs['shopify_clash'] = Tab::make('Shopify Clash')
+                ->badge((string) $reportCounts['shopify_clash'])
+                ->badgeColor('danger')
+                ->modifyQueryUsing(fn (Builder $query) => self::applyShopifyClashFilter(
+                    self::applyHeaderReportScope($query)
+                ));
+        }
+
         if ($reportCounts['missing_siblings'] > 0) {
             $tabs['missing_siblings'] = Tab::make('No Siblings')
                 ->badge((string) $reportCounts['missing_siblings'])
@@ -133,6 +142,9 @@ class ListNewProductDrafts extends ListRecords
             'missing_uvp' => NewProductDraftResource::applyMissingUvpReportFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
+            'shopify_clash' => self::applyShopifyClashFilter(
+                self::applyHeaderReportScope(NewProductDraft::query())
+            )->count(),
             'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
@@ -161,7 +173,8 @@ class ListNewProductDrafts extends ListRecords
      */
     private function resolvedStatusTabs(): array
     {
-        $preferred = ['active', 'draft', 'archived', 'unlisted'];
+        $preferred = ['active', 'draft'];
+        $excluded = ['archived', 'unlisted'];
         $resolved = [];
 
         $configuredStatuses = Status::query()
@@ -204,14 +217,29 @@ class ListNewProductDrafts extends ListRecords
             }
 
             $key = strtolower($label);
+            if (in_array($key, $excluded, true)) {
+                continue;
+            }
+
             $resolved[$key] = $resolved[$key] ?? self::formatStatusTabLabel($label);
         }
 
         foreach ($presentStatuses as $key => $label) {
+            if (in_array($key, $excluded, true)) {
+                continue;
+            }
+
             $resolved[$key] = $resolved[$key] ?? self::formatStatusTabLabel($label);
         }
 
         return $resolved;
+    }
+
+    private static function applyShopifyClashFilter(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('shopify_sync_warnings')
+            ->where('shopify_sync_warnings', '!=', '[]');
     }
 
     private static function formatStatusTabLabel(string $label): string

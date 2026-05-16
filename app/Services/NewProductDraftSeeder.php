@@ -123,7 +123,7 @@ final class NewProductDraftSeeder
             $currentValue = $draft->getAttribute($key);
 
             if (in_array($key, $identityFields, true)) {
-                if (!$this->valuesMatch($currentValue, $incomingValue)) {
+                if (!$this->valuesMatch($key, $currentValue, $incomingValue)) {
                     $changes[$key] = $incomingValue;
                 }
                 continue;
@@ -142,7 +142,7 @@ final class NewProductDraftSeeder
                 continue;
             }
 
-            if ($supportsWarnings && !$this->valuesMatch($currentValue, $incomingValue)) {
+            if ($supportsWarnings && !$this->valuesMatch($key, $currentValue, $incomingValue)) {
                 $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
             }
         }
@@ -393,13 +393,13 @@ final class NewProductDraftSeeder
         };
     }
 
-    private function valuesMatch(mixed $left, mixed $right): bool
+    private function valuesMatch(string $field, mixed $left, mixed $right): bool
     {
         if (is_array($left) || is_array($right)) {
             return $this->normalizeArrayValue($left) === $this->normalizeArrayValue($right);
         }
 
-        return $this->stringifyValue($left) === $this->stringifyValue($right);
+        return $this->normalizeComparableValue($field, $left) === $this->normalizeComparableValue($field, $right);
     }
 
     /**
@@ -438,5 +438,25 @@ final class NewProductDraftSeeder
         }
 
         return trim((string) $value);
+    }
+
+    private function normalizeComparableValue(string $field, mixed $value): string
+    {
+        $string = $this->stringifyValue($value);
+
+        return match ($field) {
+            'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
+            default => $string,
+        };
+    }
+
+    private function normalizeRichTextForComparison(string $value): string
+    {
+        $text = html_entity_decode(strip_tags($value), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = str_replace(['/', '\\'], ' ', $text);
+        $text = preg_replace('/[[:punct:]]+/u', ' ', $text) ?? $text;
+        $text = preg_replace('/\s+/u', ' ', strtolower(trim($text))) ?? strtolower(trim($text));
+
+        return $text;
     }
 }

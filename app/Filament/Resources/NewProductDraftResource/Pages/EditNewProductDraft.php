@@ -92,6 +92,71 @@ class EditNewProductDraft extends EditRecord
         ];
     }
 
+    public function resolveSingleShopifyWarningUsingShopify(string $field): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        $result = NewProductDraftResource::resolveSingleShopifyWarning(
+            $this->record->fresh() ?? $this->record,
+            $field,
+            'shopify'
+        );
+
+        if (!$result['resolved']) {
+            Notification::make()
+                ->title('Warning not resolved')
+                ->body('That Shopify warning could not be found. Refresh the page and try again.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+
+        Notification::make()
+            ->title('Shopify value applied')
+            ->success()
+            ->send();
+
+        $this->redirect(static::getResource()::getUrl('edit', ['record' => $this->record]));
+    }
+
+    public function resolveSingleShopifyWarningKeepingDraft(string $field): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        $result = NewProductDraftResource::resolveSingleShopifyWarning(
+            $this->record->fresh() ?? $this->record,
+            $field,
+            'draft'
+        );
+
+        if (!$result['resolved']) {
+            Notification::make()
+                ->title('Warning not resolved')
+                ->body('That Shopify warning could not be found. Refresh the page and try again.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+
+        Notification::make()
+            ->title('Draft value kept')
+            ->body($result['synced'] ? 'That field was synced back to Products.' : null)
+            ->success()
+            ->send();
+
+        $this->redirect(static::getResource()::getUrl('edit', ['record' => $this->record]));
+    }
+
     private function hasBlockingShopifyWarnings(): bool
     {
         return (($this->record?->shopifySyncWarningCount() ?? 0) > 0);

@@ -13,7 +13,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
-it('flags shopify complementary products below three valid items and chooses a valid local backup', function (): void {
+it('flags shopify complementary products when a live shopify ref is invalid and chooses a valid local backup', function (): void {
     $user = User::factory()->create();
     $import = Import::create([
         'filename' => 'shopify-products',
@@ -130,7 +130,65 @@ it('matches draft filters using local and live complementary status', function (
         ->and($service->draftIdsMatchingShopifyStatus('flagged'))->toContain($draft->id);
 });
 
-it('flags shopify complementary products when more than three valid products are live', function (): void {
+it('treats fewer live shopify complementary products as healthy when they already exist locally', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $main = Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/350',
+        'handle' => 'subset-healthy',
+        'title' => 'Subset Healthy',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    Variant::create([
+        'product_id' => $main->id,
+        'inventory_qty' => 10,
+        'sync_state' => Variant::SYNC_STATE_SYNCED,
+    ]);
+
+    $a = createComplementaryCandidate($import->id, 351, 'subset-a', 'active', 5);
+    $b = createComplementaryCandidate($import->id, 352, 'subset-b', 'active', 5);
+    $c = createComplementaryCandidate($import->id, 353, 'subset-c', 'active', 5);
+    $d = createComplementaryCandidate($import->id, 354, 'subset-d', 'active', 5);
+
+    ShopifyRow::create([
+        'import_id' => $import->id,
+        'row_index' => 1,
+        'handle' => $main->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [$a->handle, $b->handle, $c->handle, $d->handle]),
+        ],
+    ]);
+
+    ShopifyMetafield::create([
+        'import_id' => $import->id,
+        'handle' => $main->handle,
+        'namespace' => ComplementaryProductAuditService::STANDARD_NAMESPACE,
+        'key' => ComplementaryProductAuditService::STANDARD_KEY,
+        'type' => 'list.product_reference',
+        'value' => json_encode([$a->shopify_id, $c->shopify_id], JSON_UNESCAPED_SLASHES),
+    ]);
+
+    $analysis = app(ComplementaryProductAuditService::class)->analyzeProduct($main);
+
+    expect($analysis['shopify_total'])->toBe(2)
+        ->and($analysis['shopify_eligible'])->toBe(2)
+        ->and($analysis['shopify_missing_local_ids'])->toBe([])
+        ->and($analysis['shopify_good'])->toBeTrue();
+});
+
+it('flags shopify complementary products when a live shopify ref is missing from the local list', function (): void {
     $user = User::factory()->create();
     $import = Import::create([
         'filename' => 'shopify-products',
@@ -144,8 +202,8 @@ it('flags shopify complementary products when more than three valid products are
     $main = Product::create([
         'import_id' => $import->id,
         'shopify_id' => 'gid://shopify/Product/400',
-        'handle' => 'too-many-live',
-        'title' => 'Too Many Live',
+        'handle' => 'missing-local-live',
+        'title' => 'Missing Local Live',
         'status' => 'active',
         'approval_version' => 1,
     ]);
@@ -167,7 +225,7 @@ it('flags shopify complementary products when more than three valid products are
         'handle' => $main->handle,
         'row_type' => 'product_primary',
         'data' => [
-            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [$a->handle, $b->handle, $c->handle, $d->handle]),
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [$a->handle, $b->handle, $c->handle]),
         ],
     ]);
 
@@ -184,6 +242,7 @@ it('flags shopify complementary products when more than three valid products are
 
     expect($analysis['shopify_total'])->toBe(4)
         ->and($analysis['shopify_eligible'])->toBe(4)
+        ->and($analysis['shopify_missing_local_ids'])->toBe([$d->id])
         ->and($analysis['shopify_good'])->toBeFalse();
 });
 

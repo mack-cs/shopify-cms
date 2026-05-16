@@ -63,7 +63,7 @@ class ShopifyAuditResource extends Resource
                     ->sortable(),
                 TextColumn::make('shopify_valid_count')
                     ->label('Shopify Valid')
-                    ->description('Healthy only when Shopify has exactly 3 valid complementary products')
+                    ->description('Healthy when Shopify refs stay valid and already exist in the local complementary list')
                     ->sortable()
                     ->toggleable(),
                 TextColumn::make('status')
@@ -234,6 +234,17 @@ class ShopifyAuditResource extends Resource
             $reason = trim((string) ($item['reason'] ?? ''));
             if ($label !== '') {
                 $parts[] = 'Shopify ref invalid: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        foreach (($details['shopify_missing_local'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Shopify ref missing from local list: ' . $label;
             }
         }
 
