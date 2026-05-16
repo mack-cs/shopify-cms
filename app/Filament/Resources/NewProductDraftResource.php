@@ -3218,67 +3218,111 @@ class NewProductDraftResource extends Resource
 
                         return $ids === [] ? $query->whereRaw('1 = 0') : $query->whereKey($ids);
                     }),
+                // SelectFilter::make('complementary_audit_status')
+                //     ->label('Complementary Audit')
+                //     ->options([
+                //         'flagged' => 'Needs Audit',
+                //         'healthy' => 'Healthy',
+                //         'missing' => 'Not Checked',
+                //     ])
+                //     ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                //         $data,
+                //         'Complementary Audit',
+                //         [
+                //             'flagged' => 'Needs Audit',
+                //             'healthy' => 'Healthy',
+                //             'missing' => 'Not Checked',
+                //         ]
+                //     ))
+                //     ->query(function (Builder $query, array $data): Builder {
+                //         $value = trim((string) ($data['value'] ?? ''));
+
+                //         return match ($value) {
+                //             'flagged' => $query->whereExists(function (Builder $sub): void {
+                //                 $sub->selectRaw('1')
+                //                     ->from('products')
+                //                     ->join('shopify_audits', function ($join): void {
+                //                         $join->on('shopify_audits.product_id', '=', 'products.id')
+                //                             ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                //                             ->where('shopify_audits.status', ShopifyAudit::STATUS_FLAGGED);
+                //                     })
+                //                     ->where(function (Builder $match): void {
+                //                         $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                //                             ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                //                     });
+                //             }),
+                //             'healthy' => $query->whereExists(function (Builder $sub): void {
+                //                 $sub->selectRaw('1')
+                //                     ->from('products')
+                //                     ->join('shopify_audits', function ($join): void {
+                //                         $join->on('shopify_audits.product_id', '=', 'products.id')
+                //                             ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                //                             ->where('shopify_audits.status', ShopifyAudit::STATUS_HEALTHY);
+                //                     })
+                //                     ->where(function (Builder $match): void {
+                //                         $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                //                             ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                //                     });
+                //             }),
+                //             'missing' => $query->whereNotExists(function (Builder $sub): void {
+                //                 $sub->selectRaw('1')
+                //                     ->from('products')
+                //                     ->join('shopify_audits', function ($join): void {
+                //                         $join->on('shopify_audits.product_id', '=', 'products.id')
+                //                             ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS);
+                //                     })
+                //                     ->where(function (Builder $match): void {
+                //                         $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                //                             ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                //                     });
+                //             }),
+                //             default => $query,
+                //         };
+                //     }),
                 SelectFilter::make('complementary_audit_status')
-                    ->label('Complementary Audit')
-                    ->options([
+                ->label('Complementary Audit')
+                ->options([
+                    'flagged' => 'Needs Audit',
+                    'healthy' => 'Healthy',
+                    'missing' => 'Not Checked',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Complementary Audit',
+                    [
                         'flagged' => 'Needs Audit',
                         'healthy' => 'Healthy',
                         'missing' => 'Not Checked',
-                    ])
-                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
-                        $data,
-                        'Complementary Audit',
-                        [
-                            'flagged' => 'Needs Audit',
-                            'healthy' => 'Healthy',
-                            'missing' => 'Not Checked',
-                        ]
-                    ))
-                    ->query(function (Builder $query, array $data): Builder {
-                        $value = trim((string) ($data['value'] ?? ''));
+                    ]
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    $value = trim((string) ($data['value'] ?? ''));
 
-                        return match ($value) {
-                            'flagged' => $query->whereExists(function (Builder $sub): void {
-                                $sub->selectRaw('1')
-                                    ->from('products')
-                                    ->join('shopify_audits', function ($join): void {
-                                        $join->on('shopify_audits.product_id', '=', 'products.id')
-                                            ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                                            ->where('shopify_audits.status', ShopifyAudit::STATUS_FLAGGED);
-                                    })
-                                    ->where(function (Builder $match): void {
-                                        $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
-                                            ->orWhereColumn('products.handle', 'new_product_drafts.handle');
-                                    });
-                            }),
-                            'healthy' => $query->whereExists(function (Builder $sub): void {
-                                $sub->selectRaw('1')
-                                    ->from('products')
-                                    ->join('shopify_audits', function ($join): void {
-                                        $join->on('shopify_audits.product_id', '=', 'products.id')
-                                            ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                                            ->where('shopify_audits.status', ShopifyAudit::STATUS_HEALTHY);
-                                    })
-                                    ->where(function (Builder $match): void {
-                                        $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
-                                            ->orWhereColumn('products.handle', 'new_product_drafts.handle');
-                                    });
-                            }),
-                            'missing' => $query->whereNotExists(function (Builder $sub): void {
-                                $sub->selectRaw('1')
-                                    ->from('products')
-                                    ->join('shopify_audits', function ($join): void {
-                                        $join->on('shopify_audits.product_id', '=', 'products.id')
-                                            ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS);
-                                    })
-                                    ->where(function (Builder $match): void {
-                                        $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
-                                            ->orWhereColumn('products.handle', 'new_product_drafts.handle');
-                                    });
-                            }),
-                            default => $query,
-                        };
-                    }),
+                    return match ($value) {
+                        'flagged' => self::applyDraftComplementaryAuditStatusFilter(
+                            $query,
+                            ShopifyAudit::STATUS_FLAGGED
+                        ),
+
+                        'healthy' => self::applyDraftComplementaryAuditStatusFilter(
+                            $query,
+                            ShopifyAudit::STATUS_HEALTHY
+                        ),
+
+                        'missing' => $query->whereNotExists(function ($sub): void {
+                            $sub->selectRaw('1')
+                                ->from('products')
+                                ->join('shopify_audits', 'shopify_audits.product_id', '=', 'products.id')
+                                ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                                ->where(function ($match): void {
+                                    $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                                        ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                                });
+                        }),
+
+                        default => $query,
+                    };
+                }),
                 Filter::make('pending_changes')
                     ->label('Pending Changes')
                     ->indicator('Pending Changes')
@@ -3791,6 +3835,23 @@ class NewProductDraftResource extends Resource
         return [
             RelationManagers\StyleProfileRelationManager::class,
         ];
+    }
+
+    private static function applyDraftComplementaryAuditStatusFilter(
+    Builder $query,
+    string $status
+    ): Builder {
+        return $query->whereExists(function ($sub) use ($status): void {
+            $sub->selectRaw('1')
+                ->from('products')
+                ->join('shopify_audits', 'shopify_audits.product_id', '=', 'products.id')
+                ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                ->where('shopify_audits.status', $status)
+                ->where(function ($match): void {
+                    $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                        ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                });
+        });
     }
 
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
