@@ -2452,7 +2452,7 @@ GQL;
                     return $resolved;
                 }
             }
-            return $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
+            return $this->referenceFallbackFromExistingRaw($type, $existingRawValue, $lookup);
         }
 
         if (str_starts_with($type, 'list.')) {
@@ -2649,7 +2649,7 @@ GQL;
         return $result;
     }
 
-    private function referenceFallbackFromExistingRaw(string $type, ?string $existingRawValue): ?string
+    private function referenceFallbackFromExistingRaw(string $type, ?string $existingRawValue, ?string $lookup = null): ?string
     {
         if ($existingRawValue === null) {
             return null;
@@ -2667,6 +2667,8 @@ GQL;
             }
 
             $items = array_values(array_filter($decoded, fn ($item) => is_string($item) && str_starts_with($item, 'gid://')));
+            $items = $this->limitReferenceItemsForLookup($lookup, $items);
+
             return empty($items) ? null : json_encode($items);
         }
 
