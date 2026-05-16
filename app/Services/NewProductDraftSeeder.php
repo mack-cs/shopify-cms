@@ -364,8 +364,8 @@ final class NewProductDraftSeeder
         return [
             'field' => $field,
             'label' => $this->warningLabel($field),
-            'draft_value' => $this->stringifyValue($draftValue),
-            'shopify_value' => $this->stringifyValue($shopifyValue),
+            'draft_value' => $this->stringifyDisplayValue($field, $draftValue),
+            'shopify_value' => $this->stringifyDisplayValue($field, $shopifyValue),
         ];
     }
 
@@ -446,8 +446,56 @@ final class NewProductDraftSeeder
 
         return match ($field) {
             'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
+            'product_category' => strtolower($this->normalizeCategoryDisplayValue($string)),
+            'sibling_collection' => strtolower($this->normalizeSiblingCollectionDisplayValue($string)),
             default => $string,
         };
+    }
+
+    private function stringifyDisplayValue(string $field, mixed $value): string
+    {
+        $string = $this->stringifyValue($value);
+
+        return match ($field) {
+            'product_category' => $this->normalizeCategoryDisplayValue($string),
+            'sibling_collection' => $this->normalizeSiblingCollectionDisplayValue($string),
+            default => $string,
+        };
+    }
+
+    private function normalizeCategoryDisplayValue(string $value): string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return '';
+        }
+
+        return trim((string) (CategoryTypeMap::categoryLabelForValue($trimmed) ?? $trimmed));
+    }
+
+    private function normalizeSiblingCollectionDisplayValue(string $value): string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return '';
+        }
+
+        if (!str_starts_with($trimmed, 'gid://shopify/Collection/')) {
+            return $trimmed;
+        }
+
+        $collection = ShopifyCollection::query()
+            ->where('shopify_id', $trimmed)
+            ->first(['title', 'handle']);
+
+        $title = trim((string) ($collection?->title ?? ''));
+        if ($title !== '') {
+            return $title;
+        }
+
+        $handle = trim((string) ($collection?->handle ?? ''));
+
+        return $handle !== '' ? $handle : $trimmed;
     }
 
     private function normalizeRichTextForComparison(string $value): string
