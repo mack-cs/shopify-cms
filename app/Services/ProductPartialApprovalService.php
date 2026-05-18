@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\RolesEnum;
 use App\Jobs\SendProductPartialApprovalRequestEmailJob;
+use App\Models\ChangeLog;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
@@ -374,6 +375,59 @@ class ProductPartialApprovalService
             'skipped_stale' => $skippedStale,
             'skipped_own_request' => $skippedOwnRequest,
             'skipped_targeted' => $skippedTargeted,
+        ];
+    }
+
+    /**
+     * @param Collection<int, ProductPartialApprovalRequest> $requests
+     * @return array{deleted:int,skipped_not_pending:int}
+     */
+    public function deletePendingRequests(Collection $requests, int $userId): array
+    {
+        $deleted = 0;
+        $skippedNotPending = 0;
+
+        foreach ($requests as $request) {
+            if (!$request instanceof ProductPartialApprovalRequest) {
+                continue;
+            }
+
+            if ($request->status !== ProductPartialApprovalRequest::STATUS_PENDING) {
+                $skippedNotPending++;
+                continue;
+            }
+
+            $product = $request->product;
+
+            ChangeLog::create([
+                'import_id' => $product?->import_id,
+                'product_id' => $product?->id,
+                'changed_by' => $userId,
+                'model_type' => ProductPartialApprovalRequest::class,
+                'model_id' => $request->id,
+                'field' => 'pending_approval_deleted',
+                'old_value' => null,
+                'new_value' => json_encode([
+                    'status' => 'deleted',
+                    'request_id' => (int) $request->id,
+                    'request_batch_id' => $request->request_batch_id,
+                    'requested_by' => (int) $request->requested_by,
+                    'target_approver_id' => $request->target_approver_id !== null ? (int) $request->target_approver_id : null,
+                    'approval_version' => (int) $request->approval_version,
+                    'scopes' => is_array($request->scopes) ? $request->scopes : [],
+                    'core_fields' => is_array($request->core_fields) ? $request->core_fields : [],
+                    'deleted_by' => $userId,
+                    'deleted_at' => now()->toDateTimeString(),
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ]);
+
+            $request->delete();
+            $deleted++;
+        }
+
+        return [
+            'deleted' => $deleted,
+            'skipped_not_pending' => $skippedNotPending,
         ];
     }
 

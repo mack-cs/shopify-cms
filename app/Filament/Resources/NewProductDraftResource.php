@@ -21,6 +21,7 @@ use App\Models\ShopifyRow;
 use App\Models\Status;
 use App\Models\Setting;
 use App\Models\StyleProfile;
+use App\Models\ProductPartialApprovalRequest;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\Variant;
@@ -36,6 +37,7 @@ use App\Services\HeaderStore;
 use App\Services\ShopifyMissingDraftWorkflowService;
 use App\Services\TagNormalizer;
 use App\Services\ComplementaryProductAuditService;
+use App\Services\ProductPartialApprovalService;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Actions;
@@ -67,6 +69,7 @@ use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
 use App\Jobs\SendNewProductDraftAssignmentEmailJob;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
@@ -2373,6 +2376,13 @@ class NewProductDraftResource extends Resource
                     ->state(fn (NewProductDraft $record): string => $record->approvalsForCurrentVersionCount() . '/2')
                     ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByApprovalCount($query, $direction))
                     ->toggleable(),
+                TextColumn::make('approval_state')
+                    ->label('Approval State')
+                    ->state(fn (NewProductDraft $record): string => self::draftApprovalStateLabel($record))
+                    ->badge()
+                    ->color(fn (NewProductDraft $record): string => self::draftApprovalStateColor($record))
+                    ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByApprovalCount($query, $direction))
+                    ->toggleable(),
                 TextColumn::make('shopify_missing_status_display')
                     ->label('Shopify Missing')
                     ->state(fn (NewProductDraft $record): string => match ($record->shopify_missing_status) {
@@ -2577,10 +2587,12 @@ class NewProductDraftResource extends Resource
                     ->label('Quick Edit')
                     ->icon('heroicon-o-adjustments-horizontal')
                     ->color('gray')
-                    ->tooltip('Quick Edit')
-                    ->tooltip(fn (NewProductDraft $record): string => self::draftHasBlockingShopifyWarnings($record)
-                        ? self::draftBlockingWarningsTooltip($record)
-                        : 'Quick Edit')
+                    ->disabled(fn (NewProductDraft $record): bool => $record->isPendingApproval())
+                    ->tooltip(fn (NewProductDraft $record): string => $record->isPendingApproval()
+                        ? 'This draft is already pending approval. Finish the current approval cycle before editing it again.'
+                        : (self::draftHasBlockingShopifyWarnings($record)
+                            ? self::draftBlockingWarningsTooltip($record)
+                            : 'Quick Edit'))
                     ->form(fn (NewProductDraft $record): array => self::draftQuickEditFormSchema($record))
                     ->fillForm(fn (NewProductDraft $record): array => self::draftQuickEditDefaults($record))
                     ->action(function (NewProductDraft $record, array $data): void {
@@ -2590,12 +2602,14 @@ class NewProductDraftResource extends Resource
                     ->label('SEO Draft')
                     ->icon('heroicon-o-document-text')
                     ->color('info')
+                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))) || $record->isPendingApproval())
                     ->tooltip(fn (NewProductDraft $record): string => filled(trim((string) ($record->handle ?? '')))
-                        ? (self::draftHasBlockingShopifyWarnings($record)
+                        ? ($record->isPendingApproval()
+                            ? 'This draft is already pending approval. Finish the current approval cycle before editing it again.'
+                            : (self::draftHasBlockingShopifyWarnings($record)
                             ? self::draftBlockingWarningsTooltip($record)
-                            : 'SEO Draft')
+                            : 'SEO Draft'))
                         : 'Save a handle on this draft before editing the SEO Draft.')
-                    ->disabled(fn (NewProductDraft $record): bool => blank(trim((string) ($record->handle ?? ''))))
                     ->modalWidth('4xl')
                     ->modalHeading(fn (NewProductDraft $record): string|HtmlString => self::seoDraftModalHeading($record))
                     ->modalSubmitActionLabel('Save SEO Draft')
@@ -2611,9 +2625,27 @@ class NewProductDraftResource extends Resource
                     }),
                 Tables\Actions\EditAction::make()
                     ->color('warning')
-                    ->tooltip(fn (NewProductDraft $record): ?string => self::draftHasBlockingShopifyWarnings($record)
-                        ? self::draftBlockingWarningsTooltip($record)
-                        : null),
+                    ->disabled(fn (NewProductDraft $record): bool => $record->isPendingApproval())
+                    ->tooltip(fn (NewProductDraft $record): ?string => $record->isPendingApproval()
+                        ? 'This draft is already pending approval. Finish the current approval cycle before editing it again.'
+                        : (self::draftHasBlockingShopifyWarnings($record)
+                            ? self::draftBlockingWarningsTooltip($record)
+                            : null)),
+                Tables\Actions\Action::make('withdrawFromApproval')
+                    ->label('Withdraw Approval')
+                    ->icon('heroicon-o-arrow-uturn-left')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->visible(fn (NewProductDraft $record): bool => $record->isPendingApproval())
+                    ->action(function (NewProductDraft $record): void {
+                        $result = self::withdrawDraftFromApproval($record, (int) Auth::id());
+
+                        self::sendNotification(Notification::make()
+                            ->title('Draft withdrawn from approval')
+                            ->body("Removed {$result['removed']} approval record(s).")
+                            ->warning()
+                        );
+                    }),
                 Tables\Actions\Action::make('investigateShopifyMissing')
                     ->label('Investigate')
                     ->icon('heroicon-o-magnifying-glass')
@@ -3822,6 +3854,74 @@ class NewProductDraftResource extends Resource
         ]);
     }
 
+    /**
+     * @return array{removed:int}
+     */
+    public static function withdrawDraftFromApproval(NewProductDraft $record, int $userId): array
+    {
+        $product = self::linkedProductForDraft($record);
+        if (filled(trim((string) ($record->handle ?? ''))) && $product instanceof Product) {
+            $requests = $product->partialApprovalRequests()
+                ->where('approval_version', $product->approval_version)
+                ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+                ->get();
+
+            $summary = app(ProductPartialApprovalService::class)->deletePendingRequests($requests, $userId);
+
+            return ['removed' => (int) ($summary['deleted'] ?? 0)];
+        }
+
+        $approvalRows = [];
+
+        $removed = DB::transaction(function () use ($record, $userId, &$approvalRows): int {
+            $approvals = NewProductDraftApproval::query()
+                ->where('new_product_draft_id', $record->id)
+                ->where('approval_version', $record->approval_version)
+                ->get(['id', 'user_id', 'approval_version']);
+
+            $approvalRows = $approvals
+                ->map(fn (NewProductDraftApproval $approval): array => [
+                    'id' => (int) $approval->id,
+                    'user_id' => (int) $approval->user_id,
+                    'approval_version' => (int) $approval->approval_version,
+                ])
+                ->all();
+
+            $count = $approvals->count();
+
+            if ($count > 0) {
+                NewProductDraftApproval::query()
+                    ->where('new_product_draft_id', $record->id)
+                    ->where('approval_version', $record->approval_version)
+                    ->delete();
+            }
+
+            return $count;
+        });
+
+        ChangeLog::create([
+            'import_id' => $record->product?->import_id,
+            'product_id' => $record->product?->id,
+            'changed_by' => $userId,
+            'model_type' => NewProductDraft::class,
+            'model_id' => $record->id,
+            'field' => 'approval_withdrawn',
+            'old_value' => null,
+            'new_value' => json_encode([
+                'status' => 'withdrawn',
+                'approval_version' => (int) $record->approval_version,
+                'title' => $record->title,
+                'handle' => $record->handle,
+                'shopify_id' => $record->shopify_id,
+                'withdrawn_by' => $userId,
+                'withdrawn_at' => now()->toDateTimeString(),
+                'removed_approvals' => $approvalRows,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        ]);
+
+        return ['removed' => $removed];
+    }
+
     public static function getPages(): array
     {
         return [
@@ -3901,6 +4001,32 @@ class NewProductDraftResource extends Resource
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
     {
         return (bool) ($record->product?->has_errors ?? false);
+    }
+
+    private static function draftApprovalStateLabel(NewProductDraft $record): string
+    {
+        if ($record->isApprovedByTwo()) {
+            return 'Approved';
+        }
+
+        if ($record->isPendingApproval()) {
+            return 'Pending Approval';
+        }
+
+        return 'Editing';
+    }
+
+    private static function draftApprovalStateColor(NewProductDraft $record): string
+    {
+        if ($record->isApprovedByTwo()) {
+            return 'success';
+        }
+
+        if ($record->isPendingApproval()) {
+            return 'warning';
+        }
+
+        return 'gray';
     }
 
     private static function draftDisplayImageUrl(NewProductDraft $record): ?string

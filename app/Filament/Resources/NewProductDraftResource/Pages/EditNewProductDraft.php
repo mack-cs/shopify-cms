@@ -23,6 +23,15 @@ class EditNewProductDraft extends EditRecord
 
         $this->acquireEditLock();
 
+        if ($this->record instanceof NewProductDraft && $this->record->isPendingApproval()) {
+            Notification::make()
+                ->title('Draft pending approval')
+                ->body('This draft already has an approval recorded and is pending the current approval cycle. Editing is disabled until that approval cycle is completed.')
+                ->warning()
+                ->persistent()
+                ->send();
+        }
+
         if ($this->hasBlockingShopifyWarnings()) {
             Notification::make()
                 ->title('Shopify conflicts detected')
@@ -46,12 +55,14 @@ class EditNewProductDraft extends EditRecord
     protected function getSaveFormAction(): Actions\Action
     {
         return parent::getSaveFormAction()
-            ->disabled(fn (): bool => $this->isLockedByAnotherUser())
-            ->tooltip(fn (): ?string => $this->hasBlockingShopifyWarnings()
+            ->disabled(fn (): bool => $this->isLockedByAnotherUser() || $this->isPendingApprovalLocked())
+            ->tooltip(fn (): ?string => $this->isPendingApprovalLocked()
+                ? 'This draft is already pending approval. Finish the current approval cycle before editing it again.'
+                : ($this->hasBlockingShopifyWarnings()
                 ? 'Conflicting field changes will not be applied until you resolve the Shopify warnings at the top. Non-conflicting changes can still be saved.'
                 : ($this->isLockedByAnotherUser()
                     ? 'Another user is actively editing this draft. Saving is locked until that edit session expires or is released.'
-                    : null));
+                    : null)));
     }
 
     protected function getHeaderActions(): array
@@ -76,6 +87,27 @@ class EditNewProductDraft extends EditRecord
                     Notification::make()
                         ->title('Edit lock released')
                         ->success()
+                        ->send();
+                }),
+            Actions\Action::make('withdrawFromApproval')
+                ->label('Withdraw Approval')
+                ->icon('heroicon-o-arrow-uturn-left')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn (): bool => $this->record instanceof NewProductDraft && $this->record->isPendingApproval())
+                ->action(function (): void {
+                    if (!$this->record instanceof NewProductDraft) {
+                        return;
+                    }
+
+                    $result = NewProductDraftResource::withdrawDraftFromApproval($this->record, (int) Auth::id());
+                    $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+                    $this->refreshEditLock();
+
+                    Notification::make()
+                        ->title('Draft withdrawn from approval')
+                        ->body("Removed {$result['removed']} approval record(s).")
+                        ->warning()
                         ->send();
                 }),
             Actions\Action::make('editImagesAndVariants')
@@ -160,6 +192,12 @@ class EditNewProductDraft extends EditRecord
     private function hasBlockingShopifyWarnings(): bool
     {
         return (($this->record?->shopifySyncWarningCount() ?? 0) > 0);
+    }
+
+    private function isPendingApprovalLocked(): bool
+    {
+        return $this->record instanceof NewProductDraft
+            && $this->record->isPendingApproval();
     }
 
     public function refreshEditorLockStatus(): void

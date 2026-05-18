@@ -124,6 +124,28 @@ it('does not flag uvp short paragraph conflicts when only rich text formatting a
     expect($seeded->shopifySyncWarningCount())->toBe(0);
 });
 
+it('does not flag uvp short paragraph conflicts when equivalent html differs only by spacing and line breaks', function (): void {
+    $product = createWorkflowTestProduct([
+        'uvp_short_paragraph' => "<p>The Emberwing Bracelet is radiant freedom and endless elegance. For women who embody <strong>grace</strong>, <strong>light</strong>, <strong>power</strong>.</p>",
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'uvp_short_paragraph' => "<p>\n  The Emberwing Bracelet is radiant freedom and endless elegance.\n  For women who embody <strong>grace</strong>, <strong>light</strong>, <strong>power</strong>.\n</p>",
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->uvp_short_paragraph)->toBe($draft->uvp_short_paragraph);
+    expect($seeded->shopifySyncWarnings())->toBe([]);
+    expect($seeded->shopifySyncWarningCount())->toBe(0);
+});
+
 it('does not flag complementary product warnings when the draft contains the shopify refs plus local backups', function (): void {
     $product = createWorkflowTestProduct([
         'approval_version' => 1,

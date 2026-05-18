@@ -507,7 +507,13 @@ final class NewProductDraftSeeder
 
     private function normalizeRichTextForComparison(string $value): string
     {
-        $text = html_entity_decode(strip_tags($value), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $html = str_replace(["\xc2\xa0", '&nbsp;'], ' ', $value);
+        $html = preg_replace('/<\s*br\s*\/?>/iu', ' ', $html) ?? $html;
+        $html = preg_replace('/<\/p>\s*<p[^>]*>/iu', ' ', $html) ?? $html;
+        $html = preg_replace('/<[^>]+>/u', ' ', $html) ?? $html;
+
+        $text = html_entity_decode($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u', ' ', $text) ?? $text;
         $text = str_replace(['/', '\\'], ' ', $text);
         $text = preg_replace('/[[:punct:]]+/u', ' ', $text) ?? $text;
         $text = preg_replace('/\s+/u', ' ', strtolower(trim($text))) ?? strtolower(trim($text));

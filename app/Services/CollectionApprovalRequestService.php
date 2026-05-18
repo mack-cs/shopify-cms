@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyCollectionResource;
+use App\Models\ChangeLog;
 use App\Models\CollectionApprovalRequest;
 use App\Models\ShopifyCollection;
 use App\Models\User;
@@ -211,6 +212,56 @@ class CollectionApprovalRequestService
         }
 
         return $summary;
+    }
+
+    /**
+     * @param Collection<int, CollectionApprovalRequest> $requests
+     * @return array{deleted:int,skipped_not_pending:int}
+     */
+    public function deletePendingRequests(Collection $requests, int $userId): array
+    {
+        $deleted = 0;
+        $skippedNotPending = 0;
+
+        foreach ($requests as $request) {
+            if (!$request instanceof CollectionApprovalRequest) {
+                continue;
+            }
+
+            if ($request->status !== CollectionApprovalRequest::STATUS_PENDING) {
+                $skippedNotPending++;
+                continue;
+            }
+
+            ChangeLog::create([
+                'import_id' => null,
+                'product_id' => null,
+                'changed_by' => $userId,
+                'model_type' => CollectionApprovalRequest::class,
+                'model_id' => $request->id,
+                'field' => 'pending_approval_deleted',
+                'old_value' => null,
+                'new_value' => json_encode([
+                    'status' => 'deleted',
+                    'request_id' => (int) $request->id,
+                    'request_batch_id' => $request->request_batch_id,
+                    'collection_id' => (int) $request->collection_id,
+                    'requested_by' => (int) $request->requested_by,
+                    'target_approver_id' => $request->target_approver_id !== null ? (int) $request->target_approver_id : null,
+                    'approval_version' => (int) $request->approval_version,
+                    'deleted_by' => $userId,
+                    'deleted_at' => now()->toDateTimeString(),
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ]);
+
+            $request->delete();
+            $deleted++;
+        }
+
+        return [
+            'deleted' => $deleted,
+            'skipped_not_pending' => $skippedNotPending,
+        ];
     }
 
     public function batchLabel(?string $batchId): string

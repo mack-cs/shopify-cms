@@ -252,6 +252,44 @@ class NewProductDraft extends Model
         return $this->approvalsForCurrentVersionCount() >= 2;
     }
 
+    public function isPendingApproval(): bool
+    {
+        if (filled(trim((string) ($this->handle ?? '')))) {
+            $product = null;
+
+            $shopifyId = trim((string) ($this->shopify_id ?? ''));
+            if ($shopifyId !== '') {
+                $product = Product::query()
+                    ->where('shopify_id', $shopifyId)
+                    ->first();
+            }
+
+            if (!$product instanceof Product) {
+                $handle = trim((string) ($this->handle ?? ''));
+                if ($handle === '') {
+                    return false;
+                }
+
+                $product = Product::query()
+                    ->where('handle', $handle)
+                    ->first();
+            }
+
+            if (!$product instanceof Product) {
+                return false;
+            }
+
+            return $product->partialApprovalRequests()
+                ->where('approval_version', $product->approval_version)
+                ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+                ->exists();
+        }
+
+        $count = $this->approvalsForCurrentVersionCount();
+
+        return $count > 0 && $count < 2;
+    }
+
     public static function supportsShopifySyncWarningsColumn(): bool
     {
         if (self::$supportsShopifySyncWarningsColumnCache !== null) {

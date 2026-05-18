@@ -3,6 +3,7 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\CollectionApprovalQueueResource\Pages;
+use App\Enums\RolesEnum;
 use App\Models\CollectionApprovalRequest;
 use App\Models\User;
 use App\Services\CollectionApprovalRequestService;
@@ -166,6 +167,22 @@ class CollectionApprovalQueueResource extends Resource
                             ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
                             ->send();
                     }),
+                Tables\Actions\Action::make('deletePendingRequest')
+                    ->label('Delete Pending Approval')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn (CollectionApprovalRequest $record): bool => static::canDelete($record)
+                        && $record->status === CollectionApprovalRequest::STATUS_PENDING)
+                    ->requiresConfirmation()
+                    ->action(function (CollectionApprovalRequest $record): void {
+                        $summary = app(CollectionApprovalRequestService::class)->deletePendingRequests(collect([$record]), (int) Auth::id());
+
+                        Notification::make()
+                            ->title('Pending approval deleted')
+                            ->body(self::deleteNotificationBody($summary))
+                            ->status(($summary['deleted'] ?? 0) > 0 ? 'success' : 'warning')
+                            ->send();
+                    }),
             ])
             ->bulkActions([
                 BulkActionGroup::make([
@@ -203,6 +220,22 @@ class CollectionApprovalQueueResource extends Resource
                                 ->title('Collection approval complete')
                                 ->body($parts ? implode(' ', $parts) : 'No collection approvals were recorded.')
                                 ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('deleteSelectedPendingRequests')
+                        ->label('Delete Pending Approvals')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->visible(fn (): bool => static::canDelete(null))
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records): void {
+                            $summary = app(CollectionApprovalRequestService::class)->deletePendingRequests($records, (int) Auth::id());
+
+                            Notification::make()
+                                ->title('Pending approvals deleted')
+                                ->body(self::deleteNotificationBody($summary))
+                                ->status(($summary['deleted'] ?? 0) > 0 ? 'success' : 'warning')
                                 ->send();
                         })
                         ->deselectRecordsAfterCompletion(),
@@ -246,12 +279,12 @@ class CollectionApprovalQueueResource extends Resource
 
     public static function canDelete($record): bool
     {
-        return false;
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
     public static function canDeleteAny(): bool
     {
-        return false;
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
     public static function getPages(): array
@@ -289,6 +322,24 @@ class CollectionApprovalQueueResource extends Resource
         }
 
         return $parts !== [] ? implode(' ', $parts) : 'No collection approval could be recorded.';
+    }
+
+    /**
+     * @param array<string, mixed> $summary
+     */
+    private static function deleteNotificationBody(array $summary): string
+    {
+        $parts = [];
+
+        if (($summary['deleted'] ?? 0) > 0) {
+            $parts[] = "Deleted {$summary['deleted']} pending approval request(s).";
+        }
+
+        if (($summary['skipped_not_pending'] ?? 0) > 0) {
+            $parts[] = "Skipped {$summary['skipped_not_pending']} that were no longer pending.";
+        }
+
+        return $parts !== [] ? implode(' ', $parts) : 'No pending approval requests were deleted.';
     }
 
     private static function reviewSummary(CollectionApprovalRequest $record): string
