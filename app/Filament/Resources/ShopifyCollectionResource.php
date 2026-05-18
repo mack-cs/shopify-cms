@@ -582,7 +582,10 @@ class ShopifyCollectionResource extends Resource
                         ->when($data['to'] ?? null, fn (Builder $q, $to): Builder => $q->where('last_synced_at', '<=', $to))),
             ])
             ->actions([
-                Tables\Actions\EditAction::make(),
+                Tables\Actions\EditAction::make()
+                    ->tooltip(fn (ShopifyCollection $record): ?string => $record->isPendingApproval()
+                        ? 'This collection is already pending approval. Withdraw the pending approval before editing it again.'
+                        : null),
             ])
             ->headerActions([
                 Tables\Actions\Action::make('syncCollections')

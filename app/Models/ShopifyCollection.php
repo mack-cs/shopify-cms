@@ -94,6 +94,14 @@ class ShopifyCollection extends Model
         return $this->approvalsForCurrentVersionCount() >= 2;
     }
 
+    public function isPendingApproval(): bool
+    {
+        return $this->approvalRequests()
+            ->where('approval_version', $this->approval_version)
+            ->where('status', CollectionApprovalRequest::STATUS_PENDING)
+            ->exists();
+    }
+
     public static function supportsShopifySyncWarningsColumn(): bool
     {
         if (self::$supportsShopifySyncWarningsColumnCache !== null) {
