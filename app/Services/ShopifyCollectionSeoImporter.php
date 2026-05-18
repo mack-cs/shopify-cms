@@ -19,6 +19,8 @@ final class ShopifyCollectionSeoImporter
 
         $total = 0;
         $updated = 0;
+        $skippedPendingApproval = 0;
+        $pendingApprovalHandles = [];
         $skippedMissingIdentifier = 0;
         $skippedNotFound = 0;
 
@@ -36,6 +38,12 @@ final class ShopifyCollectionSeoImporter
                     $skippedNotFound++;
                 }
 
+                continue;
+            }
+
+            if ($collection->isPendingApproval()) {
+                $skippedPendingApproval++;
+                $pendingApprovalHandles[] = trim((string) ($collection->handle ?: $collection->title ?: $collection->shopify_id ?: 'Collection #' . $collection->id));
                 continue;
             }
 
@@ -82,6 +90,8 @@ final class ShopifyCollectionSeoImporter
         return [
             'total' => $total,
             'updated' => $updated,
+            'skipped_pending_approval' => $skippedPendingApproval,
+            'pending_approval_handles' => array_values(array_unique(array_filter($pendingApprovalHandles))),
             'skipped_missing_identifier' => $skippedMissingIdentifier,
             'skipped_not_found' => $skippedNotFound,
             'batch' => $importBatch,

@@ -23,6 +23,8 @@ final class NewProductDraftCsvImporter
      *   created:int,
      *   updated:int,
      *   seo_drafts_upserted:int,
+     *   skipped_pending_approval:int,
+     *   pending_approval_handles:array<int,string>,
      *   skipped_missing_handle:int,
      *   skipped_duplicate_sku:int,
      *   skipped_reference_validation:int,
@@ -117,6 +119,8 @@ final class NewProductDraftCsvImporter
         $created = 0;
         $updated = 0;
         $seoDraftsUpserted = 0;
+        $skippedPendingApproval = 0;
+        $pendingApprovalHandles = [];
         $skippedMissingHandle = 0;
         $skippedDuplicateSku = 0;
         $skippedReferenceValidation = 0;
@@ -131,6 +135,8 @@ final class NewProductDraftCsvImporter
             &$created,
             &$updated,
             &$seoDraftsUpserted,
+            &$skippedPendingApproval,
+            &$pendingApprovalHandles,
             &$skippedMissingHandle,
             &$skippedDuplicateSku,
             &$skippedReferenceValidation,
@@ -178,6 +184,12 @@ final class NewProductDraftCsvImporter
 
                 if (!$handle && !$draft) {
                     $skippedMissingHandle++;
+                    continue;
+                }
+
+                if ($draft instanceof NewProductDraft && $draft->isPendingApproval()) {
+                    $skippedPendingApproval++;
+                    $pendingApprovalHandles[] = trim((string) ($draft->handle ?: $draft->title ?: $draft->shopify_id ?: 'Draft #' . $draft->id));
                     continue;
                 }
 
@@ -285,6 +297,8 @@ final class NewProductDraftCsvImporter
             'created' => $created,
             'updated' => $updated,
             'seo_drafts_upserted' => $seoDraftsUpserted,
+            'skipped_pending_approval' => $skippedPendingApproval,
+            'pending_approval_handles' => array_values(array_unique(array_filter($pendingApprovalHandles))),
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_duplicate_sku' => $skippedDuplicateSku,
             'skipped_reference_validation' => $skippedReferenceValidation,

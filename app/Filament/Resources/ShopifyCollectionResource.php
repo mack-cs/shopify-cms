@@ -660,6 +660,16 @@ class ShopifyCollectionResource extends Resource
 
                         $result = $importer->importFromPath($import, $path);
 
+                        $pendingApprovalPart = '';
+                        if (($result['skipped_pending_approval'] ?? 0) > 0) {
+                            $names = array_slice($result['pending_approval_handles'] ?? [], 0, 5);
+                            $pendingApprovalPart = ", Approval pending skips: {$result['skipped_pending_approval']}";
+                            if ($names !== []) {
+                                $pendingApprovalPart .= ' (' . implode(', ', $names) . ')';
+                            }
+                            $pendingApprovalPart .= '. Withdraw approval first if you still want to update those collections.';
+                        }
+
                         self::sendNotification(
                             Notification::make()
                                 ->title('Collection SEO import complete')
@@ -667,9 +677,10 @@ class ShopifyCollectionResource extends Resource
                                     "Total: {$result['total']}, Updated: {$result['updated']}, " .
                                     "Missing ID/Handle: " . ($result['skipped_missing_identifier'] ?? 0) . ", " .
                                     "Not Found: {$result['skipped_not_found']}, " .
-                                    "Batch: {$result['batch']}"
+                                    "Batch: {$result['batch']}" .
+                                    $pendingApprovalPart
                                 )
-                                ->success()
+                                ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
                         );
                     }),
             ])

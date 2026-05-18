@@ -2776,6 +2776,16 @@ class NewProductDraftResource extends Resource
                             $referenceParts[] = "Unresolved links: {$result['unresolved_product_references']}";
                         }
 
+                        $pendingApprovalPart = '';
+                        if (($result['skipped_pending_approval'] ?? 0) > 0) {
+                            $names = array_slice($result['pending_approval_handles'] ?? [], 0, 5);
+                            $pendingApprovalPart = ", Approval pending skips: {$result['skipped_pending_approval']}";
+                            if ($names !== []) {
+                                $pendingApprovalPart .= ' (' . implode(', ', $names) . ')';
+                            }
+                            $pendingApprovalPart .= '. Withdraw approval first if you still want to update those records.';
+                        }
+
                         self::sendNotification(Notification::make()
                             ->title('Import complete')
                             ->body(
@@ -2784,9 +2794,10 @@ class NewProductDraftResource extends Resource
                                 "Missing handle: {$result['skipped_missing_handle']}, " .
                                 "Duplicate SKU: {$result['skipped_duplicate_sku']}, " .
                                 "Reference rule skips: " . ($result['skipped_reference_validation'] ?? 0) .
-                                ($referenceParts === [] ? '' : ', ' . implode(', ', $referenceParts))
+                                ($referenceParts === [] ? '' : ', ' . implode(', ', $referenceParts)) .
+                                $pendingApprovalPart
                             )
-                            ->success()
+                            ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
                         );
                     }),
                 Tables\Actions\Action::make('configureComplementaryRule')
