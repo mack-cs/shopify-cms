@@ -360,6 +360,141 @@ it('uses the draft local primary trio when showing draft complementary audit sta
     expect($label)->toBe('Healthy');
 });
 
+it('shows a warning draft complementary audit when only the local 4th backup is missing', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $main = Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/550',
+        'handle' => 'draft-warning-only',
+        'title' => 'Draft Warning Only',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $a = createComplementaryCandidate($import->id, 551, 'dwo-a', 'active', 5);
+    $b = createComplementaryCandidate($import->id, 552, 'dwo-b', 'active', 5);
+    $c = createComplementaryCandidate($import->id, 553, 'dwo-c', 'active', 5);
+
+    $draft = NewProductDraft::create([
+        'handle' => $main->handle,
+        'shopify_id' => $main->shopify_id,
+        'title' => $main->title,
+        'status' => 'active',
+        'complementary_products' => implode('; ', [$a->handle, $b->handle, $c->handle]),
+        'approval_version' => 1,
+    ]);
+
+    ShopifyAudit::create([
+        'product_id' => $main->id,
+        'audit_type' => ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS,
+        'status' => ShopifyAudit::STATUS_HEALTHY,
+        'needs_attention' => false,
+        'details' => [
+            'shopify_ids' => [$a->id, $b->id, $c->id],
+            'shopify_ineligible' => [],
+        ],
+        'last_checked_at' => now(),
+    ]);
+
+    $label = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditStatusLabel($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+    $color = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditStatusColor($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+    $issues = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditIssuesSummary($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+
+    expect($label)->toBe('Needs Audit')
+        ->and($color)->toBe('warning')
+        ->and($issues)->toContain('Local draft needs 1 more complementary backup product(s) to reach 4.')
+        ->and($issues)->not->toContain('Shopify has fewer than 3 complementary products.');
+});
+
+it('shows a danger draft complementary audit when shopify is short on complementary products', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $main = Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/560',
+        'handle' => 'draft-danger-short-shopify',
+        'title' => 'Draft Danger Short Shopify',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $a = createComplementaryCandidate($import->id, 561, 'ddss-a', 'active', 5);
+    $b = createComplementaryCandidate($import->id, 562, 'ddss-b', 'active', 5);
+    $c = createComplementaryCandidate($import->id, 563, 'ddss-c', 'active', 5);
+    $d = createComplementaryCandidate($import->id, 564, 'ddss-d', 'active', 5);
+
+    $draft = NewProductDraft::create([
+        'handle' => $main->handle,
+        'shopify_id' => $main->shopify_id,
+        'title' => $main->title,
+        'status' => 'active',
+        'complementary_products' => implode('; ', [$a->handle, $b->handle, $c->handle, $d->handle]),
+        'approval_version' => 1,
+    ]);
+
+    ShopifyAudit::create([
+        'product_id' => $main->id,
+        'audit_type' => ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS,
+        'status' => ShopifyAudit::STATUS_HEALTHY,
+        'needs_attention' => false,
+        'details' => [
+            'shopify_ids' => [$a->id, $b->id],
+            'shopify_ineligible' => [],
+        ],
+        'last_checked_at' => now(),
+    ]);
+
+    $label = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditStatusLabel($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+    $color = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditStatusColor($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+    $issues = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditIssuesSummary($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+
+    expect($label)->toBe('Needs Audit')
+        ->and($color)->toBe('danger')
+        ->and($issues)->toContain('Shopify has fewer than 3 complementary products.')
+        ->and($issues)->not->toContain('Local draft needs 1 more complementary backup product(s) to reach 4.');
+});
+
 function createComplementaryCandidate(int $importId, int $shopifyNumericId, string $handle, string $status, int $inventoryQty): Product
 {
     $product = Product::create([

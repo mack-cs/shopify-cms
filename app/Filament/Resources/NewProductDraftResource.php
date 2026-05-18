@@ -3213,9 +3213,7 @@ class NewProductDraftResource extends Resource
                             return $query;
                         }
 
-                        $ids = app(ComplementaryProductAuditService::class)->draftIdsMatchingShopifyStatus($value);
-
-                        return $ids === [] ? $query->whereRaw('1 = 0') : $query->whereKey($ids);
+                        return self::applyDraftLatestAuditShopifyStatusFilter($query, $value);
                     }),
                 // SelectFilter::make('complementary_audit_status')
                 //     ->label('Complementary Audit')
@@ -3322,6 +3320,10 @@ class NewProductDraftResource extends Resource
                         default => $query,
                     };
                 }),
+                Filter::make('shopify_missing_complementary_products')
+                    ->label('Shopify Missing Complementary')
+                    ->indicator('Shopify Missing Complementary')
+                    ->query(fn (Builder $query): Builder => self::applyDraftShopifyComplementaryShortageFilter($query)),
                 Filter::make('pending_changes')
                     ->label('Pending Changes')
                     ->indicator('Pending Changes')
@@ -3866,6 +3868,34 @@ class NewProductDraftResource extends Resource
         }
 
         return $query->whereKey(array_values(array_unique($matchingDraftIds)));
+    }
+
+    private static function applyDraftShopifyComplementaryShortageFilter(Builder $query): Builder
+    {
+        return $query->whereExists(function ($sub): void {
+            $sub->selectRaw('1')
+                ->from('products')
+                ->join('shopify_audits', 'shopify_audits.product_id', '=', 'products.id')
+                ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                ->whereRaw('LOWER(COALESCE(products.title, "")) NOT LIKE ?', ['%tes%'])
+                ->whereRaw(
+                    "COALESCE(JSON_LENGTH(JSON_EXTRACT(shopify_audits.details, '$.shopify_ids')), 0) < ?",
+                    [ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT]
+                )
+                ->where(function ($match): void {
+                    $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
+                        ->orWhereColumn('products.handle', 'new_product_drafts.handle');
+                });
+        });
+    }
+
+    private static function applyDraftLatestAuditShopifyStatusFilter(Builder $query, string $status): Builder
+    {
+        return match ($status) {
+            'healthy' => self::applyDraftComplementaryAuditStatusFilter($query, ShopifyAudit::STATUS_HEALTHY),
+            'flagged' => self::applyDraftComplementaryAuditStatusFilter($query, ShopifyAudit::STATUS_FLAGGED),
+            default => $query,
+        };
     }
 
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
@@ -5909,7 +5939,7 @@ class NewProductDraftResource extends Resource
             return 'gray';
         }
 
-        return ($snapshot['status'] ?? null) === ShopifyAudit::STATUS_HEALTHY ? 'success' : 'danger';
+        return (string) ($snapshot['severity'] ?? 'gray');
     }
 
     private static function draftComplementaryAuditIssuesSummary(NewProductDraft $record): string
@@ -5921,6 +5951,17 @@ class NewProductDraftResource extends Resource
 
         $details = is_array($snapshot['details'] ?? null) ? $snapshot['details'] : [];
         $parts = [];
+
+        if (($snapshot['has_local_shortage'] ?? false) === true) {
+            $missing = max(0, ComplementaryProductAuditService::LOCAL_TARGET_COUNT - (int) ($snapshot['local_total'] ?? 0));
+            $parts[] = $missing > 0
+                ? "Local draft needs {$missing} more complementary backup product(s) to reach 4."
+                : 'Local draft is below the 4-product complementary target.';
+        }
+
+        if (($snapshot['has_shopify_shortage'] ?? false) === true) {
+            $parts[] = 'Shopify has fewer than 3 complementary products.';
+        }
 
         foreach (($details['shopify_ineligible'] ?? []) as $item) {
             if (!is_array($item)) {
@@ -5982,7 +6023,16 @@ class NewProductDraftResource extends Resource
     }
 
     /**
-     * @return array{status:string,details:array<string,mixed>,unexpected_shopify_ids:array<int,int>}|null
+     * @return array{
+     *   status:string,
+     *   severity:string,
+     *   details:array<string,mixed>,
+     *   unexpected_shopify_ids:array<int,int>,
+     *   local_total:int,
+     *   shopify_total:int,
+     *   has_local_shortage:bool,
+     *   has_shopify_shortage:bool
+     * }|null
      */
     private static function draftComplementaryAuditSnapshot(NewProductDraft $record): ?array
     {
@@ -6000,6 +6050,9 @@ class NewProductDraftResource extends Resource
             0,
             ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT
         );
+        $localIds = $service->resolveProductIdsFromTokens(
+            $service->parseReferenceTokens($record->complementary_products)
+        );
         $shopifyIds = array_values(array_unique(array_filter(array_map(
             static fn (mixed $value): int => (int) $value,
             $details['shopify_ids'] ?? []
@@ -6010,13 +6063,23 @@ class NewProductDraftResource extends Resource
         ));
         $hasShopifyIneligible = is_array($details['shopify_ineligible'] ?? null)
             && ($details['shopify_ineligible'] ?? []) !== [];
+        $hasLocalShortage = count($localIds) < ComplementaryProductAuditService::LOCAL_TARGET_COUNT;
+        $hasShopifyShortage = count($shopifyIds) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+        $hasDanger = $hasShopifyIneligible || $unexpectedShopifyIds !== [] || $hasShopifyShortage;
 
         return [
-            'status' => ($hasShopifyIneligible || $unexpectedShopifyIds !== [])
+            'status' => ($hasDanger || $hasLocalShortage)
                 ? ShopifyAudit::STATUS_FLAGGED
                 : ShopifyAudit::STATUS_HEALTHY,
+            'severity' => $hasDanger
+                ? 'danger'
+                : ($hasLocalShortage ? 'warning' : 'success'),
             'details' => $details,
             'unexpected_shopify_ids' => $unexpectedShopifyIds,
+            'local_total' => count($localIds),
+            'shopify_total' => count($shopifyIds),
+            'has_local_shortage' => $hasLocalShortage,
+            'has_shopify_shortage' => $hasShopifyShortage,
         ];
     }
 
