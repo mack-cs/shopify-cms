@@ -60,6 +60,7 @@ class ComplementaryProductMaintenanceService
                             'shopify_valid_count' => (int) ($analysis['shopify_eligible'] ?? 0),
                             'details' => [
                                 'local_ids' => $analysis['local_ids'] ?? [],
+                                'local_primary_ids' => $analysis['local_primary_ids'] ?? [],
                                 'local_eligible_ids' => $analysis['local_eligible_ids'] ?? [],
                                 'local_ineligible' => $analysis['local_ineligible'] ?? [],
                                 'shopify_ids' => $analysis['shopify_ids'] ?? [],

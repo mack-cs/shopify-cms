@@ -154,6 +154,8 @@ class CollectionApprovalQueueResource extends Resource
                     ->label('Approve')
                     ->icon('heroicon-o-check-badge')
                     ->color('success')
+                    ->visible(fn (CollectionApprovalRequest $record): bool => app(CollectionApprovalRequestService::class)
+                        ->canApproveRequest($record, (int) Auth::id()))
                     ->requiresConfirmation()
                     ->action(function (CollectionApprovalRequest $record): void {
                         $summary = app(CollectionApprovalRequestService::class)->approveRequests(collect([$record]), (int) Auth::id());
@@ -171,6 +173,8 @@ class CollectionApprovalQueueResource extends Resource
                         ->label('Approve Selected')
                         ->icon('heroicon-o-check-badge')
                         ->color('success')
+                        ->visible(fn (): bool => (int) Auth::id() > 0
+                            && app(CollectionApprovalRequestService::class)->actionableRequestsQuery((int) Auth::id())->exists())
                         ->requiresConfirmation()
                         ->action(function (Collection $records): void {
                             $summary = app(CollectionApprovalRequestService::class)->approveRequests($records, (int) Auth::id());
@@ -208,21 +212,18 @@ class CollectionApprovalQueueResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        $userId = (int) Auth::id();
-
         return app(CollectionApprovalRequestService::class)
-            ->actionableRequestsQuery($userId);
+            ->visiblePendingRequestsQuery();
     }
 
     public static function getNavigationBadge(): ?string
     {
-        $userId = (int) Auth::id();
-        if ($userId <= 0) {
+        if ((int) Auth::id() <= 0) {
             return null;
         }
 
         $count = app(CollectionApprovalRequestService::class)
-            ->actionableRequestsQuery($userId)
+            ->visiblePendingRequestsQuery()
             ->count();
 
         return $count > 0 ? (string) $count : null;

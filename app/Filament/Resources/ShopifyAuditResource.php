@@ -127,22 +127,11 @@ class ShopifyAuditResource extends Resource
                     ->label('Edit Complementary')
                     ->icon('heroicon-o-pencil-square')
                     ->color('warning')
-                    ->action(function (ShopifyAudit $record) {
-                        $product = $record->product;
-                        if (!$product instanceof Product) {
-                            return null;
-                        }
-
-                        $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($product, Auth::id());
-
-                        return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
-                    }),
+                    ->action(fn (ShopifyAudit $record) => redirect(self::newProductDraftEditUrl($record))),
                 Tables\Actions\Action::make('openProduct')
-                    ->label('Open Product')
+                    ->label('Open Draft')
                     ->icon('heroicon-o-arrow-top-right-on-square')
-                    ->url(fn (ShopifyAudit $record): ?string => $record->product
-                        ? ProductResource::getUrl('edit', ['record' => $record->product])
-                        : null)
+                    ->url(fn (ShopifyAudit $record): ?string => self::newProductDraftEditUrl($record))
                     ->openUrlInNewTab(),
             ])
             ->headerActions([
@@ -249,5 +238,17 @@ class ShopifyAuditResource extends Resource
         }
 
         return $parts !== [] ? implode(' | ', $parts) : 'None';
+    }
+
+    private static function newProductDraftEditUrl(ShopifyAudit $record): ?string
+    {
+        $product = $record->product;
+        if (!$product instanceof Product) {
+            return null;
+        }
+
+        $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($product, Auth::id());
+
+        return NewProductDraftResource::getUrl('edit', ['record' => $draft]);
     }
 }

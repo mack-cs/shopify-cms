@@ -3,10 +3,12 @@
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyAudit;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\User;
 use App\Models\Variant;
+use App\Filament\Resources\NewProductDraftResource;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\HeaderStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -244,6 +246,118 @@ it('flags shopify complementary products when a live shopify ref is missing from
         ->and($analysis['shopify_eligible'])->toBe(4)
         ->and($analysis['shopify_missing_local_ids'])->toBe([$d->id])
         ->and($analysis['shopify_good'])->toBeFalse();
+});
+
+it('flags shopify complementary products when shopify uses the backup instead of the local primary trio', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $main = Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/450',
+        'handle' => 'primary-vs-backup',
+        'title' => 'Primary vs Backup',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    Variant::create([
+        'product_id' => $main->id,
+        'inventory_qty' => 10,
+        'sync_state' => Variant::SYNC_STATE_SYNCED,
+    ]);
+
+    $a = createComplementaryCandidate($import->id, 451, 'pvb-a', 'active', 5);
+    $b = createComplementaryCandidate($import->id, 452, 'pvb-b', 'active', 5);
+    $c = createComplementaryCandidate($import->id, 453, 'pvb-c', 'active', 5);
+    $d = createComplementaryCandidate($import->id, 454, 'pvb-d', 'active', 5);
+
+    ShopifyRow::create([
+        'import_id' => $import->id,
+        'row_index' => 1,
+        'handle' => $main->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [$a->handle, $b->handle, $c->handle, $d->handle]),
+        ],
+    ]);
+
+    ShopifyMetafield::create([
+        'import_id' => $import->id,
+        'handle' => $main->handle,
+        'namespace' => ComplementaryProductAuditService::STANDARD_NAMESPACE,
+        'key' => ComplementaryProductAuditService::STANDARD_KEY,
+        'type' => 'list.product_reference',
+        'value' => json_encode([$a->shopify_id, $b->shopify_id, $d->shopify_id], JSON_UNESCAPED_SLASHES),
+    ]);
+
+    $analysis = app(ComplementaryProductAuditService::class)->analyzeProduct($main);
+
+    expect($analysis['local_primary_ids'])->toBe([$a->id, $b->id, $c->id])
+        ->and($analysis['shopify_missing_local_ids'])->toBe([$d->id])
+        ->and($analysis['shopify_good'])->toBeFalse();
+});
+
+it('uses the draft local primary trio when showing draft complementary audit status', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'shopify-products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $main = Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/500',
+        'handle' => 'draft-audit-status',
+        'title' => 'Draft Audit Status',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $a = createComplementaryCandidate($import->id, 501, 'das-a', 'active', 5);
+    $b = createComplementaryCandidate($import->id, 502, 'das-b', 'active', 5);
+    $c = createComplementaryCandidate($import->id, 503, 'das-c', 'active', 5);
+    $d = createComplementaryCandidate($import->id, 504, 'das-d', 'active', 5);
+
+    $draft = NewProductDraft::create([
+        'handle' => $main->handle,
+        'shopify_id' => $main->shopify_id,
+        'title' => $main->title,
+        'status' => 'active',
+        'complementary_products' => implode('; ', [$a->handle, $b->handle, $d->handle, $c->handle]),
+        'approval_version' => 1,
+    ]);
+
+    ShopifyAudit::create([
+        'product_id' => $main->id,
+        'audit_type' => ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS,
+        'status' => ShopifyAudit::STATUS_FLAGGED,
+        'needs_attention' => true,
+        'details' => [
+            'shopify_ids' => [$a->id, $b->id, $d->id],
+            'shopify_ineligible' => [],
+        ],
+        'last_checked_at' => now(),
+    ]);
+
+    $label = \Closure::bind(
+        static fn (NewProductDraft $record): string => NewProductDraftResource::draftComplementaryAuditStatusLabel($record),
+        null,
+        NewProductDraftResource::class
+    )($draft);
+
+    expect($label)->toBe('Healthy');
 });
 
 function createComplementaryCandidate(int $importId, int $shopifyNumericId, string $handle, string $status, int $inventoryQty): Product

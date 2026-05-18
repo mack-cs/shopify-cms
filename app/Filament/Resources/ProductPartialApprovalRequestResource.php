@@ -170,6 +170,8 @@ class ProductPartialApprovalRequestResource extends Resource
                     ->label('Approve')
                     ->icon('heroicon-o-check-badge')
                     ->color('success')
+                    ->visible(fn (ProductPartialApprovalRequest $record): bool => app(ProductPartialApprovalService::class)
+                        ->canApproveRequest($record, (int) Auth::id()))
                     ->requiresConfirmation()
                     ->action(function (ProductPartialApprovalRequest $record): void {
                         $summary = app(ProductPartialApprovalService::class)->approveRequests(collect([$record]), (int) Auth::id());
@@ -187,6 +189,8 @@ class ProductPartialApprovalRequestResource extends Resource
                         ->label('Approve Selected')
                         ->icon('heroicon-o-check-badge')
                         ->color('success')
+                        ->visible(fn (): bool => (int) Auth::id() > 0
+                            && app(ProductPartialApprovalService::class)->actionableRequestsQuery((int) Auth::id())->exists())
                         ->requiresConfirmation()
                         ->action(function (Collection $records): void {
                             $summary = app(ProductPartialApprovalService::class)->approveRequests($records, (int) Auth::id());
@@ -221,21 +225,18 @@ class ProductPartialApprovalRequestResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        $userId = (int) Auth::id();
-
         return app(ProductPartialApprovalService::class)
-            ->actionableRequestsQuery($userId);
+            ->visiblePendingRequestsQuery();
     }
 
     public static function getNavigationBadge(): ?string
     {
-        $userId = (int) Auth::id();
-        if ($userId <= 0) {
+        if ((int) Auth::id() <= 0) {
             return null;
         }
 
         $count = app(ProductPartialApprovalService::class)
-            ->actionableRequestsQuery($userId)
+            ->visiblePendingRequestsQuery()
             ->count();
 
         return $count > 0 ? (string) $count : null;

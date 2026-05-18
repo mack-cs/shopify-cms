@@ -3840,17 +3840,32 @@ class NewProductDraftResource extends Resource
     Builder $query,
     string $status
     ): Builder {
-        return $query->whereExists(function ($sub) use ($status): void {
-            $sub->selectRaw('1')
-                ->from('products')
-                ->join('shopify_audits', 'shopify_audits.product_id', '=', 'products.id')
-                ->where('shopify_audits.audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                ->where('shopify_audits.status', $status)
-                ->where(function ($match): void {
-                    $match->whereColumn('products.shopify_id', 'new_product_drafts.shopify_id')
-                        ->orWhereColumn('products.handle', 'new_product_drafts.handle');
-                });
-        });
+        $matchingDraftIds = [];
+
+        NewProductDraft::query()
+            ->select(['id', 'handle', 'shopify_id', 'complementary_products'])
+            ->chunkById(200, function ($drafts) use (&$matchingDraftIds, $status): void {
+                foreach ($drafts as $draft) {
+                    if (!$draft instanceof NewProductDraft) {
+                        continue;
+                    }
+
+                    $snapshot = self::draftComplementaryAuditSnapshot($draft);
+                    if ($snapshot === null) {
+                        continue;
+                    }
+
+                    if (($snapshot['status'] ?? null) === $status) {
+                        $matchingDraftIds[] = (int) $draft->id;
+                    }
+                }
+            });
+
+        if ($matchingDraftIds === []) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->whereKey(array_values(array_unique($matchingDraftIds)));
     }
 
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
@@ -5879,31 +5894,66 @@ class NewProductDraftResource extends Resource
 
     private static function draftComplementaryAuditStatusLabel(NewProductDraft $record): string
     {
-        $audit = self::draftComplementaryAuditRecord($record);
-
-        if (!$audit instanceof ShopifyAudit) {
+        $snapshot = self::draftComplementaryAuditSnapshot($record);
+        if ($snapshot === null) {
             return 'Not Checked';
         }
 
-        return $audit->status === ShopifyAudit::STATUS_HEALTHY ? 'Healthy' : 'Needs Audit';
+        return ($snapshot['status'] ?? null) === ShopifyAudit::STATUS_HEALTHY ? 'Healthy' : 'Needs Audit';
     }
 
     private static function draftComplementaryAuditStatusColor(NewProductDraft $record): string
     {
-        $audit = self::draftComplementaryAuditRecord($record);
-
-        if (!$audit instanceof ShopifyAudit) {
+        $snapshot = self::draftComplementaryAuditSnapshot($record);
+        if ($snapshot === null) {
             return 'gray';
         }
 
-        return $audit->status === ShopifyAudit::STATUS_HEALTHY ? 'success' : 'danger';
+        return ($snapshot['status'] ?? null) === ShopifyAudit::STATUS_HEALTHY ? 'success' : 'danger';
     }
 
     private static function draftComplementaryAuditIssuesSummary(NewProductDraft $record): string
     {
-        return self::complementaryAuditIssuesSummaryFromDetails(
-            self::draftComplementaryAuditRecord($record)?->details
-        );
+        $snapshot = self::draftComplementaryAuditSnapshot($record);
+        if ($snapshot === null) {
+            return 'None';
+        }
+
+        $details = is_array($snapshot['details'] ?? null) ? $snapshot['details'] : [];
+        $parts = [];
+
+        foreach (($details['shopify_ineligible'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = trim((string) ($item['title'] ?? '')) ?: trim((string) ($item['handle'] ?? ''));
+            $reason = trim((string) ($item['reason'] ?? ''));
+            if ($label !== '') {
+                $parts[] = 'Shopify ref invalid: ' . $label . ($reason !== '' ? ' (' . $reason . ')' : '');
+            }
+        }
+
+        $unexpectedIds = array_values(array_filter(array_map(
+            static fn (mixed $value): int => (int) $value,
+            $snapshot['unexpected_shopify_ids'] ?? []
+        )));
+
+        if ($unexpectedIds !== []) {
+            $labels = Product::query()
+                ->whereKey($unexpectedIds)
+                ->get(['id', 'title', 'handle'])
+                ->map(fn (Product $product): string => trim((string) ($product->title ?? '')) ?: trim((string) ($product->handle ?? '')))
+                ->filter()
+                ->values()
+                ->all();
+
+            foreach ($labels as $label) {
+                $parts[] = 'Shopify ref missing from draft primary list: ' . $label;
+            }
+        }
+
+        return $parts !== [] ? implode(' | ', $parts) : 'None';
     }
 
     private static function draftComplementaryAuditRecord(NewProductDraft $record): ?ShopifyAudit
@@ -5929,6 +5979,45 @@ class NewProductDraftResource extends Resource
         }
 
         return $product?->complementaryProductsAudit;
+    }
+
+    /**
+     * @return array{status:string,details:array<string,mixed>,unexpected_shopify_ids:array<int,int>}|null
+     */
+    private static function draftComplementaryAuditSnapshot(NewProductDraft $record): ?array
+    {
+        $audit = self::draftComplementaryAuditRecord($record);
+        if (!$audit instanceof ShopifyAudit) {
+            return null;
+        }
+
+        $details = is_array($audit->details) ? $audit->details : [];
+        $service = app(ComplementaryProductAuditService::class);
+        $localPrimaryIds = array_slice(
+            $service->resolveProductIdsFromTokens(
+                $service->parseReferenceTokens($record->complementary_products)
+            ),
+            0,
+            ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT
+        );
+        $shopifyIds = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $value): int => (int) $value,
+            $details['shopify_ids'] ?? []
+        ))));
+        $unexpectedShopifyIds = array_values(array_filter(
+            $shopifyIds,
+            static fn (int $productId): bool => !in_array($productId, $localPrimaryIds, true)
+        ));
+        $hasShopifyIneligible = is_array($details['shopify_ineligible'] ?? null)
+            && ($details['shopify_ineligible'] ?? []) !== [];
+
+        return [
+            'status' => ($hasShopifyIneligible || $unexpectedShopifyIds !== [])
+                ? ShopifyAudit::STATUS_FLAGGED
+                : ShopifyAudit::STATUS_HEALTHY,
+            'details' => $details,
+            'unexpected_shopify_ids' => $unexpectedShopifyIds,
+        ];
     }
 
     private static function complementaryAuditIssuesSummaryFromDetails(mixed $details): string

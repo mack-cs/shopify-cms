@@ -11,6 +11,9 @@ use App\Services\HeaderStore;
 
 final class NewProductDraftSeeder
 {
+    /** @var array<string, int>|null */
+    private ?array $productReferenceMap = null;
+
     /**
      * @return array{created:int, updated:int, skipped:int}
      */
@@ -395,6 +398,10 @@ final class NewProductDraftSeeder
 
     private function valuesMatch(string $field, mixed $left, mixed $right): bool
     {
+        if ($field === 'complementary_products') {
+            return $this->complementaryProductsMatch($left, $right);
+        }
+
         if (is_array($left) || is_array($right)) {
             return $this->normalizeArrayValue($left) === $this->normalizeArrayValue($right);
         }
@@ -506,5 +513,138 @@ final class NewProductDraftSeeder
         $text = preg_replace('/\s+/u', ' ', strtolower(trim($text))) ?? strtolower(trim($text));
 
         return $text;
+    }
+
+    private function complementaryProductsMatch(mixed $draftValue, mixed $shopifyValue): bool
+    {
+        $draftRefs = $this->normalizedComplementaryReferenceSet($draftValue);
+        $shopifyRefs = $this->normalizedComplementaryReferenceSet($shopifyValue);
+
+        if ($shopifyRefs === []) {
+            return $draftRefs === [];
+        }
+
+        foreach ($shopifyRefs as $reference) {
+            if (!in_array($reference, $draftRefs, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function normalizedComplementaryReferenceSet(mixed $value): array
+    {
+        $tokens = $this->parseComplementaryReferenceTokens($value);
+        $resolved = [];
+
+        foreach ($tokens as $token) {
+            $productId = $this->resolveProductIdFromReferenceToken($token);
+            if ($productId !== null) {
+                $resolved[] = 'id:' . $productId;
+                continue;
+            }
+
+            $normalized = $this->normalizeProductReferenceToken($token);
+            if ($normalized !== '') {
+                $resolved[] = 'raw:' . $normalized;
+            }
+        }
+
+        return array_values(array_unique($resolved));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function parseComplementaryReferenceTokens(mixed $value): array
+    {
+        $raw = trim($this->stringifyValue($value));
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            return $this->parseComplementaryReferenceTokens(implode('; ', array_map('strval', $decoded)));
+        }
+
+        $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn (mixed $item): string => trim((string) $item),
+            $parts
+        ), static fn (string $item): bool => $item !== '')));
+    }
+
+    private function resolveProductIdFromReferenceToken(string $token): ?int
+    {
+        $normalized = $this->normalizeProductReferenceToken($token);
+        if ($normalized === '') {
+            return null;
+        }
+
+        return $this->productReferenceMap()[$normalized] ?? null;
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function productReferenceMap(): array
+    {
+        if ($this->productReferenceMap !== null) {
+            return $this->productReferenceMap;
+        }
+
+        $map = [];
+
+        Product::query()
+            ->select(['id', 'shopify_id', 'handle', 'title'])
+            ->chunkById(500, function ($products) use (&$map): void {
+                foreach ($products as $product) {
+                    foreach ([
+                        trim((string) ($product->shopify_id ?? '')),
+                        trim((string) ($product->handle ?? '')),
+                        trim((string) ($product->title ?? '')),
+                    ] as $value) {
+                        $normalized = $this->normalizeProductReferenceToken($value);
+                        if ($normalized !== '' && !isset($map[$normalized])) {
+                            $map[$normalized] = (int) $product->id;
+                        }
+                    }
+                }
+            });
+
+        return $this->productReferenceMap = $map;
+    }
+
+    private function normalizeProductReferenceToken(?string $value): string
+    {
+        $trimmed = trim((string) ($value ?? ''));
+        if ($trimmed === '') {
+            return '';
+        }
+
+        if (preg_match('#gid://shopify/Product/([0-9]+)#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#/products/([0-9]+)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            $trimmed = $matches[1];
+        }
+
+        $trimmed = strtolower($trimmed);
+        $trimmed = str_replace('&', 'and', $trimmed);
+        $trimmed = preg_replace('/[^a-z0-9]+/', '-', $trimmed) ?? $trimmed;
+        $trimmed = preg_replace('/-+/', '-', $trimmed) ?? $trimmed;
+
+        return trim($trimmed, '-');
     }
 }

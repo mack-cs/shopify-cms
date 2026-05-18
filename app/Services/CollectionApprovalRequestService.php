@@ -15,16 +15,11 @@ class CollectionApprovalRequestService
 {
     public function actionableRequestsQuery(int $userId): Builder
     {
-        return CollectionApprovalRequest::query()
-            ->with(['collection', 'requester', 'targetApprover'])
-            ->where('status', CollectionApprovalRequest::STATUS_PENDING)
+        return $this->visiblePendingRequestsQuery()
             ->where('requested_by', '!=', $userId)
             ->where(function (Builder $query) use ($userId): void {
                 $query->whereNull('target_approver_id')
                     ->orWhere('target_approver_id', $userId);
-            })
-            ->whereHas('collection', function (Builder $query): void {
-                $query->whereColumn('collections.approval_version', 'collection_approval_requests.approval_version');
             })
             ->whereNotExists(function ($sub) use ($userId): void {
                 $sub->selectRaw('1')
@@ -33,6 +28,46 @@ class CollectionApprovalRequestService
                     ->whereColumn('collection_approvals.approval_version', 'collection_approval_requests.approval_version')
                     ->where('collection_approvals.user_id', $userId);
             });
+    }
+
+    public function visiblePendingRequestsQuery(): Builder
+    {
+        return CollectionApprovalRequest::query()
+            ->with(['collection', 'requester', 'targetApprover'])
+            ->where('status', CollectionApprovalRequest::STATUS_PENDING)
+            ->whereHas('collection', function (Builder $query): void {
+                $query->whereColumn('collections.approval_version', 'collection_approval_requests.approval_version');
+            });
+    }
+
+    public function canApproveRequest(CollectionApprovalRequest $request, int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+
+        if ($request->status !== CollectionApprovalRequest::STATUS_PENDING) {
+            return false;
+        }
+
+        $collection = $request->collection;
+        if (!$collection instanceof ShopifyCollection || (int) $request->approval_version !== (int) ($collection->approval_version ?? 0)) {
+            return false;
+        }
+
+        if ((int) $request->requested_by === $userId) {
+            return false;
+        }
+
+        if ($request->target_approver_id !== null && (int) $request->target_approver_id !== $userId) {
+            return false;
+        }
+
+        return !\DB::table('collection_approvals')
+            ->where('collection_id', $request->collection_id)
+            ->where('approval_version', $request->approval_version)
+            ->where('user_id', $userId)
+            ->exists();
     }
 
     public function eligibleApproversQuery(?int $excludeUserId = null): Builder

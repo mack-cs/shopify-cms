@@ -29,17 +29,44 @@ class ProductPartialApprovalService
 
     public function actionableRequestsQuery(int $userId): Builder
     {
-        return ProductPartialApprovalRequest::query()
-            ->with(['product', 'requester', 'targetApprover'])
-            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+        return $this->visiblePendingRequestsQuery()
             ->where('requested_by', '!=', $userId)
             ->where(function (Builder $query) use ($userId): void {
                 $query->whereNull('target_approver_id')
                     ->orWhere('target_approver_id', $userId);
-            })
+            });
+    }
+
+    public function visiblePendingRequestsQuery(): Builder
+    {
+        return ProductPartialApprovalRequest::query()
+            ->with(['product', 'requester', 'targetApprover'])
+            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
             ->whereHas('product', function (Builder $query): void {
                 $query->whereColumn('products.approval_version', 'product_partial_approval_requests.approval_version');
             });
+    }
+
+    public function canApproveRequest(ProductPartialApprovalRequest $request, int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+
+        if ($request->status !== ProductPartialApprovalRequest::STATUS_PENDING) {
+            return false;
+        }
+
+        $product = $request->product;
+        if (!$product instanceof Product || (int) $request->approval_version !== (int) ($product->approval_version ?? 0)) {
+            return false;
+        }
+
+        if ((int) $request->requested_by === $userId) {
+            return false;
+        }
+
+        return $request->target_approver_id === null || (int) $request->target_approver_id === $userId;
     }
 
     public function eligibleApproversQuery(?int $excludeUserId = null): Builder

@@ -124,6 +124,45 @@ it('does not flag uvp short paragraph conflicts when only rich text formatting a
     expect($seeded->shopifySyncWarningCount())->toBe(0);
 });
 
+it('does not flag complementary product warnings when the draft contains the shopify refs plus local backups', function (): void {
+    $product = createWorkflowTestProduct([
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => implode('; ', [
+            'gid://shopify/Product/8516761714824',
+            'gid://shopify/Product/8516761518216',
+            'gid://shopify/Product/8516761780360',
+            'gid://shopify/Product/8835930783880',
+        ]),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [
+                'gid://shopify/Product/8516761518216',
+                'gid://shopify/Product/8516761780360',
+                'gid://shopify/Product/8516761714824',
+            ]),
+        ],
+    ]);
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->complementary_products)->toBe($draft->complementary_products);
+    expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('complementary_products');
+});
+
 it('allows resolving shopify warnings one field at a time with different decisions', function (): void {
     $product = createWorkflowTestProduct([
         'vendor' => 'Shopify Vendor',
