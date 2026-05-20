@@ -1133,6 +1133,14 @@ class ProductResource extends Resource
                 ->falseColor('gray')
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('updated_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
