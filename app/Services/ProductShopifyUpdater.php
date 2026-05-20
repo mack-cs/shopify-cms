@@ -2814,6 +2814,7 @@ GQL;
             ->select(['id', 'shopify_id', 'handle', 'title'])
             ->whereNotNull('shopify_id')
             ->where('shopify_id', '!=', '')
+            ->where('status', 'active')
             ->chunkById(500, function ($products) use (&$map): void {
                 foreach ($products as $product) {
                     $gid = trim((string) ($product->shopify_id ?? ''));
@@ -3256,10 +3257,31 @@ GQL;
         ), static fn (string $item): bool => $item !== '')));
 
         if ($lookup === 'shopify--discovery--product_recommendation.complementary_products') {
-            return array_slice($normalized, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
+            // return array_slice($normalized, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
+            $activeItems = $this->filterActiveProductReferenceGids($normalized);
+
+        return array_slice($activeItems, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
         }
 
         return $normalized;
+    }
+
+    private function filterActiveProductReferenceGids(array $gids): array
+    {
+        if (empty($gids)) {
+            return [];
+        }
+
+        $activeGids = Product::query()
+            ->whereIn('shopify_id', $gids)
+            ->where('status', 'active')
+            ->pluck('shopify_id')
+            ->all();
+
+        return array_values(array_filter(
+            $gids,
+            fn (string $gid): bool => in_array($gid, $activeGids, true)
+        ));
     }
 
     /**
