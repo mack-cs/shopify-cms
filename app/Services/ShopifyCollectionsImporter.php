@@ -39,7 +39,7 @@ final class ShopifyCollectionsImporter
     public function importIntoExistingImport(Import $import): void
     {
         $seen = [];
-        $touchedIds = [];
+        $approvalBumpIds = [];
         foreach ($this->fetchCollections() as $collection) {
             $shopifyId = trim((string) data_get($collection, 'id', ''));
             $handle = trim((string) data_get($collection, 'handle', ''));
@@ -83,19 +83,49 @@ final class ShopifyCollectionsImporter
                 $updateData['published_channel_names'] = $this->publishedChannelNames($collection);
             }
 
-            $saved = ShopifyCollection::withoutEvents(fn () => ShopifyCollection::updateOrCreate(
-                [
-                    'import_id' => $import->id,
-                    'shopify_id' => $shopifyId,
-                ],
-                $updateData
-            ));
+            $saved = ShopifyCollection::query()
+                ->where('import_id', $import->id)
+                ->where('shopify_id', $shopifyId)
+                ->first();
 
-            $touchedIds[] = $saved->id;
+            if ($saved instanceof ShopifyCollection) {
+                $saved = ShopifyCollection::withoutEvents(function () use ($saved, $updateData): ShopifyCollection {
+                    $saved->fill($updateData);
+
+                    if ($saved->isDirty()) {
+                        $saved->save();
+                    }
+
+                    return $saved;
+                });
+
+                if ($saved->wasChanged([
+                    'handle',
+                    'title',
+                    'description_html',
+                    'seo_title',
+                    'seo_description',
+                    'footer_title',
+                    'elegant_footer_description',
+                    'deindex',
+                    'published_on_online_store_only',
+                    'published_channel_names',
+                ])) {
+                    $approvalBumpIds[] = $saved->id;
+                }
+            } else {
+                $saved = ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create(array_merge(
+                    [
+                        'import_id' => $import->id,
+                        'shopify_id' => $shopifyId,
+                    ],
+                    $updateData
+                )));
+            }
         }
 
-        if (!empty($touchedIds)) {
-            ShopifyCollection::whereIn('id', array_unique($touchedIds))->increment('approval_version');
+        if (!empty($approvalBumpIds)) {
+            ShopifyCollection::whereIn('id', array_unique($approvalBumpIds))->increment('approval_version');
         }
 
         $import->update(['status' => 'ready', 'is_valid' => true]);
