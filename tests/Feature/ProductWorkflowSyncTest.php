@@ -185,6 +185,229 @@ it('does not flag complementary product warnings when the draft contains the sho
     expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('complementary_products');
 });
 
+it('uses the imported complementary metafield before the row so local 4-vs-shopify-3 does not warn', function (): void {
+    $product = createWorkflowTestProduct([
+        'approval_version' => 1,
+    ]);
+
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/8745850798216',
+        'handle' => 'comp-a',
+        'title' => 'Comp A',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/8816597336200',
+        'handle' => 'comp-b',
+        'title' => 'Comp B',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/8816597467272',
+        'handle' => 'comp-c',
+        'title' => 'Comp C',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/8745860989064',
+        'handle' => 'comp-d',
+        'title' => 'Comp D',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => implode('; ', [
+            'gid://shopify/Product/8745850798216',
+            'gid://shopify/Product/8816597336200',
+            'gid://shopify/Product/8816597467272',
+            'gid://shopify/Product/8745860989064',
+        ]),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [
+                'gid://shopify/Product/8745850798216',
+                'gid://shopify/Product/8816597336200',
+                'gid://shopify/Product/8816597467272',
+                'gid://shopify/Product/8745860989064',
+            ]),
+        ],
+    ]);
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => $product->handle,
+        'namespace' => 'shopify--discovery--product_recommendation',
+        'key' => 'complementary_products',
+        'type' => 'list.product_reference',
+        'value' => implode('; ', [
+            'gid://shopify/Product/8745850798216',
+            'gid://shopify/Product/8816597336200',
+            'gid://shopify/Product/8816597467272',
+        ]),
+    ]);
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->complementary_products)->toBe($draft->complementary_products);
+    expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('complementary_products');
+});
+
+it('ignores imported shopify complementary refs beyond the first three when checking draft conflicts', function (): void {
+    $product = createWorkflowTestProduct([
+        'approval_version' => 1,
+    ]);
+
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9745850798216',
+        'handle' => 'shopify-first-a',
+        'title' => 'Shopify First A',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9816597336200',
+        'handle' => 'shopify-first-b',
+        'title' => 'Shopify First B',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9816597467272',
+        'handle' => 'shopify-first-c',
+        'title' => 'Shopify First C',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9745860989064',
+        'handle' => 'shopify-extra-d',
+        'title' => 'Shopify Extra D',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => implode('; ', [
+            'gid://shopify/Product/9745850798216',
+            'gid://shopify/Product/9816597336200',
+            'gid://shopify/Product/9816597467272',
+        ]),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => $product->handle,
+        'namespace' => 'shopify--discovery--product_recommendation',
+        'key' => 'complementary_products',
+        'type' => 'list.product_reference',
+        'value' => implode('; ', [
+            'gid://shopify/Product/9745850798216',
+            'gid://shopify/Product/9816597336200',
+            'gid://shopify/Product/9816597467272',
+            'gid://shopify/Product/9745860989064',
+        ]),
+    ]);
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->complementary_products)->toBe($draft->complementary_products);
+    expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('complementary_products');
+});
+
+it('flags complementary product warnings when any compared complementary product is no longer active', function (): void {
+    $product = createWorkflowTestProduct([
+        'approval_version' => 1,
+    ]);
+
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9745850798216',
+        'handle' => 'inactive-comp-a',
+        'title' => 'Inactive Comp A',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9816597336200',
+        'handle' => 'inactive-comp-b',
+        'title' => 'Inactive Comp B',
+        'status' => 'draft',
+        'approval_version' => 1,
+    ]);
+    Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/9816597467272',
+        'handle' => 'inactive-comp-c',
+        'title' => 'Inactive Comp C',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => implode('; ', [
+            'gid://shopify/Product/9745850798216',
+            'gid://shopify/Product/9816597336200',
+            'gid://shopify/Product/9816597467272',
+        ]),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => $product->handle,
+        'namespace' => 'shopify--discovery--product_recommendation',
+        'key' => 'complementary_products',
+        'type' => 'list.product_reference',
+        'value' => implode('; ', [
+            'gid://shopify/Product/9745850798216',
+            'gid://shopify/Product/9816597336200',
+            'gid://shopify/Product/9816597467272',
+        ]),
+    ]);
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->toContain('complementary_products');
+    expect($draft->refresh()->shopifySyncWarnings()[0]['field'])->toBe('complementary_products');
+    expect($draft->refresh()->shopifySyncWarnings()[0]['draft_value'])->toContain('Inactive Comp A');
+    expect($draft->refresh()->shopifySyncWarnings()[0]['draft_value'])->toContain('Inactive Comp B');
+    expect($draft->refresh()->shopifySyncWarnings()[0]['shopify_value'])->toContain('Inactive Comp B');
+    expect($draft->refresh()->shopifySyncWarnings()[0]['draft_value'])->not->toContain('gid://shopify/Product/');
+});
+
 it('allows resolving shopify warnings one field at a time with different decisions', function (): void {
     $product = createWorkflowTestProduct([
         'vendor' => 'Shopify Vendor',
@@ -404,6 +627,118 @@ it('syncs only the first three complementary products to Shopify while keeping e
         ->firstOrFail();
 
     expect($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS))->toBe(implode('; ', $selectedComplementary));
+});
+
+it('prefers linked draft complementary products over stale row data during approved shopify sync', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1101',
+        'approval_version' => 1,
+    ]);
+
+    approveWorkflowTestProduct($product);
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => implode('; ', [
+                'gid://shopify/Product/3001',
+                'gid://shopify/Product/3002',
+                'gid://shopify/Product/3003',
+            ]),
+        ],
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => implode('; ', [
+            'gid://shopify/Product/4001',
+            'gid://shopify/Product/4002',
+            'gid://shopify/Product/4003',
+            'gid://shopify/Product/4004',
+        ]),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => '',
+        'namespace' => 'shopify--discovery--product_recommendation',
+        'key' => 'complementary_products',
+        'type' => 'list.product_reference',
+        'value' => '',
+    ]);
+
+    $capturedMetafields = null;
+
+    $client = Mockery::mock(ShopifyApiClient::class);
+    $client->shouldReceive('graphql')
+        ->andReturnUsing(function (string $query, array $variables = []) use (&$capturedMetafields): array {
+            if (str_contains($query, 'query ProductByIdDetails')) {
+                return [
+                    'product' => [
+                        'id' => 'gid://shopify/Product/1101',
+                        'options' => [],
+                        'category' => [
+                            'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                            'name' => 'Jewelry',
+                        ],
+                        'productCategory' => [
+                            'productTaxonomyNode' => [
+                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                                'fullName' => 'Apparel & Accessories > Jewelry',
+                            ],
+                        ],
+                        'variants' => ['nodes' => []],
+                        'media' => ['nodes' => []],
+                    ],
+                ];
+            }
+
+            if (str_contains($query, 'query ProductByIdMetafields')) {
+                return [
+                    'product' => [
+                        'metafields' => [
+                            'nodes' => [],
+                        ],
+                    ],
+                ];
+            }
+
+            if (str_contains($query, 'mutation MetafieldsSet')) {
+                $capturedMetafields = $variables['metafields'] ?? null;
+
+                return [
+                    'metafieldsSet' => [
+                        'metafields' => [['id' => 'gid://shopify/Metafield/1']],
+                        'userErrors' => [],
+                    ],
+                ];
+            }
+
+            throw new RuntimeException('Unexpected Shopify GraphQL call in test.');
+        });
+
+    app()->instance(ShopifyApiClient::class, $client);
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
+        collect([$product]),
+        [ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS],
+        [ProductShopifyUpdater::CORE_FIELD_COMPLEMENTARY_PRODUCTS]
+    );
+
+    expect($result['updated'])->toBe(1);
+    expect($result['failed'])->toBe(0);
+    expect(json_decode($capturedMetafields[0]['value'], true))->toBe([
+        'gid://shopify/Product/4001',
+        'gid://shopify/Product/4002',
+        'gid://shopify/Product/4003',
+    ]);
 });
 
 it('reuses the existing Shopify media when only an image filename changes', function (): void {

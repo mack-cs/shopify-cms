@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
 use Illuminate\Database\Eloquent\Builder;
@@ -360,13 +361,17 @@ class ComplementaryProductAuditService
             ->where('row_type', 'product_primary')
             ->first();
 
-        if (!$row instanceof ShopifyRow) {
-            return null;
+        if ($row instanceof ShopifyRow) {
+            $value = trim((string) ($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, '') ?? ''));
+            if ($value !== '') {
+                return $value;
+            }
         }
 
-        $value = trim((string) ($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, '') ?? ''));
-
-        return $value !== '' ? $value : null;
+        return $this->localComplementaryMetafieldValue(
+            (int) ($product->import_id ?? 0),
+            $handle
+        );
     }
 
     public function shopifyComplementaryValueForProduct(Product $product): ?string
@@ -556,7 +561,7 @@ class ComplementaryProductAuditService
             return [];
         }
 
-        return ShopifyRow::query()
+        $values = ShopifyRow::query()
             ->whereIn('import_id', $importIds)
             ->whereIn('handle', $handles)
             ->where('row_type', 'product_primary')
@@ -572,6 +577,62 @@ class ComplementaryProductAuditService
                 ];
             })
             ->all();
+
+        $missingHandlesByImport = [];
+        foreach ($products as $product) {
+            if (!$product instanceof Product) {
+                continue;
+            }
+
+            $importId = (int) ($product->import_id ?? 0);
+            $handle = trim((string) ($product->handle ?? ''));
+            if ($importId <= 0 || $handle === '') {
+                continue;
+            }
+
+            $key = $importId . '|' . $handle;
+            if (!isset($values[$key])) {
+                $missingHandlesByImport[$importId][] = $handle;
+            }
+        }
+
+        foreach ($missingHandlesByImport as $importId => $missingHandles) {
+            $metafieldValues = ShopifyMetafield::query()
+                ->where('import_id', $importId)
+                ->whereIn('handle', array_values(array_unique($missingHandles)))
+                ->where('namespace', self::STANDARD_NAMESPACE)
+                ->where('key', self::STANDARD_KEY)
+                ->pluck('value', 'handle');
+
+            foreach ($metafieldValues as $handle => $value) {
+                $trimmed = trim((string) $value);
+                if ($trimmed === '') {
+                    continue;
+                }
+
+                $values[$importId . '|' . trim((string) $handle)] = $trimmed;
+            }
+        }
+
+        return $values;
+    }
+
+    private function localComplementaryMetafieldValue(int $importId, string $handle): ?string
+    {
+        if ($importId <= 0 || $handle === '') {
+            return null;
+        }
+
+        $value = ShopifyMetafield::query()
+            ->where('import_id', $importId)
+            ->where('handle', $handle)
+            ->where('namespace', self::STANDARD_NAMESPACE)
+            ->where('key', self::STANDARD_KEY)
+            ->value('value');
+
+        $trimmed = is_string($value) ? trim($value) : '';
+
+        return $trimmed !== '' ? $trimmed : null;
     }
 
     private function linkedProductForDraft(NewProductDraft $draft): ?Product

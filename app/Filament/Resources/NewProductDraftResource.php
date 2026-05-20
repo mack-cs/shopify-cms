@@ -5556,8 +5556,8 @@ class NewProductDraftResource extends Resource
         $items = array_map(function (array $warning): string {
             $field = trim((string) ($warning['field'] ?? ''));
             $label = e((string) ($warning['label'] ?? $warning['field'] ?? 'Field'));
-            $draftValue = e((string) ($warning['draft_value'] ?? ''));
-            $shopifyValue = e((string) ($warning['shopify_value'] ?? ''));
+            $draftValue = e(self::formatShopifyWarningDisplayValue($field, (string) ($warning['draft_value'] ?? '')));
+            $shopifyValue = e(self::formatShopifyWarningDisplayValue($field, (string) ($warning['shopify_value'] ?? '')));
             $encodedField = e($field);
 
             $actions = $field === ''
@@ -5579,6 +5579,116 @@ class NewProductDraftResource extends Resource
             . '</ul>'
             . '</div>'
         );
+    }
+
+    private static function formatShopifyWarningDisplayValue(string $field, string $value): string
+    {
+        return match ($field) {
+            'complementary_products' => self::formatComplementaryWarningDisplayValue($value),
+            default => $value,
+        };
+    }
+
+    private static function formatComplementaryWarningDisplayValue(string $value): string
+    {
+        $raw = trim($value);
+        if ($raw === '') {
+            return '';
+        }
+
+        $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
+        $tokens = array_values(array_filter(array_map(
+            static fn (mixed $item): string => trim((string) $item),
+            $parts
+        ), static fn (string $item): bool => $item !== ''));
+
+        if ($tokens === []) {
+            return $raw;
+        }
+
+        $normalizedByToken = [];
+        foreach ($tokens as $token) {
+            $normalizedByToken[$token] = self::normalizeComplementaryWarningToken($token);
+        }
+
+        $titlesByNormalized = Product::query()
+            ->select(['title', 'shopify_id', 'handle'])
+            ->where(function (Builder $query) use ($normalizedByToken): void {
+                foreach (array_unique(array_values($normalizedByToken)) as $normalized) {
+                    if ($normalized === '') {
+                        continue;
+                    }
+
+                    if (str_starts_with($normalized, 'gid://shopify/product/')) {
+                        $numericId = substr($normalized, strlen('gid://shopify/product/'));
+                        if ($numericId !== '') {
+                            $query->orWhere('shopify_id', 'gid://shopify/Product/' . $numericId);
+                        }
+
+                        continue;
+                    }
+
+                    $query->orWhere('handle', $normalized)
+                        ->orWhereRaw('LOWER(title) = ?', [str_replace('-', ' ', $normalized)]);
+                }
+            })
+            ->get()
+            ->mapWithKeys(function (Product $product): array {
+                $map = [];
+
+                $shopifyId = trim((string) ($product->shopify_id ?? ''));
+                if ($shopifyId !== '') {
+                    $map[self::normalizeComplementaryWarningToken($shopifyId)] = trim((string) ($product->title ?? ''));
+                }
+
+                $handle = trim((string) ($product->handle ?? ''));
+                if ($handle !== '') {
+                    $map[self::normalizeComplementaryWarningToken($handle)] = trim((string) ($product->title ?? ''));
+                }
+
+                $title = trim((string) ($product->title ?? ''));
+                if ($title !== '') {
+                    $map[self::normalizeComplementaryWarningToken($title)] = $title;
+                }
+
+                return $map;
+            })
+            ->all();
+
+        $display = [];
+        foreach ($tokens as $token) {
+            $normalized = $normalizedByToken[$token] ?? '';
+            $display[] = trim((string) ($titlesByNormalized[$normalized] ?? $token));
+        }
+
+        return implode('; ', $display);
+    }
+
+    private static function normalizeComplementaryWarningToken(?string $value): string
+    {
+        $trimmed = trim((string) ($value ?? ''));
+        if ($trimmed === '') {
+            return '';
+        }
+
+        if (preg_match('#gid://shopify/Product/([0-9]+)#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#/products/([0-9]+)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            return 'gid://shopify/product/' . $matches[1];
+        }
+
+        if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
+            $trimmed = $matches[1];
+        }
+
+        $trimmed = strtolower($trimmed);
+        $trimmed = str_replace('&', 'and', $trimmed);
+        $trimmed = preg_replace('/[^a-z0-9]+/', '-', $trimmed) ?? $trimmed;
+        $trimmed = preg_replace('/-+/', '-', $trimmed) ?? $trimmed;
+
+        return trim($trimmed, '-');
     }
 
     private static function shopifySyncWarningsBlockingHtml(?NewProductDraft $record): ?HtmlString

@@ -261,9 +261,7 @@ final class NewProductDraftSeeder
                 ['custom', 'uvp_short_paragraph'],
             ]);
         }
-        $data['complementary_products'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::COMPLEMENTARY_PRODUCTS, [
-            ['shopify--discovery--product_recommendation', 'complementary_products'],
-        ]);
+        $data['complementary_products'] = $this->complementaryValueFromMetafieldOrRow($product, $row);
 
         return $data;
     }
@@ -294,6 +292,26 @@ final class NewProductDraftSeeder
 
         $handle = trim((string) ($collection?->handle ?? ''));
         return $handle !== '' ? $handle : $trimmed;
+    }
+
+    private function complementaryValueFromMetafieldOrRow(Product $product, ?ShopifyRow $row): ?string
+    {
+        $metafieldValue = ShopifyMetafield::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('namespace', 'shopify--discovery--product_recommendation')
+            ->where('key', 'complementary_products')
+            ->value('value');
+
+        $metafieldTrimmed = is_string($metafieldValue) ? trim($metafieldValue) : '';
+        if ($metafieldTrimmed !== '') {
+            return $metafieldTrimmed;
+        }
+
+        $rowValue = $row?->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
+        $rowTrimmed = is_string($rowValue) ? trim($rowValue) : '';
+
+        return $rowTrimmed !== '' ? $rowTrimmed : null;
     }
 
     private function designValueFromRowOrMetafield(Product $product, ?ShopifyRow $row): ?string
@@ -466,8 +484,49 @@ final class NewProductDraftSeeder
         return match ($field) {
             'product_category' => $this->normalizeCategoryDisplayValue($string),
             'sibling_collection' => $this->normalizeSiblingCollectionDisplayValue($string),
+            'complementary_products' => $this->normalizeComplementaryProductsDisplayValue($value),
             default => $string,
         };
+    }
+
+    private function normalizeComplementaryProductsDisplayValue(mixed $value): string
+    {
+        $tokens = $this->parseComplementaryReferenceTokens($value);
+        if ($tokens === []) {
+            return '';
+        }
+
+        $productIds = [];
+        foreach ($tokens as $token) {
+            $productId = $this->resolveProductIdFromReferenceToken($token);
+            if ($productId !== null) {
+                $productIds[] = $productId;
+            }
+        }
+
+        $titlesById = Product::query()
+            ->whereKey(array_values(array_unique($productIds)))
+            ->pluck('title', 'id')
+            ->all();
+
+        $display = [];
+        foreach ($tokens as $token) {
+            $productId = $this->resolveProductIdFromReferenceToken($token);
+            if ($productId !== null) {
+                $title = trim((string) ($titlesById[$productId] ?? ''));
+                if ($title !== '') {
+                    $display[] = $title;
+                    continue;
+                }
+            }
+
+            $normalized = trim((string) $token);
+            if ($normalized !== '') {
+                $display[] = $normalized;
+            }
+        }
+
+        return implode('; ', array_values(array_unique($display)));
     }
 
     private function normalizeCategoryDisplayValue(string $value): string
@@ -524,7 +583,15 @@ final class NewProductDraftSeeder
     private function complementaryProductsMatch(mixed $draftValue, mixed $shopifyValue): bool
     {
         $draftRefs = $this->normalizedComplementaryReferenceSet($draftValue);
-        $shopifyRefs = $this->normalizedComplementaryReferenceSet($shopifyValue);
+        $shopifyRefs = array_slice(
+            $this->normalizedComplementaryReferenceSet($shopifyValue),
+            0,
+            3
+        );
+
+        if ($this->hasInactiveComplementaryProducts(array_merge($draftRefs, $shopifyRefs))) {
+            return false;
+        }
 
         if ($shopifyRefs === []) {
             return $draftRefs === [];
@@ -537,6 +604,44 @@ final class NewProductDraftSeeder
         }
 
         return true;
+    }
+
+    /**
+     * @param array<int, string> $references
+     */
+    private function hasInactiveComplementaryProducts(array $references): bool
+    {
+        $ids = [];
+
+        foreach ($references as $reference) {
+            if (!str_starts_with($reference, 'id:')) {
+                continue;
+            }
+
+            $id = (int) substr($reference, 3);
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        $ids = array_values(array_unique($ids));
+        if ($ids === []) {
+            return false;
+        }
+
+        $statuses = Product::query()
+            ->whereKey($ids)
+            ->pluck('status', 'id')
+            ->all();
+
+        foreach ($ids as $id) {
+            $status = strtolower(trim((string) ($statuses[$id] ?? '')));
+            if ($status !== 'active') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

@@ -5,6 +5,9 @@ namespace App\Filament\Resources\NewProductDraftResource\Pages;
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
 use App\Models\NewProductDraft;
+use App\Models\Product;
+use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftSeeder;
 use Filament\Notifications\Notification;
 use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
@@ -16,11 +19,14 @@ class EditNewProductDraft extends EditRecord
     protected static string $resource = NewProductDraftResource::class;
     protected ?bool $hasUnsavedDataChangesAlert = true;
     protected int $editLockMinutes = 15;
+    /** @var array<int, string> */
+    protected array $savedDraftAttributes = [];
 
     public function mount(int | string $record): void
     {
         parent::mount($record);
 
+        $this->refreshDraftFromLinkedProduct();
         $this->acquireEditLock();
 
         if ($this->record instanceof NewProductDraft && $this->record->isPendingApproval()) {
@@ -44,11 +50,15 @@ class EditNewProductDraft extends EditRecord
 
     protected function mutateFormDataBeforeSave(array $data): array
     {
-        return NewProductDraftResource::mutateDraftFormData($data, $this->record);
+        $data = NewProductDraftResource::mutateDraftFormData($data, $this->record);
+        $this->savedDraftAttributes = $this->syncableDraftAttributes(array_keys($data));
+
+        return $data;
     }
 
     protected function afterSave(): void
     {
+        $this->syncSavedDraftFieldsToProduct();
         $this->refreshEditLock();
     }
 
@@ -313,5 +323,83 @@ class EditNewProductDraft extends EditRecord
         return $expiresAt
             ? "{$editor} is actively editing this draft. The lock expires {$expiresAt}."
             : "{$editor} is actively editing this draft.";
+    }
+
+    private function refreshDraftFromLinkedProduct(): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        $product = null;
+
+        $shopifyId = trim((string) ($this->record->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $product = Product::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+        }
+
+        if (!$product instanceof Product) {
+            $handle = trim((string) ($this->record->handle ?? ''));
+            if ($handle !== '') {
+                $product = Product::query()
+                    ->where('handle', $handle)
+                    ->first();
+            }
+        }
+
+        if (!$product instanceof Product) {
+            return;
+        }
+
+        $this->record = app(NewProductDraftSeeder::class)->upsertFromProduct(
+            $product,
+            Auth::id()
+        );
+    }
+
+    /**
+     * @param array<int, string> $attributes
+     * @return array<int, string>
+     */
+    private function syncableDraftAttributes(array $attributes): array
+    {
+        $blocked = [
+            'handle',
+            'shopify_id',
+            'origin',
+            'created_by',
+            'shopify_sync_warnings',
+            'editing_user_id',
+            'editing_started_at',
+            'editing_expires_at',
+            'approval_version',
+        ];
+
+        return array_values(array_filter(
+            array_unique(array_map('strval', $attributes)),
+            static fn (string $attribute): bool => $attribute !== '' && !in_array($attribute, $blocked, true)
+        ));
+    }
+
+    private function syncSavedDraftFieldsToProduct(): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        if ($this->savedDraftAttributes === []) {
+            return;
+        }
+
+        app(NewProductDraftProductSync::class)->syncToExistingProduct(
+            $this->record->fresh() ?? $this->record,
+            ensureApprovalReset: true,
+            attributes: $this->savedDraftAttributes
+        );
+
+        $this->savedDraftAttributes = [];
+        $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
     }
 }

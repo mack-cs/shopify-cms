@@ -5342,6 +5342,20 @@ GQL;
 
     private function selectedCoreMetafieldValue(Product $product, array $primaryData, string $header): ?string
     {
+        if ($header === HeaderStore::COMPLEMENTARY_PRODUCTS) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'complementary_products');
+            if ($draftValue !== null) {
+                return $draftValue;
+            }
+        }
+
+        if ($header === HeaderStore::SIBLINGS) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'siblings');
+            if ($draftValue !== null) {
+                return $draftValue;
+            }
+        }
+
         if ($header === HeaderStore::COLOR_METAFIELD) {
             $productValue = $this->nullIfEmpty($product->color_string);
             if ($productValue !== null) {
@@ -5363,6 +5377,41 @@ GQL;
 
         $stringValue = trim((string) $value);
         return $stringValue === '' ? null : $stringValue;
+    }
+
+    private function linkedDraftMetafieldValue(Product $product, string $attribute): ?string
+    {
+        $draftQuery = NewProductDraft::query();
+
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+
+        if ($shopifyId !== '' && $handle !== '') {
+            $draftQuery->where(function ($query) use ($shopifyId, $handle): void {
+                $query->where('shopify_id', $shopifyId)
+                    ->orWhere('handle', $handle);
+            });
+        } elseif ($shopifyId !== '') {
+            $draftQuery->where('shopify_id', $shopifyId);
+        } elseif ($handle !== '') {
+            $draftQuery->where('handle', $handle);
+        } else {
+            return null;
+        }
+
+        $draft = $draftQuery->first([$attribute]);
+        if (!$draft instanceof NewProductDraft) {
+            return null;
+        }
+
+        $value = $draft->getAttribute($attribute);
+        if (!is_scalar($value)) {
+            return null;
+        }
+
+        $trimmed = trim((string) $value);
+
+        return $trimmed !== '' ? $trimmed : null;
     }
 
     private function isMetafieldHeader(string $header): bool
