@@ -142,6 +142,26 @@ class Product extends Model
         return $this->approvalsForCurrentVersionCount() >= 2;
     }
 
+    public function latestApprovalAt(): ?\Illuminate\Support\Carbon
+    {
+        $approval = $this->approvalsForCurrentVersion()
+            ->latest('created_at')
+            ->first();
+
+        return $approval?->created_at;
+    }
+
+    public function latestPartialApprovalAt(): ?\Illuminate\Support\Carbon
+    {
+        $request = $this->partialApprovalRequests()
+            ->where('approval_version', $this->approval_version)
+            ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+            ->latest('approved_at')
+            ->first();
+
+        return $request?->approved_at;
+    }
+
     public function changeLogs(): HasMany
     {
         return $this->hasMany(ChangeLog::class);

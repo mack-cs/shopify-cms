@@ -508,7 +508,7 @@ class ProductResource extends Resource
                                     ) && ($record?->styleProfiles()->exists() ?? false);
                                     return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
                                 }),
-                            Grid::make(5)->schema([
+                            Grid::make(7)->schema([
                                 Placeholder::make('seo_updated_at_display')
                                     ->label('Last SEO update')
                                     ->content(fn (?Product $record): string => $record?->seo_updated_at?->format('Y-m-d H:i') ?? 'Not tracked yet'),
@@ -531,6 +531,12 @@ class ProductResource extends Resource
                                     ->content(fn (?Product $record): string => $record
                                         ? ($record->approvalsForCurrentVersionCount() . '/2')
                                         : '0/2'),
+                                Placeholder::make('latest_approval_at_display')
+                                    ->label('Last full approval')
+                                    ->content(fn (?Product $record): string => $record?->latestApprovalAt()?->format('Y-m-d H:i:s') ?? 'Not approved yet'),
+                                Placeholder::make('latest_partial_approval_at_display')
+                                    ->label('Last partial approval')
+                                    ->content(fn (?Product $record): string => $record?->latestPartialApprovalAt()?->format('Y-m-d H:i:s') ?? 'No partial approval yet'),
                                 Toggle::make('is_bundle')
                                     ->label('Bundle')
                                     ->helperText('Internal only. Not exported.'),
@@ -1069,9 +1075,21 @@ class ProductResource extends Resource
                 ->label('Approvals')
                 ->state(fn (Product $record) => $record->approvalsForCurrentVersionCount())
                 ->formatStateUsing(fn (int $state) => "{$state}/2")
+                ->description(fn (Product $record): ?string => $record->latestApprovalAt()?->format('Y-m-d H:i:s'))
                 ->badge()
                 ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('approval_status')
+                ->label('Approval Status')
+                ->state(fn (Product $record): string => self::approvalStatusLabel($record))
+                ->description(fn (Product $record): ?string => $record->latestApprovalAt()?->format('Y-m-d H:i:s'))
+                ->badge()
+                ->color(fn (string $state): string => match ($state) {
+                    'Approved' => 'success',
+                    'Pending 1/2' => 'warning',
+                    default => 'gray',
+                })
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('delete_request_status')
                 ->label('Delete Request')
@@ -1086,12 +1104,28 @@ class ProductResource extends Resource
             TextColumn::make('partial_approval_status')
                 ->label('Partial Approval')
                 ->state(fn (Product $record): string => self::partialApprovalStatusLabel($record))
+                ->description(fn (Product $record): ?string => self::partialApprovalFieldsPreview($record))
                 ->badge()
                 ->color(fn (string $state): string => match (true) {
                     str_starts_with($state, 'Pending') => 'warning',
                     str_starts_with($state, 'Approved') => 'success',
                     default => 'gray',
                 })
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('partial_approval_fields_preview')
+                ->label('Partial Approval Fields')
+                ->state(fn (Product $record): string => self::partialApprovalFieldsPreview($record, false) ?? '-')
+                ->wrap()
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('latest_approval_at')
+                ->label('Approval Time')
+                ->state(fn (Product $record): ?string => $record->latestApprovalAt()?->format('Y-m-d H:i:s'))
+                ->placeholder('-')
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('latest_partial_approval_at')
+                ->label('Partial Approval Time')
+                ->state(fn (Product $record): ?string => $record->latestPartialApprovalAt()?->format('Y-m-d H:i:s'))
+                ->placeholder('-')
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('complementaryProductsAudit.status')
                 ->label('Complementary Audit')
@@ -1107,6 +1141,7 @@ class ProductResource extends Resource
             TextColumn::make('shopify_sync_state')
                 ->label('Shopify Sync')
                 ->state(fn (Product $record): string => $record->shopifySyncState())
+                ->description(fn (Product $record): ?string => self::syncFieldsPreview($record))
                 ->badge()
                 ->color(fn (string $state): string => match ($state) {
                     'Synced' => 'success',
@@ -1114,6 +1149,11 @@ class ProductResource extends Resource
                     default => 'gray',
                 })
                 ->toggleable(),
+            TextColumn::make('sync_fields_preview')
+                ->label('Sync Preview')
+                ->state(fn (Product $record): string => self::syncFieldsPreview($record, false) ?? '-')
+                ->wrap()
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('sync_batch_id')
                 ->label('Sync Batch')
                 ->state(fn (Product $record): string => self::syncBatchLabel($record->sync_batch_id))
@@ -1828,6 +1868,12 @@ class ProductResource extends Resource
                                 'user_id' => Auth::id(),
                                 'approval_version' => $record->approval_version,
                             ]);
+
+                            $record->refresh();
+                            if ($record->isApprovedByTwo()) {
+                                app(ProductPartialApprovalService::class)->clearRequestsForCurrentVersion($record);
+                                self::notifyFullApprovalGranted($record);
+                            }
                             $approvedCount++;
                         }
 
@@ -1855,14 +1901,21 @@ class ProductResource extends Resource
                     ->color('info')
                     ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--sync'])
                     ->requiresConfirmation()
+                    ->modalWidth('4xl')
+                    ->form([
+                        Placeholder::make('sync_preview')
+                            ->label('Sync preview')
+                            ->content(new HtmlString(self::bulkSyncPreviewHtml())),
+                    ])
                     ->action(function (Collection $records): void {
                         $ids = $records->pluck('id')->all();
                         $selectedCount = count($ids);
                         \App\Jobs\ProductShopifyUpdateJob::dispatch($ids, Auth::id());
 
+                        $preview = self::selectedSyncPreviewSummary($records);
                         self::sendNotification(Notification::make()
                             ->title('Shopify sync queued')
-                            ->body("Queued {$selectedCount} selected product(s). Active products will sync only fully approved or partially approved fields.")
+                            ->body(trim("Queued {$selectedCount} selected product(s). {$preview}"))
                             ->success()
                         );
                     })
@@ -2261,6 +2314,11 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
 
         $record->refresh();
 
+        if ($record->isApprovedByTwo()) {
+            app(ProductPartialApprovalService::class)->clearRequestsForCurrentVersion($record);
+            self::notifyFullApprovalGranted($record);
+        }
+
         self::sendNotification(Notification::make()
             ->title('Product approved')
             ->body("Approvals: {$record->approvalsForCurrentVersionCount()}/2.")
@@ -2452,6 +2510,10 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
                     array_values(array_filter($get('scopes') ?? [], 'is_string')),
                     true
                 )),
+            Placeholder::make('partial_approval_preview')
+                ->label('Preview')
+                ->content(fn (Get $get): string => self::partialApprovalSelectionPreview($get))
+                ->live(),
             Checkbox::make('continue_on_invalid')
                 ->label('Continue and skip invalid products')
                 ->helperText('If some selected products have errors in the selected fields, they will be skipped instead of blocking the request.'),
@@ -2541,6 +2603,209 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
         }
 
         return 'None';
+    }
+
+    private static function partialApprovalFieldsPreview(Product $record, bool $limit = true): ?string
+    {
+        $pendingLabels = self::partialApprovalFieldLabelsByStatus($record, ProductPartialApprovalRequest::STATUS_PENDING);
+        if ($pendingLabels !== []) {
+            return self::previewLabelList('Pending', $pendingLabels, $limit);
+        }
+
+        $approvedLabels = self::partialApprovalFieldLabelsByStatus($record, ProductPartialApprovalRequest::STATUS_APPROVED);
+        if ($approvedLabels !== []) {
+            return self::previewLabelList('Approved', $approvedLabels, $limit);
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function partialApprovalFieldLabelsByStatus(Product $record, string $status): array
+    {
+        $requests = $record->partialApprovalRequests()
+            ->where('approval_version', $record->approval_version)
+            ->where('status', $status)
+            ->get(['scopes', 'core_fields']);
+
+        $labels = [];
+        $service = app(ProductPartialApprovalService::class);
+
+        foreach ($requests as $request) {
+            $labels = array_merge($labels, $service->requestFieldLabels(
+                is_array($request->scopes) ? $request->scopes : [],
+                is_array($request->core_fields) ? $request->core_fields : [],
+            ));
+        }
+
+        return array_values(array_unique(array_filter(array_map('strval', $labels))));
+    }
+
+    private static function syncFieldsPreview(Product $record, bool $limit = true): ?string
+    {
+        $labels = self::syncPreviewLabels($record);
+        if ($labels === []) {
+            return null;
+        }
+
+        return self::previewLabelList('Will sync', $labels, $limit);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function syncPreviewLabels(Product $record): array
+    {
+        $service = app(ProductPartialApprovalService::class);
+
+        if ($record->isApprovedByTwo()) {
+            return $service->requestFieldLabels(
+                ProductShopifyUpdater::availableSyncScopes(),
+                ProductShopifyUpdater::defaultCoreFields(),
+            );
+        }
+
+        if (!$service->isActiveProduct($record)) {
+            return [];
+        }
+
+        $allowed = $service->allowedSelections(
+            $record,
+            ProductShopifyUpdater::availableSyncScopes(),
+            ProductShopifyUpdater::defaultCoreFields(),
+        );
+
+        $scopes = is_array($allowed['scopes'] ?? null) ? $allowed['scopes'] : [];
+        $coreFields = is_array($allowed['core_fields'] ?? null) ? $allowed['core_fields'] : [];
+
+        if ($scopes === []) {
+            return [];
+        }
+
+        return $service->requestFieldLabels($scopes, $coreFields);
+    }
+
+    private static function previewLabelList(string $prefix, array $labels, bool $limit = true): ?string
+    {
+        $labels = array_values(array_unique(array_filter(array_map('trim', $labels))));
+        if ($labels === []) {
+            return null;
+        }
+
+        $text = $prefix . ': ' . implode(', ', $labels);
+
+        return $limit
+            ? \Illuminate\Support\Str::limit($text, 110)
+            : $text;
+    }
+
+    private static function partialApprovalSelectionPreview(Get $get): string
+    {
+        $service = app(ProductPartialApprovalService::class);
+        $normalized = $service->normalizeSelections(
+            $get('scopes') ?? [],
+            $get('core_fields') ?? [],
+            $get('metafield_fields') ?? [],
+        );
+
+        if (($normalized['scopes'] ?? []) === []) {
+            return 'Choose at least one field group.';
+        }
+
+        $labels = $service->requestFieldLabels(
+            is_array($normalized['scopes'] ?? null) ? $normalized['scopes'] : [],
+            is_array($normalized['core_fields'] ?? null) ? $normalized['core_fields'] : [],
+        );
+
+        return self::previewLabelList('Will request approval for', $labels, false)
+            ?? 'Choose at least one valid field.';
+    }
+
+    private static function bulkSyncPreviewHtml(): string
+    {
+        $service = app(ProductPartialApprovalService::class);
+        $fullLabels = $service->requestFieldLabels(
+            ProductShopifyUpdater::availableSyncScopes(),
+            ProductShopifyUpdater::defaultCoreFields(),
+        );
+
+        $fullText = e(implode(', ', $fullLabels));
+
+        return '<div style="display:flex;flex-direction:column;gap:8px;">'
+            . '<div><strong>Fully approved products:</strong> ' . $fullText . '</div>'
+            . '<div><strong>Partially approved active products:</strong> only the fields currently approved for each product will sync.</div>'
+            . '<div style="color:#6b7280;">Use the selectable <strong>Sync Preview</strong> and <strong>Partial Approval Fields</strong> columns to inspect products before running sync.</div>'
+            . '</div>';
+    }
+
+    private static function selectedSyncPreviewSummary(Collection $records): string
+    {
+        $previewTexts = $records
+            ->map(fn (Product $record): ?string => self::syncFieldsPreview($record, false))
+            ->filter(fn (?string $value): bool => is_string($value) && trim($value) !== '')
+            ->unique()
+            ->take(3)
+            ->values()
+            ->all();
+
+        if ($previewTexts === []) {
+            return 'No approved sync fields were found on the selected products.';
+        }
+
+        $summary = 'Preview: ' . implode(' | ', $previewTexts);
+
+        if ($records->count() > 3) {
+            $summary .= ' | Additional products may differ.';
+        }
+
+        return $summary;
+    }
+
+    private static function approvalStatusLabel(Product $record): string
+    {
+        $count = $record->approvalsForCurrentVersionCount();
+
+        if ($count >= 2) {
+            return 'Approved';
+        }
+
+        if ($count === 1) {
+            return 'Pending 1/2';
+        }
+
+        return 'None';
+    }
+
+    private static function notifyFullApprovalGranted(Product $record): void
+    {
+        $approvalUserIds = $record->approvalsForCurrentVersion()
+            ->distinct('user_id')
+            ->pluck('user_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->all();
+
+        if ($approvalUserIds === []) {
+            return;
+        }
+
+        $title = trim((string) ($record->title ?? '')) ?: ('Product #' . $record->id);
+        $approvedAt = $record->latestApprovalAt()?->format('Y-m-d H:i:s');
+        $body = $approvedAt !== null
+            ? "{$title} reached full approval at {$approvedAt}."
+            : "{$title} reached full approval.";
+
+        foreach ($approvalUserIds as $userId) {
+            AdminNotification::sendToUserId(
+                Notification::make()
+                    ->title('Product fully approved')
+                    ->body($body)
+                    ->success(),
+                $userId
+            );
+        }
     }
 
     public static function getPages(): array

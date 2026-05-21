@@ -41,13 +41,16 @@ class ProductShopifyUpdateJob implements ShouldQueue
             $parts = [];
             $scopeLabels = ProductShopifyUpdater::syncScopeLabels();
             $coreFieldLabels = ProductShopifyUpdater::coreFieldLabels();
-            $scopeSummary = $this->scopes === null
-                ? 'Full sync'
-                : collect($this->scopes)
+            if ($this->scopes === null) {
+                $parts[] = 'Scopes: Automatic by approval state. Fully approved products run full sync; partially approved active products sync only their approved fields.';
+            } else {
+                $scopeSummary = collect($this->scopes)
                     ->map(fn (string $scope): string => $scopeLabels[$scope] ?? $scope)
                     ->implode(', ');
 
-            $parts[] = "Scopes: {$scopeSummary}.";
+                $parts[] = "Scopes: {$scopeSummary}.";
+            }
+
             if ($this->scopes !== null && in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $this->scopes, true)) {
                 $coreSummary = empty($this->coreFields)
                     ? 'none selected'

@@ -273,6 +273,7 @@ final class ProductShopifyUpdater
             $product->forceFill([
                 'sync_batch_id' => $syncBatchId,
                 'last_synced_at' => now(),
+                'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
             ])->saveQuietly();
         });
     }
@@ -836,7 +837,10 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         $input['tags'] = TagNormalizer::parseTokens((string) $tagsRaw);
     }
     if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
-        $input['status'] = $this->mapStatus((string) $statusRaw);
+        $mappedStatus = $this->mapStatusForSync((string) $statusRaw);
+        if ($mappedStatus !== null) {
+            $input['status'] = $mappedStatus;
+        }
     }
     $handleChangeRequested = $syncProduct
         && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE)
@@ -2075,6 +2079,17 @@ GQL;
             'archived' => 'ARCHIVED',
             default => 'DRAFT',
         };
+    }
+
+    private function mapStatusForSync(string $status): ?string
+    {
+        $normalized = strtolower(trim($status));
+
+        if ($normalized === 'archived') {
+            return null;
+        }
+
+        return $this->mapStatus($status);
     }
 
     private function resolveProductCategoryGid(?string $productCategory, ?string $productType): ?string

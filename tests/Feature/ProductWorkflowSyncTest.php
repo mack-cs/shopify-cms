@@ -75,6 +75,80 @@ it('pushes changed draft fields into the linked product on save, including clear
     expect($product->approval_version)->toBe(2);
 });
 
+it('keeps removed complementary products removed after draft sync and reseed', function (): void {
+    $product = createWorkflowTestProduct([
+        'approval_version' => 1,
+    ]);
+
+    $originalComplementary = implode('; ', [
+        'gid://shopify/Product/2001',
+        'gid://shopify/Product/2002',
+        'gid://shopify/Product/2003',
+        'gid://shopify/Product/2004',
+    ]);
+    $updatedComplementary = implode('; ', [
+        'gid://shopify/Product/2001',
+        'gid://shopify/Product/2002',
+        'gid://shopify/Product/2003',
+    ]);
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => $originalComplementary,
+        ],
+    ]);
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => $product->handle,
+        'namespace' => 'shopify--discovery--product_recommendation',
+        'key' => 'complementary_products',
+        'type' => 'list.product_reference',
+        'value' => $originalComplementary,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'complementary_products' => $updatedComplementary,
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        ensureApprovalReset: false,
+        attributes: ['complementary_products']
+    );
+
+    $metafield = ShopifyMetafield::query()
+        ->where('import_id', $product->import_id)
+        ->where('handle', $product->handle)
+        ->where('namespace', 'shopify--discovery--product_recommendation')
+        ->where('key', 'complementary_products')
+        ->firstOrFail();
+
+    expect($metafield->value)->toBe($updatedComplementary);
+
+    $row = ShopifyRow::query()
+        ->where('import_id', $product->import_id)
+        ->where('handle', $product->handle)
+        ->where('row_type', 'product_primary')
+        ->firstOrFail();
+
+    $row->set(HeaderStore::COMPLEMENTARY_PRODUCTS, $originalComplementary);
+    $row->save();
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->complementary_products)->toBe($updatedComplementary);
+});
+
 it('backfills empty draft fields from shopify sync and records warnings for conflicting draft edits', function (): void {
     $product = createWorkflowTestProduct([
         'vendor' => 'Shopify Vendor',
@@ -100,6 +174,27 @@ it('backfills empty draft fields from shopify sync and records warnings for conf
     expect($seeded->shopifySyncWarnings()[0]['field'])->toBe('vendor');
     expect($seeded->shopifySyncWarnings()[0]['draft_value'])->toBe('Draft Vendor');
     expect($seeded->shopifySyncWarnings()[0]['shopify_value'])->toBe('Shopify Vendor');
+});
+
+it('treats non-draft shopify status as authoritative for the draft without a warning', function (): void {
+    $product = createWorkflowTestProduct([
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'status' => 'draft',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->status)->toBe('active');
+    expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('status');
 });
 
 it('does not flag uvp short paragraph conflicts when only rich text formatting and punctuation differ', function (): void {
@@ -739,6 +834,69 @@ it('prefers linked draft complementary products over stale row data during appro
         'gid://shopify/Product/4002',
         'gid://shopify/Product/4003',
     ]);
+});
+
+it('does not send archived product status to shopify during sync', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1201',
+        'status' => 'archived',
+        'approval_version' => 1,
+    ]);
+
+    approveWorkflowTestProduct($product);
+
+    $client = Mockery::mock(ShopifyApiClient::class);
+    $client->shouldReceive('graphql')
+        ->andReturnUsing(function (string $query, array $variables = []): array {
+            if (str_contains($query, 'mutation ProductUpdate')) {
+                throw new RuntimeException('Archived status should not trigger a Shopify product status update.');
+            }
+
+            if (str_contains($query, 'query ProductByIdDetails')) {
+                return [
+                    'product' => [
+                        'id' => 'gid://shopify/Product/1201',
+                        'options' => [],
+                        'category' => [
+                            'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                            'name' => 'Jewelry',
+                        ],
+                        'productCategory' => [
+                            'productTaxonomyNode' => [
+                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                                'fullName' => 'Apparel & Accessories > Jewelry',
+                            ],
+                        ],
+                        'variants' => ['nodes' => []],
+                        'media' => ['nodes' => []],
+                        'images' => ['nodes' => []],
+                    ],
+                ];
+            }
+
+            if (str_contains($query, 'query ProductByIdMetafields')) {
+                return [
+                    'product' => [
+                        'metafields' => [
+                            'nodes' => [],
+                        ],
+                    ],
+                ];
+            }
+
+            throw new RuntimeException('Unexpected Shopify GraphQL call in archived status sync test.');
+        });
+
+    app()->instance(ShopifyApiClient::class, $client);
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
+        collect([$product]),
+        [ProductShopifyUpdater::SYNC_SCOPE_PRODUCT],
+        [ProductShopifyUpdater::CORE_FIELD_STATUS]
+    );
+
+    expect($result['updated'])->toBe(1);
+    expect($result['failed'])->toBe(0);
 });
 
 it('reuses the existing Shopify media when only an image filename changes', function (): void {

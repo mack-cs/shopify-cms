@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
 use App\Services\HeaderStore;
@@ -48,6 +49,7 @@ final class NewProductDraftProductSync
         $this->syncVariantFromDraft($product, $draft, $attributes);
         $this->syncCostPerItemRow($product, $draft, $attributes);
         $this->syncShopifyRowFieldsFromDraft($product, $draft, $attributes);
+        $this->syncShopifyMetafieldFieldsFromDraft($product, $draft, $attributes);
 
         $product->refresh();
         if ($ensureApprovalReset && (int) ($product->approval_version ?? 1) === $initialApprovalVersion) {
@@ -347,6 +349,56 @@ final class NewProductDraftProductSync
         if ($seoDeindexChanged) {
             $this->seoTracker->markSeoUpdated($product);
         }
+    }
+
+    private function syncShopifyMetafieldFieldsFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
+    {
+        $this->syncDraftMetafieldSnapshot(
+            $product,
+            'complementary_products',
+            'shopify--discovery--product_recommendation',
+            'complementary_products',
+            'list.product_reference',
+            $draft->complementary_products,
+            $attributes
+        );
+
+        $this->syncDraftMetafieldSnapshot(
+            $product,
+            'siblings',
+            'shopify--discovery--product_recommendation',
+            'related_products',
+            'list.product_reference',
+            $draft->siblings,
+            $attributes
+        );
+    }
+
+    private function syncDraftMetafieldSnapshot(
+        Product $product,
+        string $attribute,
+        string $namespace,
+        string $key,
+        string $type,
+        mixed $value,
+        ?array $attributes = null
+    ): void {
+        if (!$this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
+            return;
+        }
+
+        ShopifyMetafield::query()->updateOrCreate(
+            [
+                'import_id' => $product->import_id,
+                'handle' => $product->handle,
+                'namespace' => $namespace,
+                'key' => $key,
+            ],
+            [
+                'type' => $type,
+                'value' => is_scalar($value) ? trim((string) $value) : '',
+            ]
+        );
     }
 
     private function addRowUpdate(

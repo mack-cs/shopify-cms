@@ -136,6 +136,18 @@ final class NewProductDraftSeeder
                 continue;
             }
 
+            if ($key === 'status') {
+                $normalizedIncomingStatus = strtolower(trim((string) $incomingValue));
+
+                if ($normalizedIncomingStatus !== '' && $normalizedIncomingStatus !== 'draft') {
+                    if (!$this->valuesMatch($key, $currentValue, $incomingValue)) {
+                        $changes[$key] = $incomingValue;
+                    }
+
+                    continue;
+                }
+            }
+
             if ($this->isEmptyValue($currentValue)) {
                 $changes[$key] = $incomingValue;
                 continue;

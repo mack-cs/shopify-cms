@@ -90,13 +90,21 @@ class ListProducts extends ListRecords
                 ->whereHas('partialApprovalRequests', function (Builder $sub): void {
                     $sub->whereColumn('approval_version', 'products.approval_version')
                         ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
-                }));
+                })
+                ->whereRaw(
+                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
+                ));
 
         $tabs['approved'] = Tab::make('Approved')
             ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
                 ->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
                 ));
+
+        $tabs['synced'] = Tab::make('Synced')
+            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+                ->whereNotNull('last_synced_at')
+                ->whereColumn('updated_at', '<=', 'last_synced_at'));
 
         $tabs['pending_approval'] = Tab::make('Pending Approval')
             ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)

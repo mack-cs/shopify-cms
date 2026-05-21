@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
 use App\Models\User;
+use Filament\Notifications\Notification;
 use App\Services\StyleProfileSeoTimelineService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -286,14 +287,17 @@ class ProductPartialApprovalService
                     continue;
                 }
 
+                $approvedAt = now();
+
                 $request->forceFill([
                     'status' => ProductPartialApprovalRequest::STATUS_APPROVED,
                     'approved_by' => $userId,
-                    'approved_at' => now(),
+                    'approved_at' => $approvedAt,
                 ])->save();
 
                 $this->syncApprovedHandleWhenTitleApproved($request);
                 $this->markSeoApprovedWhenApplicable($request, $userId);
+                $this->notifyRequestApproved($request, $approvedAt);
                 $approved++;
             }
         }
@@ -357,14 +361,17 @@ class ProductPartialApprovalService
                 continue;
             }
 
+            $approvedAt = now();
+
             $request->forceFill([
                 'status' => ProductPartialApprovalRequest::STATUS_APPROVED,
                 'approved_by' => $userId,
-                'approved_at' => now(),
+                'approved_at' => $approvedAt,
             ])->save();
 
             $this->syncApprovedHandleWhenTitleApproved($request);
             $this->markSeoApprovedWhenApplicable($request, $userId);
+            $this->notifyRequestApproved($request, $approvedAt);
             $approved++;
         }
 
@@ -467,6 +474,84 @@ class ProductPartialApprovalService
             'scopes' => array_values($allowedScopes),
             'core_fields' => array_values($allowedCoreFields),
         ];
+    }
+
+    public function clearRequestsForCurrentVersion(Product $product): void
+    {
+        $pendingRequests = ProductPartialApprovalRequest::query()
+            ->with('product')
+            ->where('product_id', $product->id)
+            ->where('approval_version', $product->approval_version)
+            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+            ->get();
+
+        $approvedAt = $product->latestApprovalAt() ?? now();
+        foreach ($pendingRequests as $request) {
+            $this->notifyRequestApprovedByFullApproval($request, $approvedAt);
+        }
+
+        ProductPartialApprovalRequest::query()
+            ->where('product_id', $product->id)
+            ->where('approval_version', $product->approval_version)
+            ->delete();
+    }
+
+    private function notifyRequestApproved(ProductPartialApprovalRequest $request, \Illuminate\Support\Carbon $approvedAt): void
+    {
+        $product = $request->product;
+        if (!$product instanceof Product) {
+            return;
+        }
+
+        $labels = $this->requestFieldLabels(
+            is_array($request->scopes) ? $request->scopes : [],
+            is_array($request->core_fields) ? $request->core_fields : [],
+        );
+
+        $bodyParts = [];
+        if ($labels !== []) {
+            $bodyParts[] = 'Approved fields: ' . implode(', ', $labels) . '.';
+        }
+        $bodyParts[] = 'Approved at ' . $approvedAt->format('Y-m-d H:i:s') . '.';
+
+        AdminNotification::sendToUserId(
+            Notification::make()
+                ->title('Partial approval request approved')
+                ->body(trim((string) ($product->title ?? 'Product')) !== ''
+                    ? $product->title . '. ' . implode(' ', $bodyParts)
+                    : implode(' ', $bodyParts))
+                ->success(),
+            (int) $request->requested_by
+        );
+    }
+
+    private function notifyRequestApprovedByFullApproval(ProductPartialApprovalRequest $request, \Illuminate\Support\Carbon $approvedAt): void
+    {
+        $product = $request->product;
+        if (!$product instanceof Product) {
+            return;
+        }
+
+        $labels = $this->requestFieldLabels(
+            is_array($request->scopes) ? $request->scopes : [],
+            is_array($request->core_fields) ? $request->core_fields : [],
+        );
+
+        $bodyParts = ['The product reached full approval, so this request is now granted.'];
+        if ($labels !== []) {
+            $bodyParts[] = 'Requested fields: ' . implode(', ', $labels) . '.';
+        }
+        $bodyParts[] = 'Approved at ' . $approvedAt->format('Y-m-d H:i:s') . '.';
+
+        AdminNotification::sendToUserId(
+            Notification::make()
+                ->title('Approval request granted')
+                ->body(trim((string) ($product->title ?? 'Product')) !== ''
+                    ? $product->title . '. ' . implode(' ', $bodyParts)
+                    : implode(' ', $bodyParts))
+                ->success(),
+            (int) $request->requested_by
+        );
     }
 
     private function syncApprovedHandleWhenTitleApproved(ProductPartialApprovalRequest $request): void
