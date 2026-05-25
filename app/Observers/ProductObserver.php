@@ -11,6 +11,7 @@ use App\Services\TagNormalizer;
 use App\Models\Tag;
 use App\Models\NewProductDraft;
 use App\Services\HeaderStore;
+use App\Services\InventoryOperationContext;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
@@ -40,6 +41,10 @@ class ProductObserver
             'seo_updated_at',
             'seo_updated_by',
         ];
+
+        if (InventoryOperationContext::active()) {
+            $ignoreForApprovalReset[] = 'status';
+        }
 
         // 2) If any meaningful field changed, bump approval_version
         $dirtyKeys = array_keys($dirty);
@@ -177,9 +182,9 @@ class ProductObserver
         if ($variant?->compare_at_price !== null) {
             $payload['variant_compare_at_price'] = $variant->compare_at_price;
         }
-        if ($variant?->inventory_qty !== null) {
-            $payload['variant_inventory_qty'] = $variant->inventory_qty;
-        }
+        $payload['variant_inventory_qty'] = $variant?->inventory_tracked === false
+            ? null
+            : ($variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null);
 
         if ($row) {
             $payload['material_cost'] = $row->get(HeaderStore::MATERIAL_COST, null);
@@ -530,6 +535,14 @@ class ProductObserver
                     && (string) $draft->getAttribute($key) !== (string) $incomingValue
                 ) {
                     $updates[$key] = $incomingValue;
+                }
+
+                continue;
+            }
+
+            if ($key === 'variant_inventory_qty' && $incomingValue === null) {
+                if ($draft->getAttribute($key) !== null) {
+                    $updates[$key] = null;
                 }
 
                 continue;

@@ -36,4 +36,6 @@ enum PermissionEnum: string
 
     // Products / Data
     case ShopifyPushProducts = 'shopify.push_products';
+    case InventoryUpdate = 'inventory.update';
+    case InventoryStatusUpdate = 'inventory_status.update';
 }

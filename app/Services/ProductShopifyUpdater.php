@@ -205,6 +205,16 @@ final class ProductShopifyUpdater
                     ));
                 }
 
+                if (
+                    in_array(self::SYNC_SCOPE_METAFIELDS, $effectiveScopes, true)
+                    && empty(array_intersect($effectiveCoreFields, self::availableMetafieldFields()))
+                ) {
+                    $effectiveScopes = array_values(array_filter(
+                        $effectiveScopes,
+                        fn (string $scope): bool => $scope !== self::SYNC_SCOPE_METAFIELDS
+                    ));
+                }
+
                 if ($effectiveScopes === []) {
                     $skippedNotApproved++;
                     continue;
@@ -596,6 +606,81 @@ final class ProductShopifyUpdater
         }
 
         return $result;
+    }
+
+    /**
+     * @param Collection<int, Product> $products
+     * @return array{
+     *   updated:int,
+     *   updated_product_ids:array<int, int>,
+     *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
+     *   failed:int,
+     *   warnings:array<int, array{product_id:int, warning:string}>,
+     *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
+     * }
+     */
+    public function syncComplementaryProducts(Collection $products, ?int $userId = null): array
+    {
+        $updated = 0;
+        $updatedProductIds = [];
+        $skippedMissingHandle = 0;
+        $skippedBlocked = 0;
+        $failed = 0;
+        $warnings = [];
+        $failures = [];
+
+        foreach ($products as $product) {
+            if (!$product instanceof Product) {
+                continue;
+            }
+
+            if (!$product->handle) {
+                $skippedMissingHandle++;
+                continue;
+            }
+
+            if ($this->isBlockedByShopifyMissingDraft($product)) {
+                $skippedBlocked++;
+                continue;
+            }
+
+            try {
+                $warnings = array_merge(
+                    $warnings,
+                    $this->updateProduct(
+                        $product,
+                        [self::SYNC_SCOPE_METAFIELDS],
+                        [self::CORE_FIELD_COMPLEMENTARY_PRODUCTS]
+                    )
+                );
+                $updated++;
+                $updatedProductIds[] = $product->id;
+            } catch (\Throwable $e) {
+                $failed++;
+                $failures[] = [
+                    'product_id' => $product->id,
+                    'reason' => 'exception',
+                    'details' => $e->getMessage(),
+                ];
+                logger()->error('Shopify complementary sync failed.', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'message' => $e->getMessage(),
+                    'user_id' => $userId,
+                ]);
+            }
+        }
+
+        return [
+            'updated' => $updated,
+            'updated_product_ids' => $updatedProductIds,
+            'skipped_missing_handle' => $skippedMissingHandle,
+            'skipped_blocked' => $skippedBlocked,
+            'failed' => $failed,
+            'warnings' => $warnings,
+            'failures' => $failures,
+        ];
     }
 
     /**
@@ -2432,7 +2517,11 @@ GQL;
                     $items = array_values(array_unique($resolved));
                 }
                 $items = $this->limitReferenceItemsForLookup($lookup, $items);
-                return empty($items) ? null : json_encode($items);
+                if (empty($items)) {
+                    return $this->shouldClearEmptyReferenceList($lookup) ? json_encode([]) : null;
+                }
+
+                return json_encode($items);
             }
 
             $parts = $this->referenceTokensFromRaw($trimmed);
@@ -2440,6 +2529,10 @@ GQL;
             $items = array_values(array_filter($parts, fn ($item) => str_starts_with($item, 'gid://')));
             if (!empty($items)) {
                 $items = $this->limitReferenceItemsForLookup($lookup, $items);
+                if (empty($items)) {
+                    return $this->shouldClearEmptyReferenceList($lookup) ? json_encode([]) : null;
+                }
+
                 return json_encode($items);
             }
 
@@ -2448,6 +2541,9 @@ GQL;
                 if ($resolved !== null) {
                     return $resolved;
                 }
+            }
+            if ($this->shouldClearEmptyReferenceList($lookup)) {
+                return json_encode([]);
             }
             return $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
         }
@@ -2699,7 +2795,7 @@ GQL;
         $tokens = $this->referenceTokensFromRaw($raw);
 
         if (empty($tokens)) {
-            return null;
+            return $this->shouldClearEmptyReferenceList($lookup) ? json_encode([]) : null;
         }
 
         if (str_starts_with($type, 'list.') && str_ends_with($type, 'reference')) {
@@ -2711,10 +2807,19 @@ GQL;
                 }
             }
             $resolved = $this->limitReferenceItemsForLookup($lookup, $resolved);
-            return empty($resolved) ? null : json_encode($resolved);
+            if (empty($resolved)) {
+                return $this->shouldClearEmptyReferenceList($lookup) ? json_encode([]) : null;
+            }
+
+            return json_encode($resolved);
         }
 
         return $this->resolveReferenceTokenFromShopify($lookup, $tokens[0]);
+    }
+
+    private function shouldClearEmptyReferenceList(?string $lookup): bool
+    {
+        return $lookup === 'shopify--discovery--product_recommendation.complementary_products';
     }
 
     private function resolveReferenceTokenFromShopify(string $lookup, string $token): ?string
@@ -2829,7 +2934,6 @@ GQL;
             ->select(['id', 'shopify_id', 'handle', 'title'])
             ->whereNotNull('shopify_id')
             ->where('shopify_id', '!=', '')
-            ->where('status', 'active')
             ->chunkById(500, function ($products) use (&$map): void {
                 foreach ($products as $product) {
                     $gid = trim((string) ($product->shopify_id ?? ''));
@@ -3272,30 +3376,31 @@ GQL;
         ), static fn (string $item): bool => $item !== '')));
 
         if ($lookup === 'shopify--discovery--product_recommendation.complementary_products') {
-            // return array_slice($normalized, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
-            $activeItems = $this->filterActiveProductReferenceGids($normalized);
+            $activeItems = $this->filterSellableProductReferenceGids($normalized);
 
-        return array_slice($activeItems, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
+            return array_slice($activeItems, 0, self::COMPLEMENTARY_PRODUCTS_SYNC_LIMIT);
         }
 
         return $normalized;
     }
 
-    private function filterActiveProductReferenceGids(array $gids): array
+    private function filterSellableProductReferenceGids(array $gids): array
     {
         if (empty($gids)) {
             return [];
         }
 
-        $activeGids = Product::query()
+        $productsByGid = Product::query()
             ->whereIn('shopify_id', $gids)
-            ->where('status', 'active')
-            ->pluck('shopify_id')
-            ->all();
+            ->with(['variants' => fn ($query) => $query->orderBy('id')])
+            ->get()
+            ->keyBy('shopify_id');
+
+        $sellability = app(ProductSellabilityService::class);
 
         return array_values(array_filter(
             $gids,
-            fn (string $gid): bool => in_array($gid, $activeGids, true)
+            fn (string $gid): bool => ($productsByGid->has($gid) && $sellability->isLocallySellable($productsByGid->get($gid)))
         ));
     }
 

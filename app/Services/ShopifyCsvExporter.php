@@ -315,7 +315,9 @@ final class ShopifyCsvExporter
         $rowData[HeaderStore::VARIANT_PRICE] = $variant->price ?? '';
         $rowData[HeaderStore::VARIANT_COMPARE_AT] = $variant->compare_at_price ?? '';
 
-        $rowData['Variant Inventory Qty'] = $variant->inventory_qty ?? '';
+        $rowData['Variant Inventory Qty'] = $variant->inventory_tracked === false
+            ? ''
+            : ($variant->inventory_qty ?? '');
         $rowData['Variant Inventory Policy'] = $variant->inventory_policy ?? '';
         $rowData['Variant Requires Shipping'] = $variant->requires_shipping ? 'true' : 'false';
         $rowData['Variant Taxable'] = $variant->taxable ? 'true' : 'false';

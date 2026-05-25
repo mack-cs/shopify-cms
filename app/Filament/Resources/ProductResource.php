@@ -2584,6 +2584,10 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
 
     private static function partialApprovalStatusLabel(Product $record): string
     {
+        if ($record->isSyncedAndCurrent()) {
+            return 'None';
+        }
+
         $pending = $record->partialApprovalRequests()
             ->where('approval_version', $record->approval_version)
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
@@ -2607,6 +2611,10 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
 
     private static function partialApprovalFieldsPreview(Product $record, bool $limit = true): ?string
     {
+        if ($record->isSyncedAndCurrent()) {
+            return null;
+        }
+
         $pendingLabels = self::partialApprovalFieldLabelsByStatus($record, ProductPartialApprovalRequest::STATUS_PENDING);
         if ($pendingLabels !== []) {
             return self::previewLabelList('Pending', $pendingLabels, $limit);

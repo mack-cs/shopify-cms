@@ -393,21 +393,9 @@ class NewProductDraftResource extends Resource
                                                 return;
                                             }
 
-                                            $draftQuery = NewProductDraft::query()->where('sku', $sku);
-                                            if ($record) {
-                                                $draftQuery->where('id', '!=', $record->id);
-                                            }
-
-                                            $variantQuery = Variant::query()->where('sku', $sku);
-                                            if ($record) {
-                                                $currentProductId = self::linkedProductForDraft($record)?->id;
-                                                if ($currentProductId) {
-                                                    $variantQuery->where('product_id', '!=', $currentProductId);
-                                                }
-                                            }
-
-                                            if ($draftQuery->exists() || $variantQuery->exists()) {
-                                                $fail('SKU must be unique across new products and existing products.');
+                                            $message = self::duplicateSkuMessageForDraft($sku, $record);
+                                            if ($message !== null) {
+                                                $fail($message);
                                             }
                                         };
                                     },
@@ -959,6 +947,8 @@ class NewProductDraftResource extends Resource
                                         TextInput::make('variant_inventory_qty')
                                             ->label('Inventory')
                                             ->numeric()
+                                            ->disabled()
+                                            ->helperText('Inventory is managed from the Inventory section.')
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -1677,7 +1667,9 @@ class NewProductDraftResource extends Resource
         return [
             'variant_price' => $variant?->price !== null ? (string) $variant->price : null,
             'variant_compare_at_price' => $variant?->compare_at_price !== null ? (string) $variant->compare_at_price : null,
-            'variant_inventory_qty' => $variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null,
+            'variant_inventory_qty' => $variant?->inventory_tracked === false
+                ? null
+                : ($variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null),
         ];
     }
 
@@ -1927,6 +1919,58 @@ class NewProductDraftResource extends Resource
 
         $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    private static function duplicateSkuMessageForDraft(string $sku, ?NewProductDraft $record = null): ?string
+    {
+        $normalizedSku = trim($sku);
+        if ($normalizedSku === '') {
+            return null;
+        }
+
+        $draftQuery = NewProductDraft::query()
+            ->select(['id', 'title', 'handle'])
+            ->where('sku', $normalizedSku);
+
+        if ($record) {
+            $draftQuery->where('id', '!=', $record->id);
+        }
+
+        $variantQuery = Variant::query()
+            ->with(['product:id,title,handle'])
+            ->where('sku', $normalizedSku);
+
+        if ($record) {
+            $currentProductId = self::linkedProductForDraft($record)?->id;
+            if ($currentProductId) {
+                $variantQuery->where('product_id', '!=', $currentProductId);
+            }
+        }
+
+        $parts = [];
+
+        $draft = $draftQuery->first();
+        if ($draft instanceof NewProductDraft) {
+            $draftLabel = self::nullIfEmpty($draft->title)
+                ?? self::nullIfEmpty($draft->handle)
+                ?? ('Draft #' . $draft->id);
+            $parts[] = "draft {$draft->id} ({$draftLabel})";
+        }
+
+        $variant = $variantQuery->first();
+        if ($variant instanceof Variant) {
+            $product = $variant->product;
+            $productLabel = self::nullIfEmpty($product?->title)
+                ?? self::nullIfEmpty($product?->handle)
+                ?? ('Product #' . ($product?->id ?? $variant->product_id));
+            $parts[] = "product variant on {$productLabel}";
+        }
+
+        if ($parts === []) {
+            return null;
+        }
+
+        return 'SKU is already used by ' . implode(' and ', $parts) . '.';
     }
 
     /**
@@ -2970,6 +3014,7 @@ class NewProductDraftResource extends Resource
                             $skippedHasHandleCount = 0;
                             $skippedFullyApprovedCount = 0;
                             $skippedAlreadyApprovedCount = 0;
+                            $skippedErrorCount = 0;
 
                             foreach ($records as $record) {
                                 if (!$record instanceof NewProductDraft) {
@@ -2983,6 +3028,11 @@ class NewProductDraftResource extends Resource
 
                                 if ($record->isApprovedByTwo()) {
                                     $skippedFullyApprovedCount++;
+                                    continue;
+                                }
+
+                                if (self::draftHasLinkedProductErrors($record)) {
+                                    $skippedErrorCount++;
                                     continue;
                                 }
 
@@ -3017,6 +3067,9 @@ class NewProductDraftResource extends Resource
                             }
                             if ($skippedAlreadyApprovedCount > 0) {
                                 $parts[] = "Skipped {$skippedAlreadyApprovedCount} already approved by you.";
+                            }
+                            if ($skippedErrorCount > 0) {
+                                $parts[] = "Skipped {$skippedErrorCount} with unresolved product errors.";
                             }
 
                             self::sendNotification(Notification::make()

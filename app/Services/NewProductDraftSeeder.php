@@ -32,9 +32,7 @@ final class NewProductDraftSeeder
                 foreach ($products as $product) {
                     $data = $this->draftDataFromProduct($product, $userId);
 
-                    $draft = NewProductDraft::query()
-                        ->where('handle', $product->handle)
-                        ->first();
+                    $draft = $this->resolveExistingDraftForProduct($product);
 
                     if (!$draft) {
                         NewProductDraft::create($data);
@@ -64,15 +62,7 @@ final class NewProductDraftSeeder
     {
         $data = $this->draftDataFromProduct($product, $userId);
 
-        $draft = NewProductDraft::query()
-            ->where('handle', $product->handle)
-            ->first();
-
-        if (!$draft && filled(trim((string) ($product->shopify_id ?? '')))) {
-            $draft = NewProductDraft::query()
-                ->where('shopify_id', $product->shopify_id)
-                ->first();
-        }
+        $draft = $this->resolveExistingDraftForProduct($product);
 
         if (!$draft) {
             return NewProductDraft::create($data);
@@ -85,6 +75,31 @@ final class NewProductDraftSeeder
         }
 
         return $draft->fresh() ?? $draft;
+    }
+
+    private function resolveExistingDraftForProduct(Product $product): ?NewProductDraft
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where('handle', $handle)
+            ->first();
+
+        return $draft instanceof NewProductDraft ? $draft : null;
     }
 
     private function isEmptyValue(mixed $value): bool

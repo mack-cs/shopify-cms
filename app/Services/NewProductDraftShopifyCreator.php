@@ -15,6 +15,7 @@ final class NewProductDraftShopifyCreator
      * @return array{
      *   created:int,
      *   skipped_not_approved:int,
+     *   skipped_has_errors:int,
      *   skipped_has_handle:int,
      *   failed:int,
      *   failures: array<int, array{
@@ -35,6 +36,7 @@ final class NewProductDraftShopifyCreator
     {
         $created = 0;
         $skippedNotApproved = 0;
+        $skippedHasErrors = 0;
         $skippedHasHandle = 0;
         $failed = 0;
         $failures = [];
@@ -52,6 +54,11 @@ final class NewProductDraftShopifyCreator
 
             if (!$draft->isApprovedByTwo()) {
                 $skippedNotApproved++;
+                continue;
+            }
+
+            if (($draft->product?->has_errors ?? false) === true) {
+                $skippedHasErrors++;
                 continue;
             }
 
@@ -96,6 +103,7 @@ final class NewProductDraftShopifyCreator
         return [
             'created' => $created,
             'skipped_not_approved' => $skippedNotApproved,
+            'skipped_has_errors' => $skippedHasErrors,
             'skipped_has_handle' => $skippedHasHandle,
             'failed' => $failed,
             'failures' => $failures,

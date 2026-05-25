@@ -200,15 +200,32 @@ class Product extends Model
 
     public function shopifySyncState(): string
     {
-        if ($this->last_synced_at === null) {
+        if (!$this->hasBeenSynced()) {
             return 'No Sync';
         }
 
-        if ($this->updated_at !== null && $this->updated_at->gt($this->last_synced_at)) {
+        if ($this->hasChangesSinceLastSync()) {
             return 'Updated After Sync';
         }
 
         return 'Synced';
+    }
+
+    public function hasBeenSynced(): bool
+    {
+        return $this->last_synced_at !== null;
+    }
+
+    public function hasChangesSinceLastSync(): bool
+    {
+        return $this->last_synced_at !== null
+            && $this->updated_at !== null
+            && $this->updated_at->gt($this->last_synced_at);
+    }
+
+    public function isSyncedAndCurrent(): bool
+    {
+        return $this->last_synced_at !== null && !$this->hasChangesSinceLastSync();
     }
 
     public function hasDuplicateImagePositions(): bool

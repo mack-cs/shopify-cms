@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
 use App\Jobs\DailyComplementaryProductCheckJob;
 use App\Services\ShopifyApiClient;
@@ -103,6 +104,23 @@ Artisan::command(
         return self::SUCCESS;
     }
 )->purpose('Local only: delete old queued jobs so they cannot run later when the worker starts.');
+
+Artisan::command(
+    'shopify:reconcile-complementary-products
+    {--user-id= : Optional user ID to receive the completion notification}',
+    function (): int {
+        $userId = (int) ($this->option('user-id') ?? 0);
+
+        ReconcileComplementaryProductsJob::dispatch($userId > 0 ? $userId : null);
+
+        $this->info('Complementary reconciliation job queued.');
+        if ($userId > 0) {
+            $this->line("Completion notification will be sent to user {$userId}.");
+        }
+
+        return self::SUCCESS;
+    }
+)->purpose('Refresh local Shopify inventory/status, repair complementary products, and record shortages.');
 
 Artisan::command(
     'shopify:audit-complementary-products',

@@ -39,6 +39,12 @@ class Variant extends Model
 
         'inventory_qty',
         'inventory_policy',
+        'inventory_tracked',
+        'inventory_last_synced_at',
+        'inventory_pushed_at',
+        'inventory_sync_batch_id',
+        'inventory_local_dirty',
+        'inventory_sync_error',
 
         'requires_shipping',
         'taxable',
@@ -57,9 +63,13 @@ class Variant extends Model
 
         'requires_shipping' => 'boolean',
         'taxable' => 'boolean',
+        'inventory_tracked' => 'boolean',
+        'inventory_local_dirty' => 'boolean',
         'local_dirty' => 'boolean',
         'last_shopify_seen_at' => 'datetime',
         'last_synced_at' => 'datetime',
+        'inventory_last_synced_at' => 'datetime',
+        'inventory_pushed_at' => 'datetime',
     ];
 
     public function product(): BelongsTo

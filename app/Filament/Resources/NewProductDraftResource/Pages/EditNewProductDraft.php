@@ -58,8 +58,41 @@ class EditNewProductDraft extends EditRecord
 
     protected function afterSave(): void
     {
-        $this->syncSavedDraftFieldsToProduct();
+        try {
+            $this->syncSavedDraftFieldsToProduct();
+        } catch (\Throwable $e) {
+            Notification::make()
+                ->title('Draft saved with sync warning')
+                ->body("The draft was saved, but the linked product sync could not complete: {$e->getMessage()}")
+                ->warning()
+                ->send();
+        }
+
         $this->refreshEditLock();
+
+        $linkedProduct = $this->record?->fresh(['product'])?->product;
+        if (($linkedProduct?->has_errors ?? false) === true) {
+            $errorFields = $linkedProduct?->error_fields;
+            $fieldSummary = '';
+
+            if (is_array($errorFields)) {
+                $fieldSummary = collect($errorFields)
+                    ->map(fn (mixed $field): string => trim((string) $field))
+                    ->filter()
+                    ->values()
+                    ->implode(', ');
+            }
+
+            Notification::make()
+                ->title('Draft saved')
+                ->body(
+                    $fieldSummary !== ''
+                        ? "This draft still has unresolved product errors: {$fieldSummary}. Saving is allowed, but approval stays blocked until the errors are fixed."
+                        : 'This draft still has unresolved product errors. Saving is allowed, but approval stays blocked until the errors are fixed.'
+                )
+                ->warning()
+                ->send();
+        }
     }
 
     protected function getSaveFormAction(): Actions\Action

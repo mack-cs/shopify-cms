@@ -247,7 +247,10 @@ final class Normalizer
                 'barcode' => $barcode,
                 'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
                 'weight_unit' => $weightUnit,
-                'inventory_qty' => $this->toInteger($vr->get(HeaderStore::VARIANT_INVENTORY_QTY, null)),
+                'inventory_tracked' => $this->toBoolean($vr->get(HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED, null)),
+                'inventory_qty' => $this->toBoolean($vr->get(HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED, null)) === false
+                    ? null
+                    : $this->toInteger($vr->get(HeaderStore::VARIANT_INVENTORY_QTY, null)),
                 'option1_name' => $vr->get(HeaderStore::OPTION1_NAME, null),
                 'option1_value' => $vr->get(HeaderStore::OPTION1_VALUE, null),
                 'option2_name' => $vr->get(HeaderStore::OPTION2_NAME, null),
@@ -272,8 +275,11 @@ final class Normalizer
                 $createdVariant = Variant::create(array_merge($payload, [
                     'sync_state' => Variant::SYNC_STATE_SYNCED,
                     'local_dirty' => false,
+                    'inventory_local_dirty' => false,
+                    'inventory_sync_error' => null,
                     'last_shopify_seen_at' => $syncedAt,
                     'last_synced_at' => $syncedAt,
+                    'inventory_last_synced_at' => $syncedAt,
                 ]));
             });
 
@@ -386,8 +392,11 @@ final class Normalizer
             $variant->fill(array_merge($payload, [
                 'sync_state' => Variant::SYNC_STATE_SYNCED,
                 'local_dirty' => false,
+                'inventory_local_dirty' => false,
+                'inventory_sync_error' => null,
                 'last_shopify_seen_at' => $syncedAt,
                 'last_synced_at' => $syncedAt,
+                'inventory_last_synced_at' => $syncedAt,
             ]))->save();
         });
     }
@@ -726,6 +735,28 @@ final class Normalizer
         }
 
         return (int) $s;
+    }
+
+    private function toBoolean(mixed $v): ?bool
+    {
+        if ($v === null) {
+            return null;
+        }
+
+        if (is_bool($v)) {
+            return $v;
+        }
+
+        $s = strtolower(trim((string) $v));
+        if ($s === '') {
+            return null;
+        }
+
+        return match ($s) {
+            '1', 'true', 'yes', 'y' => true,
+            '0', 'false', 'no', 'n' => false,
+            default => null,
+        };
     }
 
     private function defaultBatchForImport(Import $import): string

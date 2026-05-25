@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\ProductResource\Pages;
 
 use App\Filament\Resources\ProductResource;
+use App\Filament\Resources\ProductResource\Widgets\ComplementaryShortageBanner;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
 use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
@@ -37,6 +38,7 @@ class ListProducts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
+            ComplementaryShortageBanner::class,
             PendingProductSyncBanner::class,
             ProductStatusStats::class,
         ];
@@ -93,7 +95,11 @@ class ListProducts extends ListRecords
                 })
                 ->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
-                ));
+                )
+                ->where(function (Builder $sub): void {
+                    $sub->whereNull('last_synced_at')
+                        ->orWhereColumn('updated_at', '>', 'last_synced_at');
+                }));
 
         $tabs['approved'] = Tab::make('Approved')
             ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)

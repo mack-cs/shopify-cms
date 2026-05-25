@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
+use Spatie\Permission\Models\Permission;
 
 class UserResource extends Resource
 {
@@ -54,6 +55,33 @@ class UserResource extends Resource
                 Forms\Components\Toggle::make('is_active')
                     ->label('Active')
                     ->default(true),
+                Forms\Components\CheckboxList::make('permissions')
+                    ->label('Extra Permissions')
+                    ->relationship('permissions', 'name')
+                    ->options(fn (): array => Permission::query()
+                        ->whereIn('name', [
+                            PermissionEnum::InventoryUpdate->value,
+                            PermissionEnum::InventoryStatusUpdate->value,
+                        ])
+                        ->pluck('name', 'id')
+                        ->all())
+                    ->descriptions(fn (): array => Permission::query()
+                        ->whereIn('name', [
+                            PermissionEnum::InventoryUpdate->value,
+                            PermissionEnum::InventoryStatusUpdate->value,
+                        ])
+                        ->get(['id', 'name'])
+                        ->mapWithKeys(fn (Permission $permission): array => [
+                            $permission->id => match ($permission->name) {
+                                PermissionEnum::InventoryUpdate->value => 'Allows updating tracked inventory and quantity.',
+                                PermissionEnum::InventoryStatusUpdate->value => 'Allows updating product status from inventory.',
+                                default => '',
+                            },
+                        ])
+                        ->all())
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->dehydrated(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->columns(1),
             ]);
     }
 
@@ -69,6 +97,11 @@ class UserResource extends Resource
                     ->label('Role')
                     ->badge()
                     ->separator(', '),
+                Tables\Columns\TextColumn::make('permissions.name')
+                    ->label('Extra Permissions')
+                    ->badge()
+                    ->separator(', ')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\IconColumn::make('is_active')
                     ->label('Active')
                     ->boolean()

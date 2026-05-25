@@ -64,6 +64,7 @@ final class HeaderStore
     public const NECKLACE_DESIGN = 'Necklace design (product.metafields.shopify.necklace-design)';
     public const EARRING_DESIGN = 'Earring design (product.metafields.shopify.earring-design)';
     public const INTERNAL_VARIANT_SHOPIFY_ID = '__shopify_variant_id';
+    public const INTERNAL_VARIANT_INVENTORY_TRACKED = '__shopify_variant_inventory_tracked';
     public const INTERNAL_IMAGE_SHOPIFY_ID = '__shopify_image_id';
 
     public static function productHeaders(): array

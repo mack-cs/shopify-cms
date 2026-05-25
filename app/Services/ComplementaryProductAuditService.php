@@ -30,6 +30,7 @@ class ComplementaryProductAuditService
 
     public function __construct(
         private readonly ShopifyApiClient $shopifyApiClient,
+        private readonly ProductSellabilityService $sellabilityService,
     ) {
     }
 
@@ -60,8 +61,7 @@ class ComplementaryProductAuditService
         $localTokens = $this->parseReferenceTokens($localValue ?? $this->localComplementaryValueForProduct($product));
 
         $localIds = $this->resolveProductIdsFromTokens($localTokens);
-        $localPrimaryIds = array_slice($localIds, 0, self::SHOPIFY_TARGET_COUNT);
-        $localStatesById = $this->liveStatesForProductIds($localIds);
+        $localStatesById = $this->localStatesForProductIds($localIds);
         $localEligibleIds = array_values(array_map(
             fn (int $productId): int => $productId,
             array_keys(array_filter(
@@ -69,6 +69,7 @@ class ComplementaryProductAuditService
                 static fn (array $state): bool => (bool) ($state['available'] ?? false)
             ))
         ));
+        $localPrimaryIds = array_slice($localEligibleIds, 0, self::SHOPIFY_TARGET_COUNT);
         $localIneligible = array_values(array_filter(
             array_map(
                 fn (int $productId): ?array => ($localStatesById[$productId]['available'] ?? false) ? null : ($localStatesById[$productId] ?? null),
@@ -155,8 +156,7 @@ class ComplementaryProductAuditService
     {
         $localTokens = $this->parseReferenceTokens($draft->complementary_products);
         $localIds = $this->resolveProductIdsFromTokens($localTokens);
-        $localPrimaryIds = array_slice($localIds, 0, self::SHOPIFY_TARGET_COUNT);
-        $localStatesById = $this->liveStatesForProductIds($localIds);
+        $localStatesById = $this->localStatesForProductIds($localIds);
         $localEligibleIds = array_values(array_map(
             fn (int $productId): int => $productId,
             array_keys(array_filter(
@@ -164,6 +164,7 @@ class ComplementaryProductAuditService
                 static fn (array $state): bool => (bool) ($state['available'] ?? false)
             ))
         ));
+        $localPrimaryIds = array_slice($localEligibleIds, 0, self::SHOPIFY_TARGET_COUNT);
         $localIneligible = array_values(array_filter(
             array_map(
                 fn (int $productId): ?array => ($localStatesById[$productId]['available'] ?? false) ? null : ($localStatesById[$productId] ?? null),
@@ -691,68 +692,40 @@ class ComplementaryProductAuditService
      * @param array<int, int> $productIds
      * @return array<int, array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}>
      */
-    private function liveStatesForProductIds(array $productIds): array
+    private function localStatesForProductIds(array $productIds): array
     {
         if ($productIds === []) {
             return [];
         }
 
-        $gidByProductId = Product::query()
+        $products = Product::query()
             ->whereKey($productIds)
-            ->whereNotNull('shopify_id')
-            ->pluck('shopify_id', 'id')
-            ->all();
-
-        $missingGids = [];
-        foreach ($productIds as $productId) {
-            $gid = trim((string) ($gidByProductId[$productId] ?? ''));
-            if ($gid !== '' && !isset($this->liveProductStatesByGid[$gid])) {
-                $missingGids[] = $gid;
-            }
-        }
-
-        foreach (array_chunk(array_values(array_unique($missingGids)), 50) as $gidChunk) {
-            if ($gidChunk === []) {
-                continue;
-            }
-
-            $data = $this->shopifyApiClient->graphql($this->productsByIdsQuery(), [
-                'ids' => array_values($gidChunk),
-            ]);
-
-            $nodes = data_get($data, 'nodes', []);
-            foreach ($nodes as $node) {
-                if (($node['id'] ?? null) === null) {
-                    continue;
-                }
-
-                $state = $this->stateFromShopifyProductNode($node);
-                $this->liveProductStatesByGid[$state['gid']] = $state;
-            }
-        }
+            ->with(['variants' => fn ($query) => $query->orderBy('id')])
+            ->get()
+            ->keyBy('id');
 
         $resolved = [];
         foreach ($productIds as $productId) {
-            $gid = trim((string) ($gidByProductId[$productId] ?? ''));
-            if ($gid === '') {
+            $product = $products->get($productId);
+            if (!$product instanceof Product) {
                 $resolved[$productId] = [
                     'gid' => '',
                     'handle' => '',
                     'title' => '',
                     'status' => 'missing',
                     'available' => false,
-                    'reason' => 'Missing Shopify product ID',
+                    'reason' => 'Missing local product',
                 ];
                 continue;
             }
 
-            $resolved[$productId] = $this->liveProductStatesByGid[$gid] ?? [
-                'gid' => $gid,
-                'handle' => '',
-                'title' => '',
-                'status' => 'missing',
-                'available' => false,
-                'reason' => 'Product not returned by Shopify',
+            $resolved[$productId] = [
+                'gid' => trim((string) ($product->shopify_id ?? '')),
+                'handle' => trim((string) ($product->handle ?? '')),
+                'title' => trim((string) ($product->title ?? '')),
+                'status' => strtolower(trim((string) ($product->status ?? ''))),
+                'available' => $this->sellabilityService->isLocallySellable($product),
+                'reason' => $this->sellabilityService->eligibilityReason($product),
             ];
         }
 
