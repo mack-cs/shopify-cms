@@ -451,6 +451,10 @@ class ProductPartialApprovalService
 
         $allowedScopes = [];
         $allowedCoreFields = [];
+        $allowedFieldUniverse = array_values(array_unique(array_merge(
+            ProductShopifyUpdater::availableProductCoreFields(),
+            ProductShopifyUpdater::availableMetafieldFields()
+        )));
 
         foreach ($approved as $request) {
             foreach (($request->scopes ?? []) as $scope) {
@@ -460,7 +464,7 @@ class ProductPartialApprovalService
             }
 
             foreach (($request->core_fields ?? []) as $field) {
-                if (is_string($field) && in_array($field, ProductShopifyUpdater::availableCoreFields(), true)) {
+                if (is_string($field) && in_array($field, $allowedFieldUniverse, true)) {
                     $allowedCoreFields[$field] = $field;
                 }
             }
