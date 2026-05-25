@@ -467,7 +467,17 @@ class ProductPartialApprovalService
         }
 
         if (!isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT])) {
-            $allowedCoreFields = [];
+            $allowedCoreFields = array_filter(
+                $allowedCoreFields,
+                fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true)
+            );
+        }
+
+        if (!isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS])) {
+            $allowedCoreFields = array_filter(
+                $allowedCoreFields,
+                fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableProductCoreFields(), true)
+            );
         }
 
         return [

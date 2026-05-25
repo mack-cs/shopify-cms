@@ -1072,10 +1072,21 @@ class ProductResource extends Resource
                 ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('approvals_current')
-                ->label('Approvals')
+                ->label('Full Approvals')
                 ->state(fn (Product $record) => $record->approvalsForCurrentVersionCount())
                 ->formatStateUsing(fn (int $state) => "{$state}/2")
-                ->description(fn (Product $record): ?string => $record->latestApprovalAt()?->format('Y-m-d H:i:s'))
+                ->description(function (Product $record): ?string {
+                    $latestApprovalAt = $record->latestApprovalAt()?->format('Y-m-d H:i:s');
+                    $partialStatus = self::partialApprovalStatusLabel($record);
+
+                    if ($partialStatus !== 'None') {
+                        return $latestApprovalAt !== null
+                            ? "{$partialStatus} | Full: {$latestApprovalAt}"
+                            : $partialStatus;
+                    }
+
+                    return $latestApprovalAt;
+                })
                 ->badge()
                 ->color(fn (int $state) => $state >= 2 ? 'success' : ($state === 1 ? 'warning' : 'gray'))
                 ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortProductsByApprovalCount($query, $direction))
@@ -2594,7 +2605,7 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
             ->count();
 
         if ($pending > 0) {
-            return "Pending {$pending}";
+            return "Partial Pending {$pending}";
         }
 
         $approved = $record->partialApprovalRequests()
@@ -2603,7 +2614,7 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
             ->count();
 
         if ($approved > 0) {
-            return "Approved {$approved}";
+            return "Partially Approved {$approved}";
         }
 
         return 'None';
