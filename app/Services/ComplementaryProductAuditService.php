@@ -77,6 +77,28 @@ class ComplementaryProductAuditService
             )
         ));
 
+        $rootShopifyState = $this->auditedProductState($product);
+        if ($rootShopifyState === null || ($rootShopifyState['available'] ?? false) !== true) {
+            return [
+                'local_total' => count($localIds),
+                'local_good' => count($localIds) >= self::LOCAL_TARGET_COUNT,
+                'local_ids' => $localIds,
+                'local_primary_ids' => $localPrimaryIds,
+                'local_eligible_ids' => $localEligibleIds,
+                'local_eligible_gids' => $this->productIdsToShopifyGids($localEligibleIds),
+                'local_ineligible' => $localIneligible,
+                'shopify_total' => 0,
+                'shopify_eligible' => 0,
+                'shopify_good' => true,
+                'shopify_ids' => [],
+                'shopify_eligible_ids' => [],
+                'shopify_missing_local_ids' => [],
+                'shopify_missing_local' => [],
+                'shopify_ineligible' => [],
+                'desired_shopify_gids' => $this->productIdsToShopifyGids($localPrimaryIds),
+            ];
+        }
+
         $shopifyStates = $this->liveComplementaryStatesForProduct($product);
         $shopifyIds = [];
         $shopifyEligibleIds = [];
@@ -351,6 +373,14 @@ class ComplementaryProductAuditService
 
     public function localComplementaryValueForProduct(Product $product): ?string
     {
+        $draft = $this->linkedDraftForProduct($product);
+        if ($draft instanceof NewProductDraft) {
+            $draftValue = trim((string) ($draft->complementary_products ?? ''));
+            if ($draftValue !== '') {
+                return $draftValue;
+            }
+        }
+
         $handle = trim((string) ($product->handle ?? ''));
         if ($handle === '') {
             return null;
@@ -636,6 +666,31 @@ class ComplementaryProductAuditService
         return $trimmed !== '' ? $trimmed : null;
     }
 
+    private function linkedDraftForProduct(Product $product): ?NewProductDraft
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where('handle', $handle)
+            ->first();
+
+        return $draft instanceof NewProductDraft ? $draft : null;
+    }
+
     private function linkedProductForDraft(NewProductDraft $draft): ?Product
     {
         $shopifyId = trim((string) ($draft->shopify_id ?? ''));
@@ -654,6 +709,21 @@ class ComplementaryProductAuditService
         $product = Product::query()->where('handle', $handle)->first();
 
         return $product instanceof Product ? $product : null;
+    }
+
+    /**
+     * @return array{gid:string,handle:string,title:string,status:string,available:bool,reason:string|null}|null
+     */
+    private function auditedProductState(Product $product): ?array
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId === '') {
+            return null;
+        }
+
+        $this->ensureLiveStatesLoaded([$shopifyId]);
+
+        return $this->liveProductStatesByGid[$shopifyId] ?? null;
     }
 
     private function normalizeReferenceToken(?string $value): string
@@ -704,6 +774,21 @@ class ComplementaryProductAuditService
             ->get()
             ->keyBy('id');
 
+        $unresolvedShopifyIds = [];
+        foreach ($productIds as $productId) {
+            $product = $products->get($productId);
+            if (!$product instanceof Product) {
+                continue;
+            }
+
+            $shopifyId = trim((string) ($product->shopify_id ?? ''));
+            if ($shopifyId !== '' && !isset($this->liveProductStatesByGid[$shopifyId])) {
+                $unresolvedShopifyIds[] = $shopifyId;
+            }
+        }
+
+        $this->ensureLiveStatesLoaded($unresolvedShopifyIds);
+
         $resolved = [];
         foreach ($productIds as $productId) {
             $product = $products->get($productId);
@@ -719,8 +804,22 @@ class ComplementaryProductAuditService
                 continue;
             }
 
+            $shopifyId = trim((string) ($product->shopify_id ?? ''));
+            if ($shopifyId !== '' && isset($this->liveProductStatesByGid[$shopifyId])) {
+                $state = $this->liveProductStatesByGid[$shopifyId];
+                $resolved[$productId] = [
+                    'gid' => $state['gid'],
+                    'handle' => $state['handle'] !== '' ? $state['handle'] : trim((string) ($product->handle ?? '')),
+                    'title' => $state['title'] !== '' ? $state['title'] : trim((string) ($product->title ?? '')),
+                    'status' => $state['status'],
+                    'available' => $state['available'],
+                    'reason' => $state['reason'],
+                ];
+                continue;
+            }
+
             $resolved[$productId] = [
-                'gid' => trim((string) ($product->shopify_id ?? '')),
+                'gid' => $shopifyId,
                 'handle' => trim((string) ($product->handle ?? '')),
                 'title' => trim((string) ($product->title ?? '')),
                 'status' => strtolower(trim((string) ($product->status ?? ''))),
@@ -730,6 +829,32 @@ class ComplementaryProductAuditService
         }
 
         return $resolved;
+    }
+
+    /**
+     * @param array<int, string> $shopifyIds
+     */
+    private function ensureLiveStatesLoaded(array $shopifyIds): void
+    {
+        $unresolvedShopifyIds = array_values(array_filter(array_unique(array_map(
+            static fn (string $id): string => trim($id),
+            $shopifyIds
+        )), fn (string $id): bool => $id !== '' && !isset($this->liveProductStatesByGid[$id])));
+
+        foreach (array_chunk($unresolvedShopifyIds, 50) as $shopifyIdChunk) {
+            $data = $this->shopifyApiClient->graphql($this->productsByIdsQuery(), [
+                'ids' => $shopifyIdChunk,
+            ]);
+
+            foreach ((array) data_get($data, 'nodes', []) as $node) {
+                if (!is_array($node) || ($node['id'] ?? null) === null) {
+                    continue;
+                }
+
+                $state = $this->stateFromShopifyProductNode($node);
+                $this->liveProductStatesByGid[$state['gid']] = $state;
+            }
+        }
     }
 
     /**

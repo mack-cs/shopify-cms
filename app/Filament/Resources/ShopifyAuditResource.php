@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\ShopifyAuditResource\Pages;
 use App\Jobs\DailyComplementaryProductCheckJob;
+use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
 use App\Services\NewProductDraftSeeder;
@@ -40,32 +41,36 @@ class ShopifyAuditResource extends Resource
                 TextColumn::make('product.status')
                     ->label('Status')
                     ->badge()
-                    ->toggleable(),
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('audit_type')
                     ->label('Audit')
                     ->formatStateUsing(fn (string $state): string => $state === ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS ? 'Complementary Products' : $state)
                     ->badge()
-                    ->color('warning'),
+                    ->color('warning')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('local_saved_count')
                     ->label('Local Saved')
                     ->badge()
                     ->color(fn (ShopifyAudit $record): string => $record->local_saved_count >= 4 ? 'success' : 'warning')
-                    ->sortable(),
-                TextColumn::make('local_valid_count')
-                    ->label('Local Valid')
-                    ->description('Target: 4 saved with backups that are active and in stock')
                     ->sortable()
                     ->toggleable(),
+                TextColumn::make('local_valid_count')
+                    ->label('Local Valid')
+                    ->tooltip('Target: 4 saved with backups that are active and in stock')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('shopify_current_count')
                     ->label('Shopify Current')
                     ->badge()
-                    ->color(fn (ShopifyAudit $record): string => $record->needs_attention ? 'danger' : 'success')
-                    ->sortable(),
-                TextColumn::make('shopify_valid_count')
-                    ->label('Shopify Valid')
-                    ->description('Healthy when Shopify refs stay valid and already exist in the local complementary list')
+                    ->formatStateUsing(fn (?int $state): string => (string) ((int) ($state ?? 0)))
+                    ->color(fn (ShopifyAudit $record): string => ((int) ($record->shopify_current_count ?? 0) >= ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) ? 'success' : 'danger')
                     ->sortable()
                     ->toggleable(),
+                TextColumn::make('shopify_valid_count')
+                    ->label('Shopify Valid')
+                    ->tooltip('Healthy when Shopify refs stay valid and already exist in the local complementary list')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('status')
                     ->label('Shopify Health')
                     ->formatStateUsing(fn (string $state): string => $state === ShopifyAudit::STATUS_HEALTHY ? 'Healthy' : 'Needs Audit')
@@ -73,9 +78,13 @@ class ShopifyAuditResource extends Resource
                     ->color(fn (string $state): string => $state === ShopifyAudit::STATUS_HEALTHY ? 'success' : 'danger'),
                 TextColumn::make('issues')
                     ->label('Issues')
-                    ->state(fn (ShopifyAudit $record): string => self::issuesSummary($record))
+                    ->state(fn (ShopifyAudit $record): string => self::issuesHtml($record))
+                    ->html()
                     ->wrap()
-                    ->toggleable(),
+                    ->toggleable()
+                    ->extraAttributes([
+                        'style' => 'min-width: 30rem; white-space: normal;',
+                    ]),
                 TextColumn::make('last_notified_at')
                     ->label('Last Alerted')
                     ->dateTime()
@@ -135,6 +144,20 @@ class ShopifyAuditResource extends Resource
                     ->openUrlInNewTab(),
             ])
             ->headerActions([
+                Tables\Actions\Action::make('fixComplementaryProducts')
+                    ->label('Fix Complementary Products')
+                    ->icon('heroicon-o-wrench-screwdriver')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->action(function (): void {
+                        ReconcileComplementaryProductsJob::dispatch(Auth::id());
+
+                        Notification::make()
+                            ->title('Complementary fix queued')
+                            ->body('The complementary reconciliation job is running in the background. Refresh this page after the worker finishes to see updated audit results.')
+                            ->success()
+                            ->send();
+                    }),
                 Tables\Actions\Action::make('runComplementaryAuditNow')
                     ->label('Run Complementary Audit')
                     ->icon('heroicon-o-arrow-path')
@@ -197,7 +220,7 @@ class ShopifyAuditResource extends Resource
         ];
     }
 
-    private static function issuesSummary(ShopifyAudit $record): string
+    private static function issuesHtml(ShopifyAudit $record): string
     {
         $details = $record->details ?? [];
         $parts = [];
@@ -237,7 +260,16 @@ class ShopifyAuditResource extends Resource
             }
         }
 
-        return $parts !== [] ? implode(' | ', $parts) : 'None';
+        if ($parts === []) {
+            return 'None';
+        }
+
+        $items = array_map(
+            static fn (string $part): string => '<li style="margin-bottom: 0.35rem;">' . e($part) . '</li>',
+            $parts
+        );
+
+        return '<ul style="margin:0; padding-left: 1rem; list-style: disc;">' . implode('', $items) . '</ul>';
     }
 
     private static function newProductDraftEditUrl(ShopifyAudit $record): ?string
