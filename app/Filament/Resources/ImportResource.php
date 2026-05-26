@@ -114,6 +114,54 @@ class ImportResource extends Resource
                     }
                 }),
         ])->actions([
+            Action::make('restorePreviousReadyImport')
+                ->label('Restore Previous Ready Import')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->visible(function (Import $record): bool {
+                    if (!(Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)) {
+                        return false;
+                    }
+
+                    if (!$record->is_current || $record->status !== 'failed') {
+                        return false;
+                    }
+
+                    return Import::query()
+                        ->whereKeyNot($record->id)
+                        ->where('status', 'ready')
+                        ->where('is_valid', true)
+                        ->exists();
+                })
+                ->action(function (Import $record): void {
+                    $previous = Import::query()
+                        ->whereKeyNot($record->id)
+                        ->where('status', 'ready')
+                        ->where('is_valid', true)
+                        ->orderByDesc('created_at')
+                        ->orderByDesc('id')
+                        ->first();
+
+                    if (!$previous) {
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('No ready import found')
+                                ->body('There is no previous ready valid import to restore.')
+                                ->warning()
+                        );
+                        return;
+                    }
+
+                    Import::query()->update(['is_current' => false]);
+                    $previous->forceFill(['is_current' => true])->save();
+
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Previous import restored')
+                            ->body("Import #{$previous->id} is now the current import.")
+                            ->success()
+                    );
+                }),
             Action::make('makeCurrent')
                 ->label('Make Current')
                 ->color('warning')
