@@ -79,10 +79,10 @@ final class NewProductDraftSeeder
 
     private function resolveExistingDraftForProduct(Product $product): ?NewProductDraft
     {
-        $shopifyId = trim((string) ($product->shopify_id ?? ''));
-        if ($shopifyId !== '') {
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle !== '') {
             $draft = NewProductDraft::query()
-                ->where('shopify_id', $shopifyId)
+                ->where('handle', $handle)
                 ->first();
 
             if ($draft instanceof NewProductDraft) {
@@ -90,13 +90,13 @@ final class NewProductDraftSeeder
             }
         }
 
-        $handle = trim((string) ($product->handle ?? ''));
-        if ($handle === '') {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId === '') {
             return null;
         }
 
         $draft = NewProductDraft::query()
-            ->where('handle', $handle)
+            ->where('shopify_id', $shopifyId)
             ->first();
 
         return $draft instanceof NewProductDraft ? $draft : null;
