@@ -7,6 +7,7 @@ use App\Jobs\DailyComplementaryProductCheckJob;
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
+use App\Services\ComplementaryProductAuditService;
 use App\Services\NewProductDraftSeeder;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
