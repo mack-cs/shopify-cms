@@ -1763,6 +1763,10 @@ class ProductResource extends Resource
                     'SEO Draft Updated To'
                 ))
                 ->query(function (Builder $query, array $data): Builder {
+                    if (($data['from'] ?? null) === null && ($data['to'] ?? null) === null) {
+                        return $query;
+                    }
+
                     return $query->whereHas('styleProfiles', function (Builder $sub) use ($data): void {
                         $sub
                             ->when($data['from'] ?? null, fn (Builder $styleQuery, $from): Builder => $styleQuery->where('seo_updated_at', '>=', $from))
