@@ -1196,11 +1196,23 @@ class ProductResource extends Resource
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
                 ->indicator('Recently Edited Today')
-                ->query(fn (Builder $query): Builder => $query->whereDate('updated_at', today())),
+                ->query(fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                    $sub->whereDate('updated_at', today())
+                        ->orWhereDate('seo_updated_at', today())
+                        ->orWhereHas('styleProfiles', function (Builder $styleQuery): void {
+                            $styleQuery->whereDate('seo_updated_at', today());
+                        });
+                })),
             Filter::make('edited_last_7_days')
                 ->label('Edited in Last 7 Days')
                 ->indicator('Edited in Last 7 Days')
-                ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                ->query(fn (Builder $query): Builder => $query->where(function (Builder $sub): void {
+                    $sub->where('updated_at', '>=', now()->subDays(7))
+                        ->orWhere('seo_updated_at', '>=', now()->subDays(7))
+                        ->orWhereHas('styleProfiles', function (Builder $styleQuery): void {
+                            $styleQuery->where('seo_updated_at', '>=', now()->subDays(7));
+                        });
+                })),
             SelectFilter::make('local_complementary_status')
                 ->label('Local Complementary')
                 ->options([
