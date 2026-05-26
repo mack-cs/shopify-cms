@@ -133,14 +133,23 @@ class ProductPartialApprovalService
         return strtolower(trim((string) ($product->status ?? ''))) === 'active';
     }
 
+    public function isPartialApprovalEligibleProduct(Product $product): bool
+    {
+        return in_array(
+            strtolower(trim((string) ($product->status ?? ''))),
+            ['active', 'draft'],
+            true
+        );
+    }
+
     /**
      * @param Collection<int, Product> $products
      * @param array<int, string> $scopes
      * @param array<int, string> $coreFields
      * @return array{
      *   requested:int,
-     *   skipped_inactive:int,
-     *   inactive_products:array<int, array{id:int,title:string,status:string}>,
+     *   skipped_ineligible:int,
+     *   ineligible_products:array<int, array{id:int,title:string,status:string}>,
      *   skipped_existing:int,
      *   existing_products:array<int, array{id:int,title:string}>,
      *   skipped_invalid:int,
@@ -159,8 +168,8 @@ class ProductPartialApprovalService
     ): array {
         $summary = [
             'requested' => 0,
-            'skipped_inactive' => 0,
-            'inactive_products' => [],
+            'skipped_ineligible' => 0,
+            'ineligible_products' => [],
             'skipped_existing' => 0,
             'existing_products' => [],
             'skipped_invalid' => 0,
@@ -178,9 +187,9 @@ class ProductPartialApprovalService
                 continue;
             }
 
-            if (!$this->isActiveProduct($product)) {
-                $summary['skipped_inactive']++;
-                $summary['inactive_products'][] = [
+            if (!$this->isPartialApprovalEligibleProduct($product)) {
+                $summary['skipped_ineligible']++;
+                $summary['ineligible_products'][] = [
                     'id' => (int) $product->id,
                     'title' => trim((string) ($product->title ?? '')) ?: ('Product #' . $product->id),
                     'status' => trim((string) ($product->status ?? '')) ?: 'unknown',

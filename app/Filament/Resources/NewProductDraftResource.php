@@ -82,11 +82,17 @@ use Carbon\Carbon;
 class NewProductDraftResource extends Resource
 {
     protected static ?string $model = NewProductDraft::class;
+    protected static bool $isScopedToTenant = false;
     protected static ?string $navigationIcon = 'heroicon-o-sparkles';
     protected static ?string $navigationGroup = 'Catalog';
     protected static ?string $navigationLabel = 'New Products';
     protected static ?int $navigationSort = 1;
     private static ?array $siblingCollectionLookupCache = null;
+
+    public static function getEloquentQuery(): Builder
+    {
+        return NewProductDraft::query()->select('new_product_drafts.*');
+    }
 
     private static function defaultBatch(): string
     {
@@ -3476,6 +3482,10 @@ class NewProductDraftResource extends Resource
                         'SEO Updated To'
                     ))
                     ->query(function (Builder $query, array $data): Builder {
+                        if (blank($data['from'] ?? null) && blank($data['to'] ?? null)) {
+                            return $query;
+                        }
+
                         return $query->whereHas('styleProfiles', function (Builder $styleProfileQuery) use ($data): void {
                             $styleProfileQuery
                                 ->when($data['from'] ?? null, fn (Builder $sub, $from): Builder => $sub->where('seo_updated_at', '>=', $from))
@@ -5312,7 +5322,7 @@ class NewProductDraftResource extends Resource
             Forms\Components\Textarea::make('draft_seo_description')
                 ->label('SEO Description (150-160 chars)')
                 ->default(fn (): ?string => self::defaultSeoDraftFieldValue($ownerRecord, 'draft_seo_description'))
-                ->live(debounce: 500)
+                ->live(onBlur: true)
                 ->disabled(self::draftAttributeHasShopifyConflict($ownerRecord, 'seo_description'))
                 ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
                 ->rows(2)

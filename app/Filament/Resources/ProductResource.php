@@ -2098,14 +2098,14 @@ class ProductResource extends Resource
                                 $parts[] = 'Available to any eligible reviewer.';
                             }
                         }
-                        if ($summary['skipped_inactive'] > 0) {
-                            $sample = collect($summary['inactive_products'] ?? [])
+                        if ($summary['skipped_ineligible'] > 0) {
+                            $sample = collect($summary['ineligible_products'] ?? [])
                                 ->take(5)
                                 ->map(fn (array $item): string => "{$item['title']} [status: {$item['status']}]")
                                 ->implode(' | ');
-                            $parts[] = "Skipped {$summary['skipped_inactive']} because partial approval requests only work for active products.";
+                            $parts[] = "Skipped {$summary['skipped_ineligible']} because partial approval requests only work for active and draft products.";
                             if ($sample !== '') {
-                                $parts[] = "Inactive examples: {$sample}";
+                                $parts[] = "Ineligible examples: {$sample}";
                             }
                         }
                         if ($summary['skipped_existing'] > 0) {
@@ -2501,7 +2501,7 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
                 ->required()
                 ->live()
                 ->columns(2)
-                ->helperText('Partial approval applies only to active products. Non-active products still need the existing full approval workflow.'),
+                ->helperText('Partial approval requests can be sent for active and draft products. Other statuses still need the existing full approval workflow.'),
             CheckboxList::make('core_fields')
                 ->label('Product core fields')
                 ->options(ProductShopifyUpdater::productCoreFieldLabels())
@@ -2595,10 +2595,6 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
 
     private static function partialApprovalStatusLabel(Product $record): string
     {
-        if ($record->isSyncedAndCurrent()) {
-            return 'None';
-        }
-
         $pending = $record->partialApprovalRequests()
             ->where('approval_version', $record->approval_version)
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
@@ -2622,10 +2618,6 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
 
     private static function partialApprovalFieldsPreview(Product $record, bool $limit = true): ?string
     {
-        if ($record->isSyncedAndCurrent()) {
-            return null;
-        }
-
         $pendingLabels = self::partialApprovalFieldLabelsByStatus($record, ProductPartialApprovalRequest::STATUS_PENDING);
         if ($pendingLabels !== []) {
             return self::previewLabelList('Pending', $pendingLabels, $limit);

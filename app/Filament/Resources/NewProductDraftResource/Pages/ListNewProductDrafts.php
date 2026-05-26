@@ -2,25 +2,96 @@
 
 namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
+use App\Enums\RolesEnum;
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\NewProductDraftResource\Widgets\ShopifyMissingDraftBanner;
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
 use App\Models\NewProductDraft;
 use App\Models\Status;
+use App\Services\LocalCatalogResetService;
+use Filament\Actions;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
 class ListNewProductDrafts extends ListRecords
 {
     protected static string $resource = NewProductDraftResource::class;
-    protected $listeners = ['draft-created' => '$refresh'];
+    protected $listeners = ['draft-created' => 'handleDraftCreated'];
 
     public function updatedPaginators($page, $pageName): void
     {
         $this->dispatch('scroll-to-top');
+    }
+
+    public function handleDraftCreated(): void
+    {
+        $this->resetTable();
+        $this->dispatch('scroll-to-top');
+    }
+
+    protected function applyGlobalSearchToTableQuery(Builder $query): Builder
+    {
+        $search = filled($this->tableSearch) ? trim((string) $this->tableSearch) : '';
+
+        if ($search === '') {
+            return $query;
+        }
+
+        $terms = array_values(array_filter(
+            preg_split('/\s+/', $search) ?: [],
+            static fn (string $term): bool => $term !== ''
+        ));
+
+        return $query->where(function (Builder $searchQuery) use ($search, $terms): void {
+            $this->applyDraftSearchMatch($searchQuery, $search);
+
+            if (count($terms) > 1) {
+                $searchQuery->orWhere(function (Builder $tokenQuery) use ($terms): void {
+                    foreach ($terms as $term) {
+                        $tokenQuery->where(function (Builder $termQuery) use ($term): void {
+                            $this->applyDraftSearchMatch($termQuery, $term);
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    private function applyDraftSearchMatch(Builder $query, string $search): void
+    {
+        $query
+            ->where('new_product_drafts.handle', 'like', "%{$search}%")
+            ->orWhere('new_product_drafts.title', 'like', "%{$search}%")
+            ->orWhere('new_product_drafts.sku', 'like', "%{$search}%")
+            ->orWhereHas('product.variants', fn (Builder $variantQuery): Builder => $variantQuery->where('sku', 'like', "%{$search}%"));
+    }
+
+    protected function getHeaderActions(): array
+    {
+        return [
+            Actions\Action::make('resetLocalCatalog')
+                ->label('Reset Local Catalog')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->visible(fn (): bool => app()->isLocal() && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
+                ->requiresConfirmation()
+                ->modalHeading('Reset local products and drafts?')
+                ->modalDescription('This clears local products, drafts, rows, approvals, audits, variants, images, and related product data. Users and your login session are kept.')
+                ->action(function (): void {
+                    $summary = app(LocalCatalogResetService::class)->reset();
+
+                    Notification::make()
+                        ->title('Local catalog reset complete')
+                        ->body("Cleared {$summary['products']} product(s) and {$summary['drafts']} draft(s). Your login session was kept.")
+                        ->success()
+                        ->send();
+                }),
+        ];
     }
 
     public function getHeaderWidgetsColumns(): int|array

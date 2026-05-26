@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\NewProductDraftResource\Widgets;
 
+use App\Filament\Resources\NewProductDraftResource;
 use App\Models\NewProductDraft;
 use App\Models\Variant;
 use App\Services\AdminNotification;
@@ -103,7 +104,7 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
 
     public function createDraft(): void
     {
-        $state = $this->form->getState();
+        $state = NewProductDraftResource::mutateDraftFormData($this->form->getState());
 
         $draft = NewProductDraft::create([
             'title' => $state['title'],
@@ -125,6 +126,6 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
             ->success()
         );
 
-        $this->dispatch('draft-created');
+        $this->dispatch('draft-created', draftId: $draft->id);
     }
 }

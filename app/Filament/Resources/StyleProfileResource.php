@@ -87,7 +87,7 @@ class StyleProfileResource extends Resource
                         ]),
                     Textarea::make('draft_seo_description')
                         ->label('SEO Description (150-160 chars)')
-                        ->live(debounce: 500)
+                        ->live(onBlur: true)
                         ->helperText(fn (Forms\Get $get): string => StyleProfile::seoDescriptionLengthHint($get('draft_seo_description')))
                         ->rows(2)
                         ->maxLength(StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX)

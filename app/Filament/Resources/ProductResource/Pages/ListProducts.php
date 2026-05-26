@@ -2,16 +2,20 @@
 
 namespace App\Filament\Resources\ProductResource\Pages;
 
+use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ProductResource\Widgets\ComplementaryShortageBanner;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
 use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
 use App\Models\Product;
+use App\Services\LocalCatalogResetService;
+use Filament\Notifications\Notification;
 use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
@@ -27,7 +31,25 @@ class ListProducts extends ListRecords
 
     protected function getHeaderActions(): array
     {
-        return [];
+        return [
+            Actions\Action::make('resetLocalCatalog')
+                ->label('Reset Local Catalog')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->visible(fn (): bool => app()->isLocal() && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
+                ->requiresConfirmation()
+                ->modalHeading('Reset local products and drafts?')
+                ->modalDescription('This clears local products, drafts, rows, approvals, audits, variants, images, and related product data. Users and your login session are kept.')
+                ->action(function (): void {
+                    $summary = app(LocalCatalogResetService::class)->reset();
+
+                    Notification::make()
+                        ->title('Local catalog reset complete')
+                        ->body("Cleared {$summary['products']} product(s) and {$summary['drafts']} draft(s). Your login session was kept.")
+                        ->success()
+                        ->send();
+                }),
+        ];
     }
 
     protected function getTablePollingInterval(): ?string
@@ -88,32 +110,28 @@ class ListProducts extends ListRecords
         }
 
         $tabs['partially_approved'] = Tab::make('Partially Approved')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
                 ->whereHas('partialApprovalRequests', function (Builder $sub): void {
                     $sub->whereColumn('approval_version', 'products.approval_version')
                         ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
                 })
                 ->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
-                )
-                ->where(function (Builder $sub): void {
-                    $sub->whereNull('last_synced_at')
-                        ->orWhereColumn('updated_at', '>', 'last_synced_at');
-                }));
+                ));
 
         $tabs['approved'] = Tab::make('Approved')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
                 ->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
                 ));
 
         $tabs['synced'] = Tab::make('Synced')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
                 ->whereNotNull('last_synced_at')
                 ->whereColumn('updated_at', '<=', 'last_synced_at'));
 
         $tabs['pending_approval'] = Tab::make('Pending Approval')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyHeaderReportScope($query)
+            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
                 ->whereRaw(
                     '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
                 ));
@@ -154,10 +172,14 @@ class ListProducts extends ListRecords
 
     private static function applyHeaderReportScope(Builder $query): Builder
     {
-        return $query
-            ->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft'])
+        return self::applyWorkflowStatusScope($query)
             ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%'])
             ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
+    }
+
+    private static function applyWorkflowStatusScope(Builder $query): Builder
+    {
+        return $query->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft']);
     }
 
     private function isSyncRunning(): bool

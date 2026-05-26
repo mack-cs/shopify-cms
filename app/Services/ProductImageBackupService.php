@@ -12,6 +12,11 @@ use Illuminate\Support\Str;
 
 class ProductImageBackupService
 {
+    private function enabled(): bool
+    {
+        return !app()->isLocal();
+    }
+
     /**
      * @param Collection<int, Product> $products
      * @return array{
@@ -37,6 +42,10 @@ class ProductImageBackupService
             'restored_candidates' => 0,
             'failures' => [],
         ];
+
+        if (!$this->enabled()) {
+            return $summary;
+        }
 
         foreach ($products as $product) {
             if (!$product instanceof Product) {
@@ -124,6 +133,10 @@ class ProductImageBackupService
             'failures' => [],
         ];
 
+        if (!$this->enabled()) {
+            return $summary;
+        }
+
         foreach ($images as $image) {
             if (!$image instanceof Image || $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
                 continue;
@@ -177,6 +190,10 @@ class ProductImageBackupService
      */
     public function backupImage(Image $image): string
     {
+        if (!$this->enabled()) {
+            return 'reused';
+        }
+
         $image->loadMissing(['product', 'imageAsset']);
 
         if (
