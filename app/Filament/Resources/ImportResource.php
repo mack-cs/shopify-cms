@@ -114,6 +114,25 @@ class ImportResource extends Resource
                     }
                 }),
         ])->actions([
+            Action::make('makeCurrent')
+                ->label('Make Current')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn (Import $record): bool => (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    && !$record->is_current
+                    && $record->is_valid
+                    && $record->status === 'ready')
+                ->action(function (Import $record): void {
+                    Import::query()->update(['is_current' => false]);
+                    $record->forceFill(['is_current' => true])->save();
+
+                    self::sendNotification(
+                        Notification::make()
+                            ->title('Import restored as current')
+                            ->body("Import #{$record->id} is now the current import.")
+                            ->success()
+                    );
+                }),
             // Action::make('validateImport')
             //     ->label('Validate CSV')
             //     ->requiresConfirmation()

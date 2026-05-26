@@ -6,6 +6,7 @@ use App\Models\NewProductDraft;
 use App\Models\Import;
 use App\Services\AdminNotification;
 use App\Services\AwsSecretService;
+use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftShopifyCreator;
 use App\Services\ShopifyApiImporter;
 use App\Jobs\ShopifySyncJob;
@@ -32,7 +33,11 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
     ) {
     }
 
-    public function handle(NewProductDraftShopifyCreator $creator, ShopifyApiImporter $importer): void
+    public function handle(
+        NewProductDraftShopifyCreator $creator,
+        ShopifyApiImporter $importer,
+        NewProductDraftProductSync $draftProductSync
+    ): void
     {
         set_time_limit(0);
 
@@ -57,9 +62,27 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
                 ]);
             }
 
+            $localSyncSummary = [
+                'updated' => 0,
+                'created' => 0,
+            ];
+
+            if ($result['created'] > 0) {
+                $localSyncSummary = $draftProductSync->syncApprovedDrafts(
+                    NewProductDraft::query()
+                        ->whereIn('id', $this->draftIds)
+                        ->get()
+                );
+            }
+
             $parts = [];
             if ($result['created'] > 0) {
                 $parts[] = "Created {$result['created']}.";
+            }
+            if (($localSyncSummary['created'] ?? 0) > 0 || ($localSyncSummary['updated'] ?? 0) > 0) {
+                $parts[] = 'Updated local Products: '
+                    . (($localSyncSummary['created'] ?? 0) + ($localSyncSummary['updated'] ?? 0))
+                    . '.';
             }
             if ($result['skipped_has_handle'] > 0) {
                 $parts[] = "Already has handle: {$result['skipped_has_handle']}.";
