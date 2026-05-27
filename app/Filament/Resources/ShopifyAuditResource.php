@@ -2,14 +2,18 @@
 
 namespace App\Filament\Resources;
 
+use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyAuditResource\Pages;
 use App\Jobs\DailyComplementaryProductCheckJob;
 use App\Jobs\ReconcileComplementaryProductsJob;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
 use App\Services\AsyncJobStateService;
 use App\Services\ComplementaryProductAuditService;
+use App\Services\ComplementaryProductMaintenanceService;
 use App\Services\NewProductDraftSeeder;
+use App\Services\ProductShopifyUpdater;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
@@ -144,6 +148,91 @@ class ShopifyAuditResource extends Resource
                     ->icon('heroicon-o-arrow-top-right-on-square')
                     ->url(fn (ShopifyAudit $record): ?string => self::newProductDraftEditUrl($record))
                     ->openUrlInNewTab(),
+                Tables\Actions\Action::make('resolveFromDraft')
+                    ->label('Resolve')
+                    ->icon('heroicon-o-wrench')
+                    ->color('success')
+                    ->visible(fn (ShopifyAudit $record): bool => self::canResolveFromDraft($record))
+                    ->requiresConfirmation()
+                    ->modalHeading('Resolve Shopify complementary shortage?')
+                    ->modalDescription('This will push the valid complementary products from the linked draft to Shopify for this product only. Use this only when the local draft already has at least 3 valid complementary products.')
+                    ->modalSubmitActionLabel('Resolve Now')
+                    ->action(function (ShopifyAudit $record): void {
+                        $product = $record->product;
+                        if (!$product instanceof Product) {
+                            Notification::make()
+                                ->title('Resolve failed')
+                                ->body('No linked product was found for this audit row.')
+                                ->danger()
+                                ->send();
+
+                            return;
+                        }
+
+                        $draft = self::linkedDraftForProduct($product);
+                        if (!$draft instanceof NewProductDraft) {
+                            Notification::make()
+                                ->title('Resolve failed')
+                                ->body('No linked draft was found. Open the draft first and confirm the complementary products there.')
+                                ->warning()
+                                ->send();
+
+                            return;
+                        }
+
+                        $auditService = app(ComplementaryProductAuditService::class);
+                        $analysis = $auditService->analyzeDraft($draft);
+                        $validCount = count($analysis['local_eligible_ids'] ?? []);
+
+                        if ($validCount < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) {
+                            Notification::make()
+                                ->title('Resolve blocked')
+                                ->body("The linked draft only has {$validCount} valid complementary product(s). At least " . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ' valid products are required before this direct resolve can run.')
+                                ->warning()
+                                ->send();
+
+                            return;
+                        }
+
+                        $result = app(ProductShopifyUpdater::class)->syncComplementaryProducts(collect([$product]), Auth::id());
+                        app(ComplementaryProductMaintenanceService::class)->recordAuditForProduct($product->fresh() ?? $product);
+
+                        if ((int) ($result['failed'] ?? 0) > 0) {
+                            $details = collect($result['failures'] ?? [])
+                                ->map(fn (array $failure): string => trim((string) ($failure['details'] ?? $failure['reason'] ?? '')))
+                                ->filter()
+                                ->implode(' | ');
+
+                            Notification::make()
+                                ->title('Resolve failed')
+                                ->body($details !== '' ? $details : 'Shopify rejected the complementary update.')
+                                ->danger()
+                                ->send();
+
+                            return;
+                        }
+
+                        if ((int) ($result['updated'] ?? 0) < 1) {
+                            $warningText = collect($result['warnings'] ?? [])
+                                ->map(fn (array $warning): string => trim((string) ($warning['warning'] ?? '')))
+                                ->filter()
+                                ->implode(' | ');
+
+                            Notification::make()
+                                ->title('Nothing changed')
+                                ->body($warningText !== '' ? $warningText : 'No Shopify complementary update was applied for this product.')
+                                ->warning()
+                                ->send();
+
+                            return;
+                        }
+
+                        Notification::make()
+                            ->title('Complementary products resolved')
+                            ->body('Shopify was updated from the linked draft for this product. Refresh the audit if you want to confirm the latest live result immediately.')
+                            ->success()
+                            ->send();
+                    }),
             ])
             ->headerActions([
                 Tables\Actions\Action::make('fixComplementaryProducts')
@@ -286,5 +375,38 @@ class ShopifyAuditResource extends Resource
         $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($product, Auth::id());
 
         return NewProductDraftResource::getUrl('edit', ['record' => $draft]);
+    }
+
+    private static function canResolveFromDraft(ShopifyAudit $record): bool
+    {
+        return (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+            && $record->audit_type === ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS
+            && (int) ($record->local_valid_count ?? 0) >= ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT
+            && (int) ($record->shopify_current_count ?? 0) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+    }
+
+    private static function linkedDraftForProduct(Product $product): ?NewProductDraft
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where('handle', $handle)
+            ->first();
+
+        return $draft instanceof NewProductDraft ? $draft : null;
     }
 }

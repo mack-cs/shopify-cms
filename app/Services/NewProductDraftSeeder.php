@@ -497,6 +497,7 @@ final class NewProductDraftSeeder
         $string = $this->stringifyValue($value);
 
         return match ($field) {
+            'body_html' => $this->normalizeRichTextForComparison($string),
             'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
             'product_category' => strtolower($this->normalizeCategoryDisplayValue($string)),
             'sibling_collection' => strtolower($this->normalizeSiblingCollectionDisplayValue($string)),

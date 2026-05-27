@@ -127,7 +127,11 @@ final class ComplementaryProductReconciliationService
         $shortageCount = ShopifyAudit::query()
             ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
             ->where('needs_attention', true)
-            ->where('local_valid_count', '<', ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT)
+            ->where(function ($query): void {
+                $query
+                    ->where('shopify_current_count', '<', ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT)
+                    ->orWhere('shopify_valid_count', '<', ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT);
+            })
             ->count();
 
         $warnings = array_values(array_filter(array_merge(

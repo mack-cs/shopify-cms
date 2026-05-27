@@ -144,7 +144,10 @@ class ComplementaryProductAuditService
             'local_ineligible' => $localIneligible,
             'shopify_total' => count($shopifyStates),
             'shopify_eligible' => count($shopifyEligibleIds),
-            'shopify_good' => $shopifyIneligible === [] && $shopifyMissingLocalIds === [],
+            'shopify_good' => count($shopifyStates) >= self::SHOPIFY_TARGET_COUNT
+                && count($shopifyEligibleIds) >= self::SHOPIFY_TARGET_COUNT
+                && $shopifyIneligible === []
+                && $shopifyMissingLocalIds === [],
             'shopify_ids' => $shopifyIds,
             'shopify_eligible_ids' => $shopifyEligibleIds,
             'shopify_missing_local_ids' => $shopifyMissingLocalIds,
