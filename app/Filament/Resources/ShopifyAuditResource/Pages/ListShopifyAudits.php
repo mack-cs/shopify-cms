@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\ShopifyAuditResource\Pages;
 
 use App\Filament\Resources\ShopifyAuditResource;
+use App\Filament\Resources\ShopifyAuditResource\Widgets\ShopifyAuditRunBanner;
 use Filament\Resources\Pages\ListRecords;
 use Illuminate\Support\HtmlString;
 
@@ -13,6 +14,13 @@ class ListShopifyAudits extends ListRecords
     protected function getHeaderActions(): array
     {
         return [];
+    }
+
+    protected function getHeaderWidgets(): array
+    {
+        return [
+            ShopifyAuditRunBanner::class,
+        ];
     }
 
     public function getHeading(): string|HtmlString

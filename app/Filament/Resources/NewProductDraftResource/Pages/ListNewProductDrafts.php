@@ -4,6 +4,7 @@ namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\NewProductDraftResource;
+use App\Filament\Resources\NewProductDraftResource\Widgets\NewProductDraftRunBanner;
 use App\Filament\Resources\NewProductDraftResource\Widgets\ShopifyMissingDraftBanner;
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
 use App\Models\NewProductDraft;
@@ -102,6 +103,7 @@ class ListNewProductDrafts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
+            NewProductDraftRunBanner::class,
             ShopifyMissingDraftBanner::class,
             QuickCreateNewProductDraft::class,
         ];

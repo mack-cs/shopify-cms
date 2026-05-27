@@ -2,7 +2,8 @@
 
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
-use App\Jobs\DailyComplementaryProductCheckJob;
+use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\ComplementaryProductMaintenanceService;
 use Illuminate\Foundation\Inspiring;
@@ -18,8 +19,20 @@ Schedule::job(new ReconcileProductImageBackupsJob())
     ->dailyAt('02:00')
     ->withoutOverlapping();
 
-Schedule::job(new DailyComplementaryProductCheckJob())
-    ->dailyAt('03:00')
+Schedule::call(function (): void {
+    app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::INVENTORY_CHECK);
+    DailyShopifyInventoryRefreshJob::dispatch();
+})
+    ->name('daily-shopify-inventory-refresh')
+    ->dailyAt('04:00')
+    ->withoutOverlapping();
+
+Schedule::call(function (): void {
+    app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_RECONCILIATION);
+    ReconcileComplementaryProductsJob::dispatch();
+})
+    ->name('daily-complementary-reconciliation')
+    ->dailyAt('05:00')
     ->withoutOverlapping();
 
 Artisan::command(
@@ -106,11 +119,30 @@ Artisan::command(
 )->purpose('Local only: delete old queued jobs so they cannot run later when the worker starts.');
 
 Artisan::command(
+    'shopify:refresh-inventory-readonly
+    {--user-id= : Optional user ID to receive the completion notification}',
+    function (): int {
+        $userId = (int) ($this->option('user-id') ?? 0);
+
+        app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::INVENTORY_CHECK);
+        DailyShopifyInventoryRefreshJob::dispatch($userId > 0 ? $userId : null);
+
+        $this->info('Daily Shopify inventory refresh job queued.');
+        if ($userId > 0) {
+            $this->line("Completion notification will be sent to user {$userId}.");
+        }
+
+        return self::SUCCESS;
+    }
+)->purpose('Read current inventory and product status from Shopify into local variants/products without pushing local changes to Shopify.');
+
+Artisan::command(
     'shopify:reconcile-complementary-products
     {--user-id= : Optional user ID to receive the completion notification}',
     function (): int {
         $userId = (int) ($this->option('user-id') ?? 0);
 
+        app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_RECONCILIATION);
         ReconcileComplementaryProductsJob::dispatch($userId > 0 ? $userId : null);
 
         $this->info('Complementary reconciliation job queued.');
@@ -125,45 +157,51 @@ Artisan::command(
 Artisan::command(
     'shopify:audit-complementary-products',
     function (): int {
-        $maintenance = app(ComplementaryProductMaintenanceService::class);
-        $summary = $maintenance->runDailyCheck();
+        app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_AUDIT);
 
-        $this->info('Complementary audit complete.');
-        $this->line("Checked: {$summary['checked']}");
-        $this->line("Recorded: {$summary['recorded']}");
-        $this->line("Healthy: {$summary['healthy']}");
-        $this->line("Flagged: {$summary['flagged']}");
-        $this->line("Alerted: {$summary['notified']}");
+        try {
+            $maintenance = app(ComplementaryProductMaintenanceService::class);
+            $summary = $maintenance->runDailyCheck();
 
-        $flagged = \App\Models\ShopifyAudit::query()
-            ->with('product')
-            ->where('audit_type', \App\Models\ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-            ->where('status', \App\Models\ShopifyAudit::STATUS_FLAGGED)
-            ->orderByDesc('last_checked_at')
-            ->get();
+            $this->info('Complementary audit complete.');
+            $this->line("Checked: {$summary['checked']}");
+            $this->line("Recorded: {$summary['recorded']}");
+            $this->line("Healthy: {$summary['healthy']}");
+            $this->line("Flagged: {$summary['flagged']}");
+            $this->line("Alerted: {$summary['notified']}");
 
-        if ($flagged->isEmpty()) {
-            $this->info('No products currently need complementary-product audit attention.');
+            $flagged = \App\Models\ShopifyAudit::query()
+                ->with('product')
+                ->where('audit_type', \App\Models\ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                ->where('status', \App\Models\ShopifyAudit::STATUS_FLAGGED)
+                ->orderByDesc('last_checked_at')
+                ->get();
+
+            if ($flagged->isEmpty()) {
+                $this->info('No products currently need complementary-product audit attention.');
+
+                return self::SUCCESS;
+            }
+
+            $this->warn('Products still needing complementary-product audit attention:');
+            foreach ($flagged as $audit) {
+                $product = $audit->product;
+                $title = trim((string) ($product?->title ?? '')) ?: ('Product #' . $audit->product_id);
+                $this->line(sprintf(
+                    '- %s | %s | local=%d | shopify=%d | valid=%d | checked=%s',
+                    $title,
+                    trim((string) ($product?->handle ?? '')),
+                    (int) ($audit->local_saved_count ?? 0),
+                    (int) ($audit->shopify_current_count ?? 0),
+                    (int) ($audit->shopify_valid_count ?? 0),
+                    optional($audit->last_checked_at)?->format('Y-m-d H:i:s') ?? 'never',
+                ));
+            }
 
             return self::SUCCESS;
+        } finally {
+            app(AsyncJobStateService::class)->markFinished(AsyncJobStateService::COMPLEMENTARY_AUDIT);
         }
-
-        $this->warn('Products still needing complementary-product audit attention:');
-        foreach ($flagged as $audit) {
-            $product = $audit->product;
-            $title = trim((string) ($product?->title ?? '')) ?: ('Product #' . $audit->product_id);
-            $this->line(sprintf(
-                '- %s | %s | local=%d | shopify=%d | valid=%d | checked=%s',
-                $title,
-                trim((string) ($product?->handle ?? '')),
-                (int) ($audit->local_saved_count ?? 0),
-                (int) ($audit->shopify_current_count ?? 0),
-                (int) ($audit->shopify_valid_count ?? 0),
-                optional($audit->last_checked_at)?->format('Y-m-d H:i:s') ?? 'never',
-            ));
-        }
-
-        return self::SUCCESS;
     }
 )->purpose('Run the complementary-product Shopify audit now and print the current audit state.');
 

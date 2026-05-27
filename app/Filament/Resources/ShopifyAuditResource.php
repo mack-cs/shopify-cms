@@ -7,6 +7,7 @@ use App\Jobs\DailyComplementaryProductCheckJob;
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
+use App\Services\AsyncJobStateService;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\NewProductDraftSeeder;
 use Filament\Notifications\Notification;
@@ -151,6 +152,7 @@ class ShopifyAuditResource extends Resource
                     ->color('warning')
                     ->requiresConfirmation()
                     ->action(function (): void {
+                        app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_RECONCILIATION);
                         ReconcileComplementaryProductsJob::dispatch(Auth::id());
 
                         Notification::make()
@@ -165,6 +167,7 @@ class ShopifyAuditResource extends Resource
                     ->color('primary')
                     ->requiresConfirmation()
                     ->action(function (): void {
+                        app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_AUDIT);
                         DailyComplementaryProductCheckJob::dispatch();
 
                         Notification::make()

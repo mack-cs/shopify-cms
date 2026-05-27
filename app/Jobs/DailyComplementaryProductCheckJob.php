@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Services\AsyncJobStateService;
 use App\Services\ComplementaryProductMaintenanceService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -17,6 +18,10 @@ class DailyComplementaryProductCheckJob implements ShouldQueue
 
     public function handle(ComplementaryProductMaintenanceService $service): void
     {
-        $service->runDailyCheck();
+        try {
+            $service->runDailyCheck();
+        } finally {
+            app(AsyncJobStateService::class)->markFinished(AsyncJobStateService::COMPLEMENTARY_AUDIT);
+        }
     }
 }

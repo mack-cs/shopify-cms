@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\NewProductDraft;
 use App\Models\Import;
 use App\Services\AdminNotification;
+use App\Services\AsyncJobStateService;
 use App\Services\AwsSecretService;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftShopifyCreator;
@@ -39,14 +40,14 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
         NewProductDraftProductSync $draftProductSync
     ): void
     {
-        set_time_limit(0);
-
-        $drafts = NewProductDraft::whereIn('id', $this->draftIds)->get();
-        if ($drafts->isEmpty()) {
-            return;
-        }
-
         try {
+            set_time_limit(0);
+
+            $drafts = NewProductDraft::whereIn('id', $this->draftIds)->get();
+            if ($drafts->isEmpty()) {
+                return;
+            }
+
             $result = $creator->createApprovedDrafts($drafts);
 
             if (!empty($result['failures'])) {
@@ -155,6 +156,8 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
             );
 
             throw $e;
+        } finally {
+            app(AsyncJobStateService::class)->markFinished(AsyncJobStateService::NEW_PRODUCT_SHOPIFY_CREATE);
         }
     }
 }

@@ -846,6 +846,146 @@ Run `php artisan storage:link` so `public/storage` serves files.
 Filament uses database notifications. Queue connection is set to `database` in `.env.example`.
 Run the queue listener in dev (done by `composer run dev`).
 
+## Operations reference
+
+This project has a few operational Artisan commands and background workflows that are easy to miss if you only use the UI.
+
+### Queue maintenance
+
+Temporary local queue flush:
+
+```bash
+php artisan queue:flush-local-pending --force
+```
+
+Options:
+
+```bash
+php artisan queue:flush-local-pending --queue=default --force
+php artisan queue:flush-local-pending --include-failed --force
+php artisan queue:flush-local-pending --include-batches --force
+php artisan queue:flush-local-pending --include-failed --include-batches --force
+```
+
+Notes:
+- This command is intentionally restricted to the `local` environment.
+- It deletes queued job rows so old background work cannot run later when the worker starts.
+- It is defined in `routes/console.php`.
+
+### Shopify inventory and complementary jobs
+
+Read-only Shopify inventory refresh:
+
+```bash
+php artisan shopify:refresh-inventory-readonly
+php artisan shopify:refresh-inventory-readonly --user-id=1
+```
+
+What it does:
+- Reads current product status and variant inventory from Shopify.
+- Updates local `products` / `variants`.
+- Does not push local inventory back to Shopify.
+
+Complementary reconciliation:
+
+```bash
+php artisan shopify:reconcile-complementary-products
+php artisan shopify:reconcile-complementary-products --user-id=1
+```
+
+What it does:
+- Refreshes local Shopify inventory/status.
+- Recalculates sellability.
+- Repairs and pushes complementary product references to Shopify where needed.
+- Runs the complementary audit/maintenance pass as part of the job.
+
+Complementary audit only:
+
+```bash
+php artisan shopify:audit-complementary-products
+```
+
+What it does:
+- Audits live Shopify complementary references.
+- Stores the latest audit result locally.
+- Does not perform complementary repair writes to Shopify.
+
+### Daily schedules
+
+Daily scheduled jobs are defined in `routes/console.php`.
+
+Current order:
+- `02:00` `ReconcileProductImageBackupsJob`
+- `04:00` read-only Shopify inventory refresh
+- `05:00` complementary reconciliation
+
+The `04:00` inventory read runs first so the `05:00` complementary reconciliation works from fresher Shopify inventory/status.
+
+### UI entry points for these jobs
+
+- **Catalog -> Inventory**
+  - `Check Shopify Inventory`
+- **Audit & History -> Shopify Audit**
+  - `Run Complementary Audit`
+  - `Fix Complementary Products`
+- **New Products**
+  - `Create In Shopify`
+
+These queue-backed actions now show a running indicator in the UI while the background job is still in progress.
+
+### New product draft seeding / sync helper
+
+`App\Services\NewProductDraftSeeder` is an internal sync helper used to keep the `new_product_drafts` table aligned with imported products.
+
+Important methods:
+- `seedMissingFromProducts(int $importId, ?int $userId = null)`
+- `upsertFromProduct(Product $product, ?int $userId = null)`
+
+Where it is used:
+- `App\Jobs\ShopifySyncJob`
+  - after a Shopify import, products are mirrored into the New Products workflow
+- Product / audit flows that need to open or reuse a working draft from a local product
+
+Operational note:
+- This is not a standalone Artisan command.
+- It is part of the product import and recovery workflow.
+
+### Database seeders
+
+Main bootstrap seeder:
+
+```bash
+php artisan db:seed
+```
+
+This runs `DatabaseSeeder`, which currently calls:
+- `CategorySeeder`
+- `ColorSeeder`
+- `TypeSeeder`
+- `TagSeeder`
+- `DropdownOptionSeeder`
+- `RequiredFieldSeeder`
+- `RoleSeeder`
+- `UserSeeder`
+- `SeoPageSeeder`
+- `SearchTrendSeeder`
+- `SeoMetricsSeeder`
+
+You can also run individual seeders when needed:
+
+```bash
+php artisan db:seed --class=CategorySeeder
+php artisan db:seed --class=ColorSeeder
+php artisan db:seed --class=RoleSeeder
+php artisan db:seed --class=UserSeeder
+php artisan db:seed --class=DropdownOptionSeeder
+php artisan db:seed --class=RequiredFieldSeeder
+```
+
+Recommended use:
+- run full `db:seed` on a fresh local setup
+- run individual seeders when only reference data needs refreshing
+
 ## Key locations
 
 - Import/Export services: `app/Services/`

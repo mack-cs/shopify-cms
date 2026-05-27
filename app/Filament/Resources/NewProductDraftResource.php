@@ -27,6 +27,7 @@ use App\Models\Tag;
 use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\AdminNotification;
+use App\Services\AsyncJobStateService;
 use App\Services\CategoryTypeMap;
 use App\Services\DeletionRequestWorkflowService;
 use App\Services\NewProductDraftCsvImporter;
@@ -3100,6 +3101,7 @@ class NewProductDraftResource extends Resource
                                 return;
                             }
 
+                            app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::NEW_PRODUCT_SHOPIFY_CREATE);
                             NewProductDraftShopifyCreateJob::dispatch($draftIds, Auth::id());
 
                             self::sendNotification(Notification::make()
