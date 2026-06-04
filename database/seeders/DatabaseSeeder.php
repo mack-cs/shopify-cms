@@ -24,6 +24,7 @@ class DatabaseSeeder extends Seeder
             RequiredFieldSeeder::class,
             RoleSeeder::class,
             UserSeeder::class,
+            SlackUserSeeder::class,
             SeoPageSeeder::class,
             SearchTrendSeeder::class,
             SeoMetricsSeeder::class,

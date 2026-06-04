@@ -23,6 +23,11 @@ class NewProductDraftAssignment extends Model
         'csv_path',
         'sent_at',
         'error_message',
+        'assigned_user_ids',
+        'notification_channel',
+        'work_status',
+        'completed_at',
+        'last_slack_notified_at',
     ];
 
     protected $casts = [
@@ -31,6 +36,9 @@ class NewProductDraftAssignment extends Model
         'context_columns' => 'array',
         'selected_columns' => 'array',
         'sent_at' => 'datetime',
+        'assigned_user_ids' => 'array',
+        'completed_at' => 'datetime',
+        'last_slack_notified_at' => 'datetime',
     ];
 
     public function sender(): BelongsTo

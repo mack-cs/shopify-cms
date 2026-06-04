@@ -10,6 +10,7 @@ use Laravel\Fortify\TwoFactorAuthenticatable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Spatie\Permission\Traits\HasRoles;
+use Illuminate\Notifications\Notification as LaravelNotification;
 
 class User extends Authenticatable  implements FilamentUser
 {
@@ -36,6 +37,8 @@ class User extends Authenticatable  implements FilamentUser
         'password',
         'force_password_change',
         'is_active',
+        'slack_user_id',
+        'slack_notifications_enabled',
     ];
 
     /**
@@ -63,6 +66,15 @@ class User extends Authenticatable  implements FilamentUser
             'two_factor_confirmed_at' => 'datetime',
             'force_password_change' => 'boolean',
             'is_active' => 'boolean',
+            'slack_notifications_enabled' => 'boolean',
         ];
     }
+
+    public function routeNotificationForSlack(LaravelNotification $notification): mixed
+    {
+        return config('services.slack.channels.assignments');
+    }
+
+
+
 }

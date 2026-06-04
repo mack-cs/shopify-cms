@@ -24,6 +24,7 @@ use App\Models\StyleProfile;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\DropdownOption;
 use App\Models\Tag;
+use App\Models\User;
 use App\Models\Variant;
 use App\Services\NewProductDraftAssignmentService;
 use App\Services\AdminNotification;
@@ -69,6 +70,7 @@ use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
 use App\Jobs\SendNewProductDraftAssignmentEmailJob;
+use App\Jobs\SendNewProductDraftAssignmentSlackJob;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -3251,6 +3253,81 @@ class NewProductDraftResource extends Resource
                                 self::sendNotification(Notification::make()
                                     ->title('Assignment queued')
                                     ->body("Assignment #{$assignment->id} was recorded and the email has been queued.")
+                                    ->success()
+                                );
+                            } catch (\Throwable $e) {
+                                self::sendNotification(Notification::make()
+                                    ->title('Assignment failed')
+                                    ->body($e->getMessage())
+                                    ->danger()
+                                );
+                            }
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('sendAssignmentSlack')
+                        ->label('Assign in Slack')
+                        ->icon('heroicon-o-chat-bubble-left-right')
+                        ->color('info')
+                        ->form([
+                            Select::make('assigned_user_ids')
+                                ->label('Assigned Users')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->required()
+                                ->options(fn (): array => User::query()
+                                    ->where('is_active', true)
+                                    ->orderBy('name')
+                                    ->get(['id', 'name', 'email'])
+                                    ->mapWithKeys(fn (User $user): array => [
+                                        $user->id => trim(($user->name ?: $user->email) . ' <' . $user->email . '>'),
+                                    ])
+                                    ->all())
+                                ->helperText('These users will be mentioned in the Slack channel. Add their Slack Member ID in User Management.'),
+                            Textarea::make('to_emails')
+                                ->label('Fallback Emails')
+                                ->rows(2)
+                                ->helperText('Optional. Used only when a selected user has no Slack ID or when email lookup is enabled.'),
+                            TextInput::make('from_name')
+                                ->label('From Name')
+                                ->default(fn (): ?string => Auth::user()?->name),
+                            TextInput::make('from_email')
+                                ->label('From Email')
+                                ->email()
+                                ->required()
+                                ->default(fn (): ?string => Auth::user()?->email),
+                            TextInput::make('subject')
+                                ->label('Subject')
+                                ->required()
+                                ->maxLength(255)
+                                ->default('New product draft assignment'),
+                            Textarea::make('body')
+                                ->label('Message')
+                                ->rows(4)
+                                ->helperText('Optional note shown in Slack.'),
+                            CheckboxList::make('context_columns')
+                                ->label('Reference Columns')
+                                ->options(fn (): array => app(NewProductDraftAssignmentService::class)->contextColumnOptions())
+                                ->columns(2)
+                                ->default(['title', 'sku', 'vendor', 'type'])
+                                ->helperText('Handle is always included as the identifier.'),
+                            CheckboxList::make('selected_columns')
+                                ->label('Work Columns')
+                                ->required()
+                                ->options(fn (): array => app(NewProductDraftAssignmentService::class)->workColumnOptions())
+                                ->columns(2)
+                                ->helperText('Choose the columns the assignee should work on.'),
+                        ])
+                        ->action(function ($records, array $data, NewProductDraftAssignmentService $service): void {
+                            try {
+                                $data['notification_channel'] = config('services.slack.channels.assignments');
+
+                                $assignment = $service->createAssignment($records, $data, Auth::user());
+                                SendNewProductDraftAssignmentSlackJob::dispatch($assignment->id);
+
+                                self::sendNotification(Notification::make()
+                                    ->title('Slack assignment queued')
+                                    ->body("Assignment #{$assignment->id} was recorded and the Slack notification has been queued.")
                                     ->success()
                                 );
                             } catch (\Throwable $e) {

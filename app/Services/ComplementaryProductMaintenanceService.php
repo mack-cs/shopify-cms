@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Mail\ComplementaryProductMaintenanceAlertMail;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
+use App\Notifications\PendingWorkSlackReminderNotification;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Notification as NotificationFacade;
 
 class ComplementaryProductMaintenanceService
 {
@@ -66,8 +68,32 @@ class ComplementaryProductMaintenanceService
             });
 
         if ($alerts !== []) {
-            $recipientEmails = $this->recipientEmails();
-            if ($recipientEmails !== []) {
+            $channel = trim((string) config('services.slack.channels.audits'));
+
+            if ($channel !== '') {
+                NotificationFacade::route('slack', $channel)
+                    ->notify(new PendingWorkSlackReminderNotification());
+
+                $notified = count($alerts);
+
+                ShopifyAudit::query()
+                    ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                    ->where('needs_attention', true)
+                    ->update([
+                        'last_notified_at' => now(),
+                    ]);
+            } else {
+                $recipientEmails = $this->recipientEmails();
+                if ($recipientEmails === []) {
+                    return [
+                        'checked' => $checked,
+                        'recorded' => $recorded,
+                        'healthy' => $healthy,
+                        'flagged' => $flagged,
+                        'notified' => $notified,
+                    ];
+                }
+
                 Mail::to($recipientEmails)->send(new ComplementaryProductMaintenanceAlertMail($alerts));
                 $notified = count($alerts);
 

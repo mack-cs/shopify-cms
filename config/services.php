@@ -33,6 +33,19 @@ return [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+
+        'channels' => [
+            'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
+        ],
+
+        'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
+        'reminder_timezone' => env('SLACK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
+        'reminder_times' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('SLACK_REMINDER_TIMES', '09:00,13:00,16:00'))
+        ))),
     ],
 
     'shopify' => [

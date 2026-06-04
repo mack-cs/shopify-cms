@@ -61,12 +61,38 @@ final class NewProductDraftAssignmentService
         }
 
         $contextColumns = $this->normalizeContextColumns($data['context_columns'] ?? []);
+        $assignedUserIds = $this->parseUserIds($data['assigned_user_ids'] ?? []);
+        $assignedUsers = $assignedUserIds === []
+            ? collect()
+            : User::query()
+                ->whereIn('id', $assignedUserIds)
+                ->where('is_active', true)
+                ->get(['id', 'email']);
+
+        $assignedUserIds = $assignedUsers
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->values()
+            ->all();
+
         $toEmails = $this->parseEmails($data['to_emails'] ?? null);
-        if (empty($toEmails)) {
-            throw new \InvalidArgumentException('Provide at least one recipient email address.');
+        if ($toEmails === [] && $assignedUsers->isNotEmpty()) {
+            $toEmails = $assignedUsers
+                ->pluck('email')
+                ->filter()
+                ->map(fn (string $email): string => strtolower(trim($email)))
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        if ($toEmails === []) {
+            throw new \InvalidArgumentException('Select at least one assigned user or provide one fallback email address.');
         }
 
         $ccEmails = $this->parseEmails($data['cc_emails'] ?? null);
+        $notificationChannel = $this->nullIfEmpty($data['notification_channel'] ?? null)
+            ?? config('services.slack.channels.assignments');
         $fromName = $this->nullIfEmpty($data['from_name'] ?? null) ?? $sender?->name;
         $fromEmail = $this->nullIfEmpty($data['from_email'] ?? null) ?? $sender?->email;
         if ($fromEmail === null) {
@@ -87,15 +113,20 @@ final class NewProductDraftAssignmentService
             $subject,
             $body,
             $contextColumns,
-            $selectedColumns
+            $selectedColumns,
+            $assignedUserIds,
+            $notificationChannel
         ): NewProductDraftAssignment {
             $assignment = NewProductDraftAssignment::create([
                 'sent_by' => $sender?->id,
                 'status' => 'queued',
+                'work_status' => 'open',
                 'from_name' => $fromName,
                 'from_email' => $fromEmail,
                 'to_emails' => $toEmails,
                 'cc_emails' => $ccEmails ?: null,
+                'assigned_user_ids' => $assignedUserIds,
+                'notification_channel' => $notificationChannel,
                 'subject' => $subject,
                 'body' => $body,
                 'context_columns' => $contextColumns,
@@ -121,11 +152,13 @@ final class NewProductDraftAssignmentService
                 $assignment,
                 'created',
                 $sender?->id,
-                'Assignment queued for email delivery.',
+                'Assignment queued for delivery.',
                 [
                     'draft_count' => $drafts->count(),
                     'to' => $toEmails,
                     'cc' => $ccEmails,
+                    'assigned_user_ids' => $assignedUserIds,
+                    'notification_channel' => $notificationChannel,
                     'context_columns' => $contextColumns,
                     'selected_columns' => $selectedColumns,
                 ]
@@ -170,6 +203,62 @@ final class NewProductDraftAssignmentService
             [
                 'error' => $e->getMessage(),
             ]
+        );
+    }
+
+    public function markSlackSent(NewProductDraftAssignment $assignment, ?string $channel = null): void
+    {
+        $assignment->update([
+            'status' => 'sent',
+            'sent_at' => now(),
+            'last_slack_notified_at' => now(),
+            'notification_channel' => $channel ?: $assignment->notification_channel,
+            'error_message' => null,
+        ]);
+
+        $this->log(
+            $assignment,
+            'slack_sent',
+            $assignment->sent_by,
+            'Assignment Slack notification sent.',
+            [
+                'channel' => $channel ?: $assignment->notification_channel,
+                'assigned_user_ids' => $assignment->assigned_user_ids,
+            ]
+        );
+    }
+
+    public function markSlackFailed(NewProductDraftAssignment $assignment, \Throwable $e): void
+    {
+        $assignment->update([
+            'status' => 'failed',
+            'error_message' => $e->getMessage(),
+        ]);
+
+        $this->log(
+            $assignment,
+            'slack_failed',
+            $assignment->sent_by,
+            'Assignment Slack notification failed.',
+            [
+                'error' => $e->getMessage(),
+                'assigned_user_ids' => $assignment->assigned_user_ids,
+            ]
+        );
+    }
+
+    public function markCompleted(NewProductDraftAssignment $assignment, ?User $user = null): void
+    {
+        $assignment->update([
+            'work_status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        $this->log(
+            $assignment,
+            'completed',
+            $user?->id,
+            'Assignment marked completed.'
         );
     }
 
@@ -366,6 +455,21 @@ final class NewProductDraftAssignmentService
         }
 
         return array_values(array_unique($emails));
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function parseUserIds(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map(
+            fn ($id): int => (int) $id,
+            $value
+        ))));
     }
 
     private function nullIfEmpty(mixed $value): ?string

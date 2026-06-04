@@ -3,17 +3,71 @@
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Models\NewProductDraftAssignment;
+use App\Models\ShopifyAudit;
+use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\ComplementaryProductMaintenanceService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Schedule;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command('slack:pending-work-reminder', function (): int {
+    $channel = trim((string) config('services.slack.channels.reminders'));
+
+    if ($channel === '') {
+        $this->error('SLACK_REMINDER_CHANNEL or SLACK_BOT_USER_DEFAULT_CHANNEL is not configured.');
+
+        return self::FAILURE;
+    }
+
+    NotificationFacade::route('slack', $channel)
+        ->notify(new PendingWorkSlackReminderNotification());
+
+    NewProductDraftAssignment::query()
+        ->where('work_status', 'open')
+        ->update(['last_slack_notified_at' => now()]);
+
+    ShopifyAudit::query()
+        ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+        ->where('status', ShopifyAudit::STATUS_FLAGGED)
+        ->update(['last_notified_at' => now()]);
+
+    $this->info("Slack pending-work reminder sent to {$channel}.");
+
+    return self::SUCCESS;
+})->purpose('Send the Slack report for open assignments, audit issues, and errors.');
+
+Artisan::command('slack:assignment-complete {assignment_id}', function (string $assignment_id): int {
+    $assignment = NewProductDraftAssignment::query()->find((int) $assignment_id);
+
+    if (!$assignment instanceof NewProductDraftAssignment) {
+        $this->error("Assignment #{$assignment_id} was not found.");
+
+        return self::FAILURE;
+    }
+
+    app(\App\Services\NewProductDraftAssignmentService::class)->markCompleted($assignment);
+
+    $this->info("Assignment #{$assignment->id} marked completed.");
+
+    return self::SUCCESS;
+})->purpose('Mark a Slack assignment completed so reminders stop including it.');
+
+foreach (config('services.slack.reminder_times', []) as $time) {
+    Schedule::command('slack:pending-work-reminder')
+        ->dailyAt($time)
+        ->timezone(config('services.slack.reminder_timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->name('slack-pending-work-reminder-' . str_replace(':', '', (string) $time));
+}
 
 Schedule::job(new ReconcileProductImageBackupsJob())
     ->dailyAt('02:00')

@@ -38,6 +38,13 @@ class UserResource extends Resource
                     ->email()
                     ->required()
                     ->maxLength(255),
+                Forms\Components\TextInput::make('slack_user_id')
+                    ->label('Slack Member ID')
+                    ->helperText('Example: U012AB3CD. In Slack, open the user profile menu and choose Copy member ID.')
+                    ->maxLength(32),
+                Forms\Components\Toggle::make('slack_notifications_enabled')
+                    ->label('Slack Notifications')
+                    ->default(true),
                 Forms\Components\Select::make('roles')
                     ->label('Role')
                     ->relationship(
@@ -93,6 +100,10 @@ class UserResource extends Resource
                     ->searchable(),
                 Tables\Columns\TextColumn::make('email')
                     ->searchable(),
+                Tables\Columns\TextColumn::make('slack_user_id')
+                    ->label('Slack ID')
+                    ->searchable()
+                    ->toggleable(),
                 Tables\Columns\TextColumn::make('roles.name')
                     ->label('Role')
                     ->badge()
