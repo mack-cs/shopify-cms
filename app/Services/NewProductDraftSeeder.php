@@ -290,6 +290,24 @@ final class NewProductDraftSeeder
         }
         $data['complementary_products'] = $this->complementaryValueFromMetafieldOrRow($product, $row);
 
+        $variant = $product->variants()
+            ->orderBy('id')
+            ->first();
+
+        $sku = trim((string) ($variant?->sku ?? ''));
+        if ($sku !== '') {
+            $data['sku'] = $sku;
+        }
+        if ($variant?->price !== null) {
+            $data['variant_price'] = $variant->price;
+        }
+        if ($variant?->compare_at_price !== null) {
+            $data['variant_compare_at_price'] = $variant->compare_at_price;
+        }
+        $data['variant_inventory_qty'] = $variant?->inventory_tracked === false
+            ? null
+            : ($variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null);
+
         return $data;
     }
 
@@ -501,8 +519,42 @@ final class NewProductDraftSeeder
             'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
             'product_category' => strtolower($this->normalizeCategoryDisplayValue($string)),
             'sibling_collection' => strtolower($this->normalizeSiblingCollectionDisplayValue($string)),
+            'variant_price',
+            'variant_compare_at_price',
+            'material_cost' => $this->normalizeDecimalComparableValue($string, 2),
+            'variant_inventory_qty' => $this->normalizeIntegerComparableValue($string),
             default => $string,
         };
+    }
+
+    private function normalizeDecimalComparableValue(string $value, int $precision): string
+    {
+        $normalized = str_replace(' ', '', trim($value));
+        if ($normalized === '') {
+            return '';
+        }
+
+        if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
+            $normalized = str_replace(',', '.', $normalized);
+        } else {
+            $normalized = str_replace(',', '', $normalized);
+        }
+
+        return is_numeric($normalized)
+            ? number_format((float) $normalized, $precision, '.', '')
+            : trim($value);
+    }
+
+    private function normalizeIntegerComparableValue(string $value): string
+    {
+        $normalized = trim($value);
+        if ($normalized === '') {
+            return '';
+        }
+
+        return is_numeric($normalized)
+            ? (string) (int) $normalized
+            : $normalized;
     }
 
     private function stringifyDisplayValue(string $field, mixed $value): string

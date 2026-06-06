@@ -18,6 +18,7 @@ use App\Models\ShopifyAudit;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
+use App\Models\Variant;
 use Filament\Tables\Table;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
@@ -508,38 +509,22 @@ class ProductResource extends Resource
                                     ) && ($record?->styleProfiles()->exists() ?? false);
                                     return $locked ? 'Edit SEO in Styles when a style is linked.' : null;
                                 }),
-                            Grid::make(7)->schema([
+                            Grid::make(4)->schema([
                                 Placeholder::make('seo_updated_at_display')
                                     ->label('Last SEO update')
                                     ->content(fn (?Product $record): string => $record?->seo_updated_at?->format('Y-m-d H:i') ?? 'Not tracked yet'),
                                 Placeholder::make('seo_updated_by_display')
                                     ->label('SEO updated by')
                                     ->content(fn (?Product $record): string => $record?->seoUpdatedBy?->name ?? 'System / not tracked'),
-                                Toggle::make('seo_deindex')
-                                    ->label('SEO: Deindex products')
-                                    ->helperText('Exported as true/false.')
-                                    ->afterStateHydrated(function (Toggle $component, ?Product $record): void {
-                                        if (!$record) {
-                                            return;
-                                        }
-                                        $raw = self::shopifyRowValue($record, HeaderStore::SEO_DEINDEX);
-                                        $component->state(filter_var($raw, FILTER_VALIDATE_BOOLEAN));
-                                    })
-                                    ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false'),
-                                Placeholder::make('approvals_current')
-                                    ->label('Approvals')
-                                    ->content(fn (?Product $record): string => $record
-                                        ? ($record->approvalsForCurrentVersionCount() . '/2')
-                                        : '0/2'),
+
+
                                 Placeholder::make('latest_approval_at_display')
                                     ->label('Last full approval')
                                     ->content(fn (?Product $record): string => $record?->latestApprovalAt()?->format('Y-m-d H:i:s') ?? 'Not approved yet'),
                                 Placeholder::make('latest_partial_approval_at_display')
                                     ->label('Last partial approval')
                                     ->content(fn (?Product $record): string => $record?->latestPartialApprovalAt()?->format('Y-m-d H:i:s') ?? 'No partial approval yet'),
-                                Toggle::make('is_bundle')
-                                    ->label('Bundle')
-                                    ->helperText('Internal only. Not exported.'),
+
                             ])->columnSpanFull(),
 
                         ])->columnSpan(2)->columns(2),
@@ -849,19 +834,42 @@ class ProductResource extends Resource
                                     ->pluck('name', 'name')
                                     ->all()),
                         ])->columnSpanFull(),
-                        Toggle::make('published')
+
+                        Grid::make(2)->schema([
+                            Toggle::make('published')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                             ->label('Published')
-                            ->helperText('Exported as true/false.')
                             ->afterStateHydrated(function (Toggle $component, $state): void {
                                 $component->state(filter_var($state, FILTER_VALIDATE_BOOLEAN));
                             })
                             ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false'),
-                        TextInput::make('you_save')
+                        Toggle::make('seo_deindex')
+                                    ->label('Deindex')
+                                    ->afterStateHydrated(function (Toggle $component, ?Product $record): void {
+                                        if (!$record) {
+                                            return;
+                                        }
+                                        $raw = self::shopifyRowValue($record, HeaderStore::SEO_DEINDEX);
+                                        $component->state(filter_var($raw, FILTER_VALIDATE_BOOLEAN));
+                                    })
+                                    ->dehydrateStateUsing(fn (bool $state): string => $state ? 'true' : 'false')
+                        ])->columnSpanFull(),
+                        Grid::make(2)->schema([
+                            TextInput::make('you_save')
                             ->label('You Save')
                             ->numeric()
                             ->inputMode('decimal')
-                            ->helperText('Internal only. Not exported.'),
+                            ->helperText('Internal use only.'),
+                             Toggle::make('is_bundle')
+                                    ->label('Bundle')
+                                    ->helperText('Internal use only'),
+                        ])->columnSpanFull(),
+
+                            RichEditor::make('uvp_short_paragraph')
+                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
+                                ->label('UVP Short Paragraph')
+                                ->toolbarButtons(self::compactRichTextToolbarButtons())
+                                ->columnSpanFull(),
                             TextInput::make('batch')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->label('Batch')
@@ -872,13 +880,14 @@ class ProductResource extends Resource
                                     ->pluck('batch')
                                     ->all())
                                 ->placeholder('import_YYYYMMDDH')
-                                ->helperText('Internal only. Not exported.'),
-                            RichEditor::make('uvp_short_paragraph')
-                                ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
-                                ->label('UVP Short Paragraph')
-                                ->toolbarButtons(self::compactRichTextToolbarButtons())
-                                ->columnSpanFull(),
+                                ->helperText('Internal use only.'),
+                            Placeholder::make('approvals_current')
+                                    ->label('Approvals')
+                                    ->content(fn (?Product $record): string => $record
+                                        ? ($record->approvalsForCurrentVersionCount() . '/2')
+                                        : '0/2'),
                         ])->columnSpan(1),
+
                     ]),
                 ]),
                 Tabs\Tab::make('Extra Fields')->schema([
@@ -1612,6 +1621,24 @@ class ProductResource extends Resource
                             ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
                     });
                 })),
+            TernaryFilter::make('variant_clash')
+                ->label('Variant Clash')
+                ->placeholder('All')
+                ->trueLabel('Has Clash')
+                ->falseLabel('No Clash')
+                ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                    $data,
+                    'Variant Clash',
+                    'No Variant Clash'
+                ))
+                ->queries(
+                    true: fn (Builder $query): Builder => $query->whereHas('variants', fn (Builder $variantQuery) => $variantQuery
+                        ->where('sync_state', Variant::SYNC_STATE_CONFLICT)
+                    ),
+                    false: fn (Builder $query): Builder => $query->whereDoesntHave('variants', fn (Builder $variantQuery) => $variantQuery
+                        ->where('sync_state', Variant::SYNC_STATE_CONFLICT)
+                    ),
+                ),
             TernaryFilter::make('has_removed_images_pending_shopify_sync')
             ->label('Removed Images Pending Shopify Sync')
             ->queries(

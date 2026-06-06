@@ -91,6 +91,28 @@ class NewProductDraftResource extends Resource
     protected static ?string $navigationLabel = 'New Products';
     protected static ?int $navigationSort = 1;
     private static ?array $siblingCollectionLookupCache = null;
+    private const DRAFT_VARIANT_CLASH_FIELDS = [
+        'sku' => [
+            'label' => 'SKU',
+            'variant_attribute' => 'sku',
+            'type' => 'string',
+        ],
+        'variant_price' => [
+            'label' => 'Price',
+            'variant_attribute' => 'price',
+            'type' => 'decimal2',
+        ],
+        'variant_compare_at_price' => [
+            'label' => 'Compare-at price',
+            'variant_attribute' => 'compare_at_price',
+            'type' => 'decimal2',
+        ],
+        'variant_inventory_qty' => [
+            'label' => 'Inventory',
+            'variant_attribute' => 'inventory_qty',
+            'type' => 'integer',
+        ],
+    ];
 
     public static function getEloquentQuery(): Builder
     {
@@ -927,11 +949,17 @@ class NewProductDraftResource extends Resource
                             ])->columns(2),
                         Section::make('Variant Defaults')
                             ->schema([
+                                Placeholder::make('variant_clash_notice')
+                                    ->label('')
+                                    ->content(fn (?NewProductDraft $record): ?HtmlString => self::draftVariantClashHtml($record))
+                                    ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
+                                    ->columnSpanFull(),
                                 Forms\Components\Grid::make(3)
                                     ->schema([
                                         TextInput::make('variant_price')
                                             ->label('Price')
                                             ->numeric()
+                                            ->disabled(fn (?NewProductDraft $record): bool => self::draftAttributeHasShopifyConflict($record, 'variant_price'))
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -944,6 +972,7 @@ class NewProductDraftResource extends Resource
                                         TextInput::make('variant_compare_at_price')
                                             ->label('Compare-at price')
                                             ->numeric()
+                                            ->disabled(fn (?NewProductDraft $record): bool => self::draftAttributeHasShopifyConflict($record, 'variant_compare_at_price'))
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -2400,8 +2429,9 @@ class NewProductDraftResource extends Resource
         return $table
             ->defaultSort('created_at', 'desc')
             ->modifyQueryUsing(fn ($query) => $query->with([
-                'product:id,handle,has_errors,error_fields',
+                'product:id,handle,shopify_id,has_errors,error_fields',
                 'product.images:id,product_id,src,position',
+                'product.variants:id,product_id,sku,price,compare_at_price,inventory_tracked,inventory_qty,sync_state',
             ]))
             ->columns([
                 ImageColumn::make('thumbnail')
@@ -2471,6 +2501,13 @@ class NewProductDraftResource extends Resource
                     ->badge()
                     ->color(fn (int $state): string => $state > 0 ? 'warning' : 'gray')
                     ->sortable(query: fn (Builder $query, string $direction): Builder => self::sortDraftsByWarningCount($query, $direction))
+                    ->toggleable(),
+                TextColumn::make('variant_clash_count')
+                    ->label('Variant Clash')
+                    ->state(fn (NewProductDraft $record): int => count(self::draftVariantClashes($record)))
+                    ->badge()
+                    ->color(fn (int $state): string => $state > 0 ? 'warning' : 'gray')
+                    ->tooltip(fn (NewProductDraft $record): string => self::draftVariantClashSummary($record))
                     ->toggleable(),
                 IconColumn::make('approved')
                     ->label('Approved')
@@ -3859,6 +3896,21 @@ class NewProductDraftResource extends Resource
                                 ->orWhereDoesntHave('product');
                         }),
                     ),
+                TernaryFilter::make('variant_clash')
+                    ->label('Variant Clash')
+                    ->placeholder('All')
+                    ->trueLabel('Has Clash')
+                    ->falseLabel('No Clash')
+                    ->indicateUsing(fn (array $data): array => self::ternaryValueIndicators(
+                        $data,
+                        'Variant Clash',
+                        'No Variant Clash'
+                    ))
+                    ->queries(
+                        true: fn (Builder $query): Builder => self::applyDraftVariantClashFilter($query, true),
+                        false: fn (Builder $query): Builder => self::applyDraftVariantClashFilter($query, false),
+                        blank: fn (Builder $query): Builder => $query,
+                    ),
             ]);
     }
 
@@ -4151,9 +4203,245 @@ class NewProductDraftResource extends Resource
         };
     }
 
+    private static function applyDraftVariantClashFilter(Builder $query, bool $hasClash): Builder
+    {
+        $ids = self::draftIdsWithVariantClash();
+
+        if ($hasClash) {
+            return $ids === []
+                ? $query->whereRaw('1 = 0')
+                : $query->whereKey($ids);
+        }
+
+        return $ids === []
+            ? $query
+            : $query->whereNotIn($query->getModel()->getQualifiedKeyName(), $ids);
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private static function draftIdsWithVariantClash(): array
+    {
+        $ids = [];
+        $columns = [
+            'id',
+            'handle',
+            'shopify_id',
+            'sku',
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+        ];
+
+        if (NewProductDraft::supportsShopifySyncWarningsColumn()) {
+            $columns[] = 'shopify_sync_warnings';
+        }
+
+        NewProductDraft::query()
+            ->select($columns)
+            ->with([
+                'product:id,handle,shopify_id',
+                'product.variants:id,product_id,sku,price,compare_at_price,inventory_tracked,inventory_qty,sync_state',
+            ])
+            ->chunkById(200, function ($drafts) use (&$ids): void {
+                foreach ($drafts as $draft) {
+                    if ($draft instanceof NewProductDraft && self::draftHasVariantClash($draft)) {
+                        $ids[] = (int) $draft->id;
+                    }
+                }
+            });
+
+        return array_values(array_unique($ids));
+    }
+
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
     {
         return (bool) ($record->product?->has_errors ?? false);
+    }
+
+    private static function draftHasVariantClash(?NewProductDraft $record): bool
+    {
+        return $record instanceof NewProductDraft && self::draftVariantClashes($record) !== [];
+    }
+
+    /**
+     * @return array<int, array{field:string,label:string,draft_value:string,existing_value:string,existing_label:string}>
+     */
+    private static function draftVariantClashes(NewProductDraft $record): array
+    {
+        $clashes = [];
+        $seen = [];
+
+        foreach ($record->shopifySyncWarnings() as $warning) {
+            $field = trim((string) ($warning['field'] ?? ''));
+            if (!isset(self::DRAFT_VARIANT_CLASH_FIELDS[$field])) {
+                continue;
+            }
+
+            $seen[$field] = true;
+            $definition = self::DRAFT_VARIANT_CLASH_FIELDS[$field];
+            $clashes[] = [
+                'field' => $field,
+                'label' => (string) ($warning['label'] ?? $definition['label']),
+                'draft_value' => self::formatShopifyWarningDisplayValue($field, (string) ($warning['draft_value'] ?? '')),
+                'existing_value' => self::formatShopifyWarningDisplayValue($field, (string) ($warning['shopify_value'] ?? '')),
+                'existing_label' => 'Shopify import',
+            ];
+        }
+
+        $variant = self::linkedVariantForDraft($record);
+        if (!$variant instanceof Variant) {
+            return $clashes;
+        }
+
+        foreach (self::DRAFT_VARIANT_CLASH_FIELDS as $field => $definition) {
+            if (isset($seen[$field])) {
+                continue;
+            }
+
+            $draftValue = $record->getAttribute($field);
+            if (self::isBlankDraftVariantValue($draftValue)) {
+                continue;
+            }
+
+            $variantAttribute = (string) $definition['variant_attribute'];
+            $variantValue = $variantAttribute === 'inventory_qty' && $variant->inventory_tracked === false
+                ? null
+                : $variant->getAttribute($variantAttribute);
+            $type = (string) $definition['type'];
+
+            if (self::normalizeDraftVariantComparableValue($type, $draftValue) === self::normalizeDraftVariantComparableValue($type, $variantValue)) {
+                continue;
+            }
+
+            $clashes[] = [
+                'field' => $field,
+                'label' => (string) $definition['label'],
+                'draft_value' => self::formatDraftVariantClashValue($type, $draftValue),
+                'existing_value' => self::formatDraftVariantClashValue($type, $variantValue),
+                'existing_label' => 'Existing variant',
+            ];
+        }
+
+        if ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+            $clashes[] = [
+                'field' => 'variant_sync_state',
+                'label' => 'Variant sync state',
+                'draft_value' => 'Draft is linked to this variant',
+                'existing_value' => 'Conflict in Products > Variants',
+                'existing_label' => 'Existing variant',
+            ];
+        }
+
+        return $clashes;
+    }
+
+    private static function draftVariantClashHtml(?NewProductDraft $record): ?HtmlString
+    {
+        if (!$record instanceof NewProductDraft) {
+            return null;
+        }
+
+        $clashes = self::draftVariantClashes($record);
+        if ($clashes === []) {
+            return null;
+        }
+
+        $items = array_map(function (array $clash): string {
+            $label = e($clash['label']);
+            $draftValue = e($clash['draft_value']);
+            $existingValue = e($clash['existing_value']);
+            $existingLabel = e($clash['existing_label']);
+
+            return "<li><strong>{$label}</strong>: draft has <code>{$draftValue}</code> but <strong>{$existingLabel}</strong> has <code>{$existingValue}</code>.</li>";
+        }, $clashes);
+
+        return new HtmlString(
+            "<div class='rounded-xl border border-warning-300 bg-warning-50 p-4 text-sm text-warning-900'>"
+            . "<p class='font-semibold mb-2'>Variant defaults clash with the linked product variant.</p>"
+            . "<p class='mb-3'>Review these values before approving or syncing this draft. Use the Shopify sync warning actions above when a field is listed there, or edit the draft/product intentionally when the existing variant value is the source of truth.</p>"
+            . "<ul class='list-disc pl-5 space-y-1'>"
+            . implode('', $items)
+            . '</ul>'
+            . '</div>'
+        );
+    }
+
+    private static function draftVariantClashSummary(NewProductDraft $record): string
+    {
+        $clashes = self::draftVariantClashes($record);
+        if ($clashes === []) {
+            return 'No variant clash detected.';
+        }
+
+        return implode('; ', array_map(
+            fn (array $clash): string => "{$clash['label']}: draft {$clash['draft_value']} / {$clash['existing_label']} {$clash['existing_value']}",
+            $clashes
+        ));
+    }
+
+    private static function linkedVariantForDraft(NewProductDraft $record): ?Variant
+    {
+        $product = self::linkedProductForDraft($record);
+        if (!$product instanceof Product) {
+            return null;
+        }
+
+        if ($product->relationLoaded('variants')) {
+            $variant = $product->variants
+                ->sortBy('id')
+                ->first();
+
+            return $variant instanceof Variant ? $variant : null;
+        }
+
+        return $product->variants()
+            ->orderBy('id')
+            ->first();
+    }
+
+    private static function isBlankDraftVariantValue(mixed $value): bool
+    {
+        return $value === null || (is_string($value) && trim($value) === '');
+    }
+
+    private static function normalizeDraftVariantComparableValue(string $type, mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $string = trim((string) $value);
+        if ($string === '') {
+            return null;
+        }
+
+        if ($type === 'integer') {
+            return is_numeric($string) ? (string) (int) $string : $string;
+        }
+
+        if ($type === 'decimal2') {
+            $normalized = str_replace(' ', '', $string);
+            if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
+                $normalized = str_replace(',', '.', $normalized);
+            } else {
+                $normalized = str_replace(',', '', $normalized);
+            }
+
+            return is_numeric($normalized)
+                ? number_format((float) $normalized, 2, '.', '')
+                : $string;
+        }
+
+        return $string;
+    }
+
+    private static function formatDraftVariantClashValue(string $type, mixed $value): string
+    {
+        $normalized = self::normalizeDraftVariantComparableValue($type, $value);
+
+        return $normalized === null ? 'blank' : $normalized;
     }
 
     private static function draftApprovalStateLabel(NewProductDraft $record): string
@@ -4313,6 +4601,15 @@ class NewProductDraftResource extends Resource
 
     private static function linkedProductForDraft(NewProductDraft $record): ?Product
     {
+        if ($record->relationLoaded('product') && $record->product instanceof Product) {
+            $shopifyId = trim((string) ($record->shopify_id ?? ''));
+            $loadedShopifyId = trim((string) ($record->product->shopify_id ?? ''));
+
+            if ($shopifyId === '' || $loadedShopifyId === $shopifyId) {
+                return $record->product;
+            }
+        }
+
         $product = self::findLinkedProduct(
             is_string($record->shopify_id ?? null) ? $record->shopify_id : null,
             is_string($record->handle ?? null) ? $record->handle : null
@@ -6276,6 +6573,37 @@ class NewProductDraftResource extends Resource
             Indicator::make($label . ': ' . ($options[$value] ?? (string) $value))
                 ->removeField($field),
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, Indicator>
+     */
+    private static function ternaryValueIndicators(array $data, string $trueLabel, ?string $falseLabel = null, string $field = 'value'): array
+    {
+        $value = self::normalizeTernaryFilterValue($data[$field] ?? null);
+        if ($value === null) {
+            return [];
+        }
+
+        $label = $value ? $trueLabel : $falseLabel;
+        if ($label === null) {
+            return [];
+        }
+
+        return [
+            Indicator::make($label)
+                ->removeField($field),
+        ];
+    }
+
+    private static function normalizeTernaryFilterValue(mixed $value): ?bool
+    {
+        return match (strtolower(trim((string) $value))) {
+            '1', 'true' => true,
+            '0', 'false' => false,
+            default => null,
+        };
     }
 
     /**

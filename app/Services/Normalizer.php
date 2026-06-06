@@ -527,7 +527,7 @@ final class Normalizer
                 continue;
             }
 
-            if ($this->normalizeComparableValue($variant->getAttribute($key)) !== $this->normalizeComparableValue($value)) {
+            if ($this->normalizeVariantComparableValue($key, $variant->getAttribute($key)) !== $this->normalizeVariantComparableValue($key, $value)) {
                 return true;
             }
         }
@@ -699,6 +699,39 @@ final class Normalizer
         $s = trim((string)$v);
         if ($s === '') return null;
         return (float)$s;
+    }
+
+    private function normalizeVariantComparableValue(string $field, mixed $value): mixed
+    {
+        return match ($field) {
+            'price', 'compare_at_price' => $this->normalizeDecimalComparableValue($value, 2),
+            'weight' => $this->normalizeDecimalComparableValue($value, 3),
+            default => $this->normalizeComparableValue($value),
+        };
+    }
+
+    private function normalizeDecimalComparableValue(mixed $value, int $precision): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $normalized = str_replace(' ', '', trim((string) $value));
+        if ($normalized === '') {
+            return null;
+        }
+
+        if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
+            $normalized = str_replace(',', '.', $normalized);
+        } else {
+            $normalized = str_replace(',', '', $normalized);
+        }
+
+        if (!is_numeric($normalized)) {
+            return (string) $this->normalizeComparableValue($value);
+        }
+
+        return number_format((float) $normalized, $precision, '.', '');
     }
 
     private function normalizeComparableValue(mixed $value): mixed

@@ -9,6 +9,7 @@ use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\StyleProfile;
 use App\Models\User;
+use App\Models\Variant;
 use App\Services\HeaderStore;
 use App\Services\NewProductDraftSeeder;
 use App\Services\NewProductDraftProductSync;
@@ -174,6 +175,64 @@ it('backfills empty draft fields from shopify sync and records warnings for conf
     expect($seeded->shopifySyncWarnings()[0]['field'])->toBe('vendor');
     expect($seeded->shopifySyncWarnings()[0]['draft_value'])->toBe('Draft Vendor');
     expect($seeded->shopifySyncWarnings()[0]['shopify_value'])->toBe('Shopify Vendor');
+});
+
+it('records warnings for conflicting draft variant defaults when seeding from the linked product', function (): void {
+    $product = createWorkflowTestProduct();
+    createWorkflowTestVariant($product, [
+        'sku' => 'SHOPIFY-SKU',
+        'price' => '200.00',
+        'compare_at_price' => '250.00',
+        'inventory_qty' => 8,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'sku' => 'DRAFT-SKU',
+        'title' => $product->title,
+        'variant_price' => '199.00',
+        'variant_compare_at_price' => '249.00',
+        'variant_inventory_qty' => 5,
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warningFields = collect($seeded->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($warningFields)->toContain('sku');
+    expect($warningFields)->toContain('variant_price');
+    expect($warningFields)->toContain('variant_compare_at_price');
+    expect($warningFields)->toContain('variant_inventory_qty');
+    expect($seeded->variant_price)->toBe('199.00');
+});
+
+it('does not record variant default warnings when only decimal formatting differs', function (): void {
+    $product = createWorkflowTestProduct();
+    createWorkflowTestVariant($product, [
+        'price' => '200.00',
+        'compare_at_price' => '250.00',
+        'inventory_qty' => 8,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'variant_price' => '200',
+        'variant_compare_at_price' => '250.0',
+        'variant_inventory_qty' => '8',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warningFields = collect($seeded->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($warningFields)->not->toContain('variant_price');
+    expect($warningFields)->not->toContain('variant_compare_at_price');
+    expect($warningFields)->not->toContain('variant_inventory_qty');
 });
 
 it('treats non-draft shopify status as authoritative for the draft without a warning', function (): void {
@@ -1038,4 +1097,23 @@ function approveWorkflowTestProduct(Product $product): void
         'user_id' => $secondApprover->id,
         'approval_version' => $product->approval_version,
     ]);
+}
+
+function createWorkflowTestVariant(Product $product, array $overrides = []): Variant
+{
+    return Variant::withoutEvents(fn (): Variant => Variant::create(array_merge([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/1001',
+        'sync_state' => Variant::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'sku' => 'WORKFLOW-SKU',
+        'barcode' => 'WORKFLOW-SKU',
+        'price' => '200.00',
+        'compare_at_price' => '250.00',
+        'inventory_tracked' => true,
+        'inventory_qty' => 8,
+        'weight' => '1.000',
+        'weight_unit' => 'g',
+        'position' => 1,
+    ], $overrides)));
 }

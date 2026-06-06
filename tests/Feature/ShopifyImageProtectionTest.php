@@ -7,6 +7,7 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Models\User;
+use App\Models\Variant;
 use App\Services\HeaderStore;
 use App\Services\Normalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -124,6 +125,97 @@ it('queues targeted backup and clears old asset when a shopify image source chan
     });
 });
 
+it('does not mark locally dirty variants as conflicted when imported money decimals are equivalent', function (): void {
+    $import = createShopifyImport();
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'handle' => 'variant-decimal-formatting',
+        'title' => 'Variant Decimal Formatting',
+        'product_category' => 'Apparel & Accessories > Jewelry > Bracelets',
+        'type' => 'Bracelets',
+    ]));
+
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/5001',
+        'sync_state' => Variant::SYNC_STATE_LOCAL_UPDATED,
+        'local_dirty' => true,
+        'sku' => 'SKU-5001',
+        'barcode' => 'SKU-5001',
+        'price' => '19.90',
+        'compare_at_price' => '29.00',
+        'weight' => '1.500',
+        'weight_unit' => 'g',
+        'inventory_tracked' => true,
+        'inventory_qty' => 5,
+        'position' => 1,
+    ]));
+
+    createPrimaryShopifyRow($import, 'variant-decimal-formatting', 1);
+    createVariantShopifyRow($import, 'variant-decimal-formatting', 2, [
+        HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID => 'gid://shopify/ProductVariant/5001',
+        HeaderStore::VARIANT_SKU => 'SKU-5001',
+        HeaderStore::VARIANT_BARCODE => 'SKU-5001',
+        HeaderStore::VARIANT_PRICE => '19.9',
+        HeaderStore::VARIANT_COMPARE_AT => '29',
+        HeaderStore::VARIANT_GRAMS => '1.5',
+        HeaderStore::VARIANT_WEIGHT_UNIT => 'g',
+        HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED => 'true',
+        HeaderStore::VARIANT_INVENTORY_QTY => '5',
+    ]);
+
+    app(Normalizer::class)->buildNormalizedTables($import);
+
+    $variant->refresh();
+
+    expect($variant->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_UPDATED)
+        ->and($variant->local_dirty)->toBeTrue();
+});
+
+it('still marks locally dirty variants as conflicted when imported money values differ', function (): void {
+    $import = createShopifyImport();
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'handle' => 'variant-real-price-conflict',
+        'title' => 'Variant Real Price Conflict',
+        'product_category' => 'Apparel & Accessories > Jewelry > Bracelets',
+        'type' => 'Bracelets',
+    ]));
+
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/5002',
+        'sync_state' => Variant::SYNC_STATE_LOCAL_UPDATED,
+        'local_dirty' => true,
+        'sku' => 'SKU-5002',
+        'barcode' => 'SKU-5002',
+        'price' => '18.90',
+        'compare_at_price' => '29.00',
+        'weight' => '1.500',
+        'weight_unit' => 'g',
+        'inventory_tracked' => true,
+        'inventory_qty' => 5,
+        'position' => 1,
+    ]));
+
+    createPrimaryShopifyRow($import, 'variant-real-price-conflict', 1);
+    createVariantShopifyRow($import, 'variant-real-price-conflict', 2, [
+        HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID => 'gid://shopify/ProductVariant/5002',
+        HeaderStore::VARIANT_SKU => 'SKU-5002',
+        HeaderStore::VARIANT_BARCODE => 'SKU-5002',
+        HeaderStore::VARIANT_PRICE => '19.90',
+        HeaderStore::VARIANT_COMPARE_AT => '29.00',
+        HeaderStore::VARIANT_GRAMS => '1.500',
+        HeaderStore::VARIANT_WEIGHT_UNIT => 'g',
+        HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED => 'true',
+        HeaderStore::VARIANT_INVENTORY_QTY => '5',
+    ]);
+
+    app(Normalizer::class)->buildNormalizedTables($import);
+
+    expect($variant->fresh()->sync_state)->toBe(Variant::SYNC_STATE_CONFLICT);
+});
+
 function createShopifyImport(): Import
 {
     $user = User::factory()->create();
@@ -158,5 +250,18 @@ function createPrimaryShopifyRow(Import $import, string $handle, int $rowIndex, 
             HeaderStore::PUBLISHED => 'true',
             HeaderStore::PRODUCT_CATEGORY => 'Apparel & Accessories > Jewelry > Bracelets',
         ], $data),
+    ]);
+}
+
+function createVariantShopifyRow(Import $import, string $handle, int $rowIndex, array $data = []): ShopifyRow
+{
+    return ShopifyRow::create([
+        'import_id' => $import->id,
+        'row_index' => $rowIndex,
+        'handle' => $handle,
+        'row_type' => 'variant',
+        'variant_key' => (string) ($data[HeaderStore::VARIANT_SKU] ?? 'variant-key'),
+        'image_key' => null,
+        'data' => $data,
     ]);
 }
