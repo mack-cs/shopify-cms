@@ -39,15 +39,20 @@ class PendingWorkSlackReminderNotification extends Notification
             ->limit(10)
             ->get();
 
-        $auditCount = ShopifyAudit::query()
+        $complementaryTarget = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+
+        $complementaryGapCount = ShopifyAudit::query()
             ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-            ->where('status', ShopifyAudit::STATUS_FLAGGED)
+            ->where('needs_attention', true)
+            ->where('shopify_valid_count', '<', $complementaryTarget)
             ->count();
 
-        $audits = ShopifyAudit::query()
+        $complementaryGaps = ShopifyAudit::query()
             ->with('product')
             ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-            ->where('status', ShopifyAudit::STATUS_FLAGGED)
+            ->where('needs_attention', true)
+            ->where('shopify_valid_count', '<', $complementaryTarget)
+            ->orderBy('shopify_valid_count')
             ->orderByDesc('last_checked_at')
             ->limit(10)
             ->get();
@@ -73,17 +78,8 @@ class PendingWorkSlackReminderNotification extends Notification
             ->filter()
             ->implode("\n");
 
-        $auditLines = $audits
-            ->map(function (ShopifyAudit $audit) use ($resolver): string {
-                $product = $audit->product;
-                $title = $resolver->escape($product?->title ?: 'Product #' . $audit->product_id);
-                $handle = $resolver->escape($product?->handle ?: 'no-handle');
-                $local = (int) ($audit->local_valid_count ?? 0);
-                $shopify = (int) ($audit->shopify_valid_count ?? 0);
-                $target = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
-
-                return "- {$title} ({$handle}) local {$local}/{$target}, Shopify {$shopify}/{$target}";
-            })
+        $complementaryGapLines = $complementaryGaps
+            ->map(fn (ShopifyAudit $audit): string => $this->complementaryGapLine($audit, $resolver))
             ->filter()
             ->implode("\n");
 
@@ -108,7 +104,7 @@ class PendingWorkSlackReminderNotification extends Notification
                     ],
                     [
                         'type' => 'mrkdwn',
-                        'text' => "*Audit flags:*\n{$auditCount}",
+                        'text' => "*Complementary gaps:*\n{$complementaryGapCount}",
                     ],
                     [
                         'type' => 'mrkdwn',
@@ -136,14 +132,29 @@ class PendingWorkSlackReminderNotification extends Notification
             ];
         }
 
-        if ($auditLines !== '') {
+        if ($complementaryGapLines !== '') {
             $blocks[] = [
                 'type' => 'section',
                 'text' => [
                     'type' => 'mrkdwn',
-                    'text' => "*Complementary-product audit flags:*\n" . Str::limit($auditLines, 2800),
+                    'text' => "*Products below Shopify complementary target ({$complementaryTarget} active/sellable):*\n"
+                        . Str::limit($complementaryGapLines, 2800),
                 ],
             ];
+
+            if ($complementaryGapCount > $complementaryGaps->count()) {
+                $remaining = $complementaryGapCount - $complementaryGaps->count();
+
+                $blocks[] = [
+                    'type' => 'context',
+                    'elements' => [
+                        [
+                            'type' => 'mrkdwn',
+                            'text' => "Showing the first {$complementaryGaps->count()} complementary gap(s); open audits for {$remaining} more.",
+                        ],
+                    ],
+                ];
+            }
         }
 
         $blocks[] = [
@@ -188,6 +199,88 @@ class PendingWorkSlackReminderNotification extends Notification
         $age = $assignment->created_at?->diffForHumans() ?? 'unknown age';
 
         return "- #{$assignment->id} {$mentions} {$subject} ({$age})";
+    }
+
+    private function complementaryGapLine(ShopifyAudit $audit, SlackUserResolver $resolver): string
+    {
+        $product = $audit->product;
+        $title = $resolver->escape($product?->title ?: 'Product #' . $audit->product_id);
+        $handle = $resolver->escape($product?->handle ?: 'no-handle');
+        $productUrl = $product instanceof Product
+            ? $this->absoluteUrl(ProductResource::getUrl('edit', ['record' => $product]))
+            : null;
+        $label = $productUrl ? "<{$productUrl}|{$title}>" : $title;
+
+        $target = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+        $localTarget = ComplementaryProductAuditService::LOCAL_TARGET_COUNT;
+        $shopifyValid = (int) ($audit->shopify_valid_count ?? 0);
+        $shopifyCurrent = (int) ($audit->shopify_current_count ?? 0);
+        $localValid = (int) ($audit->local_valid_count ?? 0);
+        $missing = max(0, $target - $shopifyValid);
+
+        $parts = [
+            "Shopify {$shopifyValid}/{$target} active/sellable",
+            "local {$localValid}/{$localTarget} eligible backups",
+        ];
+
+        if ($shopifyCurrent !== $shopifyValid) {
+            $parts[] = "{$shopifyCurrent} Shopify ref(s) total";
+        }
+
+        if ($missing > 0) {
+            $parts[] = 'needs ' . $missing . ' more active/sellable Shopify ' . Str::plural('ref', $missing);
+        }
+
+        $issues = $this->complementaryGapIssues($audit, $resolver);
+        if ($issues !== '') {
+            $parts[] = $issues;
+        }
+
+        return "- {$label} ({$handle}) - " . implode('; ', $parts);
+    }
+
+    private function complementaryGapIssues(ShopifyAudit $audit, SlackUserResolver $resolver): string
+    {
+        $details = is_array($audit->details) ? $audit->details : [];
+        $issues = [];
+
+        foreach (array_slice($details['shopify_ineligible'] ?? [], 0, 2) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = $this->complementaryStateLabel($item, $resolver);
+            if ($label !== '') {
+                $issues[] = 'invalid Shopify ref: ' . $label;
+            }
+        }
+
+        if ($issues === []) {
+            return '';
+        }
+
+        return 'issues: ' . implode(', ', $issues);
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     */
+    private function complementaryStateLabel(array $item, SlackUserResolver $resolver): string
+    {
+        $label = trim((string) ($item['title'] ?? ''))
+            ?: trim((string) ($item['handle'] ?? ''))
+            ?: trim((string) ($item['gid'] ?? ''));
+
+        if ($label === '') {
+            return '';
+        }
+
+        $reason = trim((string) ($item['reason'] ?? ''));
+        if ($reason !== '') {
+            $label .= " ({$reason})";
+        }
+
+        return $resolver->escape($label);
     }
 
     private function assignmentMentions(NewProductDraftAssignment $assignment, SlackUserResolver $resolver): string

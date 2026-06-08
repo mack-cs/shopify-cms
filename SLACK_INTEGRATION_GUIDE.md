@@ -13,7 +13,7 @@ The implementation below keeps the existing email pieces available, but moves da
 - Assign selected drafts to application users instead of only typing email addresses.
 - Send an immediate Slack channel message that mentions the assigned person.
 - Send delayed Slack reminders for product partial approval requests, grouped after 30 minutes so multiple pending requests do not spam the channel.
-- Send a configurable three-times-per-day Slack reminder report for open assignments, Shopify audit flags, product/image errors, and failed queue jobs.
+- Send a configurable three-times-per-day Slack reminder report for open assignments, complementary-product Shopify gaps, product/image errors, and failed queue jobs.
 - Optionally send critical Laravel log messages to Slack through the existing `config/logging.php` Slack channel.
 
 ## How The Slack Pieces Fit Together
@@ -1077,7 +1077,7 @@ After Slack is proven in production, you can hide or remove the old email bulk a
 
 ## 14. Add The Three-Times-Per-Day Reminder Notification
 
-What this file does: this notification builds the scheduled Slack digest. It counts and lists open assignments, complementary-product audit flags, product errors, image errors, and failed queue jobs. It also includes buttons back to the relevant Filament pages.
+What this file does: this notification builds the scheduled Slack digest. It counts and lists open assignments, complementary-product Shopify gaps, product errors, image errors, and failed queue jobs. A complementary gap means Shopify has fewer than 3 active and sellable complementary products for an audited product. The message includes buttons back to the relevant Filament pages.
 
 Why it exists separately from the immediate assignment notification: the immediate notification is about one handoff; this reminder is about everything still pending later in the day.
 
@@ -1125,15 +1125,20 @@ class PendingWorkSlackReminderNotification extends Notification
             ->limit(10)
             ->get();
 
-        $auditCount = ShopifyAudit::query()
+        $complementaryTarget = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+
+        $complementaryGapCount = ShopifyAudit::query()
             ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-            ->where('status', ShopifyAudit::STATUS_FLAGGED)
+            ->where('needs_attention', true)
+            ->where('shopify_valid_count', '<', $complementaryTarget)
             ->count();
 
-        $audits = ShopifyAudit::query()
+        $complementaryGaps = ShopifyAudit::query()
             ->with('product')
             ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-            ->where('status', ShopifyAudit::STATUS_FLAGGED)
+            ->where('needs_attention', true)
+            ->where('shopify_valid_count', '<', $complementaryTarget)
+            ->orderBy('shopify_valid_count')
             ->orderByDesc('last_checked_at')
             ->limit(10)
             ->get();
@@ -1159,17 +1164,8 @@ class PendingWorkSlackReminderNotification extends Notification
             ->filter()
             ->implode("\n");
 
-        $auditLines = $audits
-            ->map(function (ShopifyAudit $audit) use ($resolver): string {
-                $product = $audit->product;
-                $title = $resolver->escape($product?->title ?: 'Product #' . $audit->product_id);
-                $handle = $resolver->escape($product?->handle ?: 'no-handle');
-                $local = (int) ($audit->local_valid_count ?? 0);
-                $shopify = (int) ($audit->shopify_valid_count ?? 0);
-                $target = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
-
-                return "- {$title} ({$handle}) local {$local}/{$target}, Shopify {$shopify}/{$target}";
-            })
+        $complementaryGapLines = $complementaryGaps
+            ->map(fn (ShopifyAudit $audit): string => $this->complementaryGapLine($audit, $resolver))
             ->filter()
             ->implode("\n");
 
@@ -1194,7 +1190,7 @@ class PendingWorkSlackReminderNotification extends Notification
                     ],
                     [
                         'type' => 'mrkdwn',
-                        'text' => "*Audit flags:*\n{$auditCount}",
+                        'text' => "*Complementary gaps:*\n{$complementaryGapCount}",
                     ],
                     [
                         'type' => 'mrkdwn',
@@ -1222,14 +1218,29 @@ class PendingWorkSlackReminderNotification extends Notification
             ];
         }
 
-        if ($auditLines !== '') {
+        if ($complementaryGapLines !== '') {
             $blocks[] = [
                 'type' => 'section',
                 'text' => [
                     'type' => 'mrkdwn',
-                    'text' => "*Complementary-product audit flags:*\n" . Str::limit($auditLines, 2800),
+                    'text' => "*Products below Shopify complementary target ({$complementaryTarget} active/sellable):*\n"
+                        . Str::limit($complementaryGapLines, 2800),
                 ],
             ];
+
+            if ($complementaryGapCount > $complementaryGaps->count()) {
+                $remaining = $complementaryGapCount - $complementaryGaps->count();
+
+                $blocks[] = [
+                    'type' => 'context',
+                    'elements' => [
+                        [
+                            'type' => 'mrkdwn',
+                            'text' => "Showing the first {$complementaryGaps->count()} complementary gap(s); open audits for {$remaining} more.",
+                        ],
+                    ],
+                ];
+            }
         }
 
         $blocks[] = [
@@ -1274,6 +1285,39 @@ class PendingWorkSlackReminderNotification extends Notification
         $age = $assignment->created_at?->diffForHumans() ?? 'unknown age';
 
         return "- #{$assignment->id} {$mentions} {$subject} ({$age})";
+    }
+
+    private function complementaryGapLine(ShopifyAudit $audit, SlackUserResolver $resolver): string
+    {
+        $product = $audit->product;
+        $title = $resolver->escape($product?->title ?: 'Product #' . $audit->product_id);
+        $handle = $resolver->escape($product?->handle ?: 'no-handle');
+        $productUrl = $product instanceof Product
+            ? $this->absoluteUrl(ProductResource::getUrl('edit', ['record' => $product]))
+            : null;
+        $label = $productUrl ? "<{$productUrl}|{$title}>" : $title;
+
+        $target = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+        $localTarget = ComplementaryProductAuditService::LOCAL_TARGET_COUNT;
+        $shopifyValid = (int) ($audit->shopify_valid_count ?? 0);
+        $shopifyCurrent = (int) ($audit->shopify_current_count ?? 0);
+        $localValid = (int) ($audit->local_valid_count ?? 0);
+        $missing = max(0, $target - $shopifyValid);
+
+        $parts = [
+            "Shopify {$shopifyValid}/{$target} active/sellable",
+            "local {$localValid}/{$localTarget} eligible backups",
+        ];
+
+        if ($shopifyCurrent !== $shopifyValid) {
+            $parts[] = "{$shopifyCurrent} Shopify ref(s) total";
+        }
+
+        if ($missing > 0) {
+            $parts[] = 'needs ' . $missing . ' more active/sellable Shopify ' . Str::plural('ref', $missing);
+        }
+
+        return "- {$label} ({$handle}) - " . implode('; ', $parts);
     }
 
     private function assignmentMentions(NewProductDraftAssignment $assignment, SlackUserResolver $resolver): string
