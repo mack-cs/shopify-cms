@@ -12,6 +12,7 @@ The implementation below keeps the existing email pieces available, but moves da
 
 - Assign selected drafts to application users instead of only typing email addresses.
 - Send an immediate Slack channel message that mentions the assigned person.
+- Send delayed Slack reminders for product partial approval requests, grouped after 30 minutes so multiple pending requests do not spam the channel.
 - Send a configurable three-times-per-day Slack reminder report for open assignments, Shopify audit flags, product/image errors, and failed queue jobs.
 - Optionally send critical Laravel log messages to Slack through the existing `config/logging.php` Slack channel.
 
@@ -25,6 +26,7 @@ This file is the central place where Laravel stores third-party service config. 
 
 - `services.slack.notifications.bot_user_oauth_token` is the bot token used by Laravel's Slack notification channel.
 - `services.slack.channels.assignments` is where new assignment messages go.
+- `services.slack.channels.partial_approvals` is where delayed partial approval reminders go.
 - `services.slack.channels.audits` is where Shopify audit alerts can go.
 - `services.slack.channels.reminders` is where the three-times-per-day pending-work report goes.
 - `services.slack.lookup_users_by_email` controls whether the app may call Slack's API to find a Slack user by email.
@@ -190,6 +192,8 @@ Add these to `.env`:
 SLACK_BOT_USER_OAUTH_TOKEN=xoxb-your-token-here
 SLACK_BOT_USER_DEFAULT_CHANNEL=C1234567890
 SLACK_ASSIGNMENT_CHANNEL=C1234567890
+SLACK_PARTIAL_APPROVAL_CHANNEL=C1234567890
+SLACK_PARTIAL_APPROVAL_DELAY_MINUTES=30
 SLACK_AUDIT_CHANNEL=C1234567890
 SLACK_REMINDER_CHANNEL=C1234567890
 SLACK_LOOKUP_USERS_BY_EMAIL=false
@@ -203,6 +207,8 @@ Add the same keys with blank values to `.env.example`:
 SLACK_BOT_USER_OAUTH_TOKEN=
 SLACK_BOT_USER_DEFAULT_CHANNEL=
 SLACK_ASSIGNMENT_CHANNEL=
+SLACK_PARTIAL_APPROVAL_CHANNEL=
+SLACK_PARTIAL_APPROVAL_DELAY_MINUTES=30
 SLACK_AUDIT_CHANNEL=
 SLACK_REMINDER_CHANNEL=
 SLACK_LOOKUP_USERS_BY_EMAIL=false
@@ -210,11 +216,11 @@ SLACK_REMINDER_TIMEZONE=Africa/Johannesburg
 SLACK_REMINDER_TIMES=09:00,13:00,16:00
 ```
 
-Set the assignment, audit, and reminder channels to the same Slack channel if you want one shared operational feed. If `SLACK_LOOKUP_USERS_BY_EMAIL=false`, you will enter each user's Slack member ID manually in Filament. This is the safer first rollout because it does not require the `users:read.email` Slack scope.
+Set the assignment, partial approval, audit, and reminder channels to the same Slack channel if you want one shared operational feed. If `SLACK_LOOKUP_USERS_BY_EMAIL=false`, you will enter each user's Slack member ID manually in Filament. This is the safer first rollout because it does not require the `users:read.email` Slack scope.
 
 ## 4. Update `config/services.php`
 
-What this code does: it converts the raw `.env` values into one Laravel config structure. The rest of the app can then ask for `services.slack.channels.assignments`, `services.slack.channels.audits`, or `services.slack.channels.reminders` instead of reading environment variables directly.
+What this code does: it converts the raw `.env` values into one Laravel config structure. The rest of the app can then ask for `services.slack.channels.assignments`, `services.slack.channels.partial_approvals`, `services.slack.channels.audits`, or `services.slack.channels.reminders` instead of reading environment variables directly.
 
 Replace the existing `slack` block in `config/services.php` with this:
 
@@ -227,12 +233,14 @@ Replace the existing `slack` block in `config/services.php` with this:
 
     'channels' => [
         'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+        'partial_approvals' => env('SLACK_PARTIAL_APPROVAL_CHANNEL') ?: env('SLACK_ASSIGNMENT_CHANNEL') ?: env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
         'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
     ],
 
-    'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
-    'reminder_timezone' => env('SLACK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
+        'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
+        'partial_approval_delay_minutes' => (int) env('SLACK_PARTIAL_APPROVAL_DELAY_MINUTES', 30),
+        'reminder_timezone' => env('SLACK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
     'reminder_times' => array_values(array_filter(array_map(
         'trim',
         explode(',', env('SLACK_REMINDER_TIMES', '09:00,13:00,16:00'))
@@ -1452,7 +1460,295 @@ if ($alerts !== []) {
 }
 ```
 
-## 17. Keep The Queue And Scheduler Running
+## 17. Add Delayed Slack Reminders For Partial Approvals
+
+What this feature does: when someone requests partial approval for products, the request records are still created by the existing partial approval flow. The only delivery change is that the old immediate email job is removed and replaced with one delayed Slack job. After 30 minutes, that job looks for all still-pending partial approval requests for the same target approver and sends one grouped Slack message that mentions the approver.
+
+Why the 30-minute delay matters: if a requester creates several partial approval requests close together, Slack receives one useful reminder instead of many separate pings. If the approver handles the request before the 30 minutes pass, the job finds no pending work and sends nothing.
+
+Why this uses the existing assignment Slack pieces: `SlackUserResolver` already knows how to turn application users into Slack mentions, so partial approvals reuse that same user-to-Slack mapping instead of inventing a second mapping system.
+
+### Update `app/Services/ProductPartialApprovalService.php`
+
+What this code does: it keeps the existing request creation logic and only changes what happens after requests are created. Instead of queueing the old email job immediately, it queues a Slack reminder job with a 30-minute delay.
+
+Replace the old email job import:
+
+```php
+use App\Jobs\SendProductPartialApprovalRequestEmailJob;
+```
+
+with:
+
+```php
+use App\Jobs\SendProductPartialApprovalSlackReminderJob;
+```
+
+Then replace this old dispatch block:
+
+```php
+if ($summary['requested'] > 0 && $summary['request_batch_id']) {
+    SendProductPartialApprovalRequestEmailJob::dispatch($summary['request_batch_id']);
+}
+```
+
+with:
+
+```php
+if ($summary['requested'] > 0 && $summary['request_batch_id']) {
+    $delayMinutes = max(1, (int) config('services.slack.partial_approval_delay_minutes', 30));
+
+    SendProductPartialApprovalSlackReminderJob::dispatch($targetApproverId)
+        ->delay(now()->addMinutes($delayMinutes));
+}
+```
+
+### Create `app/Jobs/SendProductPartialApprovalSlackReminderJob.php`
+
+What this file does: this queued job waits for Laravel's queue delay, then re-checks the database. It sends Slack only for requests that are still pending and still match the same target approver. It is unique per approver, so repeated requests for the same person within the delay window group into one reminder.
+
+```php
+<?php
+
+namespace App\Jobs;
+
+use App\Notifications\ProductPartialApprovalSlackReminderNotification;
+use App\Services\ProductPartialApprovalService;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Notification;
+use RuntimeException;
+
+class SendProductPartialApprovalSlackReminderJob implements ShouldQueue, ShouldBeUnique
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $timeout = 120;
+    public int $tries = 3;
+    public int $uniqueFor = 2400;
+
+    public function __construct(
+        private readonly ?int $targetApproverId,
+    ) {
+    }
+
+    public function uniqueId(): string
+    {
+        return 'partial-approval-slack-reminder:' . ($this->targetApproverId ?: 'any');
+    }
+
+    public function handle(ProductPartialApprovalService $service): void
+    {
+        $query = $service->visiblePendingRequestsQuery();
+
+        if ($this->targetApproverId !== null && $this->targetApproverId > 0) {
+            $query
+                ->where('target_approver_id', $this->targetApproverId)
+                ->where('requested_by', '!=', $this->targetApproverId);
+        } else {
+            $query->whereNull('target_approver_id');
+        }
+
+        $requestIds = $query
+            ->orderBy('created_at')
+            ->limit(25)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        if ($requestIds === []) {
+            return;
+        }
+
+        $channel = trim((string) config('services.slack.channels.partial_approvals'));
+
+        if ($channel === '') {
+            throw new RuntimeException('Slack partial approval channel is not configured.');
+        }
+
+        Notification::route('slack', $channel)
+            ->notify(new ProductPartialApprovalSlackReminderNotification(
+                $this->targetApproverId,
+                $requestIds,
+            ));
+    }
+}
+```
+
+### Create `app/Notifications/ProductPartialApprovalSlackReminderNotification.php`
+
+What this file does: this notification builds the Slack message. It mentions the target approver when the request was assigned to a specific person, lists the pending products and requested fields, and includes a button back to the partial approval queue.
+
+```php
+<?php
+
+namespace App\Notifications;
+
+use App\Filament\Resources\ProductPartialApprovalRequestResource;
+use App\Filament\Resources\ProductResource;
+use App\Models\ProductPartialApprovalRequest;
+use App\Models\User;
+use App\Services\ProductPartialApprovalService;
+use App\Services\SlackUserResolver;
+use Illuminate\Notifications\Notification;
+use Illuminate\Notifications\Slack\SlackMessage;
+use Illuminate\Support\Str;
+
+class ProductPartialApprovalSlackReminderNotification extends Notification
+{
+    /**
+     * @param array<int, int> $requestIds
+     */
+    public function __construct(
+        private readonly ?int $targetApproverId,
+        private readonly array $requestIds,
+    ) {
+    }
+
+    public function via(object $notifiable): array
+    {
+        return ['slack'];
+    }
+
+    public function toSlack(object $notifiable): SlackMessage
+    {
+        $resolver = app(SlackUserResolver::class);
+        $service = app(ProductPartialApprovalService::class);
+
+        $requests = ProductPartialApprovalRequest::query()
+            ->with(['product', 'requester', 'targetApprover'])
+            ->whereIn('id', $this->requestIds)
+            ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+            ->orderBy('created_at')
+            ->get();
+
+        if ($requests->isEmpty()) {
+            return (new SlackMessage)->text('There are no pending partial approval requests.');
+        }
+
+        $requestCount = $requests->count();
+        $targetApprover = $this->targetApproverId
+            ? User::query()->find($this->targetApproverId)
+            : null;
+
+        $mention = $targetApprover instanceof User
+            ? ($resolver->mentionForUser($targetApprover) ?? $resolver->escape($targetApprover->name ?: $targetApprover->email))
+            : 'Any eligible reviewer';
+
+        $queueUrl = $this->absoluteUrl(ProductPartialApprovalRequestResource::getUrl('index'));
+
+        $requestLines = $requests
+            ->take(12)
+            ->map(function (ProductPartialApprovalRequest $request) use ($resolver, $service): string {
+                $product = $request->product;
+                $title = $resolver->escape($product?->title ?: 'Product #' . $request->product_id);
+                $handle = $resolver->escape($product?->handle ?: 'no-handle');
+                $fields = $resolver->escape(implode(', ', $service->requestFieldLabels(
+                    is_array($request->scopes) ? $request->scopes : [],
+                    is_array($request->core_fields) ? $request->core_fields : [],
+                )) ?: 'Selected fields');
+                $requester = $resolver->escape($request->requester?->name ?: 'Unknown requester');
+                $productUrl = $product ? $this->absoluteUrl(ProductResource::getUrl('edit', ['record' => $product])) : null;
+                $label = $productUrl ? "<{$productUrl}|{$title}>" : $title;
+
+                return "- {$label} ({$handle}) - {$fields} - requested by {$requester}";
+            })
+            ->implode("\n");
+
+        if ($requests->count() > 12) {
+            $remaining = $requestCount - 12;
+            $requestLines .= "\n- plus {$remaining} more";
+        }
+
+        $blocks = [
+            [
+                'type' => 'header',
+                'text' => [
+                    'type' => 'plain_text',
+                    'text' => 'Partial approvals waiting',
+                ],
+            ],
+            [
+                'type' => 'section',
+                'text' => [
+                    'type' => 'mrkdwn',
+                    'text' => "{$mention}, there " . ($requestCount === 1 ? 'is' : 'are') . " *{$requestCount}* partial approval " . Str::plural('request', $requestCount) . ' waiting for review.',
+                ],
+            ],
+            [
+                'type' => 'section',
+                'text' => [
+                    'type' => 'mrkdwn',
+                    'text' => Str::limit($requestLines, 2800),
+                ],
+            ],
+            [
+                'type' => 'actions',
+                'elements' => [
+                    [
+                        'type' => 'button',
+                        'text' => [
+                            'type' => 'plain_text',
+                            'text' => 'Open Partial Approval Queue',
+                        ],
+                        'url' => $queueUrl,
+                    ],
+                ],
+            ],
+        ];
+
+        return (new SlackMessage)
+            ->text('Partial approvals waiting for review')
+            ->usingBlockKitTemplate(json_encode(['blocks' => $blocks], JSON_UNESCAPED_SLASHES) ?: '{"blocks":[]}');
+    }
+
+    private function absoluteUrl(string $url): string
+    {
+        return str_starts_with($url, 'http') ? $url : url($url);
+    }
+}
+```
+
+### Remove The Old Partial Approval Email Queue
+
+What this cleanup does: it prevents future developers from accidentally reusing the old email-based partial approval notification. Assignment emails can still exist separately; this cleanup is only for partial approval requests.
+
+Delete these files:
+
+```text
+app/Jobs/SendProductPartialApprovalRequestEmailJob.php
+app/Mail/ProductPartialApprovalRequestMail.php
+resources/views/emails/product-partial-approval-request.blade.php
+```
+
+Also remove the old `approvalRequestRecipientEmails()` and `userCanReceiveApprovalEmail()` methods from `ProductPartialApprovalService.php` because they only supported that deleted email job.
+
+### Test The Partial Approval Slack Reminder
+
+Make sure these values are set:
+
+```dotenv
+SLACK_BOT_USER_OAUTH_TOKEN=xoxb-your-token-here
+SLACK_PARTIAL_APPROVAL_CHANNEL=C1234567890
+SLACK_PARTIAL_APPROVAL_DELAY_MINUTES=3
+```
+
+Then clear config and run a queue worker:
+
+```bash
+php artisan config:clear
+php artisan queue:work --tries=3 --timeout=120
+```
+
+In Filament, request partial approval and choose a specific target approver. That user must have `slack_user_id` filled in and `slack_notifications_enabled=true` on their user record. With `SLACK_PARTIAL_APPROVAL_DELAY_MINUTES=3`, the request will be queued for Slack after about 3 minutes.
+
+After the smoke test, set `SLACK_PARTIAL_APPROVAL_DELAY_MINUTES=30`, clear config, and restart the queue worker.
+
+## 18. Keep The Queue And Scheduler Running
 
 This project already uses `QUEUE_CONNECTION=database`, and `composer dev` starts a queue listener. For local development, run:
 
@@ -1481,7 +1777,7 @@ Also add the Laravel scheduler cron on the server:
 * * * * * cd /path-to/shopify-editor && php artisan schedule:run >> /dev/null 2>&1
 ```
 
-## 18. Test End To End
+## 19. Test End To End
 
 Clear config and make sure the new migration is applied:
 
@@ -1521,7 +1817,15 @@ php artisan slack:assignment-complete 123
 
 Replace `123` with the real assignment ID from the Slack message.
 
-## 19. Optional: Send Critical Laravel Logs To Slack
+Test the delayed partial approval reminder:
+
+1. Make sure the target approver has a Slack member ID on their user record.
+2. Request partial approval from Filament and assign it to that target approver.
+3. Keep `php artisan queue:work` running.
+4. Wait 30 minutes, or temporarily change the delay to one minute for a local smoke test.
+5. Confirm Slack receives one grouped message that mentions the approver and links to the partial approval queue.
+
+## 20. Optional: Send Critical Laravel Logs To Slack
 
 This is separate from the bot-token notifications above. Laravel's log Slack channel uses an incoming webhook URL.
 
@@ -1552,7 +1856,7 @@ Then change the `slack` channel in `config/logging.php` so it uses `LOG_SLACK_LE
 
 Do not set `LOG_SLACK_LEVEL=debug` in production, or the channel can become noisy.
 
-## 20. Rollout Checklist
+## 21. Rollout Checklist
 
 - Install `laravel/slack-notification-channel`.
 - Configure the Slack app, bot token, and channel IDs.
@@ -1561,10 +1865,11 @@ Do not set `LOG_SLACK_LEVEL=debug` in production, or the channel can become nois
 - Replace or add the Slack assignment bulk action.
 - Run `php artisan slack:pending-work-reminder` manually.
 - Create one test assignment and verify the person is pinged.
+- Create one targeted partial approval request and verify Slack pings the approver after the delay.
 - Keep `queue:work` and `schedule:run` running in production.
 - After a few days, remove or hide the old email action if Slack fully replaces it.
 
-## 21. References Checked
+## 22. References Checked
 
 - Laravel 12 Slack notifications: <https://laravel.com/docs/12.x/notifications#slack-notifications>
 - Laravel 12 notification routing: <https://laravel.com/docs/12.x/notifications#routing-slack-notifications>

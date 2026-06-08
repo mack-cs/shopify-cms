@@ -3,7 +3,7 @@
 namespace App\Services;
 
 use App\Enums\RolesEnum;
-use App\Jobs\SendProductPartialApprovalRequestEmailJob;
+use App\Jobs\SendProductPartialApprovalSlackReminderJob;
 use App\Models\ChangeLog;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
@@ -242,7 +242,10 @@ class ProductPartialApprovalService
         }
 
         if ($summary['requested'] > 0 && $summary['request_batch_id']) {
-            SendProductPartialApprovalRequestEmailJob::dispatch($summary['request_batch_id']);
+            $delayMinutes = max(1, (int) config('services.slack.partial_approval_delay_minutes', 30));
+
+            SendProductPartialApprovalSlackReminderJob::dispatch($targetApproverId)
+                ->delay(now()->addMinutes($delayMinutes));
         }
 
         return $summary;
@@ -655,24 +658,6 @@ class ProductPartialApprovalService
         return strtoupper(substr(str_replace('-', '', $value), 0, 8));
     }
 
-    /**
-     * @return array<int, string>
-     */
-    public function approvalRequestRecipientEmails(ProductPartialApprovalRequest $request, int $requestedBy): array
-    {
-        if ($request->targetApprover && $this->userCanReceiveApprovalEmail($request->targetApprover, $requestedBy)) {
-            return [$request->targetApprover->email];
-        }
-
-        return $this->eligibleApproversQuery($requestedBy)
-            ->get(['email'])
-            ->map(fn (User $user): string => trim((string) $user->email))
-            ->filter(fn (string $email): bool => $email !== '')
-            ->unique()
-            ->values()
-            ->all();
-    }
-
     public function partialApprovalQueueUrl(): string
     {
         try {
@@ -872,20 +857,6 @@ class ProductPartialApprovalService
             ->exists()
             ? $targetApproverId
             : null;
-    }
-
-    private function userCanReceiveApprovalEmail(?User $user, int $requestedBy): bool
-    {
-        if (!$user instanceof User) {
-            return false;
-        }
-
-        if ((int) $user->id === $requestedBy) {
-            return false;
-        }
-
-        return (bool) $user->is_active
-            && trim((string) $user->email) !== '';
     }
 
     private function normalizeRequestNote(?string $requestNote): ?string

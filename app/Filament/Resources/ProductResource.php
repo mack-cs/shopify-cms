@@ -2140,6 +2140,7 @@ class ProductResource extends Resource
                             } else {
                                 $parts[] = 'Available to any eligible reviewer.';
                             }
+                            $parts[] = 'Slack reminder will be sent in about 30 minutes if the request is still pending.';
                         }
                         if ($summary['skipped_ineligible'] > 0) {
                             $sample = collect($summary['ineligible_products'] ?? [])

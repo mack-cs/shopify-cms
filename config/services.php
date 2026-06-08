@@ -36,11 +36,13 @@ return [
 
         'channels' => [
             'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'partial_approvals' => env('SLACK_PARTIAL_APPROVAL_CHANNEL') ?: env('SLACK_ASSIGNMENT_CHANNEL') ?: env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
             'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
         ],
 
         'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
+        'partial_approval_delay_minutes' => (int) env('SLACK_PARTIAL_APPROVAL_DELAY_MINUTES', 30),
         'reminder_timezone' => env('SLACK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
         'reminder_times' => array_values(array_filter(array_map(
             'trim',
