@@ -5,10 +5,13 @@ use App\Jobs\ReconcileProductImageBackupsJob;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Models\NewProductDraftAssignment;
 use App\Models\ShopifyAudit;
+use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\ComplementaryProductMaintenanceService;
+use App\Services\SiteAudit\SitemapDiscoveryService;
+use App\Services\SiteAudit\SiteAuditRunnerService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
@@ -87,6 +90,57 @@ Schedule::call(function (): void {
 })
     ->name('daily-complementary-reconciliation')
     ->dailyAt('05:00')
+    ->withoutOverlapping();
+
+Artisan::command(
+    'site-audit:run {--type=scheduled : Audit type: scheduled or manual}',
+    function (): int {
+        $type = (string) $this->option('type');
+        if (! in_array($type, [SiteAuditRun::TYPE_SCHEDULED, SiteAuditRun::TYPE_MANUAL], true)) {
+            $this->error("Invalid --type='{$type}'. Use scheduled or manual.");
+
+            return self::FAILURE;
+        }
+
+        try {
+            $this->info('Syncing sitemap URLs...');
+            $count = app(SitemapDiscoveryService::class)->sync((string) config('site-audit.sitemap_url'));
+            $this->info("Synced {$count} public URL(s).");
+
+            $run = app(SiteAuditRunnerService::class)->run($type);
+            $this->info("Site audit run #{$run->id} queued {$run->total_urls} URL check(s).");
+
+            return self::SUCCESS;
+        } catch (\Throwable $exception) {
+            SiteAuditRun::query()->create([
+                'type' => $type,
+                'status' => SiteAuditRun::STATUS_FAILED,
+                'started_at' => now(),
+                'completed_at' => now(),
+                'error_message' => $exception->getMessage(),
+            ]);
+
+            $this->error('Site audit failed to start: ' . $exception->getMessage());
+
+            return self::FAILURE;
+        }
+    }
+)->purpose('Fetch Shopify sitemap URLs and run the public URL audit.');
+
+Artisan::command('site-audit:finalize', function (): int {
+    $finalized = app(SiteAuditRunnerService::class)->finalizeRunningRuns();
+
+    $this->info("Finalized {$finalized} site audit run(s).");
+
+    return self::SUCCESS;
+})->purpose('Finalize completed site audit runs.');
+
+Schedule::command('site-audit:run --type=scheduled')
+    ->dailyAt('06:00')
+    ->withoutOverlapping();
+
+Schedule::command('site-audit:finalize')
+    ->everyFiveMinutes()
     ->withoutOverlapping();
 
 Artisan::command(

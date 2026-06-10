@@ -1,0 +1,138 @@
+<?php
+
+namespace App\Jobs;
+
+use App\Models\SiteAuditResult;
+use App\Models\SiteAuditRun;
+use App\Models\SiteAuditUrl;
+use App\Services\SiteAudit\SiteAuditRunnerService;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
+use Throwable;
+
+class CheckSiteAuditUrlJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $tries = 2;
+    public int $timeout = 30;
+
+    public function __construct(
+        public int $siteAuditRunId,
+        public int $siteAuditUrlId,
+    ) {
+    }
+
+    public function handle(): void
+    {
+        $run = SiteAuditRun::query()->find($this->siteAuditRunId);
+        $auditUrl = SiteAuditUrl::query()->find($this->siteAuditUrlId);
+
+        if (! $run instanceof SiteAuditRun || ! $auditUrl instanceof SiteAuditUrl) {
+            return;
+        }
+
+        $started = microtime(true);
+
+        try {
+            $response = Http::timeout((int) config('site-audit.check_timeout_seconds', 15))
+                ->connectTimeout((int) config('site-audit.check_connect_timeout_seconds', 10))
+                ->withHeaders([
+                    'User-Agent' => (string) config('site-audit.user_agent'),
+                ])
+                ->get($auditUrl->url);
+
+            $responseTimeMs = $this->elapsedMilliseconds($started);
+            $statusCode = $response->status();
+            $finalUrl = $response->effectiveUri() ? (string) $response->effectiveUri() : $auditUrl->url;
+            $result = $this->classifyResult($statusCode, $auditUrl->url, $finalUrl);
+
+            SiteAuditResult::query()->create([
+                'site_audit_run_id' => $run->id,
+                'site_audit_url_id' => $auditUrl->id,
+                'status_code' => $statusCode,
+                'result' => $result,
+                'final_url' => $finalUrl,
+                'response_time_ms' => $responseTimeMs,
+            ]);
+
+            $auditUrl->update([
+                'last_checked_at' => now(),
+            ]);
+
+            $this->recordProgress($run, $result !== SiteAuditResult::RESULT_OK);
+        } catch (Throwable $exception) {
+            SiteAuditResult::query()->create([
+                'site_audit_run_id' => $run->id,
+                'site_audit_url_id' => $auditUrl->id,
+                'result' => $this->classifyException($exception),
+                'response_time_ms' => $this->elapsedMilliseconds($started),
+                'error_message' => $exception->getMessage(),
+            ]);
+
+            $auditUrl->update([
+                'last_checked_at' => now(),
+            ]);
+
+            $this->recordProgress($run, true);
+        }
+    }
+
+    private function classifyResult(int $statusCode, string $originalUrl, string $finalUrl): string
+    {
+        if ($statusCode >= 200 && $statusCode < 300) {
+            return $originalUrl === $finalUrl
+                ? SiteAuditResult::RESULT_OK
+                : SiteAuditResult::RESULT_REDIRECT;
+        }
+
+        if ($statusCode >= 300 && $statusCode < 400) {
+            return SiteAuditResult::RESULT_REDIRECT;
+        }
+
+        if ($statusCode === 404 || $statusCode === 410) {
+            return SiteAuditResult::RESULT_BROKEN;
+        }
+
+        if ($statusCode >= 500) {
+            return SiteAuditResult::RESULT_SERVER_ERROR;
+        }
+
+        return SiteAuditResult::RESULT_FAILED;
+    }
+
+    private function classifyException(Throwable $exception): string
+    {
+        $message = strtolower($exception->getMessage());
+
+        if (str_contains($message, 'timed out') || str_contains($message, 'timeout')) {
+            return SiteAuditResult::RESULT_TIMEOUT;
+        }
+
+        if (str_contains($message, 'ssl') || str_contains($message, 'certificate')) {
+            return SiteAuditResult::RESULT_SSL_ERROR;
+        }
+
+        return SiteAuditResult::RESULT_FAILED;
+    }
+
+    private function recordProgress(SiteAuditRun $run, bool $failed): void
+    {
+        $run->increment('checked_urls');
+
+        if ($failed) {
+            $run->increment('failed_urls');
+        }
+
+        app(SiteAuditRunnerService::class)->finalizeRun($run);
+    }
+
+    private function elapsedMilliseconds(float $started): int
+    {
+        return max(0, (int) ((microtime(true) - $started) * 1000));
+    }
+}
