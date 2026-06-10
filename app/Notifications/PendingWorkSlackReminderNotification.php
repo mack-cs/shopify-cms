@@ -5,9 +5,12 @@ namespace App\Notifications;
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ShopifyAuditResource;
+use App\Filament\Resources\SiteAuditResultResource;
 use App\Models\Image;
 use App\Models\NewProductDraftAssignment;
 use App\Models\Product;
+use App\Models\SiteAuditResult;
+use App\Models\SiteAuditRun;
 use App\Models\ShopifyAudit;
 use App\Models\User;
 use App\Services\ComplementaryProductAuditService;
@@ -69,6 +72,8 @@ class PendingWorkSlackReminderNotification extends Notification
             })
             ->count();
 
+        $siteAuditSummary = $this->siteAuditSummary($resolver);
+
         $failedJobCount = Schema::hasTable('failed_jobs')
             ? DB::table('failed_jobs')->count()
             : 0;
@@ -116,6 +121,10 @@ class PendingWorkSlackReminderNotification extends Notification
                     ],
                     [
                         'type' => 'mrkdwn',
+                        'text' => "*Site audit:*\n{$siteAuditSummary['field']}",
+                    ],
+                    [
+                        'type' => 'mrkdwn',
                         'text' => "*Failed queue jobs:*\n{$failedJobCount}",
                     ],
                 ],
@@ -157,6 +166,16 @@ class PendingWorkSlackReminderNotification extends Notification
             }
         }
 
+        if ($siteAuditSummary['details'] !== '') {
+            $blocks[] = [
+                'type' => 'section',
+                'text' => [
+                    'type' => 'mrkdwn',
+                    'text' => "*Latest public URL audit:*\n" . Str::limit($siteAuditSummary['details'], 2800),
+                ],
+            ];
+        }
+
         $blocks[] = [
             'type' => 'actions',
             'elements' => [
@@ -183,6 +202,14 @@ class PendingWorkSlackReminderNotification extends Notification
                         'text' => 'Open Products',
                     ],
                     'url' => $productUrl,
+                ],
+                [
+                    'type' => 'button',
+                    'text' => [
+                        'type' => 'plain_text',
+                        'text' => 'Site Audit',
+                    ],
+                    'url' => $this->absoluteUrl(SiteAuditResultResource::getUrl('latest')),
                 ],
             ],
         ];
@@ -237,6 +264,108 @@ class PendingWorkSlackReminderNotification extends Notification
         }
 
         return "- {$label} ({$handle}) - " . implode('; ', $parts);
+    }
+
+    /**
+     * @return array{field: string, details: string}
+     */
+    private function siteAuditSummary(SlackUserResolver $resolver): array
+    {
+        if (
+            ! Schema::hasTable('site_audit_runs') ||
+            ! Schema::hasTable('site_audit_results') ||
+            ! Schema::hasTable('site_audit_urls')
+        ) {
+            return [
+                'field' => 'Not migrated yet',
+                'details' => '',
+            ];
+        }
+
+        $run = SiteAuditRun::query()
+            ->where('status', SiteAuditRun::STATUS_COMPLETED)
+            ->latest('completed_at')
+            ->latest('id')
+            ->first();
+
+        if (! $run instanceof SiteAuditRun) {
+            return [
+                'field' => 'No completed run yet',
+                'details' => '',
+            ];
+        }
+
+        $counts = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->selectRaw('result, COUNT(*) as total')
+            ->groupBy('result')
+            ->pluck('total', 'result')
+            ->map(fn ($total): int => (int) $total);
+
+        $okCount = (int) ($counts[SiteAuditResult::RESULT_OK] ?? 0);
+        $redirectCount = (int) ($counts[SiteAuditResult::RESULT_REDIRECT] ?? 0);
+        $problemCount = collect(SiteAuditResult::ISSUE_RESULTS)
+            ->sum(fn (string $result): int => (int) ($counts[$result] ?? 0));
+        $slowThreshold = (int) config('site-audit.slow_threshold_ms', 3000);
+        $slowCount = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->where('response_time_ms', '>', $slowThreshold)
+            ->count();
+
+        $field = "Run #{$run->id}: {$problemCount} problem " . Str::plural('URL', $problemCount);
+        if ($redirectCount > 0) {
+            $field .= ", {$redirectCount} " . Str::plural('redirect', $redirectCount);
+        }
+        if ($slowCount > 0) {
+            $field .= ", {$slowCount} slow";
+        }
+
+        $completedAt = $run->completed_at?->format('Y-m-d H:i') ?? 'unknown time';
+        $details = [
+            "Run #{$run->id} completed {$completedAt}.",
+            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; slow > {$slowThreshold}ms: {$slowCount}.",
+        ];
+
+        $problemLines = SiteAuditResult::query()
+            ->with('siteAuditUrl')
+            ->where('site_audit_run_id', $run->id)
+            ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->orderBy('result')
+            ->orderByDesc('response_time_ms')
+            ->limit(5)
+            ->get()
+            ->map(fn (SiteAuditResult $result): string => $this->siteAuditProblemLine($result, $resolver))
+            ->filter()
+            ->values();
+
+        if ($problemLines->isNotEmpty()) {
+            $details[] = "Top problem URLs:\n" . $problemLines->implode("\n");
+        }
+
+        if ($problemCount > $problemLines->count()) {
+            $remaining = $problemCount - $problemLines->count();
+            $details[] = "Open Site Audit for {$remaining} more problem " . Str::plural('URL', $remaining) . '.';
+        }
+
+        return [
+            'field' => $field,
+            'details' => implode("\n", $details),
+        ];
+    }
+
+    private function siteAuditProblemLine(SiteAuditResult $result, SlackUserResolver $resolver): string
+    {
+        $url = trim((string) ($result->siteAuditUrl?->url ?? ''));
+        if ($url === '') {
+            return '';
+        }
+
+        $path = (string) parse_url($url, PHP_URL_PATH);
+        $label = $resolver->escape(Str::limit($path !== '' ? $path : $url, 90));
+        $status = $result->status_code ? " HTTP {$result->status_code}" : '';
+        $time = $result->response_time_ms !== null ? " {$result->response_time_ms}ms" : '';
+
+        return "- <{$url}|{$label}> {$result->result}{$status}{$time}";
     }
 
     private function complementaryGapIssues(ShopifyAudit $audit, SlackUserResolver $resolver): string
