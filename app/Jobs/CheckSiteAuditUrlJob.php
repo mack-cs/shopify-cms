@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\SiteAuditResult;
 use App\Models\SiteAuditRun;
 use App\Models\SiteAuditUrl;
+use App\Services\SiteAudit\SiteAuditContextService;
 use App\Services\SiteAudit\SiteAuditRunnerService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -27,7 +28,7 @@ class CheckSiteAuditUrlJob implements ShouldQueue
     ) {
     }
 
-    public function handle(): void
+    public function handle(SiteAuditContextService $contextService): void
     {
         $run = SiteAuditRun::query()->find($this->siteAuditRunId);
         $auditUrl = SiteAuditUrl::query()->find($this->siteAuditUrlId);
@@ -50,6 +51,7 @@ class CheckSiteAuditUrlJob implements ShouldQueue
             $statusCode = $response->status();
             $finalUrl = $response->effectiveUri() ? (string) $response->effectiveUri() : $auditUrl->url;
             $result = $this->classifyResult($statusCode, $auditUrl->url, $finalUrl);
+            $context = $contextService->explain($auditUrl, $result, $statusCode, $finalUrl);
 
             SiteAuditResult::query()->create([
                 'site_audit_run_id' => $run->id,
@@ -58,6 +60,10 @@ class CheckSiteAuditUrlJob implements ShouldQueue
                 'result' => $result,
                 'final_url' => $finalUrl,
                 'response_time_ms' => $responseTimeMs,
+                'speed_classification' => SiteAuditResult::classifySpeed($responseTimeMs),
+                'error_reason' => $context['error_reason'],
+                'shopify_resource_status' => $context['shopify_resource_status'],
+                'shopify_context' => $context['shopify_context'],
             ]);
 
             $auditUrl->update([
@@ -66,11 +72,19 @@ class CheckSiteAuditUrlJob implements ShouldQueue
 
             $this->recordProgress($run, $result !== SiteAuditResult::RESULT_OK);
         } catch (Throwable $exception) {
+            $result = $this->classifyException($exception);
+            $responseTimeMs = $this->elapsedMilliseconds($started);
+            $context = $contextService->explain($auditUrl, $result, null, null, $exception);
+
             SiteAuditResult::query()->create([
                 'site_audit_run_id' => $run->id,
                 'site_audit_url_id' => $auditUrl->id,
-                'result' => $this->classifyException($exception),
-                'response_time_ms' => $this->elapsedMilliseconds($started),
+                'result' => $result,
+                'response_time_ms' => $responseTimeMs,
+                'speed_classification' => SiteAuditResult::classifySpeed($responseTimeMs),
+                'error_reason' => $context['error_reason'],
+                'shopify_resource_status' => $context['shopify_resource_status'],
+                'shopify_context' => $context['shopify_context'],
                 'error_message' => $exception->getMessage(),
             ]);
 
@@ -115,6 +129,10 @@ class CheckSiteAuditUrlJob implements ShouldQueue
 
         if (str_contains($message, 'ssl') || str_contains($message, 'certificate')) {
             return SiteAuditResult::RESULT_SSL_ERROR;
+        }
+
+        if (str_contains($message, 'redirect')) {
+            return SiteAuditResult::RESULT_FAILED;
         }
 
         return SiteAuditResult::RESULT_FAILED;

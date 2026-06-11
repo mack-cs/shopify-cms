@@ -19,7 +19,7 @@ class ListSlowSiteAuditResults extends ListSiteAuditResults
 
         return $query
             ->where('site_audit_run_id', $run->id)
-            ->where('response_time_ms', '>', SiteAuditResultResource::slowThreshold());
+            ->where('response_time_ms', '>=', SiteAuditResultResource::slowThreshold());
     }
 
     public function getHeading(): string

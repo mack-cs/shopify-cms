@@ -77,10 +77,29 @@ class SiteAuditUrlResource extends Resource
                     ->badge()
                     ->placeholder('-'),
                 TextColumn::make('latestResult.response_time_ms')
-                    ->label('Ms')
+                    ->label('Load ms')
                     ->badge()
-                    ->color(fn (?int $state): string => ((int) ($state ?? 0)) > SiteAuditResultResource::slowThreshold() ? 'warning' : 'gray')
+                    ->color(fn (?int $state): string => ((int) ($state ?? 0)) >= SiteAuditResultResource::slowThreshold() ? 'warning' : 'gray')
                     ->placeholder('-'),
+                TextColumn::make('latestResult.speed_classification')
+                    ->label('Speed')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): ?string => $state ? (SiteAuditResultResource::speedOptions()[$state] ?? 'Unknown') : null)
+                    ->color(fn (?string $state): string => SiteAuditResultResource::speedColor($state))
+                    ->placeholder('-'),
+                TextColumn::make('latestResult.error_reason')
+                    ->label('Latest Reason')
+                    ->state(fn (SiteAuditUrl $record): ?string => $record->latestResult
+                        ? SiteAuditResultResource::reasonSummary($record->latestResult)
+                        : null)
+                    ->limit(44)
+                    ->tooltip(fn (SiteAuditUrl $record): ?string => $record->latestResult
+                        ? SiteAuditResultResource::reasonTooltip($record->latestResult)
+                        : null)
+                    ->extraAttributes([
+                        'style' => 'max-width: 16rem; white-space: nowrap;',
+                    ])
+                    ->toggleable(),
                 TextColumn::make('last_seen_at')
                     ->dateTime()
                     ->sortable()
@@ -97,7 +116,7 @@ class SiteAuditUrlResource extends Resource
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('latestResult.error_message')
                     ->label('Latest Error')
-                    ->limit(80)
+                    ->limit(50)
                     ->tooltip(fn (SiteAuditUrl $record): ?string => $record->latestResult?->error_message)
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
@@ -120,6 +139,21 @@ class SiteAuditUrlResource extends Resource
                         return $query->whereHas(
                             'latestResult',
                             fn (Builder $resultQuery): Builder => $resultQuery->where('result', $value),
+                        );
+                    }),
+                SelectFilter::make('latest_speed')
+                    ->label('Latest Speed')
+                    ->options(SiteAuditResultResource::speedOptions())
+                    ->query(function (Builder $query, array $data): Builder {
+                        $value = trim((string) ($data['value'] ?? ''));
+
+                        if ($value === '') {
+                            return $query;
+                        }
+
+                        return $query->whereHas(
+                            'latestResult',
+                            fn (Builder $resultQuery): Builder => $resultQuery->where('speed_classification', $value),
                         );
                     }),
             ])

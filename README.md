@@ -816,6 +816,199 @@ Notes:
 - Metafields are populated based on the headers in your latest CSV template.
 - Variants and images are imported into their own rows for proper normalization.
 
+## Shopify public URL audit
+
+The public URL audit checks the URLs Shopify exposes to Google, customers, crawlers, and paid-campaign traffic. The source of truth is the public sitemap, not local products or collections, because the sitemap shows what is actually exposed on the storefront.
+
+Default sitemap:
+
+```env
+SITE_AUDIT_SITEMAP_URL=https://leighavenue.co.za/sitemap.xml
+```
+
+### Audit pipeline
+
+1. Fetch the parent sitemap from `SITE_AUDIT_SITEMAP_URL`.
+2. Extract child sitemap URLs, such as products, collections, pages, and blogs.
+3. Fetch each child sitemap and store discovered public URLs in `site_audit_urls`.
+4. Create a `site_audit_runs` row for the audit.
+5. Dispatch queued `CheckSiteAuditUrlJob` jobs for active URLs.
+6. Request each public URL and store a historical `site_audit_results` row.
+7. Classify HTTP result, final URL, load speed, and reviewer-facing error reason.
+8. For broken Shopify resource URLs, run a best-effort Shopify GraphQL lookup for extra context.
+9. Finalize the run when all queued URL checks are complete.
+10. Surface the report in Filament and the scheduled Slack reminder.
+
+### Admin entry points
+
+Filament pages:
+- **Audit & History -> Site Audit Runs**
+- **Audit & History -> Site Audit URLs**
+- **Audit & History -> Site Audit Results**
+
+Useful buttons:
+- `Run Audit Now`: syncs the sitemap, creates a manual run, and queues URL checks.
+- `Sync Sitemap`: refreshes `site_audit_urls` without running checks.
+- `Finalize Runs`: marks completed async runs as completed.
+- `Latest Report`: opens the latest completed audit.
+- `Broken URLs`: shows broken/server-error/timeout/SSL/failed URLs from the latest completed run.
+- `Redirects`: shows URLs that redirect.
+- `Slow URLs`: shows URLs slower than the configured slow threshold.
+- `Check Now` / `Check Selected`: rechecks individual or selected URLs.
+- `Export CSV`: exports the current audit view.
+
+### Scheduled commands
+
+Daily scheduled jobs are defined in `routes/console.php`.
+
+```bash
+php artisan site-audit:run --type=scheduled
+php artisan site-audit:finalize
+```
+
+Schedule:
+- `06:00` runs `site-audit:run --type=scheduled`
+- every 5 minutes runs `site-audit:finalize`
+
+The audit uses the Laravel queue. Make sure a queue worker is running:
+
+```bash
+php artisan queue:work
+```
+
+### What happens when an audit is rerun
+
+Audit results are historical. A rerun does not delete old reports.
+
+Instead:
+- a new `site_audit_runs` row is created
+- new `site_audit_results` rows are written for that run only
+- the previous completed report remains available for history/comparison
+- `Latest Report`, `Broken URLs`, `Redirects`, and `Slow URLs` point to the newest completed run
+
+This means a fresh rerun starts with a clean result set, but historical reports are preserved. While a new run is still processing, the previous completed report remains the latest completed report. After the new run finalizes, the latest report switches to the new run.
+
+### How to read audit results
+
+Important columns:
+- `URL`: the original public URL tested.
+- `Final URL`: the URL the visitor actually ends up on after redirects.
+- `Result`: the HTTP classification, such as `ok`, `redirect`, `broken`, `server_error`, `timeout`, `ssl_error`, or `failed`.
+- `Status`: the HTTP status code returned by the public request.
+- `Load ms`: response time in milliseconds. For example, `831` means about 0.831 seconds.
+- `Speed`: human speed classification.
+- `Reason`: short reviewer-facing explanation of what most likely happened. Hover the value in Filament to see the full reason and raw error details.
+- `Shopify`: optional Shopify Admin API context, such as `not_found`, `active`, `draft`, `archived`, `found`, or `lookup_failed`.
+
+Speed bands:
+
+```text
+0 - 999 ms        Good
+1000 - 2999 ms    Acceptable
+3000 - 4999 ms    Slow
+5000+ ms         Very slow
+```
+
+Final URL examples:
+
+```text
+URL:
+https://leighavenue.co.za/products/my-product
+
+Final URL:
+https://leighavenue.co.za/products/my-product?variant=123
+```
+
+This means Shopify redirected the visitor to a variant-specific URL.
+
+```text
+URL:
+https://leighavenue.co.za/old-page
+
+Status:
+301
+
+Final URL:
+https://leighavenue.co.za/new-page
+```
+
+This means the old page redirects to a new page.
+
+If a broken URL has the same `URL` and `Final URL`, no redirect happened. Shopify returned the error directly for that URL. For example:
+
+```text
+URL:
+https://leighavenue.co.za/collections/untamed-necklaces
+
+Status:
+404
+
+Result:
+broken
+
+Final URL:
+https://leighavenue.co.za/collections/untamed-necklaces
+```
+
+This means the collection URL was requested, Shopify did not redirect it, and the storefront returned a 404 page.
+
+### Error reasons and Shopify context
+
+For plain HTTP failures, the audit stores a reason such as:
+- `Collection URL returned HTTP 404. No redirect happened before the 404/410 response.`
+- `The public request timed out before Shopify returned a response.`
+- `The public request failed because of an SSL or certificate problem.`
+- `The public URL returned HTTP 500, which indicates a Shopify/server-side error.`
+- `The public request failed while following redirects. This may indicate a redirect loop or an invalid redirect chain.`
+
+For broken Shopify resource URLs, the job also attempts a Shopify GraphQL lookup:
+- Product URLs use the product handle.
+- Collection URLs use the collection handle.
+- Page URLs use the page handle.
+- Blog URLs verify the blog handle and flag article handles as needing manual confirmation if the blog exists.
+
+Example outcomes:
+
+```text
+URL:
+https://leighavenue.co.za/collections/untamed-necklaces
+
+HTTP:
+404 broken
+
+GraphQL:
+Collection handle not found
+
+Reason:
+Collection handle not found in Shopify. The URL is still in the sitemap but the Shopify resource appears deleted or renamed.
+```
+
+```text
+URL:
+https://leighavenue.co.za/products/example
+
+HTTP:
+404 broken
+
+GraphQL:
+Product exists with DRAFT status
+
+Reason:
+Product "Example" exists in Shopify but its status is DRAFT. It may not be published to the Online Store.
+```
+
+GraphQL context is best-effort. If Shopify credentials are missing or Shopify rejects the lookup, the audit still stores the HTTP result and records `lookup_failed` as context instead of failing the URL check.
+
+### Slack reporting
+
+The scheduled Slack reminder is sent from `slack:pending-work-reminder` at the times configured by `SLACK_REMINDER_TIMES`, currently three times per day in the default `.env.example`.
+
+The Slack reminder includes:
+- latest completed audit run number
+- total checked, OK, redirect, problem, and slow counts
+- top problem URLs with HTTP status, load time, speed label, and error reason
+- a `Site Audit` button that opens the latest report
+
 ## Database schema overview
 
 Core tables:

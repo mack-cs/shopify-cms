@@ -309,7 +309,7 @@ class PendingWorkSlackReminderNotification extends Notification
         $slowThreshold = (int) config('site-audit.slow_threshold_ms', 3000);
         $slowCount = SiteAuditResult::query()
             ->where('site_audit_run_id', $run->id)
-            ->where('response_time_ms', '>', $slowThreshold)
+            ->where('response_time_ms', '>=', $slowThreshold)
             ->count();
 
         $field = "Run #{$run->id}: {$problemCount} problem " . Str::plural('URL', $problemCount);
@@ -323,7 +323,7 @@ class PendingWorkSlackReminderNotification extends Notification
         $completedAt = $run->completed_at?->format('Y-m-d H:i') ?? 'unknown time';
         $details = [
             "Run #{$run->id} completed {$completedAt}.",
-            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; slow > {$slowThreshold}ms: {$slowCount}.",
+            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; slow >= {$slowThreshold}ms: {$slowCount}.",
         ];
 
         $problemLines = SiteAuditResult::query()
@@ -364,8 +364,13 @@ class PendingWorkSlackReminderNotification extends Notification
         $label = $resolver->escape(Str::limit($path !== '' ? $path : $url, 90));
         $status = $result->status_code ? " HTTP {$result->status_code}" : '';
         $time = $result->response_time_ms !== null ? " {$result->response_time_ms}ms" : '';
+        $speed = $result->speed_classification
+            ? ' ' . (SiteAuditResult::speedLabels()[$result->speed_classification] ?? $result->speed_classification)
+            : '';
+        $reason = trim((string) ($result->error_reason ?? ''));
+        $reasonText = $reason !== '' ? ' - ' . $resolver->escape(Str::limit($reason, 180)) : '';
 
-        return "- <{$url}|{$label}> {$result->result}{$status}{$time}";
+        return "- <{$url}|{$label}> {$result->result}{$status}{$time}{$speed}{$reasonText}";
     }
 
     private function complementaryGapIssues(ShopifyAudit $audit, SlackUserResolver $resolver): string

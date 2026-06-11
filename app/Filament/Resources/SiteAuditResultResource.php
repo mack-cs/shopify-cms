@@ -24,6 +24,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Str;
 
 class SiteAuditResultResource extends Resource
 {
@@ -91,10 +92,38 @@ class SiteAuditResultResource extends Resource
                     })
                     ->sortable(),
                 TextColumn::make('response_time_ms')
-                    ->label('Ms')
+                    ->label('Load ms')
                     ->badge()
-                    ->color(fn (?int $state): string => ((int) ($state ?? 0)) > self::slowThreshold() ? 'warning' : 'gray')
+                    ->color(fn (?int $state): string => ((int) ($state ?? 0)) >= self::slowThreshold() ? 'warning' : 'gray')
                     ->sortable(),
+                TextColumn::make('speed_classification')
+                    ->label('Speed')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): ?string => $state ? (self::speedOptions()[$state] ?? 'Unknown') : null)
+                    ->color(fn (?string $state): string => self::speedColor($state))
+                    ->placeholder('-')
+                    ->sortable(),
+                TextColumn::make('error_reason')
+                    ->label('Reason')
+                    ->state(fn (SiteAuditResult $record): ?string => self::reasonSummary($record))
+                    ->searchable()
+                    ->limit(44)
+                    ->tooltip(fn (SiteAuditResult $record): ?string => self::reasonTooltip($record))
+                    ->extraAttributes([
+                        'style' => 'max-width: 16rem; white-space: nowrap;',
+                    ])
+                    ->toggleable(),
+                TextColumn::make('shopify_resource_status')
+                    ->label('Shopify')
+                    ->badge()
+                    ->placeholder('-')
+                    ->color(fn (?string $state): string => match ($state) {
+                        'not_found', 'lookup_failed' => 'danger',
+                        'draft', 'archived', 'blog_found_article_not_verified' => 'warning',
+                        'active', 'found' => 'success',
+                        default => 'gray',
+                    })
+                    ->toggleable(),
                 TextColumn::make('final_url')
                     ->label('Final URL')
                     ->copyable()
@@ -105,9 +134,9 @@ class SiteAuditResultResource extends Resource
                     ->toggleable(),
                 TextColumn::make('error_message')
                     ->label('Error')
-                    ->limit(80)
+                    ->limit(50)
                     ->tooltip(fn (SiteAuditResult $record): ?string => $record->error_message)
-                    ->toggleable(),
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('result')
@@ -147,7 +176,10 @@ class SiteAuditResultResource extends Resource
                     }),
                 Filter::make('slow')
                     ->label('Slow Pages')
-                    ->query(fn (Builder $query): Builder => $query->where('response_time_ms', '>', self::slowThreshold())),
+                    ->query(fn (Builder $query): Builder => $query->where('response_time_ms', '>=', self::slowThreshold())),
+                SelectFilter::make('speed_classification')
+                    ->label('Speed')
+                    ->options(self::speedOptions()),
             ])
             ->headerActions([
                 ...self::reportLinkActions(),
@@ -251,6 +283,22 @@ class SiteAuditResultResource extends Resource
         ];
     }
 
+    public static function speedOptions(): array
+    {
+        return SiteAuditResult::speedLabels();
+    }
+
+    public static function speedColor(?string $speed): string
+    {
+        return match ($speed) {
+            SiteAuditResult::SPEED_GOOD => 'success',
+            SiteAuditResult::SPEED_ACCEPTABLE => 'info',
+            SiteAuditResult::SPEED_SLOW => 'warning',
+            SiteAuditResult::SPEED_VERY_SLOW => 'danger',
+            default => 'gray',
+        };
+    }
+
     public static function resourceTypeOptions(): array
     {
         return [
@@ -274,6 +322,64 @@ class SiteAuditResultResource extends Resource
             SiteAuditResult::RESULT_FAILED => 'danger',
             default => 'gray',
         };
+    }
+
+    public static function reasonSummary(SiteAuditResult $record): ?string
+    {
+        $reason = trim((string) ($record->error_reason ?? ''));
+        $error = trim((string) ($record->error_message ?? ''));
+
+        $source = $reason !== '' ? $reason : $error;
+
+        if ($source === '') {
+            return null;
+        }
+
+        $lower = strtolower($source);
+
+        if (str_contains($lower, 'could not resolve host') || str_contains($lower, 'curl error 6') || str_contains($lower, 'dns host not resolved')) {
+            return 'DNS host not resolved';
+        }
+
+        if (str_contains($lower, 'timed out') || str_contains($lower, 'timeout')) {
+            return 'Request timed out';
+        }
+
+        if (str_contains($lower, 'ssl') || str_contains($lower, 'certificate')) {
+            return 'SSL/certificate error';
+        }
+
+        if (str_contains($lower, 'redirect loop') || str_contains($lower, 'following redirects')) {
+            return 'Redirect chain failed';
+        }
+
+        if (str_contains($lower, 'handle not found in shopify')) {
+            return 'Shopify handle not found';
+        }
+
+        if (str_contains($lower, 'exists in shopify')) {
+            return 'Exists in Shopify; storefront failed';
+        }
+
+        if (str_contains($lower, 'returned http 404') || str_contains($lower, 'returned http 410')) {
+            return 'Not found on storefront';
+        }
+
+        if (str_contains($lower, 'server-side error') || str_contains($lower, 'returned http 5')) {
+            return 'Server error';
+        }
+
+        return Str::limit($source, 44);
+    }
+
+    public static function reasonTooltip(SiteAuditResult $record): ?string
+    {
+        $parts = collect([
+            trim((string) ($record->error_reason ?? '')),
+            trim((string) ($record->error_message ?? '')),
+        ])->filter()->unique()->values();
+
+        return $parts->isEmpty() ? null : $parts->implode("\n\n");
     }
 
     public static function reportLinkActions(): array
