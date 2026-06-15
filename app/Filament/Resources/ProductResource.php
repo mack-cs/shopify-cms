@@ -2210,13 +2210,13 @@ class ProductResource extends Resource
                     })
                     ->deselectRecordsAfterCompletion(),
                  BulkAction::make('bulkRemoveDuplicateImages')
-                    ->label('Remove Duplicate Images')
+                    ->label('Hide Duplicate Images')
                     ->icon('heroicon-o-trash')
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Remove duplicate images')
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false)
-                    ->modalDescription('This will keep one image per duplicate position and mark the extra images for Shopify deletion where needed.')
+                    ->modalDescription('This will keep one image per duplicate position, hide the extra local rows from normal users, and mark Shopify-backed duplicates for deletion where needed.')
                     ->action(function (Collection $records): void {
                         $productsProcessed = 0;
                         $imagesRemoved = 0;
@@ -2232,7 +2232,7 @@ class ProductResource extends Resource
 
                         self::sendNotification(Notification::make()
                             ->title('Duplicate image cleanup complete')
-                            ->body("Processed {$productsProcessed} product(s). Removed {$imagesRemoved} duplicate image(s).")
+                            ->body("Processed {$productsProcessed} product(s). Hid {$imagesRemoved} duplicate image(s).")
                             ->success()
                         );
                     })
@@ -2290,10 +2290,19 @@ class ProductResource extends Resource
                 continue;
             }
 
+            $primary = $images->first();
             $imagesToRemove = $images->slice(1);
 
             foreach ($imagesToRemove as $image) {
-                self::removeImageRecordForBulkCleanup($image);
+                if (!$image instanceof Image) {
+                    continue;
+                }
+
+                $image->hideAsDuplicate(
+                    $primary instanceof Image ? $primary : null,
+                    Auth::id(),
+                    'Bulk duplicate-position cleanup'
+                );
                 $removed++;
             }
         }
@@ -2303,20 +2312,7 @@ class ProductResource extends Resource
 
         return $removed;
     }
-private static function removeImageRecordForBulkCleanup(Image $image): void
-{
-    if ($image->shopify_image_id) {
-        $image->forceFill([
-            'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
-            'local_dirty' => true,
-            'deleted_at' => now(),
-        ])->save();
 
-        return;
-    }
-
-    $image->delete();
-}
     public static function getRelations(): array
     {
         return [
@@ -3013,6 +3009,10 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
                     Image::SYNC_STATE_LOCAL_DELETED,
                     Image::SYNC_STATE_REMOTE_DELETED,
                 ])
+                ->where(function ($imageQuery): void {
+                    $imageQuery->whereNull('images.is_duplicate_hidden')
+                        ->orWhere('images.is_duplicate_hidden', false);
+                })
                 ->groupBy('images.position')
                 ->havingRaw('COUNT(*) > 1');
         });
@@ -3029,6 +3029,10 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
                     Image::SYNC_STATE_LOCAL_DELETED,
                     Image::SYNC_STATE_REMOTE_DELETED,
                 ])
+                ->where(function ($imageQuery): void {
+                    $imageQuery->whereNull('images.is_duplicate_hidden')
+                        ->orWhere('images.is_duplicate_hidden', false);
+                })
                 ->groupBy('images.position')
                 ->havingRaw('COUNT(*) > 1');
         });
@@ -3051,6 +3055,14 @@ private static function removeImageRecordForBulkCleanup(Image $image): void
             Image::query()
                 ->select('src')
                 ->whereColumn('images.product_id', 'products.id')
+                ->whereNotIn('images.sync_state', [
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED,
+                ])
+                ->where(function ($imageQuery): void {
+                    $imageQuery->whereNull('images.is_duplicate_hidden')
+                        ->orWhere('images.is_duplicate_hidden', false);
+                })
                 ->orderByRaw('COALESCE(position, 2147483647)')
                 ->limit(1),
             $direction

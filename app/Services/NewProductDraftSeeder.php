@@ -238,6 +238,7 @@ final class NewProductDraftSeeder
             'body_html' => $product->body_html,
             'vendor' => $product->vendor,
             'tags' => $product->tags,
+            'is_on_sale' => in_array('sale', TagNormalizer::parseTokens((string) ($product->tags ?? '')), true),
             'type' => $product->type,
             'published' => $product->published,
             'product_category' => $product->product_category,

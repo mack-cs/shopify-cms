@@ -4,6 +4,18 @@ This document describes how to reproduce, run, and operate the Shopify CSV edito
 
 ## Change Log
 
+### 2026-06-11
+
+New product draft sale, bundle, and image handling was updated.
+
+- New Products now has a `Put product on sale` switch.
+- Sale drafts automatically add `sale`, remove `exclude-from-the-sale`, move the current price into compare-at price when needed, lock compare-at price, and require a new lower price before save.
+- Non-sale drafts automatically carry `exclude-from-the-sale`.
+- New product drafts now default to `all-products-collection`, `all-products`, and a singular product-type tag such as `bracelet` or `necklace`.
+- Bundle/stack drafts now support internal component product selection and image selection from those component products.
+- Bundle/stack drafts use the shared `bundles` tag and the specific bundle collection tag, such as `livi-road-bundles`; they must not keep the main collection tag, such as `livi-road` or `pata-pata`.
+- Duplicate image cleanup now hides duplicate local rows from normal users, marks Shopify-backed duplicates for deletion when needed, and lets Super Admins restore hidden duplicates.
+
 ### 2026-04-24
 
 Draft deletion workflow was changed to protect Shopify-backed records and improve audit logging.
@@ -1142,6 +1154,43 @@ Where it is used:
 Operational note:
 - This is not a standalone Artisan command.
 - It is part of the product import and recovery workflow.
+
+### New product draft sale, bundle, and image rules (2026-06-11)
+
+Sale tags:
+- `sale` means the product is on sale.
+- `exclude-from-the-sale` means the product is not on sale.
+- Every saved draft gets one of those two tags automatically.
+
+Sale workflow in **Catalog -> New Products**:
+- The `Put product on sale` switch defaults to off.
+- Switching it on adds `sale` and removes `exclude-from-the-sale`.
+- If compare-at price is empty and price has a value, the current price is copied into compare-at price and the price field is cleared.
+- Compare-at price is locked while the switch is on.
+- The user must enter a new price, and it must be lower than compare-at price.
+- The draft will not save until sale price is present and lower than compare-at price.
+
+Default draft tags:
+- Drafts automatically include `all-products-collection` and `all-products`.
+- Non-bundle drafts also get a singular type tag from the selected type, for example `bracelet`, `necklace`, or `ring`.
+- When the product type changes, old known type tags are removed and the current type tag is applied.
+- Bundle and stack drafts are the exception: they use `bundles` as the product grouping tag even if the Shopify product type is `Bracelets`.
+- Bundle collection tags replace main collection tags. For example, `livi-road-bundles` is kept and `livi-road` is removed; `pata-pata-bundle` / `pata-pata-bundles` removes `pata-pata`.
+
+Bundle/stack image workflow:
+- Bundle and stack drafts show an internal `Bundle products` selector.
+- After selecting component products, users can choose images from those selected products.
+- The image options come from active Shopify images in position order.
+- The first selected bundle image becomes the draft primary `image_url`.
+- These fields are internal draft tooling and do not write a bundle relationship to Shopify by themselves.
+
+Duplicate image cleanup:
+- Duplicate cleanup keeps one active image per duplicate position.
+- Extra duplicates are hidden locally instead of being hard-deleted.
+- Shopify-backed hidden duplicates are also marked `local_deleted` so outbound image sync can remove them from Shopify.
+- Normal users only see active, non-hidden images in Shopify position order.
+- Super Admins can see hidden duplicate rows in the Images relation manager and use `Restore Hidden` to make an image visible locally again.
+- Run `php artisan migrate` after deploying this change so the new draft and image columns exist.
 
 ### Database seeders
 

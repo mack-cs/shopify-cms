@@ -75,6 +75,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 use League\Csv\Reader;
 use League\Csv\Writer;
 use SplTempFileObject;
@@ -91,6 +92,24 @@ class NewProductDraftResource extends Resource
     protected static ?string $navigationLabel = 'New Products';
     protected static ?int $navigationSort = 1;
     private static ?array $siblingCollectionLookupCache = null;
+    private const SALE_TAG = 'sale';
+    private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
+    private const DEFAULT_NEW_PRODUCT_TAGS = [
+        'all-products-collection',
+        'all-products',
+    ];
+    private const PRODUCT_TYPE_TAGS = [
+        'anklet',
+        'bracelet',
+        'bundle',
+        'bundles',
+        'charm',
+        'earring',
+        'necklace',
+        'ring',
+        'stack',
+        'stacks',
+    ];
     private const DRAFT_VARIANT_CLASH_FIELDS = [
         'sku' => [
             'label' => 'SKU',
@@ -462,7 +481,17 @@ class NewProductDraftResource extends Resource
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                                    $collectionTags = self::collectionTags($state);
+                                    $current = $get('tags');
+                                    $normalized = self::normalizeTagList($current);
+                                    $isBundleContext = self::isBundleOrStackState(
+                                        $get('type'),
+                                        $normalized,
+                                        $get('title')
+                                    );
+
+                                    $collectionTags = $isBundleContext
+                                        ? self::bundleContextCollectionTags(is_string($state) ? $state : null)
+                                        : self::collectionTags(is_string($state) ? $state : null);
                                     if ($collectionTags === []) {
                                         return;
                                     }
@@ -474,8 +503,6 @@ class NewProductDraftResource extends Resource
                                         $set('vendor', $expectedVendor);
                                     }
 
-                                    $current = $get('tags');
-                                    $normalized = self::normalizeTagList($current);
                                     $collectionPool = self::allCollectionTags();
 
                                     $kept = array_values(array_filter(
@@ -483,7 +510,11 @@ class NewProductDraftResource extends Resource
                                         fn (string $tag): bool => !in_array($tag, $collectionPool, true)
                                     ));
 
-                                    $merged = array_values(array_unique(array_merge($kept, $collectionTags)));
+                                    $merged = self::defaultedDraftTags(
+                                        array_values(array_unique(array_merge($kept, $collectionTags))),
+                                        $get('type'),
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                    );
                                     $set('tags', $merged);
                                 }),
                             Select::make('vendor')
@@ -553,10 +584,15 @@ class NewProductDraftResource extends Resource
                                 ->searchable()
                                 ->preload()
                                 ->reactive()
-                                ->afterStateUpdated(function ($state, callable $set): void {
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                     if (!$state) {
                                         $set('product_category', null);
                                         $set('google_product_category', null);
+                                        $set('tags', self::defaultedDraftTags(
+                                            self::normalizeTagList($get('tags')),
+                                            null,
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        ));
                                         return;
                                     }
 
@@ -565,6 +601,12 @@ class NewProductDraftResource extends Resource
                                         $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
                                         $set('google_product_category', $mapping['google_product_category']);
                                     }
+
+                                    $set('tags', self::defaultedDraftTags(
+                                        self::normalizeTagList($get('tags')),
+                                        $state,
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                    ));
                                 }),
                             Select::make('product_category')
                                 ->label('Category')
@@ -582,10 +624,15 @@ class NewProductDraftResource extends Resource
                                     $mapping = CategoryTypeMap::byCategoryValue($state);
                                     return $mapping['shopify_taxonomy_gid'] ?? $state;
                                 })
-                                ->afterStateUpdated(function ($state, callable $set): void {
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                     if (!$state) {
                                         $set('type', null);
                                         $set('google_product_category', null);
+                                        $set('tags', self::defaultedDraftTags(
+                                            self::normalizeTagList($get('tags')),
+                                            null,
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        ));
                                         return;
                                     }
 
@@ -593,6 +640,11 @@ class NewProductDraftResource extends Resource
                                     if ($mapping) {
                                         $set('type', $mapping['type']);
                                         $set('google_product_category', $mapping['google_product_category']);
+                                        $set('tags', self::defaultedDraftTags(
+                                            self::normalizeTagList($get('tags')),
+                                            $mapping['type'],
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        ));
                                     }
                                 }),
                             TextInput::make('google_product_category')
@@ -758,6 +810,38 @@ class NewProductDraftResource extends Resource
                                 ->dehydrateStateUsing(function ($state): ?string {
                                     $values = is_array($state) ? $state : [];
                                     return TagNormalizer::normalizeFromArray($values);
+                                }),
+                            Forms\Components\Toggle::make('is_on_sale')
+                                ->label('Put product on sale')
+                                ->default(false)
+                                ->inline(false)
+                                ->live()
+                                ->helperText('Adds the sale tag, removes exclude-from-the-sale, locks compare-at price, and requires a lower sale price.')
+                                ->afterStateHydrated(function (Forms\Components\Toggle $component, $state, ?NewProductDraft $record): void {
+                                    $tags = self::normalizeTagList($record?->tags);
+                                    $component->state((bool) $state || self::tagListContains($tags, self::SALE_TAG));
+                                })
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                    $isOnSale = self::saleStateFromForm($state, null);
+
+                                    $tags = self::defaultedDraftTags(
+                                        self::normalizeTagList($get('tags')),
+                                        $get('type'),
+                                        $isOnSale
+                                    );
+                                    $set('tags', $tags);
+
+                                    if (!$isOnSale) {
+                                        return;
+                                    }
+
+                                    $currentPrice = self::decimalStringFromState($get('variant_price'));
+                                    $compareAtPrice = self::decimalStringFromState($get('variant_compare_at_price'));
+
+                                    if ($compareAtPrice === null && $currentPrice !== null) {
+                                        $set('variant_compare_at_price', $currentPrice);
+                                        $set('variant_price', null);
+                                    }
                                 }),
                         ])
                         ->columnSpanFull(),
@@ -959,8 +1043,43 @@ class NewProductDraftResource extends Resource
                                         TextInput::make('variant_price')
                                             ->label('Price')
                                             ->numeric()
+                                            ->required(fn (Get $get): bool => (bool) $get('is_on_sale'))
+                                            ->rules([
+                                                fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                                    if (!self::saleStateFromForm($get('is_on_sale'), $get('tags'))) {
+                                                        return;
+                                                    }
+
+                                                    $price = self::decimalFloatFromState($value);
+                                                    $compareAt = self::decimalFloatFromState($get('variant_compare_at_price'));
+
+                                                    if ($price === null) {
+                                                        $fail('Enter the new sale price before saving.');
+                                                        return;
+                                                    }
+
+                                                    if ($compareAt === null) {
+                                                        $fail('Compare-at price is required before a product can be put on sale.');
+                                                        return;
+                                                    }
+
+                                                    if ($price >= $compareAt) {
+                                                        $fail('Sale price must be lower than the compare-at price.');
+                                                    }
+                                                },
+                                            ])
                                             ->disabled(fn (?NewProductDraft $record): bool => self::draftAttributeHasShopifyConflict($record, 'variant_price'))
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if (
+                                                    $record !== null
+                                                    && self::saleStateFromForm($record->is_on_sale, $record->tags)
+                                                    && $record->variant_compare_at_price === null
+                                                    && $state !== null
+                                                ) {
+                                                    $component->state(null);
+                                                    return;
+                                                }
+
                                                 if ($record === null || $state !== null) {
                                                     return;
                                                 }
@@ -972,8 +1091,21 @@ class NewProductDraftResource extends Resource
                                         TextInput::make('variant_compare_at_price')
                                             ->label('Compare-at price')
                                             ->numeric()
-                                            ->disabled(fn (?NewProductDraft $record): bool => self::draftAttributeHasShopifyConflict($record, 'variant_compare_at_price'))
+                                            ->required(fn (Get $get): bool => (bool) $get('is_on_sale'))
+                                            ->dehydrated(true)
+                                            ->disabled(fn (Get $get, ?NewProductDraft $record): bool => (bool) $get('is_on_sale')
+                                                || self::draftAttributeHasShopifyConflict($record, 'variant_compare_at_price'))
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if (
+                                                    $record !== null
+                                                    && self::saleStateFromForm($record->is_on_sale, $record->tags)
+                                                    && $state === null
+                                                    && $record->variant_price !== null
+                                                ) {
+                                                    $component->state(self::decimalStringFromState($record->variant_price));
+                                                    return;
+                                                }
+
                                                 if ($record === null || $state !== null) {
                                                     return;
                                                 }
@@ -1075,6 +1207,52 @@ class NewProductDraftResource extends Resource
                             }
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_path'))),
+                    Select::make('bundle_product_ids')
+                        ->label('Bundle products')
+                        ->helperText('Internal use only. Select the products that make up this bundle or stack so their Shopify images can be reused.')
+                        ->multiple()
+                        ->searchable()
+                        ->preload()
+                        ->live()
+                        ->options(fn (Get $get): array => self::bundleProductOptions($get('bundle_product_ids')))
+                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record))
+                        ->afterStateHydrated(function (Select $component, $state): void {
+                            $component->state(self::normalizeBundleProductIds($state));
+                        })
+                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                            $allowed = array_keys(self::bundleProductImageOptions($state));
+                            $selected = array_values(array_intersect(
+                                self::normalizeBundleImageUrls($get('bundle_image_urls')),
+                                $allowed
+                            ));
+
+                            $set('bundle_image_urls', $selected);
+
+                            if ($selected !== [] && blank($get('image_path'))) {
+                                $set('image_url', $selected[0]);
+                            }
+                        })
+                        ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
+                    CheckboxList::make('bundle_image_urls')
+                        ->label('Bundle image choices')
+                        ->helperText('Pick images from the selected products. The first selected image becomes the draft primary image URL.')
+                        ->columns(2)
+                        ->bulkToggleable()
+                        ->options(fn (Get $get): array => self::bundleProductImageOptions($get('bundle_product_ids')))
+                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record)
+                            && self::normalizeBundleProductIds($get('bundle_product_ids')) !== [])
+                        ->afterStateHydrated(function (CheckboxList $component, $state): void {
+                            $component->state(self::normalizeBundleImageUrls($state));
+                        })
+                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                            $selected = self::normalizeBundleImageUrls($state);
+                            if ($selected === [] || filled($get('image_path'))) {
+                                return;
+                            }
+
+                            $set('image_url', $selected[0]);
+                        })
+                        ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleImageUrls($state))),
                     Placeholder::make('image_locked_notice')
                         ->label('')
                         ->content(function (Get $get, ?NewProductDraft $record): ?string {
@@ -1431,17 +1609,49 @@ class NewProductDraftResource extends Resource
             return null;
         }
 
-        return DropdownOption::query()
-            ->whereIn('collection_tag_primary', $normalized)
-            ->where(function ($query) use ($normalized) {
-                $query->whereIn('collection_tag_secondary', $normalized)
-                    ->orWhereNull('collection_tag_secondary');
+        $rows = DropdownOption::query()
+            ->where(function ($query) use ($normalized): void {
+                $query->whereIn('collection_tag_primary', $normalized)
+                    ->orWhereIn('collection_tag_secondary', $normalized);
             })
             ->orderBy('collection_style')
-            ->value('collection_style');
+            ->get(['collection_style', 'collection_tag_primary', 'collection_tag_secondary']);
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        $hasBundleTags = self::hasBundleOrStackTag($normalized);
+        $matched = $rows
+            ->sortByDesc(function ($row) use ($normalized, $hasBundleTags): int {
+                $primary = TagNormalizer::normalizeToken((string) ($row->collection_tag_primary ?? ''));
+                $secondary = TagNormalizer::normalizeToken((string) ($row->collection_tag_secondary ?? ''));
+                $score = 0;
+
+                if ($secondary !== null && in_array($secondary, $normalized, true)) {
+                    $score += 10;
+                }
+
+                if ($primary !== null && in_array($primary, $normalized, true)) {
+                    $score += 3;
+                }
+
+                if ($hasBundleTags && self::isBundleCollectionRow($row->collection_style ?? null, $primary, $secondary)) {
+                    $score += 20;
+                }
+
+                return $score;
+            })
+            ->first();
+
+        return is_string($matched?->collection_style ?? null) ? $matched->collection_style : null;
     }
 
-    private static function collectionTags(?string $collection): array
+    private static function collectionTags(
+        ?string $collection,
+        bool $forProductTags = true,
+        bool $forceBundleTags = false
+    ): array
     {
         if ($collection === null || trim($collection) === '') {
             return [];
@@ -1455,15 +1665,77 @@ class NewProductDraftResource extends Resource
 
         $tags = [];
         foreach ($rows as $row) {
-            if ($row->collection_tag_primary) {
-                $tags[] = $row->collection_tag_primary;
+            $primary = TagNormalizer::normalizeToken((string) ($row->collection_tag_primary ?? ''));
+            $secondary = TagNormalizer::normalizeToken((string) ($row->collection_tag_secondary ?? ''));
+            $isBundleCollection = $forceBundleTags
+                || self::isBundleCollectionRow($collection, $primary, $secondary);
+
+            if ($forProductTags && $isBundleCollection) {
+                $tags[] = 'bundles';
+                if ($secondary !== null) {
+                    $tags[] = $secondary;
+                }
+
+                continue;
             }
-            if ($row->collection_tag_secondary) {
-                $tags[] = $row->collection_tag_secondary;
+
+            if ($primary !== null) {
+                $tags[] = $primary;
+            }
+            if ($secondary !== null) {
+                $tags[] = $secondary;
             }
         }
 
-        return array_values(array_unique(array_filter(array_map('trim', $tags))));
+        $tags = self::uniqueNormalizedTags($tags);
+
+        return $forProductTags ? self::normalizeBundleCollectionTags($tags) : $tags;
+    }
+
+    private static function bundleContextCollectionTags(?string $collection, bool $forProductTags = true): array
+    {
+        $bundleCollection = self::bundleCollectionStyleForCollection($collection);
+        if ($bundleCollection !== null) {
+            return self::collectionTags($bundleCollection, forProductTags: $forProductTags);
+        }
+
+        return self::collectionTags($collection, forProductTags: $forProductTags, forceBundleTags: true);
+    }
+
+    private static function bundleCollectionStyleForCollection(?string $collection): ?string
+    {
+        if ($collection === null || trim($collection) === '') {
+            return null;
+        }
+
+        $currentTags = self::collectionTags($collection, forProductTags: false);
+        if (self::hasBundleOrStackTag($currentTags)) {
+            return $collection;
+        }
+
+        $secondaryCandidates = [];
+        foreach ($currentTags as $tag) {
+            if (self::hasBundleOrStackTag([$tag])) {
+                continue;
+            }
+
+            $secondaryCandidates[] = "{$tag}-bundles";
+            $secondaryCandidates[] = "{$tag}-bundle";
+            $secondaryCandidates[] = "{$tag}-stacks";
+            $secondaryCandidates[] = "{$tag}-stack";
+        }
+
+        $secondaryCandidates = self::uniqueNormalizedTags($secondaryCandidates);
+        if ($secondaryCandidates === []) {
+            return null;
+        }
+
+        $style = DropdownOption::query()
+            ->whereIn('collection_tag_secondary', $secondaryCandidates)
+            ->orderBy('collection_style')
+            ->value('collection_style');
+
+        return is_string($style) && trim($style) !== '' ? $style : null;
     }
 
     private static function allCollectionTags(): array
@@ -1480,7 +1752,7 @@ class NewProductDraftResource extends Resource
             ->pluck('collection_tag_secondary')
             ->all();
 
-        return array_values(array_unique(array_filter(array_merge($primary, $secondary))));
+        return self::uniqueNormalizedTags(array_merge($primary, $secondary, ['bundles', 'bundle', 'stack', 'stacks']));
     }
 
     private static function expectedVendorForCollection(?string $collection): ?string
@@ -1673,7 +1945,7 @@ class NewProductDraftResource extends Resource
     private static function normalizeTagList(mixed $tags): array
     {
         if (is_array($tags)) {
-            return array_values(array_filter(array_map('trim', $tags)));
+            return self::uniqueNormalizedTags($tags);
         }
 
         if (is_string($tags) && trim($tags) !== '') {
@@ -1681,6 +1953,391 @@ class NewProductDraftResource extends Resource
         }
 
         return [];
+    }
+
+    /**
+     * @param array<int, mixed> $tags
+     * @return array<int, string>
+     */
+    private static function uniqueNormalizedTags(array $tags): array
+    {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($tags as $tag) {
+            $token = TagNormalizer::normalizeToken((string) $tag);
+            if ($token === null) {
+                continue;
+            }
+
+            $key = strtolower($token);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $normalized[] = $token;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private static function normalizeBundleCollectionTags(array $tags): array
+    {
+        $tags = self::uniqueNormalizedTags($tags);
+        if (!self::hasBundleOrStackTag($tags)) {
+            return $tags;
+        }
+
+        $remove = ['bundle', 'stack', 'stacks'];
+        foreach ($tags as $tag) {
+            foreach (['-bundles', '-bundle', '-stacks', '-stack'] as $suffix) {
+                if (!str_ends_with($tag, $suffix)) {
+                    continue;
+                }
+
+                $base = substr($tag, 0, -strlen($suffix));
+                if ($base !== '') {
+                    $remove[] = $base;
+                }
+            }
+        }
+
+        $tags = array_values(array_filter(
+            $tags,
+            fn (string $tag): bool => !in_array($tag, array_unique($remove), true)
+        ));
+        $tags[] = 'bundles';
+
+        return self::uniqueNormalizedTags($tags);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function hasBundleOrStackTag(array $tags): bool
+    {
+        foreach (self::uniqueNormalizedTags($tags) as $tag) {
+            if (in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)) {
+                return true;
+            }
+
+            if (
+                str_ends_with($tag, '-bundle')
+                || str_ends_with($tag, '-bundles')
+                || str_ends_with($tag, '-stack')
+                || str_ends_with($tag, '-stacks')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function isBundleCollectionRow(mixed $collection, ?string $primary, ?string $secondary): bool
+    {
+        $collectionToken = TagNormalizer::normalizeToken((string) ($collection ?? ''));
+        $tokens = array_values(array_filter([$collectionToken, $primary, $secondary]));
+
+        return self::hasBundleOrStackTag($tokens);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function isBundleOrStackState(mixed $type, array $tags = [], mixed $title = null): bool
+    {
+        if (self::hasBundleOrStackTag($tags)) {
+            return true;
+        }
+
+        $typeTag = self::defaultTagForProductType($type);
+        if ($typeTag === 'bundles') {
+            return true;
+        }
+
+        $titleTag = TagNormalizer::normalizeToken((string) ($title ?? ''));
+
+        return is_string($titleTag) && self::hasBundleOrStackTag([$titleTag]);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale): array
+    {
+        $tags = self::normalizeBundleCollectionTags($tags);
+        $typeTag = self::isBundleOrStackState($type, $tags)
+            ? 'bundles'
+            : self::defaultTagForProductType($type);
+        $tags = self::applySaleTags($tags, $isOnSale);
+
+        foreach (self::DEFAULT_NEW_PRODUCT_TAGS as $defaultTag) {
+            $tags[] = $defaultTag;
+        }
+
+        if ($typeTag !== null) {
+            $tags = array_values(array_filter(
+                $tags,
+                fn (string $tag): bool => !in_array($tag, self::PRODUCT_TYPE_TAGS, true) || $tag === $typeTag
+            ));
+            $tags[] = $typeTag;
+        }
+
+        return self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
+    }
+
+    /**
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private static function applySaleTags(array $tags, bool $isOnSale): array
+    {
+        $tags = array_values(array_filter(
+            self::uniqueNormalizedTags($tags),
+            fn (string $tag): bool => !in_array($tag, [self::SALE_TAG, self::EXCLUDE_FROM_SALE_TAG], true)
+        ));
+
+        $tags[] = $isOnSale ? self::SALE_TAG : self::EXCLUDE_FROM_SALE_TAG;
+
+        return self::uniqueNormalizedTags($tags);
+    }
+
+    private static function defaultTagForProductType(mixed $type): ?string
+    {
+        $token = TagNormalizer::normalizeToken((string) ($type ?? ''));
+        if ($token === null) {
+            return null;
+        }
+
+        return match ($token) {
+            'anklet', 'anklets' => 'anklet',
+            'bracelet', 'bracelets' => 'bracelet',
+            'bundle', 'bundles', 'stack', 'stacks' => 'bundles',
+            'charm', 'charms' => 'charm',
+            'earring', 'earrings' => 'earring',
+            'necklace', 'necklaces' => 'necklace',
+            'ring', 'rings' => 'ring',
+            default => str_ends_with($token, 's') && strlen($token) > 3
+                ? substr($token, 0, -1)
+                : $token,
+        };
+    }
+
+    private static function saleStateFromForm(mixed $state, mixed $tags = null): bool
+    {
+        if ($state !== null && $state !== '') {
+            return filter_var($state, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return self::tagListContains(self::normalizeTagList($tags), self::SALE_TAG);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function tagListContains(array $tags, string $needle): bool
+    {
+        $normalizedNeedle = TagNormalizer::normalizeToken($needle);
+        if ($normalizedNeedle === null) {
+            return false;
+        }
+
+        return in_array($normalizedNeedle, self::uniqueNormalizedTags($tags), true);
+    }
+
+    private static function decimalStringFromState(mixed $state): ?string
+    {
+        $value = self::decimalFloatFromState($state);
+
+        return $value === null ? null : number_format($value, 2, '.', '');
+    }
+
+    private static function decimalFloatFromState(mixed $state): ?float
+    {
+        if ($state === null) {
+            return null;
+        }
+
+        $normalized = trim((string) $state);
+        if ($normalized === '') {
+            return null;
+        }
+
+        $normalized = str_replace([' ', ','], ['', '.'], $normalized);
+        $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+        if ($normalized === null || $normalized === '' || $normalized === '.') {
+            return null;
+        }
+
+        $parts = explode('.', $normalized);
+        if (count($parts) > 2) {
+            $normalized = array_shift($parts) . '.' . implode('', $parts);
+        }
+
+        return is_numeric($normalized) ? (float) $normalized : null;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private static function normalizeBundleProductIds(mixed $state): array
+    {
+        $values = is_array($state) ? $state : [];
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn (mixed $value): int => (int) $value,
+            $values
+        ), static fn (int $value): bool => $value > 0)));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function normalizeBundleImageUrls(mixed $state): array
+    {
+        if (is_string($state)) {
+            $state = preg_split('/[\r\n,;]+/', $state) ?: [];
+        }
+
+        $values = is_array($state) ? $state : [];
+        $urls = [];
+        $seen = [];
+
+        foreach ($values as $value) {
+            $url = trim((string) $value);
+            if ($url === '') {
+                continue;
+            }
+
+            $key = strtolower($url);
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $urls[] = $url;
+        }
+
+        return $urls;
+    }
+
+    /**
+     * @param array<int, mixed> $values
+     * @return array<int, mixed>|null
+     */
+    private static function nullableArray(array $values): ?array
+    {
+        return $values === [] ? null : array_values($values);
+    }
+
+    private static function shouldShowBundleImageTools(Get $get, ?NewProductDraft $record): bool
+    {
+        return !self::draftImageLocked($get, $record)
+            && self::isBundleOrStackDraft($get('type'), $get('tags'), $record);
+    }
+
+    private static function isBundleOrStackDraft(mixed $type, mixed $tags = null, ?NewProductDraft $record = null): bool
+    {
+        return self::isBundleOrStackState($type, self::normalizeTagList($tags), $record?->title);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function bundleProductOptions(mixed $currentValue = null): array
+    {
+        $selected = self::normalizeBundleProductIds($currentValue);
+
+        $products = Product::query()
+            ->where(function (Builder $query) use ($selected): void {
+                $query
+                    ->whereRaw('LOWER(status) = ?', ['active'])
+                    ->orWhereRaw('LOWER(status) = ?', ['draft']);
+
+                if ($selected !== []) {
+                    $query->orWhereIn('id', $selected);
+                }
+            })
+            ->orderBy('title')
+            ->orderBy('handle')
+            ->get(['id', 'title', 'handle', 'status']);
+
+        $options = [];
+        foreach ($products as $product) {
+            $options[(int) $product->id] = self::localProductReferenceLabel($product);
+        }
+
+        return $options;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function bundleProductImageOptions(mixed $productIds): array
+    {
+        $ids = self::normalizeBundleProductIds($productIds);
+        if ($ids === []) {
+            return [];
+        }
+
+        $order = array_flip($ids);
+        $products = Product::query()
+            ->whereIn('id', $ids)
+            ->with(['images' => fn ($query) => $query
+                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('position')
+                ->orderBy('id')])
+            ->get(['id', 'title', 'handle'])
+            ->sortBy(fn (Product $product): int => $order[(int) $product->id] ?? PHP_INT_MAX);
+
+        $options = [];
+        foreach ($products as $product) {
+            $productLabel = self::localProductReferenceLabel($product);
+
+            foreach ($product->images as $image) {
+                if (!$image instanceof Image) {
+                    continue;
+                }
+
+                $src = trim((string) ($image->src ?? ''));
+                if ($src === '' || isset($options[$src])) {
+                    continue;
+                }
+
+                $position = $image->position !== null ? '#' . $image->position : '#?';
+                $path = parse_url($src, PHP_URL_PATH);
+                $filename = is_string($path) ? basename($path) : '';
+
+                $options[$src] = trim($productLabel . ' ' . $position . ($filename !== '' ? " - {$filename}" : ''));
+            }
+        }
+
+        return $options;
+    }
+
+    private static function localProductReferenceLabel(Product $product): string
+    {
+        $title = trim((string) ($product->title ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+        $status = strtolower(trim((string) ($product->status ?? '')));
+        $label = $title !== '' ? $title : ($handle !== '' ? $handle : 'Product #' . $product->id);
+
+        if ($handle !== '' && strcasecmp($label, $handle) !== 0) {
+            $label .= " ({$handle})";
+        }
+
+        if ($status === 'draft') {
+            return "[DRAFT] {$label}";
+        }
+
+        return $label;
     }
 
     private static function resolvedSkuForDraft(NewProductDraft $record): ?string
@@ -2403,7 +3060,12 @@ class NewProductDraftResource extends Resource
     {
         $collection = $get('collection_filter');
         if ($collection) {
-            $tags = self::collectionTags($collection);
+            $rawTags = $get('tags');
+            $currentTags = self::normalizeTagList($rawTags);
+            $isBundleContext = self::isBundleOrStackState($productType, $currentTags, $get('title'));
+            $tags = $isBundleContext
+                ? self::bundleContextCollectionTags($collection, forProductTags: false)
+                : self::collectionTags($collection, forProductTags: false);
             if (!empty($tags)) {
                 return $tags;
             }
@@ -4523,6 +5185,14 @@ class NewProductDraftResource extends Resource
             ->select('images.src')
             ->join('products as sortable_products', 'sortable_products.id', '=', 'images.product_id')
             ->whereColumn('sortable_products.handle', 'new_product_drafts.handle')
+            ->whereNotIn('images.sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function (Builder $imageQuery): void {
+                $imageQuery->whereNull('images.is_duplicate_hidden')
+                    ->orWhere('images.is_duplicate_hidden', false);
+            })
             ->orderByRaw('COALESCE(images.position, 2147483647)')
             ->limit(1);
 
@@ -4740,11 +5410,87 @@ class NewProductDraftResource extends Resource
         $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
         unset($data['extra_shopify_fields']);
 
+        $data = self::applyDraftSaleAndBundleData($data);
+
         if ($record) {
             $data = self::removeConflictingDraftInputs($data, $record);
         }
 
         return $data;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    private static function applyDraftSaleAndBundleData(array $data): array
+    {
+        $tags = self::normalizeTagList($data['tags'] ?? null);
+        $isOnSale = array_key_exists('is_on_sale', $data)
+            ? self::saleStateFromForm($data['is_on_sale'], null)
+            : self::tagListContains($tags, self::SALE_TAG);
+
+        if ($isOnSale) {
+            $currentPrice = self::decimalStringFromState($data['variant_price'] ?? null);
+            $compareAtPrice = self::decimalStringFromState($data['variant_compare_at_price'] ?? null);
+
+            if ($compareAtPrice === null && $currentPrice !== null) {
+                $data['variant_compare_at_price'] = $currentPrice;
+                $data['variant_price'] = null;
+            }
+        }
+
+        $data['is_on_sale'] = $isOnSale;
+        $data['tags'] = TagNormalizer::normalizeFromArray(
+            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale)
+        );
+
+        self::validateDraftSalePricing($data);
+
+        $data['bundle_product_ids'] = self::nullableArray(
+            self::normalizeBundleProductIds($data['bundle_product_ids'] ?? null)
+        );
+        $data['bundle_image_urls'] = self::nullableArray(
+            self::normalizeBundleImageUrls($data['bundle_image_urls'] ?? null)
+        );
+
+        if (
+            is_array($data['bundle_image_urls'] ?? null)
+            && $data['bundle_image_urls'] !== []
+            && blank($data['image_path'] ?? null)
+        ) {
+            $data['image_url'] = $data['bundle_image_urls'][0];
+        }
+
+        return $data;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private static function validateDraftSalePricing(array $data): void
+    {
+        if (!self::saleStateFromForm($data['is_on_sale'] ?? false, $data['tags'] ?? null)) {
+            return;
+        }
+
+        $price = self::decimalFloatFromState($data['variant_price'] ?? null);
+        $compareAt = self::decimalFloatFromState($data['variant_compare_at_price'] ?? null);
+        $messages = [];
+
+        if ($compareAt === null) {
+            $messages['variant_compare_at_price'] = 'Compare-at price is required before a product can be put on sale.';
+        }
+
+        if ($price === null) {
+            $messages['variant_price'] = 'Enter the new sale price before saving.';
+        } elseif ($compareAt !== null && $price >= $compareAt) {
+            $messages['variant_price'] = 'Sale price must be lower than the compare-at price.';
+        }
+
+        if ($messages !== []) {
+            throw ValidationException::withMessages($messages);
+        }
     }
 
     /**

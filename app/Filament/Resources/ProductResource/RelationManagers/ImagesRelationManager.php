@@ -14,6 +14,7 @@ use Filament\Forms\Get;
 use Filament\Tables;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Resources\RelationManagers\RelationManager;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
@@ -136,6 +137,18 @@ class ImagesRelationManager extends RelationManager
                 ->label('Local Dirty')
                 ->boolean()
                 ->toggleable(isToggledHiddenByDefault: true),
+            Tables\Columns\IconColumn::make('is_duplicate_hidden')
+                ->label('Hidden Duplicate')
+                ->boolean()
+                ->trueColor('warning')
+                ->falseColor('success')
+                ->visible(fn (): bool => $this->canViewHiddenDuplicates())
+                ->toggleable(isToggledHiddenByDefault: true),
+            Tables\Columns\TextColumn::make('duplicate_hidden_reason')
+                ->label('Hidden Reason')
+                ->wrap()
+                ->visible(fn (): bool => $this->canViewHiddenDuplicates())
+                ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('last_shopify_seen_at')
                 ->label('Last Shopify Seen')
                 ->since()
@@ -190,6 +203,9 @@ class ImagesRelationManager extends RelationManager
                     Image::BACKUP_STATUS_FAILED => 'Failed',
                     Image::BACKUP_STATUS_MISSING_SOURCE => 'Missing Source',
                 ]),
+            Tables\Filters\TernaryFilter::make('is_duplicate_hidden')
+                ->label('Hidden Duplicate')
+                ->visible(fn (): bool => $this->canViewHiddenDuplicates()),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
@@ -208,7 +224,7 @@ class ImagesRelationManager extends RelationManager
                     AdminNotification::send(
                         Notification::make()
                             ->title('Duplicate images removed')
-                            ->body("Removed {$summary['removed']} duplicate image(s). Kept {$summary['kept']} primary image(s) across {$summary['positions']} duplicate position(s).")
+                            ->body("Hid {$summary['removed']} duplicate image(s). Kept {$summary['kept']} primary image(s) across {$summary['positions']} duplicate position(s).")
                             ->status($summary['removed'] > 0 ? 'success' : 'warning')
                     );
                 }),
@@ -269,7 +285,8 @@ class ImagesRelationManager extends RelationManager
                 }),
         ])->actions([
             Tables\Actions\EditAction::make()
-                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED)
+                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED
+                    && !$record->is_duplicate_hidden)
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
                 ->after(function (): void {
                     $this->bumpOwnerApprovalVersion();
@@ -285,25 +302,45 @@ class ImagesRelationManager extends RelationManager
                     ProductResource::queueRemoteDeletedImageRestore($this->getOwnerRecord(), [$record->id]);
                 }),
             Tables\Actions\DeleteAction::make()
-                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED)
+                ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED
+                    && !$record->is_duplicate_hidden)
                 ->action(function (Image $record): void {
                     $this->removeImageRecord($record);
                 }),
+            Tables\Actions\Action::make('restoreHiddenDuplicate')
+                ->label('Restore Hidden')
+                ->icon('heroicon-o-arrow-uturn-left')
+                ->color('warning')
+                ->requiresConfirmation()
+                ->visible(fn (Image $record): bool => $record->is_duplicate_hidden
+                    && $this->canViewHiddenDuplicates())
+                ->action(function (Image $record): void {
+                    $record->restoreDuplicateHidden(Auth::id());
+                    $this->bumpOwnerApprovalVersion();
+
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Hidden duplicate restored')
+                            ->body('The image is visible locally again. Sync selected images if it should be restored to Shopify.')
+                            ->success()
+                    );
+                }),
             Tables\Actions\Action::make('removeDuplicate')
-                ->label('Remove Duplicate')
+                ->label('Hide Duplicate')
                 ->icon('heroicon-o-trash')
                 ->color('danger')
                 ->requiresConfirmation()
                 ->visible(fn (Image $record): bool => $this->canManageDuplicateRemoval()
                     && $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED
+                    && !$record->is_duplicate_hidden
                     && $this->hasDuplicatePosition($record))
                 ->action(function (Image $record): void {
-                    $this->removeImageRecord($record);
+                    $this->hideDuplicateImageRecord($record);
 
                     AdminNotification::send(
                         Notification::make()
                             ->title('Duplicate image removed')
-                            ->body('The selected duplicate image was removed.')
+                            ->body('The selected duplicate image was hidden from normal image lists.')
                             ->success()
                     );
                 }),
@@ -349,7 +386,7 @@ class ImagesRelationManager extends RelationManager
                             continue;
                         }
 
-                        $this->removeImageRecord($record, false);
+                        $this->hideDuplicateImageRecord($record, false);
                         $removed++;
                     }
 
@@ -361,13 +398,14 @@ class ImagesRelationManager extends RelationManager
                         Notification::make()
                             ->title('Duplicate images removed')
                             ->body($removed > 0
-                                ? "Removed {$removed} selected duplicate image(s)."
+                                ? "Hid {$removed} selected duplicate image(s)."
                                 : 'No selected images were removable duplicates.')
                             ->status($removed > 0 ? 'success' : 'warning')
                     );
                 })
                 ->deselectRecordsAfterCompletion(),
         ])
+            ->modifyQueryUsing(fn (Builder $query): Builder => $this->applyImageVisibilityQuery($query))
             ->defaultSort('position')
             ->paginated(false)
             ->reorderable('position');
@@ -455,12 +493,38 @@ class ImagesRelationManager extends RelationManager
                 Image::SYNC_STATE_LOCAL_DELETED,
                 Image::SYNC_STATE_REMOTE_DELETED,
             ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
             ->exists() ?? false;
+    }
+
+    private function canViewHiddenDuplicates(): bool
+    {
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
     private function canManageDuplicateRemoval(): bool
     {
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    private function applyImageVisibilityQuery(Builder $query): Builder
+    {
+        if ($this->canViewHiddenDuplicates()) {
+            return $query;
+        }
+
+        return $query
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function (Builder $imageQuery): void {
+                $imageQuery->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            });
     }
 
     private function ownerHasDuplicatePositions(): bool
@@ -476,6 +540,10 @@ class ImagesRelationManager extends RelationManager
                 Image::SYNC_STATE_LOCAL_DELETED,
                 Image::SYNC_STATE_REMOTE_DELETED,
             ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
             ->select('position')
             ->groupBy('position')
             ->havingRaw('COUNT(*) > 1')
@@ -498,6 +566,10 @@ class ImagesRelationManager extends RelationManager
                 Image::SYNC_STATE_LOCAL_DELETED,
                 Image::SYNC_STATE_REMOTE_DELETED,
             ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
             ->orderBy('position')
             ->orderBy('id')
             ->get()
@@ -520,7 +592,7 @@ class ImagesRelationManager extends RelationManager
                     continue;
                 }
 
-                $this->removeImageRecord($image, false);
+                $this->hideDuplicateImageRecord($image, false, $primary);
                 $removed++;
             }
         }
@@ -559,6 +631,46 @@ class ImagesRelationManager extends RelationManager
         $first = $sorted->first();
 
         return $first instanceof Image ? $first : null;
+    }
+
+    private function hideDuplicateImageRecord(Image $record, bool $bumpApprovalVersion = true, ?Image $primary = null): void
+    {
+        $primary ??= $this->primaryImageForDuplicatePosition($record);
+        $record->hideAsDuplicate(
+            $primary,
+            Auth::id(),
+            $record->position !== null
+                ? "Duplicate image position {$record->position}"
+                : 'Duplicate image cleanup'
+        );
+
+        if ($bumpApprovalVersion) {
+            $this->bumpOwnerApprovalVersion();
+        }
+    }
+
+    private function primaryImageForDuplicatePosition(Image $record): ?Image
+    {
+        if ($record->position === null) {
+            return null;
+        }
+
+        $images = $this->getOwnerRecord()
+            ?->allImages()
+            ->where('position', $record->position)
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->get() ?? collect();
+
+        $primary = $this->preferredImageToKeep($images);
+
+        return $primary instanceof Image && !$primary->is($record) ? $primary : null;
     }
 
     private function removeImageRecord(Image $record, bool $bumpApprovalVersion = true): void

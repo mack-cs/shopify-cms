@@ -3815,7 +3815,11 @@ GQL;
         $matchedExistingIds = [];
 
         $imageQuery = $product->allImages()
-            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED);
+            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            });
 
         if (!$allowRemoteDeletedRestore) {
             $imageQuery->where('sync_state', '!=', Image::SYNC_STATE_REMOTE_DELETED);

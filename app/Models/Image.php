@@ -30,6 +30,13 @@ class Image extends Model
         'image_asset_id',
         'sync_state',
         'local_dirty',
+        'is_duplicate_hidden',
+        'duplicate_of_image_id',
+        'duplicate_hidden_at',
+        'duplicate_hidden_by',
+        'duplicate_hidden_reason',
+        'duplicate_restored_at',
+        'duplicate_restored_by',
         'last_shopify_seen_at',
         'last_synced_at',
         'src',
@@ -50,6 +57,9 @@ class Image extends Model
 
     protected $casts = [
         'local_dirty' => 'boolean',
+        'is_duplicate_hidden' => 'boolean',
+        'duplicate_hidden_at' => 'datetime',
+        'duplicate_restored_at' => 'datetime',
         'last_shopify_seen_at' => 'datetime',
         'last_synced_at' => 'datetime',
         'backup_completed_at' => 'datetime',
@@ -62,7 +72,10 @@ class Image extends Model
         return $query->whereNotIn('sync_state', [
             self::SYNC_STATE_LOCAL_DELETED,
             self::SYNC_STATE_REMOTE_DELETED,
-        ]);
+        ])->where(function (Builder $activeQuery): void {
+            $activeQuery->whereNull('is_duplicate_hidden')
+                ->orWhere('is_duplicate_hidden', false);
+        });
     }
 
     public function product(): BelongsTo
@@ -78,6 +91,21 @@ class Image extends Model
     public function variants(): HasMany
     {
         return $this->hasMany(Variant::class);
+    }
+
+    public function duplicateOf(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'duplicate_of_image_id');
+    }
+
+    public function duplicateHiddenBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'duplicate_hidden_by');
+    }
+
+    public function duplicateRestoredBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'duplicate_restored_by');
     }
 
     public function lastShopifySyncedImageAsset(): BelongsTo
@@ -190,6 +218,40 @@ class Image extends Model
         }
 
         return $this->normalizeSourceUrl($this->src) !== null;
+    }
+
+    public function hideAsDuplicate(?Image $primary = null, ?int $userId = null, ?string $reason = null): void
+    {
+        $hasShopifyId = filled(trim((string) ($this->shopify_id ?? '')));
+
+        $this->forceFill([
+            'is_duplicate_hidden' => true,
+            'duplicate_of_image_id' => $primary?->getKey(),
+            'duplicate_hidden_at' => now(),
+            'duplicate_hidden_by' => $userId,
+            'duplicate_hidden_reason' => $reason !== null ? trim($reason) : null,
+            'duplicate_restored_at' => null,
+            'duplicate_restored_by' => null,
+            'sync_state' => self::SYNC_STATE_LOCAL_DELETED,
+            'local_dirty' => $hasShopifyId,
+        ])->save();
+    }
+
+    public function restoreDuplicateHidden(?int $userId = null): void
+    {
+        $hasShopifyId = filled(trim((string) ($this->shopify_id ?? '')));
+
+        $this->forceFill([
+            'is_duplicate_hidden' => false,
+            'duplicate_of_image_id' => null,
+            'duplicate_hidden_at' => null,
+            'duplicate_hidden_by' => null,
+            'duplicate_hidden_reason' => null,
+            'duplicate_restored_at' => now(),
+            'duplicate_restored_by' => $userId,
+            'sync_state' => $hasShopifyId ? self::SYNC_STATE_SYNCED : self::SYNC_STATE_LOCAL_NEW,
+            'local_dirty' => !$hasShopifyId,
+        ])->save();
     }
 
     private function normalizeSourceUrl(?string $value): ?string

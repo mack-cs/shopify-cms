@@ -237,6 +237,10 @@ class Product extends Model
                 Image::SYNC_STATE_LOCAL_DELETED,
                 Image::SYNC_STATE_REMOTE_DELETED,
             ])
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
             ->select('position')
             ->groupBy('position')
             ->havingRaw('COUNT(*) > 1');

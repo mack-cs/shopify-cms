@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
 use App\Services\HeaderStore;
+use App\Services\TagNormalizer;
 use App\Models\StyleProfile;
 use App\Models\Product;
 use App\Models\User;
@@ -26,6 +27,24 @@ class NewProductDraft extends Model
     public const SHOPIFY_MISSING_INVESTIGATING = 'investigating';
     public const SHOPIFY_MISSING_CLEANED = 'cleaned';
     public const SHOPIFY_MISSING_RECOVERY_ENABLED = 'recovery_enabled';
+    private const SALE_TAG = 'sale';
+    private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
+    private const DEFAULT_NEW_PRODUCT_TAGS = [
+        'all-products-collection',
+        'all-products',
+    ];
+    private const PRODUCT_TYPE_TAGS = [
+        'anklet',
+        'bracelet',
+        'bundle',
+        'bundles',
+        'charm',
+        'earring',
+        'necklace',
+        'ring',
+        'stack',
+        'stacks',
+    ];
 
     protected $fillable = [
         'handle',
@@ -38,6 +57,7 @@ class NewProductDraft extends Model
         'google_product_category',
         'type',
         'tags',
+        'is_on_sale',
         'color_string',
         'status',
         'published',
@@ -60,6 +80,8 @@ class NewProductDraft extends Model
         'sibling_collection',
         'uvp_short_paragraph',
         'complementary_products',
+        'bundle_product_ids',
+        'bundle_image_urls',
         'seo_deindex',
         'variant_inventory_policy',
         'variant_fulfillment_service',
@@ -81,6 +103,9 @@ class NewProductDraft extends Model
         'shopify_sync_warnings' => 'array',
         'shopify_missing_detected_at' => 'datetime',
         'shopify_missing_sync_blocked' => 'boolean',
+        'is_on_sale' => 'boolean',
+        'bundle_product_ids' => 'array',
+        'bundle_image_urls' => 'array',
         'variant_price' => 'decimal:2',
         'variant_compare_at_price' => 'decimal:2',
         'variant_inventory_qty' => 'integer',
@@ -95,20 +120,21 @@ class NewProductDraft extends Model
             $current = is_string($draft->google_product_category)
                 ? trim($draft->google_product_category)
                 : '';
-            if ($current !== '') {
-                return;
+
+            if ($current === '') {
+                $resolved = CategoryTypeMap::resolve(
+                    is_string($draft->product_category) ? $draft->product_category : null,
+                    is_string($draft->type) ? $draft->type : null,
+                    null
+                );
+
+                $google = trim((string) ($resolved['google_product_category'] ?? ''));
+                if ($google !== '') {
+                    $draft->google_product_category = $google;
+                }
             }
 
-            $resolved = CategoryTypeMap::resolve(
-                is_string($draft->product_category) ? $draft->product_category : null,
-                is_string($draft->type) ? $draft->type : null,
-                null
-            );
-
-            $google = trim((string) ($resolved['google_product_category'] ?? ''));
-            if ($google !== '') {
-                $draft->google_product_category = $google;
-            }
+            $draft->applyDefaultSaleTags();
         });
     }
 
@@ -156,6 +182,120 @@ class NewProductDraft extends Model
     public function setImagePathAttribute(mixed $value): void
     {
         $this->attributes['image_path'] = is_string($value) ? trim($value) : $value;
+    }
+
+    private function applyDefaultSaleTags(): void
+    {
+        $tags = self::normalizeBundleCollectionTags(
+            TagNormalizer::parseTokens((string) ($this->attributes['tags'] ?? ''))
+        );
+        $isOnSale = (bool) ($this->attributes['is_on_sale'] ?? false)
+            || in_array(self::SALE_TAG, $tags, true);
+
+        $tags = array_values(array_filter(
+            $tags,
+            fn (string $tag): bool => !in_array($tag, [self::SALE_TAG, self::EXCLUDE_FROM_SALE_TAG], true)
+        ));
+
+        foreach (self::DEFAULT_NEW_PRODUCT_TAGS as $defaultTag) {
+            $tags[] = $defaultTag;
+        }
+
+        $typeTag = self::hasBundleOrStackTag($tags)
+            ? 'bundles'
+            : self::defaultTagForType($this->attributes['type'] ?? null);
+        if ($typeTag !== null) {
+            $tags = array_values(array_filter(
+                $tags,
+                fn (string $tag): bool => !in_array($tag, self::PRODUCT_TYPE_TAGS, true) || $tag === $typeTag
+            ));
+            $tags[] = $typeTag;
+        }
+
+        $tags[] = $isOnSale ? self::SALE_TAG : self::EXCLUDE_FROM_SALE_TAG;
+
+        $this->attributes['is_on_sale'] = $isOnSale;
+        $this->attributes['tags'] = TagNormalizer::normalizeFromArray(
+            self::normalizeBundleCollectionTags($tags)
+        );
+    }
+
+    private static function defaultTagForType(mixed $type): ?string
+    {
+        $token = TagNormalizer::normalizeToken((string) ($type ?? ''));
+        if ($token === null) {
+            return null;
+        }
+
+        return match ($token) {
+            'anklet', 'anklets' => 'anklet',
+            'bracelet', 'bracelets' => 'bracelet',
+            'bundle', 'bundles', 'stack', 'stacks' => 'bundles',
+            'charm', 'charms' => 'charm',
+            'earring', 'earrings' => 'earring',
+            'necklace', 'necklaces' => 'necklace',
+            'ring', 'rings' => 'ring',
+            default => str_ends_with($token, 's') && strlen($token) > 3
+                ? substr($token, 0, -1)
+                : $token,
+        };
+    }
+
+    /**
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private static function normalizeBundleCollectionTags(array $tags): array
+    {
+        $tags = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags));
+        if (!self::hasBundleOrStackTag($tags)) {
+            return $tags;
+        }
+
+        $remove = ['bundle', 'stack', 'stacks'];
+        foreach ($tags as $tag) {
+            foreach (['-bundles', '-bundle', '-stacks', '-stack'] as $suffix) {
+                if (!str_ends_with($tag, $suffix)) {
+                    continue;
+                }
+
+                $base = substr($tag, 0, -strlen($suffix));
+                if ($base !== '') {
+                    $remove[] = $base;
+                }
+            }
+        }
+
+        $tags = array_values(array_filter(
+            $tags,
+            fn (string $tag): bool => !in_array($tag, array_unique($remove), true)
+        ));
+        $tags[] = 'bundles';
+
+        return TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags));
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function hasBundleOrStackTag(array $tags): bool
+    {
+        foreach (TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags)) as $tag) {
+            if (in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)) {
+                return true;
+            }
+
+            if (
+                str_ends_with($tag, '-bundle')
+                || str_ends_with($tag, '-bundles')
+                || str_ends_with($tag, '-stack')
+                || str_ends_with($tag, '-stacks')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function setTitleAttribute(mixed $value): void
