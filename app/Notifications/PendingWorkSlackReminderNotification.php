@@ -364,8 +364,21 @@ class PendingWorkSlackReminderNotification extends Notification
 
         $okCount = (int) ($counts[SiteAuditResult::RESULT_OK] ?? 0);
         $redirectCount = (int) ($counts[SiteAuditResult::RESULT_REDIRECT] ?? 0);
-        $problemCount = collect(SiteAuditResult::ISSUE_RESULTS)
-            ->sum(fn (string $result): int => (int) ($counts[$result] ?? 0));
+        $problemCount = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->where(function (Builder $notRateLimitedQuery): void {
+                $notRateLimitedQuery->whereNull('status_code')
+                    ->orWhere('status_code', '!=', 429);
+            })
+            ->count();
+        $rateLimitedCount = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->where(function (Builder $rateLimitedQuery): void {
+                $rateLimitedQuery->where('result', SiteAuditResult::RESULT_RATE_LIMITED)
+                    ->orWhere('status_code', 429);
+            })
+            ->count();
         $slowThreshold = (int) config('site-audit.slow_threshold_ms', 3000);
         $slowCount = SiteAuditResult::query()
             ->where('site_audit_run_id', $run->id)
@@ -379,17 +392,24 @@ class PendingWorkSlackReminderNotification extends Notification
         if ($slowCount > 0) {
             $field .= ", {$slowCount} slow";
         }
+        if ($rateLimitedCount > 0) {
+            $field .= ", {$rateLimitedCount} rate-limited";
+        }
 
         $completedAt = $run->completed_at?->format('Y-m-d H:i') ?? 'unknown time';
         $details = [
             "Run #{$run->id} completed {$completedAt}.",
-            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; slow >= {$slowThreshold}ms: {$slowCount}.",
+            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; rate-limited {$rateLimitedCount}; slow >= {$slowThreshold}ms: {$slowCount}.",
         ];
 
         $problemLines = SiteAuditResult::query()
             ->with('siteAuditUrl')
             ->where('site_audit_run_id', $run->id)
             ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->where(function (Builder $notRateLimitedQuery): void {
+                $notRateLimitedQuery->whereNull('status_code')
+                    ->orWhere('status_code', '!=', 429);
+            })
             ->orderBy('result')
             ->orderByDesc('response_time_ms')
             ->limit(5)

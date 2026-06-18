@@ -13,6 +13,7 @@ class SiteAuditResult extends Model
     public const RESULT_SERVER_ERROR = 'server_error';
     public const RESULT_TIMEOUT = 'timeout';
     public const RESULT_SSL_ERROR = 'ssl_error';
+    public const RESULT_RATE_LIMITED = 'rate_limited';
     public const RESULT_FAILED = 'failed';
 
     public const SPEED_GOOD = 'good';
@@ -75,6 +76,20 @@ class SiteAuditResult extends Model
             self::SPEED_SLOW => 'Slow',
             self::SPEED_VERY_SLOW => 'Very slow',
         ];
+    }
+
+    public function effectiveResult(): string
+    {
+        return self::effectiveResultFor($this->result, $this->status_code);
+    }
+
+    public static function effectiveResultFor(?string $result, ?int $statusCode): string
+    {
+        if ((int) $statusCode === 429) {
+            return self::RESULT_RATE_LIMITED;
+        }
+
+        return trim((string) $result) ?: self::RESULT_FAILED;
     }
 
     public function siteAuditUrl(): BelongsTo

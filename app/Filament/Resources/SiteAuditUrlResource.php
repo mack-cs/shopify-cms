@@ -69,6 +69,8 @@ class SiteAuditUrlResource extends Resource
                     ->sortable(),
                 TextColumn::make('latestResult.result')
                     ->label('Latest Result')
+                    ->state(fn (SiteAuditUrl $record): ?string => $record->latestResult?->effectiveResult())
+                    ->formatStateUsing(fn (?string $state): ?string => $state ? (SiteAuditResultResource::resultOptions()[$state] ?? $state) : null)
                     ->badge()
                     ->color(fn (?string $state): string => SiteAuditResultResource::resultColor($state))
                     ->placeholder('Not checked'),
@@ -136,9 +138,29 @@ class SiteAuditUrlResource extends Resource
                             return $query;
                         }
 
+                        if ($value === \App\Models\SiteAuditResult::RESULT_RATE_LIMITED) {
+                            return $query->whereHas(
+                                'latestResult',
+                                fn (Builder $resultQuery): Builder => $resultQuery
+                                    ->where('result', \App\Models\SiteAuditResult::RESULT_RATE_LIMITED)
+                                    ->orWhere('status_code', 429),
+                            );
+                        }
+
                         return $query->whereHas(
                             'latestResult',
-                            fn (Builder $resultQuery): Builder => $resultQuery->where('result', $value),
+                            function (Builder $resultQuery) use ($value): Builder {
+                                $resultQuery->where('result', $value);
+
+                                if ($value === \App\Models\SiteAuditResult::RESULT_FAILED) {
+                                    $resultQuery->where(function (Builder $notRateLimitedQuery): void {
+                                        $notRateLimitedQuery->whereNull('status_code')
+                                            ->orWhere('status_code', '!=', 429);
+                                    });
+                                }
+
+                                return $resultQuery;
+                            },
                         );
                     }),
                 SelectFilter::make('latest_speed')

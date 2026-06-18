@@ -77,6 +77,8 @@ class SiteAuditResultResource extends Resource
                     })
                     ->sortable(),
                 TextColumn::make('result')
+                    ->state(fn (SiteAuditResult $record): string => $record->effectiveResult())
+                    ->formatStateUsing(fn (?string $state): ?string => self::resultOptions()[$state] ?? $state)
                     ->badge()
                     ->color(fn (?string $state): string => self::resultColor($state))
                     ->sortable(),
@@ -87,6 +89,7 @@ class SiteAuditResultResource extends Resource
                         $state === null => 'gray',
                         $state >= 200 && $state < 300 => 'success',
                         $state >= 300 && $state < 400 => 'warning',
+                        $state === 429 => 'warning',
                         $state >= 500 => 'danger',
                         default => 'gray',
                     })
@@ -140,7 +143,32 @@ class SiteAuditResultResource extends Resource
             ])
             ->filters([
                 SelectFilter::make('result')
-                    ->options(self::resultOptions()),
+                    ->options(self::resultOptions())
+                    ->query(function (Builder $query, array $data): Builder {
+                        $value = trim((string) ($data['value'] ?? ''));
+
+                        if ($value === '') {
+                            return $query;
+                        }
+
+                        if ($value === SiteAuditResult::RESULT_RATE_LIMITED) {
+                            return $query->where(function (Builder $rateLimitedQuery): void {
+                                $rateLimitedQuery->where('result', SiteAuditResult::RESULT_RATE_LIMITED)
+                                    ->orWhere('status_code', 429);
+                            });
+                        }
+
+                        $query->where('result', $value);
+
+                        if ($value === SiteAuditResult::RESULT_FAILED) {
+                            $query->where(function (Builder $notRateLimitedQuery): void {
+                                $notRateLimitedQuery->whereNull('status_code')
+                                    ->orWhere('status_code', '!=', 429);
+                            });
+                        }
+
+                        return $query;
+                    }),
                 SelectFilter::make('resource_type')
                     ->label('Resource Type')
                     ->options(self::resourceTypeOptions())
@@ -279,6 +307,7 @@ class SiteAuditResultResource extends Resource
             SiteAuditResult::RESULT_SERVER_ERROR => 'Server Error',
             SiteAuditResult::RESULT_TIMEOUT => 'Timeout',
             SiteAuditResult::RESULT_SSL_ERROR => 'SSL Error',
+            SiteAuditResult::RESULT_RATE_LIMITED => 'Rate Limited',
             SiteAuditResult::RESULT_FAILED => 'Failed',
         ];
     }
@@ -315,6 +344,7 @@ class SiteAuditResultResource extends Resource
         return match ($result) {
             SiteAuditResult::RESULT_OK => 'success',
             SiteAuditResult::RESULT_REDIRECT => 'warning',
+            SiteAuditResult::RESULT_RATE_LIMITED => 'warning',
             SiteAuditResult::RESULT_BROKEN,
             SiteAuditResult::RESULT_SERVER_ERROR,
             SiteAuditResult::RESULT_TIMEOUT,
@@ -367,6 +397,10 @@ class SiteAuditResultResource extends Resource
 
         if (str_contains($lower, 'server-side error') || str_contains($lower, 'returned http 5')) {
             return 'Server error';
+        }
+
+        if (str_contains($lower, 'http 429') || str_contains($lower, 'too many requests') || str_contains($lower, 'rate limit')) {
+            return 'Rate limited by Shopify';
         }
 
         return Str::limit($source, 44);

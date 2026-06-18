@@ -39,9 +39,15 @@ final class SiteAuditRunnerService
             return $run;
         }
 
-        $urlIds->each(function (int $urlId) use ($run): void {
-            CheckSiteAuditUrlJob::dispatch($run->id, $urlId)
+        $spacingSeconds = $this->checkSpacingSeconds();
+
+        $urlIds->values()->each(function (int $urlId, int $index) use ($run, $spacingSeconds): void {
+            $dispatch = CheckSiteAuditUrlJob::dispatch($run->id, $urlId)
                 ->onQueue((string) config('site-audit.queue', 'default'));
+
+            if ($spacingSeconds > 0 && $index > 0) {
+                $dispatch->delay($index * $spacingSeconds);
+            }
         });
 
         return $run;
@@ -95,5 +101,16 @@ final class SiteAuditRunnerService
         return in_array($type, [SiteAuditRun::TYPE_SCHEDULED, SiteAuditRun::TYPE_MANUAL], true)
             ? $type
             : SiteAuditRun::TYPE_SCHEDULED;
+    }
+
+    private function checkSpacingSeconds(): int
+    {
+        $checksPerMinute = (int) config('site-audit.checks_per_minute', 20);
+
+        if ($checksPerMinute <= 0) {
+            return 0;
+        }
+
+        return max(1, (int) ceil(60 / $checksPerMinute));
     }
 }
