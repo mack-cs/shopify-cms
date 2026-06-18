@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -97,6 +98,29 @@ class Product extends Model
     public function images(): HasMany
     {
         return $this->hasMany(Image::class)->active();
+    }
+
+    public function scopeActiveStatus(Builder $query): Builder
+    {
+        return $query->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['active']);
+    }
+
+    public function scopeMissingImageAltText(Builder $query): Builder
+    {
+        return $query->whereHas('images', fn (Builder $imageQuery): Builder => self::applyMissingImageAltTextImageFilter($imageQuery));
+    }
+
+    public function scopeActiveMissingImageAltText(Builder $query): Builder
+    {
+        return $query->activeStatus()->missingImageAltText();
+    }
+
+    public static function applyMissingImageAltTextImageFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $altQuery): void {
+            $altQuery->whereNull('alt_text')
+                ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
+        });
     }
 
     public function allImages(): HasMany

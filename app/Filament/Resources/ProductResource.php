@@ -1615,12 +1615,7 @@ class ProductResource extends Resource
             Filter::make('missing_image_alt_text')
                 ->label('Missing Image Alt Text')
                 ->indicator('Missing Image Alt Text')
-                ->query(fn (Builder $query): Builder => $query->whereHas('images', function (Builder $imageQuery): void {
-                    $imageQuery->where(function (Builder $altQuery): void {
-                        $altQuery->whereNull('alt_text')
-                            ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
-                    });
-                })),
+                ->query(fn (Builder $query): Builder => $query->missingImageAltText()),
             TernaryFilter::make('variant_clash')
                 ->label('Variant Clash')
                 ->placeholder('All')
