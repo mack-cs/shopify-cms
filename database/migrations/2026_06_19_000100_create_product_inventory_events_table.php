@@ -12,7 +12,7 @@ return new class extends Migration
             $table->id();
             $table->foreignId('product_id')->nullable()->constrained('products')->nullOnDelete();
             $table->foreignId('product_inventory_snapshot_id')->nullable()->constrained()->nullOnDelete();
-            $table->foreignId('previous_product_inventory_snapshot_id')->nullable()->constrained('product_inventory_snapshots')->nullOnDelete();
+            $table->foreignId('previous_product_inventory_snapshot_id')->nullable();
             $table->foreignId('observed_by')->nullable()->constrained('users')->nullOnDelete();
             $table->string('product_title')->nullable();
             $table->string('product_handle')->nullable()->index();
@@ -33,6 +33,10 @@ return new class extends Migration
 
             $table->index(['product_id', 'event_type', 'occurred_at'], 'product_inventory_events_lookup');
             $table->index(['event_type', 'occurred_at']);
+            $table->foreign('previous_product_inventory_snapshot_id', 'pi_events_prev_snapshot_fk')
+                ->references('id')
+                ->on('product_inventory_snapshots')
+                ->nullOnDelete();
         });
     }
 
