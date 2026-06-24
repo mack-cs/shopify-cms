@@ -800,12 +800,7 @@ final class Normalizer
 
     private function isBundleFromTags(?string $tags): bool
     {
-        $tokens = TagNormalizer::parseTokens($tags);
-        if (empty($tokens)) {
-            return false;
-        }
-
-        return in_array('bundle', $tokens, true) || in_array('bundles', $tokens, true);
+        return TagNormalizer::containsBundleOrStackTag($tags);
     }
 
     private function syncCategory(?string $name, ?string $googleCategory): ?Category

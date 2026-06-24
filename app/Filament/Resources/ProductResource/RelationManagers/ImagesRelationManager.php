@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductResource\RelationManagers;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Models\Image;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
@@ -18,6 +19,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
 class ImagesRelationManager extends RelationManager
@@ -28,6 +30,49 @@ class ImagesRelationManager extends RelationManager
     {
         return $form->schema([
             Section::make()->schema([
+                Forms\Components\CheckboxList::make('associated_image_srcs')
+                    ->label('Associated product images')
+                    ->helperText('Reuse an image from the single products associated with this bundle or stack.')
+                    ->options(fn (): array => $this->associatedProductImageOptions())
+                    ->visible(fn (): bool => $this->associatedProductImageOptions() !== [])
+                    ->columns(2)
+                    ->gridDirection('row')
+                    ->extraAttributes([
+                        'style' => 'max-height: 22rem; overflow-y: auto; padding: 0.75rem; border: 1px solid rgb(229 231 235); border-radius: 0.5rem; align-content: start;',
+                    ])
+                    ->allowHtml()
+                    ->maxItems(1)
+                    ->live()
+                    ->dehydrated(false)
+                    ->afterStateHydrated(function (Forms\Components\CheckboxList $component, Get $get): void {
+                        $src = $this->normalizeImageUrl(is_string($get('src')) ? $get('src') : null);
+                        if ($src !== null && array_key_exists($src, $this->associatedProductImageOptions())) {
+                            $component->state([$src]);
+                        }
+                    })
+                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                        $selected = is_array($state) ? array_values($state) : [];
+                        $lastSelected = $selected !== [] ? $selected[array_key_last($selected)] : null;
+                        $src = $this->normalizeImageUrl(is_string($lastSelected) ? $lastSelected : null);
+
+                        if ($src !== null) {
+                            $set('associated_image_srcs', [$src]);
+                            $set('src', $src);
+                            $set('image_path', null);
+                            return;
+                        }
+
+                        $currentSrc = $this->normalizeImageUrl(is_string($get('src')) ? $get('src') : null);
+                        if ($currentSrc !== null && array_key_exists($currentSrc, $this->associatedProductImageOptions())) {
+                            $set('src', null);
+                        }
+                    })
+                    ->columnSpanFull(),
+                Forms\Components\Placeholder::make('associated_image_preview')
+                    ->label('Preview')
+                    ->content(fn (Get $get): ?HtmlString => $this->associatedProductImagePreview($this->selectedAssociatedImageSrc($get('associated_image_srcs'))))
+                    ->visible(fn (Get $get): bool => $this->selectedAssociatedImageSrc($get('associated_image_srcs')) !== null)
+                    ->columnSpanFull(),
                 Forms\Components\FileUpload::make('image_path')
                     ->label('Upload Image')
                     ->rules(['required_without:src'])
@@ -428,6 +473,178 @@ class ImagesRelationManager extends RelationManager
         }
 
         return $trimmed;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function associatedProductImageOptions(): array
+    {
+        $productIds = $this->associatedProductIds();
+        if ($productIds === []) {
+            return [];
+        }
+
+        $order = array_flip($productIds);
+        $products = Product::query()
+            ->whereIn('id', $productIds)
+            ->with(['images' => fn ($query) => $query
+                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('position')
+                ->orderBy('id')])
+            ->get(['id', 'title', 'handle'])
+            ->sortBy(fn (Product $product): int => $order[(int) $product->id] ?? PHP_INT_MAX);
+
+        $options = [];
+        foreach ($products as $product) {
+            foreach ($product->images as $image) {
+                if (!$image instanceof Image) {
+                    continue;
+                }
+
+                $src = $this->normalizeImageUrl($image->src);
+                if ($src === null || isset($options[$src])) {
+                    continue;
+                }
+
+                $options[$src] = $this->associatedProductImageOptionLabel($product, $image, $src);
+            }
+        }
+
+        return $options;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function associatedProductIds(): array
+    {
+        $draft = $this->linkedDraftForOwner();
+        $ids = is_array($draft?->bundle_product_ids) ? $draft->bundle_product_ids : [];
+
+        $normalized = [];
+        $seen = [];
+
+        foreach ($ids as $id) {
+            $id = (int) $id;
+            if ($id <= 0 || isset($seen[$id])) {
+                continue;
+            }
+
+            $seen[$id] = true;
+            $normalized[] = $id;
+        }
+
+        return $normalized;
+    }
+
+    private function linkedDraftForOwner(): ?NewProductDraft
+    {
+        $product = $this->getOwnerRecord();
+        if (!$product instanceof Product) {
+            return null;
+        }
+
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+
+        if ($shopifyId === '' && $handle === '') {
+            return null;
+        }
+
+        return NewProductDraft::query()
+            ->where(function (Builder $query) use ($shopifyId, $handle): void {
+                if ($shopifyId !== '') {
+                    $query->where('shopify_id', $shopifyId);
+                }
+
+                if ($handle !== '') {
+                    $shopifyId !== ''
+                        ? $query->orWhere('handle', $handle)
+                        : $query->where('handle', $handle);
+                }
+            })
+            ->orderByDesc('updated_at')
+            ->first(['id', 'shopify_id', 'handle', 'bundle_product_ids']);
+    }
+
+    private function associatedProductImageOptionLabel(Product $product, Image $image, string $src): string
+    {
+        $label = e($this->associatedProductImageTextLabel($product, $image));
+        $src = e($src);
+
+        return <<<HTML
+<div style="display:flex;align-items:center;gap:12px;min-height:84px;">
+    <img src="{$src}" alt="" style="width:76px;height:76px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;background:#f9fafb;flex:0 0 auto;" />
+    <span style="white-space:normal;line-height:1.25;">{$label}</span>
+</div>
+HTML;
+    }
+
+    private function associatedProductImageTextLabel(Product $product, Image $image): string
+    {
+        $title = trim((string) ($product->title ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+        $label = $title !== '' ? $title : ($handle !== '' ? $handle : 'Product #' . $product->id);
+
+        $position = $image->position !== null ? '#' . $image->position : '#?';
+
+        return trim($label . ' ' . $position);
+    }
+
+    private function selectedAssociatedImageSrc(mixed $state): ?string
+    {
+        $selected = is_array($state) ? array_values($state) : [];
+        $lastSelected = $selected !== [] ? $selected[array_key_last($selected)] : null;
+
+        return $this->normalizeImageUrl(is_string($lastSelected) ? $lastSelected : null);
+    }
+
+    private function associatedProductImagePreview(mixed $src): ?HtmlString
+    {
+        $src = $this->normalizeImageUrl(is_string($src) ? $src : null);
+        if ($src === null) {
+            return null;
+        }
+
+        $label = $this->associatedProductImagePreviewLabel($src);
+        $escapedSrc = e($src);
+        $escapedLabel = e($label ?? 'Selected associated product image');
+
+        return new HtmlString(<<<HTML
+<div style="display:flex;align-items:center;gap:14px;">
+    <img src="{$escapedSrc}" alt="" style="width:128px;height:128px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;background:#f9fafb;" />
+    <div style="font-size:14px;line-height:1.4;color:#374151;">{$escapedLabel}</div>
+</div>
+HTML);
+    }
+
+    private function associatedProductImagePreviewLabel(string $src): ?string
+    {
+        $productIds = $this->associatedProductIds();
+        if ($productIds === []) {
+            return null;
+        }
+
+        $products = Product::query()
+            ->whereIn('id', $productIds)
+            ->with(['images' => fn ($query) => $query
+                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('position')
+                ->orderBy('id')])
+            ->get(['id', 'title', 'handle']);
+
+        foreach ($products as $product) {
+            foreach ($product->images as $image) {
+                if (!$image instanceof Image || $this->normalizeImageUrl($image->src) !== $src) {
+                    continue;
+                }
+
+                return $this->associatedProductImageTextLabel($product, $image);
+            }
+        }
+
+        return null;
     }
 
     private function normalizeFormData(array $data): array

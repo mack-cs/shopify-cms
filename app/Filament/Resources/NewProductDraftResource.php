@@ -908,6 +908,41 @@ class NewProductDraftResource extends Resource
                                     $component->state(self::parseProductReferenceState($state));
                                 })
                                 ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateProductReferenceState($state)),
+                            Select::make('bundle_product_ids')
+                                ->label('Associated products')
+                                ->helperText('Select the single products that make up this bundle or stack. This is stored locally and does not change Shopify product references.')
+                                ->placeholder('Select products')
+                                ->multiple()
+                                ->searchable()
+                                ->preload()
+                                ->live()
+                                ->options(fn (Get $get, ?NewProductDraft $record): array => self::bundleProductOptions(
+                                    $get('bundle_product_ids'),
+                                    $record
+                                ))
+                                ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleAssociationField($get, $record))
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    $component->state(self::normalizeBundleProductIds($state));
+                                })
+                                ->afterStateUpdated(function ($state, callable $set, Get $get, ?NewProductDraft $record): void {
+                                    if (!self::shouldShowBundleImageTools($get, $record)) {
+                                        return;
+                                    }
+
+                                    $allowed = array_keys(self::bundleProductImageOptions($state));
+                                    $selected = array_values(array_intersect(
+                                        self::normalizeBundleImageUrls($get('bundle_image_urls')),
+                                        $allowed
+                                    ));
+
+                                    $set('bundle_image_urls', $selected);
+
+                                    if ($selected !== [] && blank($get('image_path'))) {
+                                        $set('image_url', $selected[0]);
+                                    }
+                                })
+                                ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state)))
+                                ->columnSpanFull(),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -1207,35 +1242,9 @@ class NewProductDraftResource extends Resource
                             }
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_path'))),
-                    Select::make('bundle_product_ids')
-                        ->label('Bundle products')
-                        ->helperText('Internal use only. Select the products that make up this bundle or stack so their Shopify images can be reused.')
-                        ->multiple()
-                        ->searchable()
-                        ->preload()
-                        ->live()
-                        ->options(fn (Get $get): array => self::bundleProductOptions($get('bundle_product_ids')))
-                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record))
-                        ->afterStateHydrated(function (Select $component, $state): void {
-                            $component->state(self::normalizeBundleProductIds($state));
-                        })
-                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                            $allowed = array_keys(self::bundleProductImageOptions($state));
-                            $selected = array_values(array_intersect(
-                                self::normalizeBundleImageUrls($get('bundle_image_urls')),
-                                $allowed
-                            ));
-
-                            $set('bundle_image_urls', $selected);
-
-                            if ($selected !== [] && blank($get('image_path'))) {
-                                $set('image_url', $selected[0]);
-                            }
-                        })
-                        ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
                     CheckboxList::make('bundle_image_urls')
-                        ->label('Bundle image choices')
-                        ->helperText('Pick images from the selected products. The first selected image becomes the draft primary image URL.')
+                        ->label('Associated product image choices')
+                        ->helperText('Pick images from the associated products. The first selected image becomes the draft primary image URL.')
                         ->columns(2)
                         ->bulkToggleable()
                         ->options(fn (Get $get): array => self::bundleProductImageOptions($get('bundle_product_ids')))
@@ -1252,6 +1261,7 @@ class NewProductDraftResource extends Resource
 
                             $set('image_url', $selected[0]);
                         })
+                        ->dehydrated(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record))
                         ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleImageUrls($state))),
                     Placeholder::make('image_locked_notice')
                         ->label('')
@@ -2237,10 +2247,15 @@ class NewProductDraftResource extends Resource
         return $values === [] ? null : array_values($values);
     }
 
+    private static function shouldShowBundleAssociationField(Get $get, ?NewProductDraft $record): bool
+    {
+        return self::isBundleOrStackDraft($get('type'), $get('tags'), $record);
+    }
+
     private static function shouldShowBundleImageTools(Get $get, ?NewProductDraft $record): bool
     {
         return !self::draftImageLocked($get, $record)
-            && self::isBundleOrStackDraft($get('type'), $get('tags'), $record);
+            && self::shouldShowBundleAssociationField($get, $record);
     }
 
     private static function isBundleOrStackDraft(mixed $type, mixed $tags = null, ?NewProductDraft $record = null): bool
@@ -2251,20 +2266,33 @@ class NewProductDraftResource extends Resource
     /**
      * @return array<int, string>
      */
-    private static function bundleProductOptions(mixed $currentValue = null): array
+    private static function bundleProductOptions(mixed $currentValue = null, ?NewProductDraft $record = null): array
     {
         $selected = self::normalizeBundleProductIds($currentValue);
+        $linkedProduct = $record instanceof NewProductDraft ? self::linkedProductForDraft($record) : null;
+        $linkedProductId = $linkedProduct instanceof Product ? (int) $linkedProduct->id : null;
 
         $products = Product::query()
             ->where(function (Builder $query) use ($selected): void {
-                $query
-                    ->whereRaw('LOWER(status) = ?', ['active'])
-                    ->orWhereRaw('LOWER(status) = ?', ['draft']);
+                $query->where(function (Builder $eligible): void {
+                    $eligible
+                        ->where(function (Builder $status): void {
+                            $status
+                                ->whereRaw('LOWER(status) = ?', ['active'])
+                                ->orWhereRaw('LOWER(status) = ?', ['draft']);
+                        })
+                        ->where(function (Builder $singleProduct): void {
+                            $singleProduct
+                                ->where('is_bundle', false)
+                                ->orWhereNull('is_bundle');
+                        });
+                });
 
                 if ($selected !== []) {
                     $query->orWhereIn('id', $selected);
                 }
             })
+            ->when($linkedProductId !== null, fn (Builder $query): Builder => $query->where('id', '!=', $linkedProductId))
             ->orderBy('title')
             ->orderBy('handle')
             ->get(['id', 'title', 'handle', 'status']);
@@ -5447,6 +5475,21 @@ class NewProductDraftResource extends Resource
 
         self::validateDraftSalePricing($data);
 
+        $isBundleOrStack = self::isBundleOrStackState(
+            $data['type'] ?? null,
+            self::normalizeTagList($data['tags'] ?? null),
+            $data['title'] ?? null
+        );
+
+        if (!$isBundleOrStack) {
+            $data['bundle_product_ids'] = null;
+            $data['bundle_image_urls'] = null;
+
+            return $data;
+        }
+
+        $bundleImagesSubmitted = array_key_exists('bundle_image_urls', $data);
+
         $data['bundle_product_ids'] = self::nullableArray(
             self::normalizeBundleProductIds($data['bundle_product_ids'] ?? null)
         );
@@ -5455,6 +5498,8 @@ class NewProductDraftResource extends Resource
         );
 
         if (
+            $bundleImagesSubmitted
+            &&
             is_array($data['bundle_image_urls'] ?? null)
             && $data['bundle_image_urls'] !== []
             && blank($data['image_path'] ?? null)

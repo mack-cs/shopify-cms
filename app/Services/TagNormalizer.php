@@ -84,4 +84,24 @@ final class TagNormalizer
 
         return $normalized === '' ? null : $normalized;
     }
+
+    public static function containsBundleOrStackTag(?string $value): bool
+    {
+        foreach (self::parseTokens($value) as $tag) {
+            if (in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)) {
+                return true;
+            }
+
+            if (
+                str_ends_with($tag, '-bundle')
+                || str_ends_with($tag, '-bundles')
+                || str_ends_with($tag, '-stack')
+                || str_ends_with($tag, '-stacks')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

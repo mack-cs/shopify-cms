@@ -121,8 +121,7 @@ class ProductObserver
         }
 
         if ($product->wasChanged('tags')) {
-            $tokens = TagNormalizer::parseTokens($product->tags);
-            $isBundle = in_array('bundle', $tokens, true) || in_array('bundles', $tokens, true);
+            $isBundle = TagNormalizer::containsBundleOrStackTag($product->tags);
             if ($product->is_bundle !== $isBundle) {
                 Product::withoutEvents(function () use ($product, $isBundle): void {
                     $product->forceFill(['is_bundle' => $isBundle])->save();
