@@ -5,8 +5,10 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\InventoryResource\Pages;
 use App\Jobs\InventorySyncJob;
 use App\Models\Product;
+use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
 use App\Services\InventoryAccessService;
+use App\Services\ProductInventoryHistoryRecorder;
 use App\Services\InventoryOperationContext;
 use Filament\Forms;
 use Filament\Forms\Form;
@@ -199,6 +201,15 @@ class InventoryResource extends Resource
                             $record->save();
                         });
 
+                        $product = Product::query()->with('variants')->find($record->product_id);
+                        if ($product instanceof Product) {
+                            app(ProductInventoryHistoryRecorder::class)->record(
+                                $product,
+                                Auth::id(),
+                                ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
+                            );
+                        }
+
                         Notification::make()
                             ->title('Inventory updated locally')
                             ->success()
@@ -231,6 +242,15 @@ class InventoryResource extends Resource
                             $product->status = (string) ($data['status'] ?? 'draft');
                             $product->save();
                         });
+
+                        $product = $product->fresh(['variants']);
+                        if ($product instanceof Product) {
+                            app(ProductInventoryHistoryRecorder::class)->record(
+                                $product,
+                                Auth::id(),
+                                ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
+                            );
+                        }
 
                         Notification::make()
                             ->title('Status updated locally')

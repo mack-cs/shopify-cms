@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Product;
+use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
 use App\Models\ChangeLog;
 use Illuminate\Support\Collection;
@@ -231,6 +232,15 @@ final class ProductInventorySyncService
         });
 
         app(InventoryDraftMirrorService::class)->syncProduct($product->fresh(['variants']));
+        $freshProduct = $product->fresh(['variants']);
+
+        if ($freshProduct instanceof Product) {
+            app(ProductInventoryHistoryRecorder::class)->record(
+                $freshProduct,
+                $userId,
+                ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH,
+            );
+        }
     }
 
     private function shopifyProductInventoryDetails(Product $product): array
