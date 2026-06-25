@@ -52,7 +52,12 @@ class ProductInventorySnapshotResource extends Resource
                 TextColumn::make('source')
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => self::sourceOptions()[$state] ?? (string) $state)
-                    ->color(fn (?string $state): string => $state === ProductInventorySnapshot::SOURCE_LOCAL_UPDATE ? 'warning' : 'info')
+                    ->color(fn (?string $state): string => match ($state) {
+                        ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
+                        ProductInventorySnapshot::SOURCE_STOCK_IMPORT => 'warning',
+                        ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH => 'info',
+                        default => 'gray',
+                    })
                     ->sortable(),
                 TextColumn::make('product_status')
                     ->label('Status')
@@ -134,6 +139,7 @@ class ProductInventorySnapshotResource extends Resource
         return [
             ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH => 'Shopify Refresh',
             ProductInventorySnapshot::SOURCE_LOCAL_UPDATE => 'Local Update',
+            ProductInventorySnapshot::SOURCE_STOCK_IMPORT => 'Stock Import',
         ];
     }
 

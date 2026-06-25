@@ -2,7 +2,6 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -28,12 +27,12 @@ return new class extends Migration
 
     private function ensureIndex(string $table, string $indexName, array $columns): void
     {
-        $exists = DB::select('SHOW INDEX FROM ' . $table . ' WHERE Key_name = ?', [$indexName]);
-        if (!empty($exists)) {
+        if (Schema::hasIndex($table, $indexName)) {
             return;
         }
 
-        $cols = implode(',', array_map(fn ($col) => "`{$col}`", $columns));
-        DB::statement("CREATE INDEX `{$indexName}` ON `{$table}` ({$cols})");
+        Schema::table($table, function (Blueprint $blueprint) use ($columns, $indexName): void {
+            $blueprint->index($columns, $indexName);
+        });
     }
 };

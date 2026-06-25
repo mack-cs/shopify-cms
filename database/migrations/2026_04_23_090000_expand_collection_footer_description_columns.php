@@ -12,8 +12,10 @@ return new class extends Migration
             return;
         }
 
-        DB::statement('ALTER TABLE `collections` MODIFY `elegant_footer_description` TEXT NULL');
-        DB::statement('ALTER TABLE `collections` MODIFY `draft_elegant_footer_description` TEXT NULL');
+        if (DB::connection()->getDriverName() === 'mysql') {
+            DB::statement('ALTER TABLE `collections` MODIFY `elegant_footer_description` TEXT NULL');
+            DB::statement('ALTER TABLE `collections` MODIFY `draft_elegant_footer_description` TEXT NULL');
+        }
     }
 
     public function down(): void
@@ -22,7 +24,9 @@ return new class extends Migration
             return;
         }
 
-        DB::statement('ALTER TABLE `collections` MODIFY `elegant_footer_description` VARCHAR(255) NULL');
-        DB::statement('ALTER TABLE `collections` MODIFY `draft_elegant_footer_description` VARCHAR(255) NULL');
+        if (DB::connection()->getDriverName() === 'mysql') {
+            DB::statement('ALTER TABLE `collections` MODIFY `elegant_footer_description` VARCHAR(255) NULL');
+            DB::statement('ALTER TABLE `collections` MODIFY `draft_elegant_footer_description` VARCHAR(255) NULL');
+        }
     }
 };

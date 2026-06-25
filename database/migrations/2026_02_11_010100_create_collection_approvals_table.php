@@ -3,17 +3,13 @@
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
     public function up(): void
     {
         if (Schema::hasTable('collection_approvals')) {
-            $existing = DB::select(
-                "SHOW INDEX FROM `collection_approvals` WHERE Key_name = 'collection_approvals_unique'"
-            );
-            if (empty($existing)) {
+            if (!Schema::hasIndex('collection_approvals', 'collection_approvals_unique')) {
                 Schema::table('collection_approvals', function (Blueprint $table) {
                     $table->unique(['collection_id', 'user_id', 'approval_version'], 'collection_approvals_unique');
                 });
