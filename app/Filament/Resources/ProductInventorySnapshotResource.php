@@ -54,7 +54,8 @@ class ProductInventorySnapshotResource extends Resource
                     ->formatStateUsing(fn (?string $state): string => self::sourceOptions()[$state] ?? (string) $state)
                     ->color(fn (?string $state): string => match ($state) {
                         ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
-                        ProductInventorySnapshot::SOURCE_STOCK_IMPORT => 'warning',
+                        ProductInventorySnapshot::SOURCE_STOCK_IMPORT,
+                        ProductInventorySnapshot::SOURCE_BUNDLE_COMPONENT_RULE => 'warning',
                         ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH => 'info',
                         default => 'gray',
                     })
@@ -140,6 +141,7 @@ class ProductInventorySnapshotResource extends Resource
             ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH => 'Shopify Refresh',
             ProductInventorySnapshot::SOURCE_LOCAL_UPDATE => 'Local Update',
             ProductInventorySnapshot::SOURCE_STOCK_IMPORT => 'Stock Import',
+            ProductInventorySnapshot::SOURCE_BUNDLE_COMPONENT_RULE => 'Bundle Component Rule',
         ];
     }
 

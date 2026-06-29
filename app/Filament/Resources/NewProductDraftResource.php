@@ -34,6 +34,7 @@ use App\Services\DeletionRequestWorkflowService;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftRoundtripCsvService;
+use App\Services\NewProductDraftStackAssociationImporter;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
 use App\Services\ShopifyMissingDraftWorkflowService;
@@ -3578,6 +3579,40 @@ class NewProductDraftResource extends Resource
                                 $pendingApprovalPart
                             )
                             ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
+                        );
+                    }),
+                Tables\Actions\Action::make('importStackAssociations')
+                    ->label('Import Stack Associations')
+                    ->icon('heroicon-o-link')
+                    ->color('gray')
+                    ->form([
+                        Forms\Components\FileUpload::make('file')
+                            ->label('Stack Association CSV')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports')
+                            ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                            ->helperText('Use columns like Stack SKU, Stack Name, SKU 1, SKU 2, SKU 3, SKU 4. Rows without a matching stack SKU are skipped; unmatched bracelet SKUs are ignored.'),
+                    ])
+                    ->action(function (array $data, NewProductDraftStackAssociationImporter $importer): void {
+                        $path = Storage::disk('local')->path($data['file']);
+                        $result = $importer->importFromPath($path);
+
+                        $skippedRows = $result['skipped_missing_stack_sku']
+                            + $result['skipped_stack_not_found']
+                            + $result['skipped_without_resolved_products'];
+
+                        $body = "Rows: {$result['total']}, Updated: {$result['updated']}, Unchanged: {$result['unchanged']}, Skipped rows: {$skippedRows}. " .
+                            "Resolved product SKUs: {$result['component_skus_resolved']}, Missing product SKUs: {$result['component_skus_not_found']}, Ambiguous product SKUs: {$result['component_skus_ambiguous']}.";
+
+                        if (($result['warnings'] ?? []) !== []) {
+                            $body .= "\n" . implode("\n", $result['warnings']);
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Stack associations imported')
+                            ->body($body)
+                            ->status($skippedRows > 0 || $result['component_skus_not_found'] > 0 || $result['component_skus_ambiguous'] > 0 ? 'warning' : 'success')
                         );
                     }),
                 Tables\Actions\Action::make('configureComplementaryRule')

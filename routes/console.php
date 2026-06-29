@@ -10,6 +10,7 @@ use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\ComplementaryProductMaintenanceService;
+use App\Services\StackBundleSellabilityService;
 use App\Services\SiteAudit\SitemapDiscoveryService;
 use App\Services\SiteAudit\SiteAuditRunnerService;
 use Illuminate\Foundation\Inspiring;
@@ -243,6 +244,54 @@ Artisan::command(
         return self::SUCCESS;
     }
 )->purpose('Read current inventory and product status from Shopify into local variants/products without pushing local changes to Shopify.');
+
+Artisan::command(
+    'inventory:enforce-stack-sellability
+    {--dry-run : Show what would be changed without updating drafts or variants}
+    {--test-only : Only allow stacks containing the test token to be changed}
+    {--test-token=test : Token used by --test-only when matching title, handle, or SKU}
+    {--require-test-components : With --test-only, also skip stacks unless all associated products contain the test token}
+    {--refresh-components : Read associated component inventory from Shopify before enforcing}
+    {--user-id= : Optional user ID recorded on inventory history snapshots}',
+    function (): int {
+        $dryRun = (bool) $this->option('dry-run');
+        $refreshComponents = (bool) $this->option('refresh-components');
+        $userId = (int) ($this->option('user-id') ?? 0);
+
+        if ($dryRun && $refreshComponents) {
+            $this->error('--refresh-components writes current Shopify inventory into local component records. Use either --dry-run or --refresh-components, not both.');
+
+            return self::FAILURE;
+        }
+
+        $summary = app(StackBundleSellabilityService::class)->enforce(
+            $userId > 0 ? $userId : null,
+            $dryRun,
+            [
+                'test_only' => (bool) $this->option('test-only'),
+                'test_token' => (string) ($this->option('test-token') ?? 'test'),
+                'require_test_components' => (bool) $this->option('require-test-components'),
+                'refresh_components' => $refreshComponents,
+            ],
+        );
+
+        $this->info($dryRun ? 'Stack sellability dry run complete.' : 'Stack sellability enforcement complete.');
+        $this->line("Checked drafts: {$summary['checked']}");
+        $this->line("With associations: {$summary['with_associations']}");
+        $this->line("All components sellable: {$summary['all_components_sellable']}");
+        $this->line("Missing components: {$summary['missing_components']}");
+        $this->line("Forced unsellable: {$summary['forced_unsellable']}");
+        $this->line("Already unsellable: {$summary['already_unsellable']}");
+        $this->line("Missing stack product: {$summary['missing_stack_product']}");
+        $this->line("Skipped non-test stacks: {$summary['skipped_non_test_stack']}");
+        $this->line("Skipped non-test/missing components: {$summary['skipped_non_test_components']}");
+        $this->line("Shopify component variants refreshed: {$summary['shopify_component_refreshes']}");
+        $this->line("Shopify component refresh failures: {$summary['shopify_component_refresh_failures']}");
+        $this->line("Stacks skipped after refresh failure: {$summary['shopify_refresh_failed_stacks']}");
+
+        return self::SUCCESS;
+    }
+)->purpose('Local only: force stack/bundle draft and variant stock to 0 when associated component products are missing or unsellable; can be limited to test records and refreshed from Shopify first.');
 
 Artisan::command(
     'shopify:reconcile-complementary-products

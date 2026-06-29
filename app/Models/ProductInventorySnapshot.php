@@ -12,6 +12,7 @@ class ProductInventorySnapshot extends Model
     public const SOURCE_SHOPIFY_REFRESH = 'shopify_refresh';
     public const SOURCE_LOCAL_UPDATE = 'local_update';
     public const SOURCE_STOCK_IMPORT = 'stock_import';
+    public const SOURCE_BUNDLE_COMPONENT_RULE = 'bundle_component_rule';
 
     protected $fillable = [
         'product_id',
