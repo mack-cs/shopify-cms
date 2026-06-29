@@ -1793,10 +1793,10 @@ query ProductByHandleDetails($handle: String!) {
         }
       }
     }
-    media(first: 50) {
+    media(first: 250) {
       nodes {
+        id
         ... on MediaImage {
-          id
           image {
             url
           }
@@ -1860,10 +1860,10 @@ query ProductByIdDetails($id: ID!) {
         }
       }
     }
-    media(first: 50) {
+    media(first: 250) {
       nodes {
+        id
         ... on MediaImage {
-          id
           image {
             url
           }
@@ -3861,21 +3861,6 @@ GQL;
                     'previous_media_mode' => trim((string) ($previousMatch['mode'] ?? '')) ?: null,
                 ];
             })
-            ->filter(function (array $row) use (&$warnings, $product): bool {
-                if ($row['sync_url'] !== null) {
-                    return true;
-                }
-
-                /** @var Image $image */
-                $image = $row['image'];
-
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
-                ];
-
-                return false;
-            })
             ->sortBy(fn (array $row): string => sprintf(
                 '%010d-%010d',
                 $row['position'] ?? 2147483647,
@@ -3892,7 +3877,7 @@ GQL;
             $syncUrl = $desiredImage['sync_url'];
             $match = null;
 
-            if ($desiredImage['requires_republish']) {
+            if ($desiredImage['requires_republish'] && $syncUrl !== null) {
                 return $desiredImage;
             }
 
@@ -3909,12 +3894,43 @@ GQL;
                 if ($matchedId !== '') {
                     $matchedExistingIds[] = $matchedId;
                     $desiredImage['matched_media_id'] = $matchedId;
-                    $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
+                    if (!$desiredImage['requires_republish']) {
+                        $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
+                    }
                 }
             }
 
             return $desiredImage;
         });
+
+        $desiredImages = $desiredImages
+            ->filter(function (array $row) use (&$warnings, $product): bool {
+                /** @var Image $image */
+                $image = $row['image'];
+
+                if ($row['matched_media_id'] !== null) {
+                    if ($row['requires_republish'] && $row['sync_url'] === null) {
+                        $warnings[] = [
+                            'product_id' => $product->id,
+                            'warning' => "Matched existing Shopify media for image {$image->id}, but it could not be republished because it has no usable sync source URL.",
+                        ];
+                    }
+
+                    return true;
+                }
+
+                if ($row['sync_url'] !== null) {
+                    return true;
+                }
+
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
+                ];
+
+                return false;
+            })
+            ->values();
 
         if (!$selectedSync) {
             // Non-destructive cleanup: remove product references for shared media files,
@@ -4063,16 +4079,28 @@ GQL;
         array $existingEntriesById,
         array $existingEntriesByUrl,
     ): ?array {
-        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
-            return $existingEntriesById[$shopifyId];
-        }
-
+        $urlMatch = null;
         if ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
-            return $existingEntriesByUrl[$currentUrl];
+            $urlMatch = $existingEntriesByUrl[$currentUrl];
+        } elseif ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
+            $urlMatch = $existingEntriesByUrl[$syncUrl];
         }
 
-        if ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
-            return $existingEntriesByUrl[$syncUrl];
+        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
+            $idMatch = $existingEntriesById[$shopifyId];
+            if (
+                $urlMatch !== null
+                && ($idMatch['mode'] ?? null) === 'legacy_image'
+                && ($urlMatch['mode'] ?? null) !== 'legacy_image'
+            ) {
+                return $urlMatch;
+            }
+
+            return $idMatch;
+        }
+
+        if ($urlMatch !== null) {
+            return $urlMatch;
         }
 
         return null;
@@ -4294,7 +4322,7 @@ GQL;
     {
         $warnings = [];
 
-        if ($desiredImages->count() <= 1) {
+        if ($desiredImages->isEmpty()) {
             return $warnings;
         }
 
@@ -4341,21 +4369,26 @@ GQL;
             $desiredMediaIds[] = $mediaId;
         }
 
-        if (count($desiredMediaIds) <= 1) {
+        $desiredMediaIds = array_values(array_unique($desiredMediaIds));
+
+        if (empty($desiredMediaIds)) {
             return $warnings;
         }
 
-        $currentDesiredOrder = array_values(array_filter(
-            $currentMediaIds,
-            fn (string $id): bool => in_array($id, $desiredMediaIds, true)
+        $desiredOrder = array_values(array_merge(
+            $desiredMediaIds,
+            array_values(array_filter(
+                $currentMediaIds,
+                fn (string $id): bool => !in_array($id, $desiredMediaIds, true)
+            ))
         ));
 
-        if ($currentDesiredOrder === $desiredMediaIds) {
+        if ($desiredOrder === $currentMediaIds) {
             return $warnings;
         }
 
         $moves = [];
-        foreach ($desiredMediaIds as $position => $mediaId) {
+        foreach ($desiredOrder as $position => $mediaId) {
             $moves[] = [
                 'id' => $mediaId,
                 'newPosition' => (string) $position,

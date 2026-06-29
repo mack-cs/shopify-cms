@@ -165,8 +165,11 @@ final class NewProductDraftShopifyCreator
         $product = $payload['product'] ?? null;
         $mediaError = null;
 
-        if ($product && ($draft->image_path || $draft->image_url)) {
-            $mediaError = $this->attachPrimaryImage($product['id'] ?? null, $draft->imageUrl());
+        if ($product) {
+            $mediaSources = $this->mediaSources($draft);
+            if ($mediaSources !== []) {
+                $mediaError = $this->attachImages($product['id'] ?? null, $mediaSources);
+            }
         }
 
         return [
@@ -177,24 +180,56 @@ final class NewProductDraftShopifyCreator
         ];
     }
 
-    private function attachPrimaryImage(?string $productId, ?string $imageUrl): ?string
+    /**
+     * @return array<int, string>
+     */
+    private function mediaSources(NewProductDraft $draft): array
+    {
+        $sources = [];
+
+        $primary = trim((string) ($draft->imageUrl() ?? ''));
+        if ($primary !== '') {
+            $sources[] = $primary;
+        }
+
+        $bundleImageUrls = is_array($draft->bundle_image_urls) ? $draft->bundle_image_urls : [];
+        foreach ($bundleImageUrls as $url) {
+            $url = is_string($url) ? trim($url) : '';
+            if ($url !== '') {
+                $sources[] = $url;
+            }
+        }
+
+        return array_values(array_unique($sources));
+    }
+
+    /**
+     * @param array<int, string> $imageUrls
+     */
+    private function attachImages(?string $productId, array $imageUrls): ?string
     {
         if (!$productId) {
             return 'Missing product id for media upload.';
         }
 
-        if (!$imageUrl) {
+        $imageUrls = array_values(array_filter(array_map(
+            static fn (string $url): string => trim($url),
+            $imageUrls
+        ), static fn (string $url): bool => $url !== ''));
+
+        if ($imageUrls === []) {
             return 'Unable to resolve image URL.';
         }
 
         $data = $this->client->graphql($this->mediaMutation(), [
             'productId' => $productId,
-            'media' => [
-                [
+            'media' => collect($imageUrls)
+                ->map(fn (string $imageUrl): array => [
                     'originalSource' => $imageUrl,
                     'mediaContentType' => 'IMAGE',
-                ],
-            ],
+                ])
+                ->values()
+                ->all(),
         ]);
 
         $payload = $data['productCreateMedia'] ?? null;

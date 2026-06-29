@@ -3,6 +3,7 @@
 use App\Filament\Resources\NewProductDraftResource;
 use App\Models\Import;
 use App\Models\NewProductDraft;
+use App\Models\NewProductDraftApproval;
 use App\Models\Product;
 use App\Models\Approval;
 use App\Models\ShopifyMetafield;
@@ -13,11 +14,11 @@ use App\Models\Variant;
 use App\Services\HeaderStore;
 use App\Services\NewProductDraftSeeder;
 use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftShopifyCreator;
 use App\Services\ProductShopifyUpdater;
-use App\Services\ShopifyApiClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
-use Mockery;
 
 uses(RefreshDatabase::class);
 
@@ -711,55 +712,51 @@ it('syncs only the first three complementary products to Shopify while keeping e
 
     $capturedMetafields = null;
 
-    $client = Mockery::mock(ShopifyApiClient::class);
-    $client->shouldReceive('graphql')
-        ->andReturnUsing(function (string $query, array $variables = []) use (&$capturedMetafields): array {
-            if (str_contains($query, 'query ProductByIdDetails')) {
-                return [
-                    'product' => [
-                        'id' => 'gid://shopify/Product/1001',
-                        'options' => [],
-                        'category' => [
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$capturedMetafields): array {
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1001',
+                    'options' => [],
+                    'category' => [
+                        'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                        'name' => 'Jewelry',
+                    ],
+                    'productCategory' => [
+                        'productTaxonomyNode' => [
                             'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                            'name' => 'Jewelry',
-                        ],
-                        'productCategory' => [
-                            'productTaxonomyNode' => [
-                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                                'fullName' => 'Apparel & Accessories > Jewelry',
-                            ],
-                        ],
-                        'variants' => ['nodes' => []],
-                        'media' => ['nodes' => []],
-                    ],
-                ];
-            }
-
-            if (str_contains($query, 'query ProductByIdMetafields')) {
-                return [
-                    'product' => [
-                        'metafields' => [
-                            'nodes' => [],
+                            'fullName' => 'Apparel & Accessories > Jewelry',
                         ],
                     ],
-                ];
-            }
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                ],
+            ];
+        }
 
-            if (str_contains($query, 'mutation MetafieldsSet')) {
-                $capturedMetafields = $variables['metafields'] ?? null;
-
-                return [
-                    'metafieldsSet' => [
-                        'metafields' => [['id' => 'gid://shopify/Metafield/1']],
-                        'userErrors' => [],
+        if (str_contains($query, 'query ProductByIdMetafields')) {
+            return [
+                'product' => [
+                    'metafields' => [
+                        'nodes' => [],
                     ],
-                ];
-            }
+                ],
+            ];
+        }
 
-            throw new RuntimeException('Unexpected Shopify GraphQL call in test.');
-        });
+        if (str_contains($query, 'mutation MetafieldsSet')) {
+            $capturedMetafields = $variables['metafields'] ?? null;
 
-    app()->instance(ShopifyApiClient::class, $client);
+            return [
+                'metafieldsSet' => [
+                    'metafields' => [['id' => 'gid://shopify/Metafield/1']],
+                    'userErrors' => [],
+                ],
+            ];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in test.');
+    });
 
     $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
         collect([$product]),
@@ -830,55 +827,51 @@ it('prefers linked draft complementary products over stale row data during appro
 
     $capturedMetafields = null;
 
-    $client = Mockery::mock(ShopifyApiClient::class);
-    $client->shouldReceive('graphql')
-        ->andReturnUsing(function (string $query, array $variables = []) use (&$capturedMetafields): array {
-            if (str_contains($query, 'query ProductByIdDetails')) {
-                return [
-                    'product' => [
-                        'id' => 'gid://shopify/Product/1101',
-                        'options' => [],
-                        'category' => [
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$capturedMetafields): array {
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1101',
+                    'options' => [],
+                    'category' => [
+                        'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                        'name' => 'Jewelry',
+                    ],
+                    'productCategory' => [
+                        'productTaxonomyNode' => [
                             'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                            'name' => 'Jewelry',
-                        ],
-                        'productCategory' => [
-                            'productTaxonomyNode' => [
-                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                                'fullName' => 'Apparel & Accessories > Jewelry',
-                            ],
-                        ],
-                        'variants' => ['nodes' => []],
-                        'media' => ['nodes' => []],
-                    ],
-                ];
-            }
-
-            if (str_contains($query, 'query ProductByIdMetafields')) {
-                return [
-                    'product' => [
-                        'metafields' => [
-                            'nodes' => [],
+                            'fullName' => 'Apparel & Accessories > Jewelry',
                         ],
                     ],
-                ];
-            }
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                ],
+            ];
+        }
 
-            if (str_contains($query, 'mutation MetafieldsSet')) {
-                $capturedMetafields = $variables['metafields'] ?? null;
-
-                return [
-                    'metafieldsSet' => [
-                        'metafields' => [['id' => 'gid://shopify/Metafield/1']],
-                        'userErrors' => [],
+        if (str_contains($query, 'query ProductByIdMetafields')) {
+            return [
+                'product' => [
+                    'metafields' => [
+                        'nodes' => [],
                     ],
-                ];
-            }
+                ],
+            ];
+        }
 
-            throw new RuntimeException('Unexpected Shopify GraphQL call in test.');
-        });
+        if (str_contains($query, 'mutation MetafieldsSet')) {
+            $capturedMetafields = $variables['metafields'] ?? null;
 
-    app()->instance(ShopifyApiClient::class, $client);
+            return [
+                'metafieldsSet' => [
+                    'metafields' => [['id' => 'gid://shopify/Metafield/1']],
+                    'userErrors' => [],
+                ],
+            ];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in test.');
+    });
 
     $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
         collect([$product]),
@@ -904,49 +897,45 @@ it('does not send archived product status to shopify during sync', function (): 
 
     approveWorkflowTestProduct($product);
 
-    $client = Mockery::mock(ShopifyApiClient::class);
-    $client->shouldReceive('graphql')
-        ->andReturnUsing(function (string $query, array $variables = []): array {
-            if (str_contains($query, 'mutation ProductUpdate')) {
-                throw new RuntimeException('Archived status should not trigger a Shopify product status update.');
-            }
+    fakeWorkflowShopifyGraphql(function (string $query): array {
+        if (str_contains($query, 'mutation ProductUpdate')) {
+            throw new RuntimeException('Archived status should not trigger a Shopify product status update.');
+        }
 
-            if (str_contains($query, 'query ProductByIdDetails')) {
-                return [
-                    'product' => [
-                        'id' => 'gid://shopify/Product/1201',
-                        'options' => [],
-                        'category' => [
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1201',
+                    'options' => [],
+                    'category' => [
+                        'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                        'name' => 'Jewelry',
+                    ],
+                    'productCategory' => [
+                        'productTaxonomyNode' => [
                             'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                            'name' => 'Jewelry',
-                        ],
-                        'productCategory' => [
-                            'productTaxonomyNode' => [
-                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                                'fullName' => 'Apparel & Accessories > Jewelry',
-                            ],
-                        ],
-                        'variants' => ['nodes' => []],
-                        'media' => ['nodes' => []],
-                        'images' => ['nodes' => []],
-                    ],
-                ];
-            }
-
-            if (str_contains($query, 'query ProductByIdMetafields')) {
-                return [
-                    'product' => [
-                        'metafields' => [
-                            'nodes' => [],
+                            'fullName' => 'Apparel & Accessories > Jewelry',
                         ],
                     ],
-                ];
-            }
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                    'images' => ['nodes' => []],
+                ],
+            ];
+        }
 
-            throw new RuntimeException('Unexpected Shopify GraphQL call in archived status sync test.');
-        });
+        if (str_contains($query, 'query ProductByIdMetafields')) {
+            return [
+                'product' => [
+                    'metafields' => [
+                        'nodes' => [],
+                    ],
+                ],
+            ];
+        }
 
-    app()->instance(ShopifyApiClient::class, $client);
+        throw new RuntimeException('Unexpected Shopify GraphQL call in archived status sync test.');
+    });
 
     $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
         collect([$product]),
@@ -969,7 +958,7 @@ it('reuses the existing Shopify media when only an image filename changes', func
 
     approveWorkflowTestProduct($product);
 
-    $image = \App\Models\Image::create([
+    $image = \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/MediaImage/9001',
         'sync_state' => \App\Models\Image::SYNC_STATE_LOCAL_UPDATED,
@@ -981,68 +970,95 @@ it('reuses the existing Shopify media when only an image filename changes', func
         'approved_filename' => 'renamed-product-01.png',
         'last_shopify_synced_filename' => 'old-product-01.png',
         'needs_shopify_image_sync' => false,
-    ]);
+    ]));
 
     $createMediaCalls = 0;
 
-    $client = Mockery::mock(ShopifyApiClient::class);
-    $client->shouldReceive('graphql')
-        ->andReturnUsing(function (string $query, array $variables = []) use (&$createMediaCalls): array {
-            if (str_contains($query, 'query ProductByIdDetails')) {
-                return [
-                    'product' => [
-                        'id' => 'gid://shopify/Product/1001',
-                        'options' => [],
-                        'category' => [
+    fakeWorkflowShopifyGraphql(function (string $query) use (&$createMediaCalls): array {
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1001',
+                    'options' => [],
+                    'category' => [
+                        'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                        'name' => 'Jewelry',
+                    ],
+                    'productCategory' => [
+                        'productTaxonomyNode' => [
                             'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                            'name' => 'Jewelry',
+                            'fullName' => 'Apparel & Accessories > Jewelry',
                         ],
-                        'productCategory' => [
-                            'productTaxonomyNode' => [
-                                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
-                                'fullName' => 'Apparel & Accessories > Jewelry',
+                    ],
+                    'variants' => ['nodes' => []],
+                    'media' => [
+                        'nodes' => [[
+                            'id' => 'gid://shopify/MediaImage/9001',
+                            'image' => [
+                                'url' => 'https://cdn.shopify.com/s/files/1/test/existing-image.png',
                             ],
-                        ],
-                        'variants' => ['nodes' => []],
-                        'media' => [
-                            'nodes' => [[
-                                'id' => 'gid://shopify/MediaImage/9001',
-                                'image' => [
-                                    'url' => 'https://cdn.shopify.com/s/files/1/test/existing-image.png',
-                                ],
-                            ]],
-                        ],
-                        'images' => [
-                            'nodes' => [],
+                        ]],
+                    ],
+                    'images' => [
+                        'nodes' => [],
+                    ],
+                ],
+            ];
+        }
+
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return [
+                'productByHandle' => [
+                    'id' => 'gid://shopify/Product/1001',
+                    'options' => [],
+                    'category' => [
+                        'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                        'name' => 'Jewelry',
+                    ],
+                    'productCategory' => [
+                        'productTaxonomyNode' => [
+                            'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                            'fullName' => 'Apparel & Accessories > Jewelry',
                         ],
                     ],
-                ];
-            }
-
-            if (str_contains($query, 'mutation ProductCreateMedia')) {
-                $createMediaCalls++;
-
-                return [
-                    'productCreateMedia' => [
-                        'media' => [['id' => 'gid://shopify/MediaImage/9999']],
-                        'mediaUserErrors' => [],
+                    'variants' => ['nodes' => []],
+                    'media' => [
+                        'nodes' => [[
+                            'id' => 'gid://shopify/MediaImage/9001',
+                            'image' => [
+                                'url' => 'https://cdn.shopify.com/s/files/1/test/existing-image.png',
+                            ],
+                        ]],
                     ],
-                ];
-            }
-
-            if (str_contains($query, 'mutation ProductReorderMedia')) {
-                return [
-                    'productReorderMedia' => [
-                        'job' => ['id' => 'gid://shopify/Job/1'],
-                        'mediaUserErrors' => [],
+                    'images' => [
+                        'nodes' => [],
                     ],
-                ];
-            }
+                ],
+            ];
+        }
 
-            throw new RuntimeException('Unexpected Shopify GraphQL call in image rename test.');
-        });
+        if (str_contains($query, 'mutation ProductCreateMedia')) {
+            $createMediaCalls++;
 
-    app()->instance(ShopifyApiClient::class, $client);
+            return [
+                'productCreateMedia' => [
+                    'media' => [['id' => 'gid://shopify/MediaImage/9999']],
+                    'mediaUserErrors' => [],
+                ],
+            ];
+        }
+
+        if (str_contains($query, 'mutation ProductReorderMedia')) {
+            return [
+                'productReorderMedia' => [
+                    'job' => ['id' => 'gid://shopify/Job/1'],
+                    'mediaUserErrors' => [],
+                ],
+            ];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in image rename test.');
+    });
 
     $result = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product]));
 
@@ -1056,6 +1072,349 @@ it('reuses the existing Shopify media when only an image filename changes', func
     expect($image->last_shopify_synced_filename)->toBe('renamed-product-01.png');
     expect($image->needs_shopify_image_sync)->toBeFalse();
 });
+
+it('sends every selected bundle image when creating a stack in Shopify', function (): void {
+    $firstImage = 'https://cdn.shopify.com/s/files/1/test/stack-01.jpg';
+    $secondImage = 'https://cdn.shopify.com/s/files/1/test/stack-02.jpg';
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Test Bracelet Stack',
+        'type' => 'Bracelets',
+        'tags' => 'bundles',
+        'status' => 'draft',
+        'image_url' => $firstImage,
+        'bundle_image_urls' => [$firstImage, $secondImage],
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    NewProductDraftApproval::create([
+        'new_product_draft_id' => $draft->id,
+        'user_id' => User::factory()->create()->id,
+        'approval_version' => 1,
+    ]);
+    NewProductDraftApproval::create([
+        'new_product_draft_id' => $draft->id,
+        'user_id' => User::factory()->create()->id,
+        'approval_version' => 1,
+    ]);
+
+    $mediaInput = null;
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use (&$mediaInput) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (str_contains($query, 'mutation ProductCreateMedia')) {
+            $mediaInput = $variables['media'] ?? null;
+
+            return Http::response([
+                'data' => [
+                    'productCreateMedia' => [
+                        'media' => [
+                            ['id' => 'gid://shopify/MediaImage/1401'],
+                            ['id' => 'gid://shopify/MediaImage/1402'],
+                        ],
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'mutation ProductCreate')) {
+            return Http::response([
+                'data' => [
+                    'productCreate' => [
+                        'product' => [
+                            'id' => 'gid://shopify/Product/1401',
+                            'handle' => 'test-bracelet-stack',
+                        ],
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in stack image create test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1);
+    expect($result['failed'])->toBe(0);
+    expect($mediaInput)->toBe([
+        [
+            'originalSource' => $firstImage,
+            'mediaContentType' => 'IMAGE',
+        ],
+        [
+            'originalSource' => $secondImage,
+            'mediaContentType' => 'IMAGE',
+        ],
+    ]);
+    expect($draft->fresh()->handle)->toBe('test-bracelet-stack');
+});
+
+it('moves videos behind the approved image order during Shopify image sync', function (): void {
+    Storage::fake('public');
+    Storage::disk('public')->put('product-images/test/media-order-01.png', 'first-image');
+    Storage::disk('public')->put('product-images/test/media-order-02.png', 'second-image');
+
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1301',
+        'approval_version' => 1,
+    ]);
+
+    approveWorkflowTestProduct($product);
+
+    \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/9101',
+        'sync_state' => \App\Models\Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'src' => 'https://cdn.shopify.com/s/files/1/test/media-order-01.png',
+        'image_path' => 'product-images/test/media-order-01.png',
+        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'position' => 1,
+        'approved_filename' => 'media-order-01.png',
+        'last_shopify_synced_filename' => 'media-order-01.png',
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/9102',
+        'sync_state' => \App\Models\Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'src' => 'https://cdn.shopify.com/s/files/1/test/media-order-02.png',
+        'image_path' => 'product-images/test/media-order-02.png',
+        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'position' => 2,
+        'approved_filename' => 'media-order-02.png',
+        'last_shopify_synced_filename' => 'media-order-02.png',
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    $reorderMoves = null;
+    $shopifyProduct = [
+        'id' => 'gid://shopify/Product/1301',
+        'options' => [],
+        'category' => [
+            'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+            'name' => 'Jewelry',
+        ],
+        'productCategory' => [
+            'productTaxonomyNode' => [
+                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                'fullName' => 'Apparel & Accessories > Jewelry',
+            ],
+        ],
+        'variants' => ['nodes' => []],
+        'media' => [
+            'nodes' => [
+                [
+                    'id' => 'gid://shopify/Video/7001',
+                    'mediaContentType' => 'VIDEO',
+                ],
+                [
+                    'id' => 'gid://shopify/MediaImage/9101',
+                    'mediaContentType' => 'IMAGE',
+                    'image' => [
+                        'url' => 'https://cdn.shopify.com/s/files/1/test/media-order-01.png',
+                    ],
+                ],
+                [
+                    'id' => 'gid://shopify/MediaImage/9102',
+                    'mediaContentType' => 'IMAGE',
+                    'image' => [
+                        'url' => 'https://cdn.shopify.com/s/files/1/test/media-order-02.png',
+                    ],
+                ],
+            ],
+        ],
+        'images' => ['nodes' => []],
+    ];
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use ($shopifyProduct, &$reorderMoves) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return Http::response(['data' => ['product' => $shopifyProduct]]);
+        }
+
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return Http::response(['data' => ['productByHandle' => $shopifyProduct]]);
+        }
+
+        if (str_contains($query, 'mutation ProductCreateMedia')) {
+            throw new RuntimeException('Existing media should be reused.');
+        }
+
+        if (str_contains($query, 'mutation ProductReorderMedia')) {
+            $reorderMoves = $variables['moves'] ?? null;
+
+            return Http::response([
+                'data' => [
+                    'productReorderMedia' => [
+                        'job' => ['id' => 'gid://shopify/Job/1'],
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in media order test.');
+    });
+
+    $result = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product]));
+
+    expect($result['synced'])->toBe(1);
+    expect($result['failed'])->toBe(0);
+    expect($reorderMoves)->toBe([
+        ['id' => 'gid://shopify/MediaImage/9101', 'newPosition' => '0'],
+        ['id' => 'gid://shopify/MediaImage/9102', 'newPosition' => '1'],
+        ['id' => 'gid://shopify/Video/7001', 'newPosition' => '2'],
+    ]);
+});
+
+it('uses media image ids for ordering when local images still store legacy Shopify image ids', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1302',
+        'approval_version' => 1,
+    ]);
+
+    approveWorkflowTestProduct($product);
+
+    $image = \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductImage/9201',
+        'sync_state' => \App\Models\Image::SYNC_STATE_LOCAL_UPDATED,
+        'local_dirty' => true,
+        'src' => 'https://cdn.shopify.com/s/files/1/test/legacy-stack-01.png',
+        'image_path' => null,
+        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'position' => 1,
+        'approved_filename' => 'legacy-stack-01.png',
+        'needs_shopify_image_sync' => true,
+    ]));
+
+    $reorderMoves = null;
+    $shopifyProduct = [
+        'id' => 'gid://shopify/Product/1302',
+        'options' => [],
+        'category' => [
+            'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+            'name' => 'Jewelry',
+        ],
+        'productCategory' => [
+            'productTaxonomyNode' => [
+                'id' => 'gid://shopify/TaxonomyCategory/aa-6-6',
+                'fullName' => 'Apparel & Accessories > Jewelry',
+            ],
+        ],
+        'variants' => ['nodes' => []],
+        'media' => [
+            'nodes' => [
+                [
+                    'id' => 'gid://shopify/Video/8001',
+                    'mediaContentType' => 'VIDEO',
+                ],
+                [
+                    'id' => 'gid://shopify/MediaImage/9201',
+                    'mediaContentType' => 'IMAGE',
+                    'image' => [
+                        'url' => 'https://cdn.shopify.com/s/files/1/test/legacy-stack-01.png',
+                    ],
+                ],
+            ],
+        ],
+        'images' => [
+            'nodes' => [
+                [
+                    'id' => 'gid://shopify/ProductImage/9201',
+                    'url' => 'https://cdn.shopify.com/s/files/1/test/legacy-stack-01.png',
+                ],
+            ],
+        ],
+    ];
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use ($shopifyProduct, &$reorderMoves) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return Http::response(['data' => ['product' => $shopifyProduct]]);
+        }
+
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return Http::response(['data' => ['productByHandle' => $shopifyProduct]]);
+        }
+
+        if (str_contains($query, 'mutation ProductCreateMedia')) {
+            throw new RuntimeException('Image without a backup should not be republished.');
+        }
+
+        if (str_contains($query, 'mutation ProductReorderMedia')) {
+            $reorderMoves = $variables['moves'] ?? null;
+
+            return Http::response([
+                'data' => [
+                    'productReorderMedia' => [
+                        'job' => ['id' => 'gid://shopify/Job/2'],
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in legacy image media order test.');
+    });
+
+    $result = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product]));
+
+    expect($result['synced'])->toBe(1);
+    expect($result['failed'])->toBe(0);
+    expect($reorderMoves)->toBe([
+        ['id' => 'gid://shopify/MediaImage/9201', 'newPosition' => '0'],
+        ['id' => 'gid://shopify/Video/8001', 'newPosition' => '1'],
+    ]);
+    expect(collect($result['warnings'])->pluck('warning')->first())
+        ->toContain('could not be republished');
+    expect($image->fresh()->needs_shopify_image_sync)->toBeTrue();
+});
+
+function fakeWorkflowShopifyGraphql(callable $handler): void
+{
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use ($handler) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        return Http::response([
+            'data' => $handler($query, $variables),
+        ]);
+    });
+}
 
 function createWorkflowTestProduct(array $overrides = []): Product
 {
