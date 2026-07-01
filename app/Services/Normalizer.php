@@ -235,6 +235,7 @@ final class Normalizer
             $barcode = $this->normalizeValue($vr->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku;
             $weightUnit = $this->normalizeValue($vr->get(HeaderStore::VARIANT_WEIGHT_UNIT, null)) ?? 'g';
             $shopifyId = $this->normalizeValue($vr->get(HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID, null));
+            $inventoryItemId = $this->normalizeValue($vr->get(HeaderStore::INTERNAL_VARIANT_INVENTORY_ITEM_ID, null));
 
             if ($firstSku === null && $sku !== null) {
                 $firstSku = $sku;
@@ -243,6 +244,7 @@ final class Normalizer
             $payload = [
                 'product_id' => $product->id,
                 'shopify_id' => $shopifyId,
+                'shopify_inventory_item_id' => $inventoryItemId,
                 'sku' => $sku,
                 'barcode' => $barcode,
                 'weight' => $this->toDecimal($vr->get(HeaderStore::VARIANT_GRAMS, null)),
@@ -375,6 +377,7 @@ final class Normalizer
                 $updates = [
                     'product_id' => $payload['product_id'],
                     'shopify_id' => $payload['shopify_id'] ?? $variant->shopify_id,
+                    'shopify_inventory_item_id' => $payload['shopify_inventory_item_id'] ?? $variant->shopify_inventory_item_id,
                     'last_shopify_seen_at' => $syncedAt,
                 ];
 

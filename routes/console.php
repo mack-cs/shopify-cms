@@ -11,6 +11,8 @@ use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\ComplementaryProductMaintenanceService;
 use App\Services\StackBundleSellabilityService;
+use App\Services\StackSellabilityShopifyPushService;
+use App\Services\StackSellabilitySlackNotifier;
 use App\Services\SiteAudit\SitemapDiscoveryService;
 use App\Services\SiteAudit\SiteAuditRunnerService;
 use Illuminate\Foundation\Inspiring;
@@ -264,8 +266,9 @@ Artisan::command(
             return self::FAILURE;
         }
 
+        $effectiveUserId = $userId > 0 ? $userId : null;
         $summary = app(StackBundleSellabilityService::class)->enforce(
-            $userId > 0 ? $userId : null,
+            $effectiveUserId,
             $dryRun,
             [
                 'test_only' => (bool) $this->option('test-only'),
@@ -275,6 +278,12 @@ Artisan::command(
             ],
         );
 
+        if (!$dryRun) {
+            $summary['source'] = 'Manual stack sellability enforcement';
+            $summary = app(StackSellabilityShopifyPushService::class)->queuePushForChangedStacks($summary, $effectiveUserId);
+            app(StackSellabilitySlackNotifier::class)->notifyIfChanged($summary);
+        }
+
         $this->info($dryRun ? 'Stack sellability dry run complete.' : 'Stack sellability enforcement complete.');
         $this->line("Checked drafts: {$summary['checked']}");
         $this->line("With associations: {$summary['with_associations']}");
@@ -282,16 +291,21 @@ Artisan::command(
         $this->line("Missing components: {$summary['missing_components']}");
         $this->line("Forced unsellable: {$summary['forced_unsellable']}");
         $this->line("Already unsellable: {$summary['already_unsellable']}");
+        $this->line("Restored sellable/untracked: {$summary['restored_sellable']}");
+        $this->line("Already sellable/untracked: {$summary['already_sellable']}");
         $this->line("Missing stack product: {$summary['missing_stack_product']}");
         $this->line("Skipped non-test stacks: {$summary['skipped_non_test_stack']}");
         $this->line("Skipped non-test/missing components: {$summary['skipped_non_test_components']}");
+        $this->line("Skipped locked stacks: {$summary['skipped_locked_stacks']}");
         $this->line("Shopify component variants refreshed: {$summary['shopify_component_refreshes']}");
         $this->line("Shopify component refresh failures: {$summary['shopify_component_refresh_failures']}");
         $this->line("Stacks skipped after refresh failure: {$summary['shopify_refresh_failed_stacks']}");
+        $this->line('Shopify push queued products: ' . (int) ($summary['shopify_push_queued_products'] ?? 0));
+        $this->line('Shopify push queued variants: ' . (int) ($summary['shopify_push_queued_variants'] ?? 0));
 
         return self::SUCCESS;
     }
-)->purpose('Local only: force stack/bundle draft and variant stock to 0 when associated component products are missing or unsellable; can be limited to test records and refreshed from Shopify first.');
+)->purpose('Force stack/bundle draft and variant stock from associated component sellability, then queue Shopify pushes for changed stacks.');
 
 Artisan::command(
     'shopify:reconcile-complementary-products

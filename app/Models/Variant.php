@@ -19,6 +19,7 @@ class Variant extends Model
         'product_id',
         'image_id',
         'shopify_id',
+        'shopify_inventory_item_id',
         'sync_state',
         'local_dirty',
         'last_shopify_seen_at',

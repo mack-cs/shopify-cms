@@ -8,6 +8,9 @@ use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftSeeder;
+use App\Services\StackBundleSellabilityService;
+use App\Services\StackSellabilityShopifyPushService;
+use App\Services\StackSellabilitySlackNotifier;
 use Filament\Notifications\Notification;
 use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
@@ -21,6 +24,8 @@ class EditNewProductDraft extends EditRecord
     protected int $editLockMinutes = 15;
     /** @var array<int, string> */
     protected array $savedDraftAttributes = [];
+    /** @var array<int, int> */
+    protected array $bundleProductIdsBeforeSave = [];
 
     public function mount(int | string $record): void
     {
@@ -50,6 +55,10 @@ class EditNewProductDraft extends EditRecord
 
     protected function mutateFormDataBeforeSave(array $data): array
     {
+        $this->bundleProductIdsBeforeSave = $this->normalizeBundleProductIdsForComparison(
+            $this->record?->getRawOriginal('bundle_product_ids') ?? $this->record?->bundle_product_ids ?? null
+        );
+
         $data = NewProductDraftResource::mutateDraftFormData($data, $this->record);
         $this->savedDraftAttributes = $this->syncableDraftAttributes(array_keys($data));
 
@@ -64,6 +73,18 @@ class EditNewProductDraft extends EditRecord
             Notification::make()
                 ->title('Draft saved with sync warning')
                 ->body("The draft was saved, but the linked product sync could not complete: {$e->getMessage()}")
+                ->warning()
+                ->send();
+        }
+
+        try {
+            $this->enforceStackSellabilityAfterAssociationSave();
+        } catch (\Throwable $e) {
+            report($e);
+
+            Notification::make()
+                ->title('Draft saved with stack warning')
+                ->body("The draft was saved, but stack sellability could not be checked: {$e->getMessage()}")
                 ->warning()
                 ->send();
         }
@@ -434,5 +455,102 @@ class EditNewProductDraft extends EditRecord
 
         $this->savedDraftAttributes = [];
         $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+    }
+
+    private function enforceStackSellabilityAfterAssociationSave(): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        $record = $this->record->fresh() ?? $this->record;
+        $bundleProductIdsAfterSave = $this->normalizeBundleProductIdsForComparison($record->bundle_product_ids);
+
+        if ($bundleProductIdsAfterSave === $this->bundleProductIdsBeforeSave) {
+            return;
+        }
+
+        $this->bundleProductIdsBeforeSave = $bundleProductIdsAfterSave;
+        $this->record = $record;
+
+        if ($bundleProductIdsAfterSave === []) {
+            return;
+        }
+
+        $summary = app(StackBundleSellabilityService::class)->enforceForAffectedStacks(
+            [(int) $record->id],
+            Auth::id(),
+            ['refresh_components' => true]
+        );
+        $summary['source'] = 'Draft stack association update';
+        $summary = app(StackSellabilityShopifyPushService::class)->queuePushForChangedStacks($summary, Auth::id());
+
+        app(StackSellabilitySlackNotifier::class)->notifyIfChanged($summary);
+        $this->notifyStackAssociationEnforcement($summary);
+
+        $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+    }
+
+    /**
+     * @param array<string, mixed> $summary
+     */
+    private function notifyStackAssociationEnforcement(array $summary): void
+    {
+        $forced = (int) ($summary['forced_unsellable'] ?? 0);
+        $restored = (int) ($summary['restored_sellable'] ?? 0);
+        $refreshFailures = (int) ($summary['shopify_component_refresh_failures'] ?? 0);
+        $pushVariants = (int) ($summary['shopify_push_queued_variants'] ?? 0);
+
+        if ($refreshFailures > 0) {
+            Notification::make()
+                ->title('Stack check incomplete')
+                ->body('Associated products were saved, but at least one component could not be refreshed from Shopify. The stack was not changed.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        if (($forced + $restored) === 0) {
+            return;
+        }
+
+        $action = $forced > 0
+            ? 'marked unsellable'
+            : 'restored to sellable';
+        $pushMessage = $pushVariants > 0
+            ? "Queued {$pushVariants} Shopify variant push(es)."
+            : 'No Shopify push was queued.';
+
+        Notification::make()
+            ->title('Stack sellability updated')
+            ->body("The stack was {$action} after checking its associated products. {$pushMessage}")
+            ->color($forced > 0 ? 'warning' : 'success')
+            ->send();
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function normalizeBundleProductIdsForComparison(mixed $value): array
+    {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            $value = json_last_error() === JSON_ERROR_NONE
+                ? $decoded
+                : explode(',', $value);
+        }
+
+        if (!is_array($value)) {
+            return [];
+        }
+
+        return collect($value)
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
     }
 }

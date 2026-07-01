@@ -38,6 +38,7 @@ return [
             'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'partial_approvals' => env('SLACK_PARTIAL_APPROVAL_CHANNEL') ?: env('SLACK_ASSIGNMENT_CHANNEL') ?: env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
             'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'inventory' => env('SLACK_INVENTORY_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
         ],
 
@@ -54,6 +55,8 @@ return [
         'shop' => env('SHOPIFY_SHOP'),
         'admin_access_token' => env('SHOPIFY_ADMIN_ACCESS_TOKEN'),
         'api_version' => env('SHOPIFY_API_VERSION', '2026-01'),
+        'webhook_secret' => env('SHOPIFY_WEBHOOK_SECRET', env('SHOPIFY_API_SECRET', env('SHOPIFY_API_SECRET_KEY'))),
+        'verify_webhooks' => filter_var(env('SHOPIFY_WEBHOOK_VERIFY', false), FILTER_VALIDATE_BOOLEAN),
         'secret_id' => env('AWS_SHOPIFY_SECRET_ID', 'prod/leighavenue/shopify'),
         'secret_cache_key' => env('AWS_SHOPIFY_SECRET_CACHE_KEY', 'shopify.admin_access_token'),
         'secret_cache_ttl' => env('AWS_SHOPIFY_SECRET_CACHE_TTL', 900),

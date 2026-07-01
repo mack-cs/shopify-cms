@@ -218,6 +218,7 @@ final class ProductInventorySyncService
 
                 $updates = [
                     'shopify_id' => trim((string) ($remoteVariant['id'] ?? '')) ?: $variant->shopify_id,
+                    'shopify_inventory_item_id' => $this->normalizeShopifyInventoryItemId(data_get($remoteVariant, 'inventoryItem.id')),
                     'inventory_tracked' => data_get($remoteVariant, 'inventoryItem.tracked'),
                     'inventory_qty' => data_get($remoteVariant, 'inventoryItem.tracked') === false
                         ? null
@@ -453,6 +454,13 @@ final class ProductInventorySyncService
         }
 
         return (int) $value;
+    }
+
+    private function normalizeShopifyInventoryItemId(mixed $value): ?string
+    {
+        $id = trim((string) ($value ?? ''));
+
+        return $id !== '' ? $id : null;
     }
 
     private function stringifyValue(mixed $value): string

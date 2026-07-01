@@ -2264,6 +2264,46 @@ class NewProductDraftResource extends Resource
         return self::isBundleOrStackState($type, self::normalizeTagList($tags), $record?->title);
     }
 
+    private static function draftBundleProductCount(NewProductDraft $record): int
+    {
+        return count(self::normalizeBundleProductIds($record->bundle_product_ids));
+    }
+
+    private static function draftStackAssociationStateLabel(NewProductDraft $record): string
+    {
+        $count = self::draftBundleProductCount($record);
+        if ($count > 0) {
+            return $count . ' linked';
+        }
+
+        return self::isBundleOrStackDraft($record->type, $record->tags, $record)
+            ? 'No links'
+            : 'Not stack';
+    }
+
+    private static function draftStackAssociationStateColor(NewProductDraft $record): string
+    {
+        if (self::draftBundleProductCount($record) > 0) {
+            return 'success';
+        }
+
+        return self::isBundleOrStackDraft($record->type, $record->tags, $record)
+            ? 'warning'
+            : 'gray';
+    }
+
+    private static function draftStackAssociationTooltip(NewProductDraft $record): string
+    {
+        $count = self::draftBundleProductCount($record);
+        if ($count > 0) {
+            return $count . ' associated product ' . ($count === 1 ? 'link' : 'links') . ' saved for this draft.';
+        }
+
+        return self::isBundleOrStackDraft($record->type, $record->tags, $record)
+            ? 'This stack has no associated products yet.'
+            : 'This draft is not detected as a stack or bundle.';
+    }
+
     /**
      * @return array<int, string>
      */
@@ -3200,6 +3240,13 @@ class NewProductDraftResource extends Resource
                     ->color(fn (int $state): string => $state > 0 ? 'warning' : 'gray')
                     ->tooltip(fn (NewProductDraft $record): string => self::draftVariantClashSummary($record))
                     ->toggleable(),
+                TextColumn::make('stack_association_state')
+                    ->label('Stack Links')
+                    ->state(fn (NewProductDraft $record): string => self::draftStackAssociationStateLabel($record))
+                    ->badge()
+                    ->color(fn (NewProductDraft $record): string => self::draftStackAssociationStateColor($record))
+                    ->tooltip(fn (NewProductDraft $record): string => self::draftStackAssociationTooltip($record))
+                    ->toggleable(),
                 IconColumn::make('approved')
                     ->label('Approved')
                     ->boolean()
@@ -4112,6 +4159,27 @@ class NewProductDraftResource extends Resource
                     ->label('Edited in Last 7 Days')
                     ->indicator('Edited in Last 7 Days')
                     ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                SelectFilter::make('stack_associations')
+                    ->label('Stack Associations')
+                    ->options([
+                        'stacks_with_components' => 'Stacks with associated products',
+                        'stacks_without_components' => 'Stacks without associated products',
+                        'any_with_components' => 'Any draft with associated products',
+                    ])
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                        $data,
+                        'Stack Associations',
+                        [
+                            'stacks_with_components' => 'Stacks with associated products',
+                            'stacks_without_components' => 'Stacks without associated products',
+                            'any_with_components' => 'Any draft with associated products',
+                        ],
+                    ))
+                    ->query(function (Builder $query, array $data): Builder {
+                        $value = trim((string) ($data['value'] ?? ''));
+
+                        return self::applyDraftStackAssociationFilter($query, $value);
+                    }),
                 SelectFilter::make('local_complementary_status')
                     ->label('Local Complementary')
                     ->options([
@@ -4866,6 +4934,57 @@ class NewProductDraftResource extends Resource
         return [
             RelationManagers\StyleProfileRelationManager::class,
         ];
+    }
+
+    private static function applyDraftStackAssociationFilter(Builder $query, string $value): Builder
+    {
+        return match ($value) {
+            'stacks_with_components' => self::applyDraftHasBundleProductFilter(
+                self::applyDraftStackFilter($query),
+                true,
+            ),
+            'stacks_without_components' => self::applyDraftHasBundleProductFilter(
+                self::applyDraftStackFilter($query),
+                false,
+            ),
+            'any_with_components' => self::applyDraftHasBundleProductFilter($query, true),
+            default => $query,
+        };
+    }
+
+    private static function applyDraftStackFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $stackQuery): void {
+            foreach (['tags', 'type', 'title'] as $column) {
+                $stackQuery
+                    ->orWhereRaw("LOWER(COALESCE({$column}, '')) LIKE ?", ['%bundle%'])
+                    ->orWhereRaw("LOWER(COALESCE({$column}, '')) LIKE ?", ['%stack%']);
+            }
+        });
+    }
+
+    private static function applyDraftHasBundleProductFilter(Builder $query, bool $hasAssociatedProducts): Builder
+    {
+        $lengthExpression = self::bundleProductIdsLengthExpression();
+
+        if ($hasAssociatedProducts) {
+            return $query
+                ->whereNotNull('bundle_product_ids')
+                ->whereRaw("COALESCE({$lengthExpression}, 0) > 0");
+        }
+
+        return $query->where(function (Builder $associationQuery) use ($lengthExpression): void {
+            $associationQuery
+                ->whereNull('bundle_product_ids')
+                ->orWhereRaw("COALESCE({$lengthExpression}, 0) = 0");
+        });
+    }
+
+    private static function bundleProductIdsLengthExpression(): string
+    {
+        return DB::connection()->getDriverName() === 'sqlite'
+            ? 'json_array_length(bundle_product_ids)'
+            : 'JSON_LENGTH(bundle_product_ids)';
     }
 
     private static function applyDraftComplementaryAuditStatusFilter(

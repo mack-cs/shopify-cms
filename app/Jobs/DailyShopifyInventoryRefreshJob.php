@@ -6,6 +6,9 @@ use App\Models\Product;
 use App\Services\AdminNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ProductInventorySyncService;
+use App\Services\StackBundleSellabilityService;
+use App\Services\StackSellabilityShopifyPushService;
+use App\Services\StackSellabilitySlackNotifier;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -24,7 +27,12 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
     ) {
     }
 
-    public function handle(ProductInventorySyncService $service): void
+    public function handle(
+        ProductInventorySyncService $service,
+        StackBundleSellabilityService $stackSellabilityService,
+        StackSellabilityShopifyPushService $pushService,
+        StackSellabilitySlackNotifier $slackNotifier,
+    ): void
     {
         try {
             $summary = [
@@ -33,6 +41,9 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
                 'failed' => 0,
                 'warnings' => [],
                 'failures' => [],
+                'stacks_forced_unsellable' => 0,
+                'stacks_restored_sellable' => 0,
+                'stack_push_queued_variants' => 0,
             ];
 
             Product::query()
@@ -75,6 +86,14 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
                     }
                 });
 
+            $stackSummary = $stackSellabilityService->enforce($this->userId);
+            $summary['stacks_forced_unsellable'] = (int) ($stackSummary['forced_unsellable'] ?? 0);
+            $summary['stacks_restored_sellable'] = (int) ($stackSummary['restored_sellable'] ?? 0);
+            $stackSummary['source'] = 'Daily inventory refresh';
+            $stackSummary = $pushService->queuePushForChangedStacks($stackSummary, $this->userId);
+            $summary['stack_push_queued_variants'] = (int) ($stackSummary['shopify_push_queued_variants'] ?? 0);
+            $slackNotifier->notifyIfChanged($stackSummary);
+
             if (!$this->userId) {
                 return;
             }
@@ -86,6 +105,18 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
 
             if ($summary['failed'] > 0) {
                 $parts[] = 'Failed: ' . $summary['failed'] . '.';
+            }
+
+            if ($summary['stacks_forced_unsellable'] > 0) {
+                $parts[] = 'Stacks forced unsellable: ' . $summary['stacks_forced_unsellable'] . '.';
+            }
+
+            if ($summary['stacks_restored_sellable'] > 0) {
+                $parts[] = 'Stacks restored: ' . $summary['stacks_restored_sellable'] . '.';
+            }
+
+            if ($summary['stack_push_queued_variants'] > 0) {
+                $parts[] = 'Stack Shopify push variants queued: ' . $summary['stack_push_queued_variants'] . '.';
             }
 
             if ($summary['warnings'] !== []) {
