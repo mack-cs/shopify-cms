@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\ProductImageBackupController;
 use App\Http\Controllers\ShopifyInventoryLevelWebhookController;
+use App\Http\Controllers\ShopifyProductUpdateWebhookController;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Support\Facades\Route;
 
@@ -12,5 +13,9 @@ Route::get('/product-image-backups/{image}/{filename?}', ProductImageBackupContr
 Route::post('/webhooks/shopify/inventory-levels-update', ShopifyInventoryLevelWebhookController::class)
     ->withoutMiddleware([ValidateCsrfToken::class])
     ->name('webhooks.shopify.inventory-levels-update');
+
+Route::post('/webhooks/shopify/products-update', ShopifyProductUpdateWebhookController::class)
+    ->withoutMiddleware([ValidateCsrfToken::class])
+    ->name('webhooks.shopify.products-update');
 
 require __DIR__ . '/settings.php';

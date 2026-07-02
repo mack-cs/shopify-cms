@@ -118,6 +118,65 @@ final class StackBundleSellabilityService
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    public function enforceForProductUpdate(?string $shopifyProductId = null, ?string $handle = null, ?int $userId = null, array $options = []): array
+    {
+        $dryRun = (bool) ($options['dry_run'] ?? false);
+        $result = $this->emptyResult($dryRun);
+        $shopifyProductId = trim((string) ($shopifyProductId ?? ''));
+        $handle = trim((string) ($handle ?? ''));
+
+        if ($shopifyProductId === '' && $handle === '') {
+            $result['missing_product_update_product']++;
+
+            return $result;
+        }
+
+        $product = $this->findProductForShopifyReference($shopifyProductId, $handle);
+        if (!$product instanceof Product) {
+            $result['missing_product_update_product']++;
+
+            return $result;
+        }
+
+        $result['component'] = $this->componentPayload($product);
+
+        if (!$dryRun && (bool) ($options['refresh_product'] ?? true)) {
+            $refresh = $this->inventorySyncService->refreshProduct($product, $userId);
+            $result['shopify_component_refreshes'] += (int) ($refresh['refreshed'] ?? 0);
+            $result['shopify_component_refresh_failures'] += (int) ($refresh['failed'] ?? 0);
+
+            if ((int) ($refresh['failed'] ?? 0) > 0) {
+                return $result;
+            }
+
+            $product = $product->fresh(['variants']) ?? $product;
+            $result['component'] = $this->componentPayload($product);
+        }
+
+        $draftIds = NewProductDraft::query()
+            ->whereJsonContains('bundle_product_ids', (int) $product->id)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        $summary = $this->enforceForAffectedStacks($draftIds, $userId, array_merge([
+            'dry_run' => $dryRun,
+            'refresh_components' => false,
+        ], $options, [
+            'refresh_components' => false,
+        ]));
+
+        $summary['component'] = $result['component'];
+        $summary['shopify_component_refreshes'] += $result['shopify_component_refreshes'];
+        $summary['shopify_component_refresh_failures'] += $result['shopify_component_refresh_failures'];
+        $summary['missing_product_update_product'] += $result['missing_product_update_product'];
+
+        return $summary;
+    }
+
+    /**
      * @param iterable<int, int> $draftIds
      * @return array<string, mixed>
      */
@@ -476,33 +535,54 @@ final class StackBundleSellabilityService
             return ['refreshed' => 0, 'failed' => 0];
         }
 
-        $variants = Variant::query()
-            ->whereIn('product_id', $idsToRefresh)
-            ->orderBy('product_id')
-            ->orderBy('id')
+        $products = Product::query()
+            ->with('variants')
+            ->whereIn('id', $idsToRefresh)
             ->get();
 
-        if ($variants->isEmpty()) {
-            foreach ($idsToRefresh as $productId) {
+        $refreshed = 0;
+        $failed = 0;
+
+        foreach ($idsToRefresh as $productId) {
+            $product = $products->first(fn (Product $candidate): bool => (int) $candidate->id === (int) $productId);
+
+            if (!$product instanceof Product) {
                 $refreshedComponentProductIds[$productId] = true;
+                continue;
             }
 
-            return ['refreshed' => 0, 'failed' => 0];
-        }
+            $summary = $this->inventorySyncService->refreshProduct($product, $userId);
+            $productFailed = (int) ($summary['failed'] ?? 0);
+            $refreshed += (int) ($summary['refreshed'] ?? 0);
+            $failed += $productFailed;
 
-        $summary = $this->inventorySyncService->refreshVariants($variants, $userId);
-        $failed = (int) ($summary['failed'] ?? 0);
-
-        if ($failed === 0) {
-            foreach ($idsToRefresh as $productId) {
+            if ($productFailed === 0) {
                 $refreshedComponentProductIds[$productId] = true;
             }
         }
 
         return [
-            'refreshed' => (int) ($summary['refreshed'] ?? 0),
+            'refreshed' => $refreshed,
             'failed' => $failed,
         ];
+    }
+
+    private function findProductForShopifyReference(string $shopifyProductId, string $handle): ?Product
+    {
+        return Product::query()
+            ->where(function ($query) use ($shopifyProductId, $handle): void {
+                $productIds = $this->productIdCandidates($shopifyProductId);
+                if ($productIds !== []) {
+                    $query->whereIn('shopify_id', $productIds);
+                }
+
+                if ($handle !== '') {
+                    $method = $productIds !== [] ? 'orWhere' : 'where';
+                    $query->{$method}('handle', $handle);
+                }
+            })
+            ->orderBy('id')
+            ->first();
     }
 
     private function findProductForDraft(NewProductDraft $draft): ?Product
@@ -741,6 +821,27 @@ final class StackBundleSellabilityService
     }
 
     /**
+     * @return array<int, string>
+     */
+    private function productIdCandidates(string $shopifyProductId): array
+    {
+        $id = trim($shopifyProductId);
+        if ($id === '') {
+            return [];
+        }
+
+        $candidates = [$id];
+
+        if (preg_match('/^gid:\/\/shopify\/Product\/(\d+)$/', $id, $matches) === 1) {
+            $candidates[] = $matches[1];
+        } elseif (preg_match('/^\d+$/', $id) === 1) {
+            $candidates[] = 'gid://shopify/Product/' . $id;
+        }
+
+        return array_values(array_unique(array_filter($candidates)));
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function emptyResult(bool $dryRun): array
@@ -761,6 +862,7 @@ final class StackBundleSellabilityService
             'skipped_locked_stacks' => 0,
             'skipped_stack_product_webhook' => 0,
             'missing_inventory_item_variant' => 0,
+            'missing_product_update_product' => 0,
             'shopify_component_refreshes' => 0,
             'shopify_component_refresh_failures' => 0,
             'shopify_refresh_failed_stacks' => 0,

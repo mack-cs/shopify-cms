@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\HandleShopifyInventoryLevelUpdatedJob;
+use App\Jobs\HandleShopifyProductUpdatedJob;
 use App\Jobs\InventorySyncJob;
 use App\Models\Import;
 use App\Models\NewProductDraft;
@@ -82,6 +83,38 @@ it('can skip Shopify webhook signature verification in local testing only', func
     Queue::assertPushed(HandleShopifyInventoryLevelUpdatedJob::class);
 });
 
+it('accepts a verified Shopify product update webhook and queues the handler', function (): void {
+    Queue::fake();
+    config([
+        'services.shopify.verify_webhooks' => true,
+        'services.shopify.webhook_secret' => 'test-webhook-secret',
+    ]);
+
+    $payload = json_encode([
+        'id' => 900000002,
+        'admin_graphql_api_id' => 'gid://shopify/Product/900000002',
+        'handle' => 'test-webhook-component',
+        'status' => 'draft',
+    ], JSON_THROW_ON_ERROR);
+    $hmac = base64_encode(hash_hmac('sha256', $payload, 'test-webhook-secret', true));
+
+    $response = $this->call('POST', '/webhooks/shopify/products-update', [], [], [], [
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_SHOPIFY_HMAC_SHA256' => $hmac,
+        'HTTP_X_SHOPIFY_TOPIC' => 'products/update',
+        'HTTP_X_SHOPIFY_WEBHOOK_ID' => 'webhook-product-1',
+    ], $payload);
+
+    $response->assertStatus(202);
+
+    Queue::assertPushed(
+        HandleShopifyProductUpdatedJob::class,
+        fn (HandleShopifyProductUpdatedJob $job): bool => $job->shopifyProductId === 'gid://shopify/Product/900000002'
+            && $job->handle === 'test-webhook-component'
+            && $job->webhookId === 'webhook-product-1'
+    );
+});
+
 it('uses an inventory item webhook to refresh Shopify truth and force affected stacks unsellable', function (): void {
     config([
         'services.shopify.shop' => 'leigh-avenue-test.myshopify.com',
@@ -110,6 +143,49 @@ it('uses an inventory item webhook to refresh Shopify truth and force affected s
     expect($records['stack_variant']->inventory_tracked)->toBeTrue();
     expect($records['stack_variant']->inventory_qty)->toBe(0);
     expect($records['stack_variant']->inventory_local_dirty)->toBeTrue();
+});
+
+it('uses a product update webhook to refresh component status and force affected stacks unsellable', function (): void {
+    Queue::fake();
+    Notification::fake();
+    config([
+        'services.shopify.shop' => 'leigh-avenue-test.myshopify.com',
+        'services.shopify.admin_access_token' => 'test-token',
+        'services.slack.channels.inventory' => '#inventory-alerts',
+    ]);
+
+    $records = createInventoryWebhookStackRecords(componentQty: 5, stackTracked: false, stackQty: null);
+
+    fakeShopifyInventoryProduct(
+        $records['component'],
+        $records['component_variant'],
+        tracked: true,
+        quantity: 5,
+        status: 'DRAFT',
+    );
+
+    $job = new HandleShopifyProductUpdatedJob($records['component']->shopify_id, $records['component']->handle);
+    $job->handle(
+        app(StackBundleSellabilityService::class),
+        app(StackSellabilityShopifyPushService::class),
+        app(StackSellabilitySlackNotifier::class),
+    );
+
+    $records['component']->refresh();
+    $records['draft']->refresh();
+    $records['stack_variant']->refresh();
+
+    expect($records['component']->status)->toBe('draft');
+    expect($records['draft']->variant_inventory_qty)->toBe(0);
+    expect($records['stack_variant']->inventory_tracked)->toBeTrue();
+    expect($records['stack_variant']->inventory_qty)->toBe(0);
+
+    Queue::assertPushed(
+        InventorySyncJob::class,
+        fn (InventorySyncJob $job): bool => $job->mode === 'push'
+            && $job->variantIds === [$records['stack_variant']->id]
+    );
+    Notification::assertSentOnDemand(StackSellabilityChangedSlackNotification::class);
 });
 
 it('restores an affected stack to untracked inventory when all associated products recover', function (): void {
@@ -296,13 +372,13 @@ function createInventoryWebhookStackRecords(int $componentQty, bool $stackTracke
     ];
 }
 
-function fakeShopifyInventoryProduct(Product $product, Variant $variant, bool $tracked, int $quantity): void
+function fakeShopifyInventoryProduct(Product $product, Variant $variant, bool $tracked, int $quantity, string $status = 'ACTIVE'): void
 {
     Http::fake(fn () => Http::response([
         'data' => [
             'product' => [
                 'id' => $product->shopify_id,
-                'status' => 'ACTIVE',
+                'status' => $status,
                 'variants' => [
                     'nodes' => [[
                         'id' => $variant->shopify_id,

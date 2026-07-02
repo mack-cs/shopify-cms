@@ -117,6 +117,40 @@ final class ProductInventorySyncService
     }
 
     /**
+     * @return array{
+     *   synced:int,
+     *   refreshed:int,
+     *   failed:int,
+     *   warnings:array<int, string>,
+     *   failures:array<int, string>
+     * }
+     */
+    public function refreshProduct(Product $product, ?int $userId = null): array
+    {
+        $variants = $product->variants()->orderBy('id')->get();
+
+        try {
+            $this->refreshProductVariants($product, $variants, $userId);
+
+            return [
+                'synced' => 0,
+                'refreshed' => max(1, $variants->count()),
+                'failed' => 0,
+                'warnings' => [],
+                'failures' => [],
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'synced' => 0,
+                'refreshed' => 0,
+                'failed' => max(1, $variants->count()),
+                'warnings' => [],
+                'failures' => ["Product {$product->id}: {$e->getMessage()}"],
+            ];
+        }
+    }
+
+    /**
      * @param Collection<int, Variant> $variants
      * @param array<int, string> $warnings
      */
