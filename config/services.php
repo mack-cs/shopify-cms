@@ -38,7 +38,7 @@ return [
             'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'partial_approvals' => env('SLACK_PARTIAL_APPROVAL_CHANNEL') ?: env('SLACK_ASSIGNMENT_CHANNEL') ?: env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
             'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
-            'inventory' => env('SLACK_INVENTORY_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'inventory' => env('SLACK_INVENTORY_UPDATES_CHANNEL', env('SLACK_INVENTORY_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
             'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
         ],
 

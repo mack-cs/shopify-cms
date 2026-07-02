@@ -264,6 +264,51 @@ it('sends the inventory Slack notification only when the webhook changes a stack
     Notification::assertSentOnDemand(StackSellabilityChangedSlackNotification::class);
 });
 
+it('routes stack sellability Slack notifications to the inventory updates channel', function (): void {
+    Notification::fake();
+    config(['services.slack.channels.inventory' => '#inventory-updates']);
+
+    $sent = app(StackSellabilitySlackNotifier::class)->notifyIfChanged([
+        'changes' => [[
+            'action' => 'disabled',
+            'stack' => [
+                'title' => 'Test Stack',
+                'sku' => 'TEST-STACK',
+            ],
+            'component' => [
+                'title' => 'Test Component',
+                'sku' => 'TEST-COMPONENT',
+                'reason' => 'Local inventory is 0',
+                'current_stock' => 0,
+            ],
+        ]],
+    ]);
+
+    expect($sent)->toBeTrue();
+
+    Notification::assertSentOnDemand(
+        StackSellabilityChangedSlackNotification::class,
+        fn (StackSellabilityChangedSlackNotification $notification, array $channels, object $notifiable): bool => in_array('slack', $channels, true)
+            && method_exists($notifiable, 'routeNotificationFor')
+            && $notifiable->routeNotificationFor('slack') === '#inventory-updates'
+    );
+});
+
+it('does not send inventory Slack notifications without a stack sellability change', function (): void {
+    Notification::fake();
+    config(['services.slack.channels.inventory' => '#inventory-updates']);
+
+    $sent = app(StackSellabilitySlackNotifier::class)->notifyIfChanged([
+        'changes' => [[
+            'action' => 'refreshed',
+            'stack' => ['title' => 'Test Stack'],
+        ]],
+    ]);
+
+    expect($sent)->toBeFalse();
+    Notification::assertNothingSent();
+});
+
 it('queues a Shopify push when manual stack enforcement changes a stack', function (): void {
     Queue::fake();
     Notification::fake();

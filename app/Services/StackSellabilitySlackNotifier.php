@@ -12,7 +12,12 @@ final class StackSellabilitySlackNotifier
      */
     public function notifyIfChanged(array $summary): bool
     {
-        if (empty($summary['changes']) || !is_array($summary['changes'])) {
+        $changes = collect($summary['changes'] ?? [])
+            ->filter(fn ($change): bool => is_array($change))
+            ->filter(fn (array $change): bool => in_array($change['action'] ?? null, ['disabled', 'restored'], true))
+            ->values();
+
+        if ($changes->isEmpty()) {
             return false;
         }
 
@@ -22,7 +27,9 @@ final class StackSellabilitySlackNotifier
         }
 
         Notification::route('slack', $channel)
-            ->notify(new StackSellabilityChangedSlackNotification($summary));
+            ->notify(new StackSellabilityChangedSlackNotification(array_merge($summary, [
+                'changes' => $changes->all(),
+            ])));
 
         return true;
     }
