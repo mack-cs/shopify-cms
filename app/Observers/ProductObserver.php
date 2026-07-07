@@ -38,6 +38,9 @@ class ProductObserver
             'first_image_auto_rename_approval_version',
             'sync_batch_id',
             'last_synced_at',
+            'image_import_batch_id',
+            'image_imported_at',
+            'image_import_status',
             'seo_updated_at',
             'seo_updated_by',
         ];
@@ -85,6 +88,9 @@ class ProductObserver
             'first_image_auto_rename_approval_version',
             'sync_batch_id',
             'last_synced_at',
+            'image_import_batch_id',
+            'image_imported_at',
+            'image_import_status',
             'seo_updated_at',
             'seo_updated_by',
         ];

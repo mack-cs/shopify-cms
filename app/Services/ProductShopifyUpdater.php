@@ -609,6 +609,64 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * @return array{
+     *   synced:int,
+     *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
+     *   failed:int,
+     *   warnings:array<int, array{product_id:int, warning:string}>,
+     *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
+     * }
+     */
+    public function syncProductImagesForImport(Product $product): array
+    {
+        $result = [
+            'synced' => 0,
+            'skipped_missing_handle' => 0,
+            'skipped_blocked' => 0,
+            'failed' => 0,
+            'warnings' => [],
+            'failures' => [],
+        ];
+
+        if (!$product->handle) {
+            $result['skipped_missing_handle'] = 1;
+            return $result;
+        }
+
+        if ($this->isBlockedByShopifyMissingDraft($product)) {
+            $result['skipped_blocked'] = 1;
+            return $result;
+        }
+
+        try {
+            $productId = $this->resolveProductId($product);
+            if (!$productId) {
+                throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+            }
+
+            $details = $this->productDetails($product, null, $productId);
+            $result['warnings'] = $this->updateImages($product, $productId, [], $details);
+            $result['synced'] = 1;
+        } catch (\Throwable $e) {
+            $result['failed'] = 1;
+            $result['failures'][] = [
+                'product_id' => $product->id,
+                'reason' => 'exception',
+                'details' => $e->getMessage(),
+            ];
+
+            logger()->error('Shopify import image sync failed.', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
+                'message' => $e->getMessage(),
+            ]);
+        }
+
+        return $result;
+    }
+
+    /**
      * @param Collection<int, Product> $products
      * @return array{
      *   updated:int,

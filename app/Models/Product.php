@@ -21,6 +21,7 @@ class Product extends Model
         'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
         'first_handle_auto_lock_completed_at','first_handle_auto_lock_approval_version',
         'batch','sync_batch_id','last_synced_at','is_bundle','you_save',
+        'image_import_batch_id','image_imported_at','image_import_status',
         'has_errors','error_fields',
     ];
 
@@ -30,6 +31,7 @@ class Product extends Model
         'has_errors' => 'boolean',
         'error_fields' => 'array',
         'last_synced_at' => 'datetime',
+        'image_imported_at' => 'datetime',
         'seo_updated_at' => 'datetime',
         'first_image_auto_rename_completed_at' => 'datetime',
         'first_handle_auto_lock_completed_at' => 'datetime',
@@ -78,6 +80,11 @@ class Product extends Model
     public function import(): BelongsTo
     {
         return $this->belongsTo(Import::class);
+    }
+
+    public function imageImportBatch(): BelongsTo
+    {
+        return $this->belongsTo(ShopifyImageImportBatch::class, 'image_import_batch_id');
     }
 
     public function seoUpdatedBy(): BelongsTo

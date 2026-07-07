@@ -15,6 +15,7 @@ use App\Models\Image;
 use App\Models\Import;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\ShopifyAudit;
+use App\Models\ShopifyImageImportBatch;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
@@ -1180,6 +1181,28 @@ class ProductResource extends Resource
                 ->placeholder('-')
                 ->sortable(query: fn (Builder $query, string $direction): Builder => $query->orderBy('sync_batch_id', $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_import_batch_id')
+                ->label('Image Import')
+                ->state(fn (Product $record): string => self::imageImportBatchLabel($record->image_import_batch_id))
+                ->placeholder('-')
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_import_status')
+                ->label('Image Import Status')
+                ->badge()
+                ->formatStateUsing(fn (?string $state): string => str_replace('_', ' ', (string) $state))
+                ->color(fn (?string $state): string => match ($state) {
+                    'updated' => 'success',
+                    'failed',
+                    'stack_rebuild_failed' => 'danger',
+                    default => 'gray',
+                })
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_imported_at')
+                ->label('Image Imported')
+                ->dateTime()
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('last_synced_at')
                 ->label('Last Synced')
                 ->dateTime()
@@ -1385,6 +1408,63 @@ class ProductResource extends Resource
                 ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Sync Batch'))
                 ->searchable()
                 ->preload(),
+            Filter::make('images_updated_latest_import')
+                ->label('Images updated in latest import')
+                ->indicator('Images updated in latest import')
+                ->query(fn (Builder $query): Builder => self::applyLatestImageImportFilter($query)),
+            SelectFilter::make('image_import_batch_id')
+                ->label('Image Import Batch')
+                ->options(fn () => ShopifyImageImportBatch::query()
+                    ->latest('completed_at')
+                    ->latest('id')
+                    ->limit(50)
+                    ->get(['id', 's3_prefix', 'completed_at', 'created_at'])
+                    ->mapWithKeys(fn (ShopifyImageImportBatch $batch): array => [
+                        (string) $batch->id => self::imageImportBatchLabel($batch->id, $batch),
+                    ])
+                    ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Image Import Batch'))
+                ->searchable()
+                ->preload(),
+            SelectFilter::make('image_import_status')
+                ->label('Image Import Status')
+                ->options([
+                    'updated' => 'Updated',
+                    'failed' => 'Failed',
+                    'stack_rebuild_failed' => 'Stack Rebuild Failed',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Image Import Status',
+                    [
+                        'updated' => 'Updated',
+                        'failed' => 'Failed',
+                        'stack_rebuild_failed' => 'Stack Rebuild Failed',
+                    ]
+                )),
+            Filter::make('image_imported_at')
+                ->form([
+                    DateTimePicker::make('imported_from'),
+                    DateTimePicker::make('imported_until'),
+                ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'imported_from',
+                    'imported_until',
+                    'Image Imported From',
+                    'Image Imported Until'
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when(
+                            $data['imported_from'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->where('image_imported_at', '>=', $date),
+                        )
+                        ->when(
+                            $data['imported_until'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->where('image_imported_at', '<=', $date),
+                        );
+                }),
             Filter::make('last_synced_at')
                 ->form([
                     DateTimePicker::make('synced_from'),
@@ -4357,6 +4437,33 @@ class ProductResource extends Resource
         }
 
         return strtoupper(substr(str_replace('-', '', $value), 0, 8));
+    }
+
+    public static function applyLatestImageImportFilter(Builder $query): Builder
+    {
+        $latestBatchId = ShopifyImageImportBatch::latestCompletedId();
+        if ($latestBatchId === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query
+            ->where('image_import_batch_id', $latestBatchId)
+            ->where('image_import_status', 'updated');
+    }
+
+    private static function imageImportBatchLabel(mixed $batchId, ?ShopifyImageImportBatch $batch = null): string
+    {
+        $id = (int) ($batchId ?? 0);
+        if ($id <= 0) {
+            return '-';
+        }
+
+        $batch ??= ShopifyImageImportBatch::query()->find($id);
+        $prefix = trim((string) ($batch?->s3_prefix ?? ''));
+        $date = $batch?->completed_at ?? $batch?->created_at;
+        $dateLabel = $date?->format('Y-m-d H:i');
+
+        return trim('#' . $id . ($prefix !== '' ? " {$prefix}" : '') . ($dateLabel ? " ({$dateLabel})" : ''));
     }
 
     private static function normalizeTagList(mixed $value): array
