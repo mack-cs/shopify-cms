@@ -20,6 +20,7 @@ class ShopifyImageImportService
     public function __construct(
         private readonly ProductShopifyUpdater $shopifyUpdater,
         private readonly ProductImageBackupService $backupService,
+        private readonly ProductImageFilenameService $filenameService,
     ) {}
 
     public function normalizePrefix(string $input): string
@@ -248,13 +249,13 @@ class ShopifyImageImportService
             $prepared = $this->prepareFirstImageForImport($product, $asset, basename($key));
             $image = $prepared['image'];
             $alreadySynced = $prepared['already_synced'];
+            $product = $product->fresh() ?? $product;
+            $duplicateCleanupCount = $this->cleanupDuplicatePositionsForPipeline($product);
+            $renamedCount = $this->renameActiveProductImagesFromHandle($product);
+            $this->pointActiveManagedImageSrcsAtManagedRoutes($product->fresh() ?? $product);
 
-            if (!$alreadySynced) {
-                $syncResult = $this->shopifyUpdater->syncSelectedProductImages(
-                    $product->fresh() ?? $product,
-                    [$image->id],
-                    true,
-                );
+            if ($this->productHasPendingImageSync($product->fresh() ?? $product)) {
+                $syncResult = $this->shopifyUpdater->syncProductImagesForImport($product->fresh() ?? $product);
 
                 $image->refresh();
 
@@ -265,14 +266,16 @@ class ShopifyImageImportService
 
                     return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
                 }
+
+                $duplicateCleanupCount += $this->purgeDeletedDuplicateRows($product->fresh() ?? $product);
             }
 
             $this->pointImageSrcAtManagedRoute($image->fresh() ?? $image);
             $this->markProductImportStatus($product, $batch, 'updated');
 
-            $message = $alreadySynced
+            $message = ($alreadySynced && $renamedCount === 0 && $duplicateCleanupCount === 0)
                 ? 'Image already matched the latest imported asset; Shopify upload skipped.'
-                : 'First Shopify image replaced.';
+                : 'First Shopify image replaced, filenames normalized, and duplicate positions cleaned.';
 
             $this->markItem($item, ShopifyImageImportItem::STATUS_UPDATED, $message);
 
@@ -457,6 +460,11 @@ class ShopifyImageImportService
             return $created;
         });
 
+        $stack = $stack->fresh() ?? $stack;
+        $duplicateCleanupCount = $this->cleanupDuplicatePositionsForPipeline($stack);
+        $renamedCount = $this->renameActiveProductImagesFromHandle($stack->fresh() ?? $stack);
+        $this->pointActiveManagedImageSrcsAtManagedRoutes($stack->fresh() ?? $stack);
+
         $syncResult = $this->shopifyUpdater->syncProductImagesForImport($stack->fresh() ?? $stack);
         $failedImages = Image::query()
             ->whereIn('id', $createdImageIds)
@@ -470,9 +478,11 @@ class ShopifyImageImportService
             ];
         }
 
+        $duplicateCleanupCount += $this->purgeDeletedDuplicateRows($stack->fresh() ?? $stack);
+
         return [
             'rebuilt' => true,
-            'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . ' component image(s).',
+            'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . " component image(s), renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s).",
         ];
     }
 
@@ -573,6 +583,230 @@ class ShopifyImageImportService
         return $image->imageAsset instanceof ImageAsset && $image->imageAsset->isAvailable()
             ? $image->imageAsset
             : null;
+    }
+
+    private function cleanupDuplicatePositionsForPipeline(Product $product): int
+    {
+        $duplicateGroups = $product->allImages()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->groupBy(fn (Image $image): string => (string) $image->position)
+            ->filter(fn (\Illuminate\Support\Collection $images): bool => $images->count() > 1);
+
+        $removed = 0;
+
+        foreach ($duplicateGroups as $images) {
+            $primary = $this->preferredPipelineImageToKeep($images);
+            if (!$primary instanceof Image) {
+                continue;
+            }
+
+            foreach ($images as $image) {
+                if (!$image instanceof Image || $image->is($primary)) {
+                    continue;
+                }
+
+                if (blank($image->shopify_id)) {
+                    $this->permanentlyDeleteImageRow($image);
+                } else {
+                    $image->hideAsDuplicate(
+                        $primary,
+                        null,
+                        $image->position !== null
+                            ? "Duplicate image position {$image->position}"
+                            : 'Image import duplicate cleanup'
+                    );
+                }
+
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    private function renameActiveProductImagesFromHandle(Product $product): int
+    {
+        $images = $product->allImages()
+            ->with('imageAsset')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+
+        $updated = 0;
+        $position = 0;
+
+        foreach ($images as $image) {
+            if (!$image instanceof Image) {
+                continue;
+            }
+
+            $position++;
+            $filename = $this->filenameService->generateForProductHandle($image, $product, $position);
+            $filenameChanged = trim((string) $image->approved_filename) !== $filename;
+            $modeChanged = trim((string) $image->filename_mode) !== Image::FILENAME_MODE_AUTO;
+            $positionChanged = (int) ($image->position ?? 0) !== $position;
+
+            if (!$filenameChanged && !$modeChanged && !$positionChanged) {
+                continue;
+            }
+
+            Image::withoutEvents(function () use ($image, $filename, $position, $filenameChanged): void {
+                $updates = [
+                    'approved_filename' => $filename,
+                    'filename_mode' => Image::FILENAME_MODE_AUTO,
+                    'position' => $position,
+                    'shopify_image_sync_error' => null,
+                ];
+
+                if ($filenameChanged && $image->hasManagedSource()) {
+                    $updates['needs_shopify_image_sync'] = true;
+                }
+
+                $image->forceFill($updates)->save();
+            });
+
+            $updated++;
+        }
+
+        return $updated;
+    }
+
+    private function pointActiveManagedImageSrcsAtManagedRoutes(Product $product): void
+    {
+        $product->allImages()
+            ->with('imageAsset')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->get()
+            ->each(function (Image $image): void {
+                $this->pointImageSrcAtManagedRoute($image);
+            });
+    }
+
+    private function productHasPendingImageSync(Product $product): bool
+    {
+        return $product->allImages()
+            ->where(function ($query): void {
+                $query->where(function ($activeQuery): void {
+                    $activeQuery
+                        ->whereNotIn('sync_state', [
+                            Image::SYNC_STATE_LOCAL_DELETED,
+                            Image::SYNC_STATE_REMOTE_DELETED,
+                        ])
+                        ->where(function ($visibleQuery): void {
+                            $visibleQuery->whereNull('is_duplicate_hidden')
+                                ->orWhere('is_duplicate_hidden', false);
+                        })
+                        ->where(function ($pendingQuery): void {
+                            $pendingQuery->where('needs_shopify_image_sync', true)
+                                ->orWhereIn('sync_state', [
+                                    Image::SYNC_STATE_LOCAL_NEW,
+                                    Image::SYNC_STATE_LOCAL_UPDATED,
+                                ]);
+                        });
+                })
+                    ->orWhere(function ($deletedQuery): void {
+                        $deletedQuery
+                            ->where('sync_state', Image::SYNC_STATE_LOCAL_DELETED)
+                            ->where('local_dirty', true);
+                    });
+            })
+            ->exists();
+    }
+
+    private function purgeDeletedDuplicateRows(Product $product): int
+    {
+        $rows = $product->allImages()
+            ->where(function ($query): void {
+                $query->whereIn('sync_state', [
+                    Image::SYNC_STATE_LOCAL_DELETED,
+                    Image::SYNC_STATE_REMOTE_DELETED,
+                ])
+                    ->orWhere('is_duplicate_hidden', true);
+            })
+            ->orderBy('id')
+            ->get();
+
+        $removed = 0;
+
+        foreach ($rows as $image) {
+            if (!$image instanceof Image) {
+                continue;
+            }
+
+            $this->permanentlyDeleteImageRow($image);
+            $removed++;
+        }
+
+        return $removed;
+    }
+
+    private function preferredPipelineImageToKeep(\Illuminate\Support\Collection $images): ?Image
+    {
+        $first = $images
+            ->sort(function (Image $left, Image $right): int {
+                $leftRank = [
+                    $left->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                    $left->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                    blank($left->shopify_id) ? 1 : 0,
+                    (int) $left->id,
+                ];
+                $rightRank = [
+                    $right->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                    $right->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                    blank($right->shopify_id) ? 1 : 0,
+                    (int) $right->id,
+                ];
+
+                return $leftRank <=> $rightRank;
+            })
+            ->first();
+
+        return $first instanceof Image ? $first : null;
+    }
+
+    private function permanentlyDeleteImageRow(Image $image): void
+    {
+        $imageId = (int) $image->id;
+        if ($imageId <= 0) {
+            return;
+        }
+
+        Variant::query()
+            ->where('image_id', $imageId)
+            ->update(['image_id' => null]);
+
+        Image::query()
+            ->where('duplicate_of_image_id', $imageId)
+            ->update(['duplicate_of_image_id' => null]);
+
+        $image->delete();
     }
 
     private function findProductBySku(string $sku): ?Product

@@ -7,6 +7,7 @@ use App\Filament\Resources\ProductResource;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\Variant;
 use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
 use Filament\Forms;
@@ -352,6 +353,24 @@ class ImagesRelationManager extends RelationManager
                 ->action(function (Image $record): void {
                     $this->removeImageRecord($record);
                 }),
+            Tables\Actions\Action::make('deleteForever')
+                ->label('Delete Forever')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->modalHeading('Permanently delete image?')
+                ->modalDescription('This removes the image row from the CMS immediately. Use this for duplicate, hidden, local-deleted, or remote-deleted rows that should no longer appear in review.')
+                ->visible(fn (): bool => $this->canPermanentlyDeleteImages())
+                ->action(function (Image $record): void {
+                    $this->permanentlyDeleteImageRecord($record);
+
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Image permanently deleted')
+                            ->body('The image row was removed from the CMS.')
+                            ->success()
+                    );
+                }),
             Tables\Actions\Action::make('restoreHiddenDuplicate')
                 ->label('Restore Hidden')
                 ->icon('heroicon-o-arrow-uturn-left')
@@ -446,6 +465,38 @@ class ImagesRelationManager extends RelationManager
                                 ? "Hid {$removed} selected duplicate image(s)."
                                 : 'No selected images were removable duplicates.')
                             ->status($removed > 0 ? 'success' : 'warning')
+                    );
+                })
+                ->deselectRecordsAfterCompletion(),
+            Tables\Actions\BulkAction::make('deleteSelectedForever')
+                ->label('Delete Selected Forever')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->modalHeading('Permanently delete selected images?')
+                ->modalDescription('This removes the selected image rows from the CMS immediately.')
+                ->visible(fn (): bool => $this->canPermanentlyDeleteImages())
+                ->action(function (Collection $records): void {
+                    $deleted = 0;
+
+                    foreach ($records as $record) {
+                        if (!$record instanceof Image) {
+                            continue;
+                        }
+
+                        $this->permanentlyDeleteImageRecord($record, false);
+                        $deleted++;
+                    }
+
+                    if ($deleted > 0) {
+                        $this->bumpOwnerApprovalVersion();
+                    }
+
+                    AdminNotification::send(
+                        Notification::make()
+                            ->title('Images permanently deleted')
+                            ->body("Deleted {$deleted} selected image row(s).")
+                            ->status($deleted > 0 ? 'success' : 'warning')
                     );
                 })
                 ->deselectRecordsAfterCompletion(),
@@ -727,6 +778,11 @@ HTML);
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
+    private function canPermanentlyDeleteImages(): bool
+    {
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
     private function applyImageVisibilityQuery(Builder $query): Builder
     {
         if ($this->canViewHiddenDuplicates()) {
@@ -900,6 +956,28 @@ HTML);
                 'local_dirty' => true,
             ]);
         }
+
+        if ($bumpApprovalVersion) {
+            $this->bumpOwnerApprovalVersion();
+        }
+    }
+
+    private function permanentlyDeleteImageRecord(Image $record, bool $bumpApprovalVersion = true): void
+    {
+        $imageId = (int) $record->id;
+        if ($imageId <= 0) {
+            return;
+        }
+
+        Variant::query()
+            ->where('image_id', $imageId)
+            ->update(['image_id' => null]);
+
+        Image::query()
+            ->where('duplicate_of_image_id', $imageId)
+            ->update(['duplicate_of_image_id' => null]);
+
+        $record->delete();
 
         if ($bumpApprovalVersion) {
             $this->bumpOwnerApprovalVersion();

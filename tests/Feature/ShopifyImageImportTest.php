@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Services\ShopifyImageImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
@@ -27,6 +28,7 @@ it('imports only direct image files in the normalized S3 folder and records the 
     Storage::fake('shopify_product_images');
     Storage::fake('public');
     config()->set('shopify_image_import.disk', 'shopify_product_images');
+    fakeSuccessfulShopifyImageImportSync();
 
     $bytes = 'fake-png-body';
     Storage::disk('shopify_product_images')->put('incoming/2026-07-06/LRB0001.png', $bytes);
@@ -52,6 +54,22 @@ it('imports only direct image files in the normalized S3 folder and records the 
         'needs_shopify_image_sync' => false,
     ]));
 
+    $duplicate = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/1002',
+        'image_asset_id' => $asset->id,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'src' => 'https://cdn.shopify.com/s/files/duplicate.png',
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'position' => 1,
+        'approved_filename' => 'duplicate.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+
     $batch = ShopifyImageImportBatch::create([
         's3_prefix' => '2026-07-06',
         'status' => ShopifyImageImportBatch::STATUS_PENDING,
@@ -72,8 +90,11 @@ it('imports only direct image files in the normalized S3 folder and records the 
         ->and($product->image_import_status)->toBe('updated')
         ->and($image->src)->toBe(route('product-image-backups.show', [
             'image' => $image,
-            'filename' => 'LRB0001.png',
-        ]));
+            'filename' => 'lrb0001-1.png',
+        ]))
+        ->and($image->approved_filename)->toBe('lrb0001-1.png')
+        ->and(Image::query()->whereKey($duplicate->id)->exists())->toBeFalse()
+        ->and($product->allImages()->where('position', 1)->count())->toBe(1);
 
     $item = ShopifyImageImportItem::query()->firstOrFail();
 
@@ -86,6 +107,7 @@ it('targets parent stacks for rebuild when an imported component image changes',
     Storage::fake('shopify_product_images');
     Storage::fake('public');
     config()->set('shopify_image_import.disk', 'shopify_product_images');
+    fakeSuccessfulShopifyImageImportSync();
 
     $bytes = 'updated-component-png-body';
     Storage::disk('shopify_product_images')->put('incoming/2026-07-06/COMP001.png', $bytes);
@@ -178,6 +200,95 @@ it('filters products updated in the latest completed image import batch', functi
         ->not->toContain($olderProduct->id)
         ->not->toContain($failedLatestProduct->id);
 });
+
+function fakeSuccessfulShopifyImageImportSync(): void
+{
+    config()->set('services.shopify.shop', 'leigh-test.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    $nextMediaId = 9000;
+
+    Http::fake(function ($request) use (&$nextMediaId) {
+        $query = (string) data_get($request->data(), 'query', '');
+
+        if (str_contains($query, 'productCreateMedia')) {
+            $nextMediaId++;
+
+            return Http::response([
+                'data' => [
+                    'productCreateMedia' => [
+                        'media' => [
+                            ['id' => 'gid://shopify/MediaImage/' . $nextMediaId],
+                        ],
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'productReorderMedia')) {
+            return Http::response([
+                'data' => [
+                    'productReorderMedia' => [
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'fileUpdate')) {
+            return Http::response([
+                'data' => [
+                    'fileUpdate' => [
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'productDeleteMedia')) {
+            return Http::response([
+                'data' => [
+                    'productDeleteMedia' => [
+                        'mediaUserErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'ProductByIdDetails')) {
+            return Http::response([
+                'data' => [
+                    'product' => fakeShopifyImageImportProductDetails(),
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'ProductByHandleDetails')) {
+            return Http::response([
+                'data' => [
+                    'productByHandle' => fakeShopifyImageImportProductDetails(),
+                ],
+            ]);
+        }
+
+        return Http::response(['data' => []]);
+    });
+}
+
+function fakeShopifyImageImportProductDetails(): array
+{
+    return [
+        'id' => 'gid://shopify/Product/1000',
+        'options' => [],
+        'category' => null,
+        'productCategory' => null,
+        'variants' => ['nodes' => []],
+        'media' => ['nodes' => []],
+        'images' => ['nodes' => []],
+    ];
+}
 
 function createImageImportProduct(string $sku, array $productOverrides = []): Product
 {

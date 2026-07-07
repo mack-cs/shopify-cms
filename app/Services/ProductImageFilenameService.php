@@ -21,6 +21,22 @@ class ProductImageFilenameService
         return sprintf('%s-%02d.%s', $base, $index, $extension);
     }
 
+    public function generateForProductHandle(Image $image, Product $product, ?int $position = null): string
+    {
+        $base = Str::slug(trim((string) $product->handle));
+        if ($base === '') {
+            $base = Str::slug(trim((string) $product->title));
+        }
+        if ($base === '') {
+            $base = 'product-image';
+        }
+
+        $index = max(1, (int) ($position ?? $image->position ?? 1));
+        $extension = $this->resolveExtension($image);
+
+        return sprintf('%s-%d.%s', $base, $index, $extension);
+    }
+
     public function assignFromCurrentTitle(Product $product, bool $manual = false): int
     {
         $product->loadMissing([
