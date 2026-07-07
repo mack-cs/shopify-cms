@@ -16,6 +16,7 @@
         "laravel/tinker": "^2.10.1",
         "laravel/wayfinder": "^0.1.9",
         "league/csv": "^9.27",
+        "league/flysystem-aws-s3-v3": "3.0",
         "spatie/laravel-permission": "^6.24"
     },
     "require-dev": {
