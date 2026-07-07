@@ -26,6 +26,7 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
         public int $batchId,
         public array $stackProductIds,
         public ?int $userId = null,
+        public bool $manageBatchStatus = false,
     ) {}
 
     public function handle(ShopifyImageImportService $service): void
@@ -35,7 +36,44 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
             return;
         }
 
-        $result = $service->rebuildStacksForBatch($batch, $this->stackProductIds);
+        $stackProductIds = array_values(array_unique(array_filter(array_map('intval', $this->stackProductIds))));
+
+        if ($this->manageBatchStatus) {
+            $batch->forceFill([
+                'status' => ShopifyImageImportBatch::STATUS_RUNNING,
+                'started_at' => $batch->started_at ?: now(),
+                'completed_at' => null,
+                'error_message' => null,
+                'matched_count' => count($stackProductIds),
+                'updated_count' => 0,
+                'failed_count' => 0,
+            ])->save();
+        }
+
+        try {
+            $result = $service->rebuildStacksForBatch($batch, $stackProductIds);
+        } catch (\Throwable $e) {
+            if ($this->manageBatchStatus) {
+                $batch->forceFill([
+                    'status' => ShopifyImageImportBatch::STATUS_FAILED,
+                    'completed_at' => now(),
+                    'error_message' => $e->getMessage(),
+                ])->save();
+            }
+
+            throw $e;
+        }
+
+        if ($this->manageBatchStatus) {
+            $batch->forceFill([
+                'status' => ShopifyImageImportBatch::STATUS_COMPLETED,
+                'matched_count' => count($stackProductIds),
+                'updated_count' => $result['rebuilt'],
+                'failed_count' => $result['failed'],
+                'completed_at' => now(),
+            ])->save();
+        }
+
         $message = "Batch #{$batch->id}: rebuilt {$result['rebuilt']} stack(s), {$result['failed']} failed.";
 
         if (!empty($result['messages'])) {
@@ -53,5 +91,21 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
         }
 
         AdminNotification::send($notification);
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        if (!$this->manageBatchStatus) {
+            return;
+        }
+
+        $batch = ShopifyImageImportBatch::query()->find($this->batchId);
+        if ($batch instanceof ShopifyImageImportBatch) {
+            $batch->forceFill([
+                'status' => ShopifyImageImportBatch::STATUS_FAILED,
+                'completed_at' => now(),
+                'error_message' => $exception->getMessage(),
+            ])->save();
+        }
     }
 }

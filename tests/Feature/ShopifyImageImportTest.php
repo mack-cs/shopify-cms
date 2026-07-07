@@ -4,6 +4,7 @@ use App\Filament\Resources\ProductResource;
 use App\Models\Image;
 use App\Models\ImageAsset;
 use App\Models\Import;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyImageImportBatch;
 use App\Models\ShopifyImageImportItem;
@@ -79,6 +80,63 @@ it('imports only direct image files in the normalized S3 folder and records the 
     expect($item->sku)->toBe('LRB0001')
         ->and($item->s3_key)->toBe('incoming/2026-07-06/LRB0001.png')
         ->and($item->status)->toBe(ShopifyImageImportItem::STATUS_UPDATED);
+});
+
+it('targets parent stacks for rebuild when an imported component image changes', function (): void {
+    Storage::fake('shopify_product_images');
+    Storage::fake('public');
+    config()->set('shopify_image_import.disk', 'shopify_product_images');
+
+    $bytes = 'updated-component-png-body';
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/COMP001.png', $bytes);
+
+    $asset = createImportTestAsset($bytes, 'png', 'COMP001.png');
+    $component = createImageImportProduct('COMP001', [
+        'handle' => 'component-one',
+    ]);
+
+    $stack = createImageImportProduct('STACK001', [
+        'handle' => 'stack-one',
+        'type' => 'Bundle',
+        'is_bundle' => true,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'STACK001',
+        'shopify_id' => $stack->shopify_id,
+        'handle' => $stack->handle,
+        'title' => $stack->title,
+        'type' => 'Bundle',
+        'tags' => 'bundles',
+        'status' => 'active',
+        'bundle_product_ids' => [$component->id],
+    ]));
+
+    Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $component->id,
+        'shopify_id' => 'gid://shopify/MediaImage/2001',
+        'image_asset_id' => $asset->id,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'position' => 1,
+        'approved_filename' => 'COMP001.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    $batch = ShopifyImageImportBatch::create([
+        's3_prefix' => '2026-07-06',
+        'status' => ShopifyImageImportBatch::STATUS_PENDING,
+    ]);
+
+    $result = app(ShopifyImageImportService::class)->runBatch($batch);
+
+    expect($result['updated_count'])->toBe(1)
+        ->and($result['affected_stack_product_ids'])->toBe([$stack->id])
+        ->and(app(ShopifyImageImportService::class)->stackProductIdsForUpdatedComponents([$component->id]))->toBe([$stack->id]);
 });
 
 it('filters products updated in the latest completed image import batch', function (): void {

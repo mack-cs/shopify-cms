@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Enums\RolesEnum;
 use App\Jobs\ImportShopifyProductImagesJob;
+use App\Jobs\RebuildShopifyStackImagesJob;
 use App\Models\ShopifyImageImportBatch;
 use App\Services\AdminNotification;
 use App\Services\ShopifyImageImportService;
@@ -70,6 +71,16 @@ class ImportShopifyProductImages extends Page implements HasForms
                                 ->action(function (ShopifyImageImportService $service): void {
                                     $this->runImport($service);
                                 }),
+                            Action::make('rebuildStackComponentImages')
+                                ->label('Rebuild Stack Component Images')
+                                ->icon('heroicon-o-arrow-path')
+                                ->color('gray')
+                                ->requiresConfirmation()
+                                ->modalHeading('Rebuild stack component images?')
+                                ->modalDescription('This queues a job for stacks with linked components. Position 1 stays as the lifestyle image and positions 2 onward are rebuilt from component first images.')
+                                ->action(function (ShopifyImageImportService $service): void {
+                                    $this->runStackComponentRebuild($service);
+                                }),
                         ]),
                     ])
                     ->columns(1),
@@ -114,6 +125,46 @@ class ImportShopifyProductImages extends Page implements HasForms
         $this->form->fill([
             's3_prefix' => $prefix,
         ]);
+    }
+
+    public function runStackComponentRebuild(ShopifyImageImportService $service): void
+    {
+        if (!static::canAccess()) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Super Admin required')
+                    ->danger()
+            );
+            return;
+        }
+
+        $stackProductIds = $service->stackProductIdsForAllLinkedComponents();
+        if ($stackProductIds === []) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('No stack component images queued')
+                    ->body('No stacks with linked components were found.')
+                    ->warning()
+            );
+            return;
+        }
+
+        $batch = ShopifyImageImportBatch::create([
+            's3_prefix' => 'manual-stack-component-rebuild',
+            'status' => ShopifyImageImportBatch::STATUS_PENDING,
+            'total_files' => 0,
+            'matched_count' => count($stackProductIds),
+            'created_by' => Auth::id(),
+        ]);
+
+        RebuildShopifyStackImagesJob::dispatch($batch->id, $stackProductIds, Auth::id(), true);
+
+        AdminNotification::send(
+            Notification::make()
+                ->title('Stack component image rebuild queued')
+                ->body('Batch #' . $batch->id . ' will rebuild component images for ' . count($stackProductIds) . ' stack(s).')
+                ->success()
+        );
     }
 
     private function normalizedPrefixPreview(): string

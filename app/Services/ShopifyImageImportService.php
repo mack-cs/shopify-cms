@@ -57,6 +57,7 @@ class ShopifyImageImportService
         $updated = 0;
         $failed = 0;
         $affectedStackProductIds = [];
+        $updatedProductIds = [];
 
         $batch->forceFill([
             's3_prefix' => $prefix,
@@ -85,11 +86,19 @@ class ShopifyImageImportService
                 $affectedStackProductIds[$result['affected_stack_product_id']] = $result['affected_stack_product_id'];
             }
 
+            if ($result['updated_product_id'] !== null) {
+                $updatedProductIds[$result['updated_product_id']] = $result['updated_product_id'];
+            }
+
             $batch->forceFill([
                 'matched_count' => $matched,
                 'updated_count' => $updated,
                 'failed_count' => $failed,
             ])->save();
+        }
+
+        foreach ($this->stackProductIdsForUpdatedComponents(array_values($updatedProductIds)) as $stackProductId) {
+            $affectedStackProductIds[$stackProductId] = $stackProductId;
         }
 
         return [
@@ -155,6 +164,35 @@ class ShopifyImageImportService
     }
 
     /**
+     * @param array<int, int> $componentProductIds
+     * @return array<int, int>
+     */
+    public function stackProductIdsForUpdatedComponents(array $componentProductIds): array
+    {
+        $componentProductIds = array_values(array_unique(array_filter(array_map('intval', $componentProductIds))));
+        if ($componentProductIds === []) {
+            return [];
+        }
+
+        $wanted = array_fill_keys($componentProductIds, true);
+
+        return $this->stackProductIdsFromDrafts(
+            fn (array $linkedComponentIds): bool => collect($linkedComponentIds)
+                ->contains(fn (int $id): bool => isset($wanted[$id]))
+        );
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    public function stackProductIdsForAllLinkedComponents(): array
+    {
+        return $this->stackProductIdsFromDrafts(
+            fn (array $linkedComponentIds): bool => $linkedComponentIds !== []
+        );
+    }
+
+    /**
      * @return array<int, string>
      */
     private function imageKeysForPrefix(string $prefix): array
@@ -172,7 +210,7 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int}
+     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int}
      */
     private function processImageKey(ShopifyImageImportBatch $batch, string $key): array
     {
@@ -191,13 +229,13 @@ class ShopifyImageImportService
 
         if ($sku === '') {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, 'No SKU could be extracted from the filename.');
-            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null];
+            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
         }
 
         $product = $this->findProductBySku($sku);
         if (!$product instanceof Product) {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, "No product variant matched SKU {$sku}.");
-            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null];
+            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
         }
 
         $item->forceFill([
@@ -225,7 +263,7 @@ class ShopifyImageImportService
                     $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, $message);
                     $this->markProductImportStatus($product, $batch, 'failed');
 
-                    return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null];
+                    return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
                 }
             }
 
@@ -243,6 +281,7 @@ class ShopifyImageImportService
                 'updated' => true,
                 'failed' => false,
                 'affected_stack_product_id' => $this->isStackProduct($product) ? (int) $product->id : null,
+                'updated_product_id' => (int) $product->id,
             ];
         } catch (\Throwable $e) {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, $e->getMessage());
@@ -256,7 +295,7 @@ class ShopifyImageImportService
                 'message' => $e->getMessage(),
             ]);
 
-            return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null];
+            return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
         }
     }
 
@@ -770,7 +809,104 @@ class ShopifyImageImportService
             ->orderByDesc('updated_at')
             ->first(['bundle_product_ids']);
 
-        $ids = is_array($draft?->bundle_product_ids) ? $draft->bundle_product_ids : [];
+        return $this->normalizeProductIds($draft?->bundle_product_ids);
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function stackProductIdsFromDrafts(callable $shouldInclude): array
+    {
+        $drafts = NewProductDraft::query()
+            ->whereNotNull('bundle_product_ids')
+            ->orderByDesc('updated_at')
+            ->get(['id', 'shopify_id', 'handle', 'bundle_product_ids'])
+            ->filter(function (NewProductDraft $draft) use ($shouldInclude): bool {
+                $linkedComponentIds = $this->normalizeProductIds($draft->bundle_product_ids);
+
+                return $linkedComponentIds !== [] && (bool) $shouldInclude($linkedComponentIds, $draft);
+            })
+            ->values();
+
+        if ($drafts->isEmpty()) {
+            return [];
+        }
+
+        $shopifyIds = $drafts
+            ->map(fn (NewProductDraft $draft): string => trim((string) ($draft->shopify_id ?? '')))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        $handles = $drafts
+            ->map(fn (NewProductDraft $draft): string => trim((string) ($draft->handle ?? '')))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($shopifyIds === [] && $handles === []) {
+            return [];
+        }
+
+        $products = Product::query()
+            ->where(function ($query) use ($shopifyIds, $handles): void {
+                if ($shopifyIds !== []) {
+                    $query->whereIn('shopify_id', $shopifyIds);
+                }
+
+                if ($handles !== []) {
+                    $shopifyIds !== []
+                        ? $query->orWhereIn('handle', $handles)
+                        : $query->whereIn('handle', $handles);
+                }
+            })
+            ->orderBy('id')
+            ->get(['id', 'shopify_id', 'handle']);
+
+        $productsByShopifyId = [];
+        $productsByHandle = [];
+
+        foreach ($products as $product) {
+            $shopifyId = trim((string) ($product->shopify_id ?? ''));
+            if ($shopifyId !== '' && !isset($productsByShopifyId[$shopifyId])) {
+                $productsByShopifyId[$shopifyId] = $product;
+            }
+
+            $handle = trim((string) ($product->handle ?? ''));
+            if ($handle !== '' && !isset($productsByHandle[$handle])) {
+                $productsByHandle[$handle] = $product;
+            }
+        }
+
+        $stackProductIds = [];
+
+        foreach ($drafts as $draft) {
+            $shopifyId = trim((string) ($draft->shopify_id ?? ''));
+            $handle = trim((string) ($draft->handle ?? ''));
+            $stack = null;
+
+            if ($shopifyId !== '' && isset($productsByShopifyId[$shopifyId])) {
+                $stack = $productsByShopifyId[$shopifyId];
+            } elseif ($handle !== '' && isset($productsByHandle[$handle])) {
+                $stack = $productsByHandle[$handle];
+            }
+
+            if ($stack instanceof Product) {
+                $stackProductIds[(int) $stack->id] = (int) $stack->id;
+            }
+        }
+
+        return array_values($stackProductIds);
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function normalizeProductIds(mixed $ids): array
+    {
+        $ids = is_array($ids) ? $ids : [];
         $normalized = [];
         $seen = [];
 
