@@ -2312,6 +2312,38 @@ class ProductResource extends Resource
                         );
                     })
                     ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkDeleteDuplicateImagesForever')
+                    ->label('Delete Duplicate Images Forever')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->modalHeading('Permanently delete duplicate images?')
+                    ->modalDescription('This keeps one active image per duplicate position and permanently deletes the extra duplicate image rows from the CMS for the selected products.')
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->action(function (Collection $records): void {
+                        $productsProcessed = 0;
+                        $imagesDeleted = 0;
+
+                        foreach ($records as $product) {
+                            if (!$product instanceof Product) {
+                                continue;
+                            }
+
+                            $deletedForProduct = self::deleteDuplicateImagesForProductForever($product);
+
+                            if ($deletedForProduct > 0) {
+                                $productsProcessed++;
+                                $imagesDeleted += $deletedForProduct;
+                            }
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Duplicate images permanently deleted')
+                            ->body("Processed {$productsProcessed} product(s). Deleted {$imagesDeleted} duplicate image row(s).")
+                            ->status($imagesDeleted > 0 ? 'success' : 'warning')
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkBackupImages')
                     ->label('Queue Image Backup')
                     ->icon('heroicon-o-arrow-down-tray')
@@ -2347,25 +2379,12 @@ class ProductResource extends Resource
 
     private static function removeDuplicateImagesForProduct(Product $product): int
     {
-        $groups = $product->images()
-            ->whereNotNull('position')
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->orderBy('position')
-            ->orderBy('id')
-            ->get()
-            ->groupBy('position');
+        $groups = self::duplicateImagePositionGroups($product);
 
         $removed = 0;
 
         foreach ($groups as $images) {
-            if ($images->count() <= 1) {
-                continue;
-            }
-
-            $primary = $images->first();
+            $primary = self::preferredDuplicateImageToKeep($images);
             $imagesToRemove = $images->slice(1);
 
             foreach ($imagesToRemove as $image) {
@@ -2386,6 +2405,86 @@ class ProductResource extends Resource
         }
 
         return $removed;
+    }
+
+    private static function deleteDuplicateImagesForProductForever(Product $product): int
+    {
+        $groups = self::duplicateImagePositionGroups($product);
+        $deleted = 0;
+
+        foreach ($groups as $images) {
+            $primary = self::preferredDuplicateImageToKeep($images);
+
+            foreach ($images as $image) {
+                if (!$image instanceof Image || ($primary instanceof Image && $image->is($primary))) {
+                    continue;
+                }
+
+                self::permanentlyDeleteImageRecord($image);
+                $deleted++;
+            }
+        }
+
+        if ($deleted > 0) {
+            $product->touch();
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int|string, \Illuminate\Support\Collection<int, Image>>
+     */
+    private static function duplicateImagePositionGroups(Product $product): Collection
+    {
+        return $product->images()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->groupBy('position')
+            ->filter(fn (Collection $images): bool => $images->count() > 1)
+            ->map(fn (Collection $images): Collection => $images->sortBy(function (Image $image): array {
+                return [
+                    $image->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                    $image->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                    blank($image->shopify_id) ? 1 : 0,
+                    (int) $image->id,
+                ];
+            })->values());
+    }
+
+    private static function preferredDuplicateImageToKeep(Collection $images): ?Image
+    {
+        $first = $images->first();
+
+        return $first instanceof Image ? $first : null;
+    }
+
+    private static function permanentlyDeleteImageRecord(Image $image): void
+    {
+        $imageId = (int) $image->id;
+        if ($imageId <= 0) {
+            return;
+        }
+
+        Variant::query()
+            ->where('image_id', $imageId)
+            ->update(['image_id' => null]);
+
+        Image::query()
+            ->where('duplicate_of_image_id', $imageId)
+            ->update(['duplicate_of_image_id' => null]);
+
+        $image->delete();
     }
 
     public static function getRelations(): array
