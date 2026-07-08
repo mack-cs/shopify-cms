@@ -18,7 +18,6 @@ class ShopifyImageImportService
     private const SUPPORTED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
 
     public function __construct(
-        private readonly ProductShopifyUpdater $shopifyUpdater,
         private readonly ProductImageBackupService $backupService,
         private readonly ProductImageFilenameService $filenameService,
     ) {}
@@ -254,28 +253,12 @@ class ShopifyImageImportService
             $renamedCount = $this->renameActiveProductImagesFromHandle($product);
             $this->pointActiveManagedImageSrcsAtManagedRoutes($product->fresh() ?? $product);
 
-            if ($this->productHasPendingImageSync($product->fresh() ?? $product)) {
-                $syncResult = $this->shopifyUpdater->syncProductImagesForImport($product->fresh() ?? $product);
-
-                $image->refresh();
-
-                if ($syncResult['failed'] > 0 || !empty($syncResult['warnings']) || $image->needs_shopify_image_sync) {
-                    $message = $this->syncFailureMessage($syncResult, $image);
-                    $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, $message);
-                    $this->markProductImportStatus($product, $batch, 'failed');
-
-                    return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
-                }
-
-                $duplicateCleanupCount += $this->purgeDeletedDuplicateRows($product->fresh() ?? $product);
-            }
-
             $this->pointImageSrcAtManagedRoute($image->fresh() ?? $image);
             $this->markProductImportStatus($product, $batch, 'updated');
 
             $message = ($alreadySynced && $renamedCount === 0 && $duplicateCleanupCount === 0)
-                ? 'Image already matched the latest imported asset; Shopify upload skipped.'
-                : 'First Shopify image replaced, filenames normalized, and duplicate positions cleaned.';
+                ? 'Image already matched the latest imported asset; Shopify sync left pending for approval.'
+                : 'First image replaced locally, filenames normalized, and duplicate positions cleaned. Shopify sync left pending for approval.';
 
             $this->markItem($item, ShopifyImageImportItem::STATUS_UPDATED, $message);
 
@@ -465,24 +448,9 @@ class ShopifyImageImportService
         $renamedCount = $this->renameActiveProductImagesFromHandle($stack->fresh() ?? $stack);
         $this->pointActiveManagedImageSrcsAtManagedRoutes($stack->fresh() ?? $stack);
 
-        $syncResult = $this->shopifyUpdater->syncProductImagesForImport($stack->fresh() ?? $stack);
-        $failedImages = Image::query()
-            ->whereIn('id', $createdImageIds)
-            ->where('needs_shopify_image_sync', true)
-            ->count();
-
-        if ($syncResult['failed'] > 0 || !empty($syncResult['warnings']) || $failedImages > 0) {
-            return [
-                'rebuilt' => false,
-                'message' => "{$stack->handle}: stack image rebuild did not fully sync. " . $this->syncFailureMessage($syncResult, $lifestyle),
-            ];
-        }
-
-        $duplicateCleanupCount += $this->purgeDeletedDuplicateRows($stack->fresh() ?? $stack);
-
         return [
             'rebuilt' => true,
-            'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . " component image(s), renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s).",
+            'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . " component image(s) locally, renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s). Shopify sync left pending for approval.",
         ];
     }
 
@@ -709,64 +677,6 @@ class ShopifyImageImportService
             });
     }
 
-    private function productHasPendingImageSync(Product $product): bool
-    {
-        return $product->allImages()
-            ->where(function ($query): void {
-                $query->where(function ($activeQuery): void {
-                    $activeQuery
-                        ->whereNotIn('sync_state', [
-                            Image::SYNC_STATE_LOCAL_DELETED,
-                            Image::SYNC_STATE_REMOTE_DELETED,
-                        ])
-                        ->where(function ($visibleQuery): void {
-                            $visibleQuery->whereNull('is_duplicate_hidden')
-                                ->orWhere('is_duplicate_hidden', false);
-                        })
-                        ->where(function ($pendingQuery): void {
-                            $pendingQuery->where('needs_shopify_image_sync', true)
-                                ->orWhereIn('sync_state', [
-                                    Image::SYNC_STATE_LOCAL_NEW,
-                                    Image::SYNC_STATE_LOCAL_UPDATED,
-                                ]);
-                        });
-                })
-                    ->orWhere(function ($deletedQuery): void {
-                        $deletedQuery
-                            ->where('sync_state', Image::SYNC_STATE_LOCAL_DELETED)
-                            ->where('local_dirty', true);
-                    });
-            })
-            ->exists();
-    }
-
-    private function purgeDeletedDuplicateRows(Product $product): int
-    {
-        $rows = $product->allImages()
-            ->where(function ($query): void {
-                $query->whereIn('sync_state', [
-                    Image::SYNC_STATE_LOCAL_DELETED,
-                    Image::SYNC_STATE_REMOTE_DELETED,
-                ])
-                    ->orWhere('is_duplicate_hidden', true);
-            })
-            ->orderBy('id')
-            ->get();
-
-        $removed = 0;
-
-        foreach ($rows as $image) {
-            if (!$image instanceof Image) {
-                continue;
-            }
-
-            $this->permanentlyDeleteImageRow($image);
-            $removed++;
-        }
-
-        return $removed;
-    }
-
     private function preferredPipelineImageToKeep(\Illuminate\Support\Collection $images): ?Image
     {
         $first = $images
@@ -872,8 +782,8 @@ class ShopifyImageImportService
                     ->orWhere('is_duplicate_hidden', false);
             })
             ->get()
-            ->each(function (Image $image): void {
-                Image::withoutEvents(function () use ($image): void {
+            ->each(function (Image $image) use ($primary): void {
+                Image::withoutEvents(function () use ($image, $primary): void {
                     if (blank($image->shopify_id)) {
                         $image->delete();
                         return;
@@ -882,6 +792,12 @@ class ShopifyImageImportService
                     $image->forceFill([
                         'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
                         'local_dirty' => true,
+                        'is_duplicate_hidden' => true,
+                        'duplicate_of_image_id' => $primary->id,
+                        'duplicate_hidden_at' => now(),
+                        'duplicate_hidden_reason' => $image->position !== null
+                            ? "Duplicate image position {$image->position}"
+                            : 'Image import duplicate cleanup',
                     ])->save();
                 });
             });
@@ -914,6 +830,9 @@ class ShopifyImageImportService
                     $image->forceFill([
                         'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
                         'local_dirty' => true,
+                        'is_duplicate_hidden' => true,
+                        'duplicate_hidden_at' => now(),
+                        'duplicate_hidden_reason' => 'Stack image rebuild replaced this image locally.',
                     ])->save();
                 });
             });
@@ -950,31 +869,6 @@ class ShopifyImageImportService
             'status' => $status,
             'message' => Str::limit($message, 2000, ''),
         ])->save();
-    }
-
-    private function syncFailureMessage(array $syncResult, Image $image): string
-    {
-        $parts = [];
-
-        if (!empty($syncResult['failures'])) {
-            $parts[] = collect($syncResult['failures'])
-                ->take(3)
-                ->map(fn (array $failure): string => (string) ($failure['details'] ?? $failure['reason'] ?? 'Shopify sync failed.'))
-                ->implode(' | ');
-        }
-
-        if (!empty($syncResult['warnings'])) {
-            $parts[] = collect($syncResult['warnings'])
-                ->take(3)
-                ->map(fn (array $warning): string => (string) ($warning['warning'] ?? 'Shopify sync warning.'))
-                ->implode(' | ');
-        }
-
-        if (filled($image->shopify_image_sync_error)) {
-            $parts[] = (string) $image->shopify_image_sync_error;
-        }
-
-        return implode(' | ', array_filter($parts)) ?: 'Shopify image sync failed.';
     }
 
     private function isStackProduct(Product $product): bool
