@@ -2318,7 +2318,7 @@ class ProductResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Permanently delete duplicate images?')
-                    ->modalDescription('This keeps one active image per duplicate position and permanently deletes the extra duplicate image rows from the CMS for the selected products.')
+                    ->modalDescription('This keeps one active image per duplicate position and permanently deletes extra duplicate, hidden, local-deleted, and remote-deleted duplicate image rows from the CMS for the selected products.')
                     ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                     ->action(function (Collection $records): void {
                         $productsProcessed = 0;
@@ -2409,20 +2409,16 @@ class ProductResource extends Resource
 
     private static function deleteDuplicateImagesForProductForever(Product $product): int
     {
-        $groups = self::duplicateImagePositionGroups($product);
+        $imagesToDelete = self::duplicateImagesForPermanentDeletion($product);
         $deleted = 0;
 
-        foreach ($groups as $images) {
-            $primary = self::preferredDuplicateImageToKeep($images);
-
-            foreach ($images as $image) {
-                if (!$image instanceof Image || ($primary instanceof Image && $image->is($primary))) {
-                    continue;
-                }
-
-                self::permanentlyDeleteImageRecord($image);
-                $deleted++;
+        foreach ($imagesToDelete as $image) {
+            if (!$image instanceof Image) {
+                continue;
             }
+
+            self::permanentlyDeleteImageRecord($image);
+            $deleted++;
         }
 
         if ($deleted > 0) {
@@ -2462,11 +2458,75 @@ class ProductResource extends Resource
             })->values());
     }
 
+    /**
+     * @return \Illuminate\Support\Collection<int, Image>
+     */
+    private static function duplicateImagesForPermanentDeletion(Product $product): Collection
+    {
+        $deleteIds = [];
+
+        $allImages = $product->allImages()
+            ->whereNotNull('position')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+
+        $allImages
+            ->groupBy('position')
+            ->filter(fn (Collection $images): bool => $images->count() > 1)
+            ->each(function (Collection $images) use (&$deleteIds): void {
+                $activeImages = $images
+                    ->filter(fn (Image $image): bool => self::isActiveVisibleImage($image))
+                    ->values();
+
+                $primary = $activeImages->isNotEmpty()
+                    ? self::preferredDuplicateImageToKeep($activeImages)
+                    : null;
+
+                foreach ($images as $image) {
+                    if (!$image instanceof Image || ($primary instanceof Image && $image->is($primary))) {
+                        continue;
+                    }
+
+                    $deleteIds[(int) $image->id] = (int) $image->id;
+                }
+            });
+
+        $product->allImages()
+            ->where(function (Builder $query): void {
+                $query->where('is_duplicate_hidden', true)
+                    ->orWhereNotNull('duplicate_of_image_id');
+            })
+            ->get()
+            ->each(function (Image $image) use (&$deleteIds): void {
+                $deleteIds[(int) $image->id] = (int) $image->id;
+            });
+
+        if ($deleteIds === []) {
+            return collect();
+        }
+
+        return Image::query()
+            ->whereIn('id', array_values($deleteIds))
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+    }
+
     private static function preferredDuplicateImageToKeep(Collection $images): ?Image
     {
         $first = $images->first();
 
         return $first instanceof Image ? $first : null;
+    }
+
+    private static function isActiveVisibleImage(Image $image): bool
+    {
+        return !in_array($image->sync_state, [
+            Image::SYNC_STATE_LOCAL_DELETED,
+            Image::SYNC_STATE_REMOTE_DELETED,
+        ], true)
+            && !(bool) ($image->is_duplicate_hidden ?? false);
     }
 
     private static function permanentlyDeleteImageRecord(Image $image): void

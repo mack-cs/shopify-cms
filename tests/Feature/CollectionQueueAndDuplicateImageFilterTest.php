@@ -166,6 +166,68 @@ it('permanently deletes extra duplicate image rows for a product', function (): 
         ->not->toContain($product->id);
 });
 
+it('permanently deletes hidden and deleted duplicate image rows for a product', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'products',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'handle' => 'stale-duplicate-product',
+        'title' => 'Stale Duplicate Product',
+    ]));
+
+    $primary = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/8101',
+        'src' => 'https://example.com/keep.jpg',
+        'position' => 1,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+    ]));
+
+    $hiddenDeletedDuplicate = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/8102',
+        'src' => 'https://example.com/hidden-local-deleted.jpg',
+        'position' => 1,
+        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+        'is_duplicate_hidden' => true,
+        'duplicate_of_image_id' => $primary->id,
+    ]));
+
+    $remoteDeletedDuplicate = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/8103',
+        'src' => 'https://example.com/remote-deleted.jpg',
+        'position' => 1,
+        'sync_state' => Image::SYNC_STATE_REMOTE_DELETED,
+    ]));
+
+    $orphanHiddenDuplicate = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/8104',
+        'src' => 'https://example.com/orphan-hidden.jpg',
+        'position' => 5,
+        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+        'is_duplicate_hidden' => true,
+    ]));
+
+    $deleted = invokePrivateProductResourceMethod('deleteDuplicateImagesForProductForever', [$product]);
+
+    expect($deleted)->toBe(3)
+        ->and(Image::query()->whereKey($primary->id)->exists())->toBeTrue()
+        ->and(Image::query()->whereKey($hiddenDeletedDuplicate->id)->exists())->toBeFalse()
+        ->and(Image::query()->whereKey($remoteDeletedDuplicate->id)->exists())->toBeFalse()
+        ->and(Image::query()->whereKey($orphanHiddenDuplicate->id)->exists())->toBeFalse();
+});
+
 function invokePrivateProductResourceMethod(string $method, array $arguments): mixed
 {
     $reflection = new ReflectionClass(ProductResource::class);
