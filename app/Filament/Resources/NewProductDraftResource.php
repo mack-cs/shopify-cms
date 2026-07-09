@@ -3746,44 +3746,44 @@ class NewProductDraftResource extends Resource
                             ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
                         );
                     }),
-                // Tables\Actions\Action::make('importSaleUpdates')
-                //     ->label('Import Sale Updates')
-                //     ->icon('heroicon-o-tag')
-                //     ->color('warning')
-                //     ->visible(fn (): bool => self::saleSchedulingTablesReady() && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
-                //     ->form([
-                //         Forms\Components\FileUpload::make('file')
-                //             ->label('Sale CSV File')
-                //             ->required()
-                //             ->disk('local')
-                //             ->directory('imports')
-                //             ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
-                //             ->helperText('Required columns: sku, old price / current price, compare to price, sale price. Import stages sale updates only; Shopify is updated by the scheduled sale job.'),
-                //     ])
-                //     ->action(function (array $data, SaleProductUpdateImporter $importer): void {
-                //         $path = Storage::disk('local')->path($data['file']);
-                //         $result = $importer->importFromPath($path, Auth::id(), (string) $data['file']);
+                Tables\Actions\Action::make('importSaleUpdates')
+                    ->label('Import Sale Updates')
+                    ->icon('heroicon-o-tag')
+                    ->color('warning')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
+                    ->form([
+                        Forms\Components\FileUpload::make('file')
+                            ->label('Sale CSV File')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports')
+                            ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                            ->helperText('Required columns: sku, old price / current price, compare to price, sale price. Import stages sale updates only; Shopify is updated by the scheduled sale job.'),
+                    ])
+                    ->action(function (array $data, SaleProductUpdateImporter $importer): void {
+                        $path = Storage::disk('local')->path($data['file']);
+                        $result = $importer->importFromPath($path, Auth::id(), (string) $data['file']);
 
-                //         $unmatched = array_slice($result['unmatched_skus'] ?? [], 0, 8);
-                //         $failed = array_slice($result['failed_skus'] ?? [], 0, 8);
-                //         $details = [];
-                //         if ($unmatched !== []) {
-                //             $details[] = 'Unmatched: ' . implode(', ', $unmatched);
-                //         }
-                //         if ($failed !== []) {
-                //             $details[] = 'Failed: ' . implode(', ', $failed);
-                //         }
+                        $unmatched = array_slice($result['unmatched_skus'] ?? [], 0, 8);
+                        $failed = array_slice($result['failed_skus'] ?? [], 0, 8);
+                        $details = [];
+                        if ($unmatched !== []) {
+                            $details[] = 'Unmatched: ' . implode(', ', $unmatched);
+                        }
+                        if ($failed !== []) {
+                            $details[] = 'Failed: ' . implode(', ', $failed);
+                        }
 
-                //         self::sendNotification(Notification::make()
-                //             ->title('Sale import complete')
-                //             ->body(
-                //                 "Batch #{$result['batch_id']}. Rows: {$result['total']}, Matched: {$result['matched']}, " .
-                //                 "Pending sale approval: {$result['pending']}, Unmatched: {$result['unmatched']}, Failed: {$result['failed']}." .
-                //                 ($details === [] ? '' : ' ' . implode(' ', $details))
-                //             )
-                //             ->status(($result['unmatched'] > 0 || $result['failed'] > 0) ? 'warning' : 'success')
-                //         );
-                //     }),
+                        self::sendNotification(Notification::make()
+                            ->title('Sale import complete')
+                            ->body(
+                                "Batch #{$result['batch_id']}. Rows: {$result['total']}, Matched: {$result['matched']}, " .
+                                "Pending sale approval: {$result['pending']}, Unmatched: {$result['unmatched']}, Failed: {$result['failed']}." .
+                                ($details === [] ? '' : ' ' . implode(' ', $details))
+                            )
+                            ->status(($result['unmatched'] > 0 || $result['failed'] > 0) ? 'warning' : 'success')
+                        );
+                    }),
                 Tables\Actions\Action::make('importStackAssociations')
                     ->label('Import Stack Associations')
                     ->icon('heroicon-o-link')
