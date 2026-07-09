@@ -145,6 +145,16 @@ class Product extends Model
         return $this->hasMany(ProductPartialApprovalRequest::class);
     }
 
+    public function saleProductUpdates(): HasMany
+    {
+        return $this->hasMany(SaleProductUpdate::class);
+    }
+
+    public function latestSaleProductUpdate(): HasOne
+    {
+        return $this->hasOne(SaleProductUpdate::class)->latestOfMany();
+    }
+
     public function shopifyAudits(): HasMany
     {
         return $this->hasMany(ShopifyAudit::class);

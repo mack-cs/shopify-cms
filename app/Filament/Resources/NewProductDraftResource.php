@@ -22,6 +22,8 @@ use App\Models\Status;
 use App\Models\Setting;
 use App\Models\StyleProfile;
 use App\Models\ProductPartialApprovalRequest;
+use App\Models\SaleImportBatch;
+use App\Models\SaleProductUpdate;
 use App\Models\DropdownOption;
 use App\Models\Tag;
 use App\Models\User;
@@ -41,6 +43,7 @@ use App\Services\ShopifyMissingDraftWorkflowService;
 use App\Services\TagNormalizer;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\ProductPartialApprovalService;
+use App\Services\SaleProductUpdateImporter;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Actions;
@@ -75,6 +78,7 @@ use App\Jobs\SendNewProductDraftAssignmentSlackJob;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use League\Csv\Reader;
@@ -2304,6 +2308,107 @@ class NewProductDraftResource extends Resource
             : 'This draft is not detected as a stack or bundle.';
     }
 
+    private static function latestSaleUpdateForDraft(NewProductDraft $record): ?SaleProductUpdate
+    {
+        if (!self::saleSchedulingTablesReady()) {
+            return null;
+        }
+
+        $product = self::linkedProductForDraft($record);
+        if (!$product instanceof Product) {
+            return null;
+        }
+
+        if ($product->relationLoaded('latestSaleProductUpdate')) {
+            $update = $product->latestSaleProductUpdate;
+            return $update instanceof SaleProductUpdate ? $update : null;
+        }
+
+        return $product->latestSaleProductUpdate()->first();
+    }
+
+    private static function saleSchedulingTablesReady(): bool
+    {
+        foreach ([
+            'sale_import_batches',
+            'sale_import_items',
+            'sale_product_updates',
+            'scheduled_jobs',
+            'scheduled_job_items',
+        ] as $table) {
+            if (!Schema::hasTable($table)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static function draftSaleUpdateStatusLabel(NewProductDraft $record): string
+    {
+        $update = self::latestSaleUpdateForDraft($record);
+        if (!$update instanceof SaleProductUpdate) {
+            return 'No sale update';
+        }
+
+        return match ($update->status) {
+            SaleProductUpdate::STATUS_PENDING => 'Pending sale approval',
+            SaleProductUpdate::STATUS_APPROVED => 'Sale approved',
+            SaleProductUpdate::STATUS_SCHEDULED => 'Scheduled',
+            SaleProductUpdate::STATUS_RUNNING => 'Running',
+            SaleProductUpdate::STATUS_COMPLETED => 'Completed',
+            SaleProductUpdate::STATUS_FAILED => 'Failed',
+            SaleProductUpdate::STATUS_CANCELLED => 'Cancelled',
+            default => ucfirst(str_replace('_', ' ', (string) $update->status)),
+        };
+    }
+
+    private static function draftSaleUpdateStatusColor(NewProductDraft $record): string
+    {
+        $update = self::latestSaleUpdateForDraft($record);
+
+        return match ($update?->status) {
+            SaleProductUpdate::STATUS_PENDING => 'warning',
+            SaleProductUpdate::STATUS_APPROVED => 'success',
+            SaleProductUpdate::STATUS_SCHEDULED, SaleProductUpdate::STATUS_RUNNING => 'info',
+            SaleProductUpdate::STATUS_COMPLETED => 'success',
+            SaleProductUpdate::STATUS_FAILED => 'danger',
+            default => 'gray',
+        };
+    }
+
+    private static function draftSaleUpdateTooltip(NewProductDraft $record): string
+    {
+        $update = self::latestSaleUpdateForDraft($record);
+        if (!$update instanceof SaleProductUpdate) {
+            return 'No staged sale update for this product.';
+        }
+
+        return self::draftSaleUpdatePreview($record);
+    }
+
+    private static function draftSaleUpdatePreview(NewProductDraft $record): string
+    {
+        $update = self::latestSaleUpdateForDraft($record);
+        if (!$update instanceof SaleProductUpdate) {
+            return '';
+        }
+
+        $pieces = [
+            'SKU ' . $update->sku,
+            'current ' . (string) ($update->current_price ?? '-'),
+            'sale ' . (string) $update->sale_price,
+            'compare-at ' . (string) $update->compare_at_price,
+            'tags: ' . (string) ($update->prepared_tags ?? ''),
+        ];
+
+        if ($update->error_message) {
+            $pieces[] = 'error: ' . $update->error_message;
+        }
+
+        return implode(' | ', array_filter($pieces));
+    }
+
     /**
      * @return array<int, string>
      */
@@ -3163,6 +3268,7 @@ class NewProductDraftResource extends Resource
                 'product:id,handle,shopify_id,has_errors,error_fields',
                 'product.images:id,product_id,src,position',
                 'product.variants:id,product_id,sku,price,compare_at_price,inventory_tracked,inventory_qty,sync_state',
+                'product.latestSaleProductUpdate',
             ]))
             ->columns([
                 ImageColumn::make('thumbnail')
@@ -3247,6 +3353,18 @@ class NewProductDraftResource extends Resource
                     ->color(fn (NewProductDraft $record): string => self::draftStackAssociationStateColor($record))
                     ->tooltip(fn (NewProductDraft $record): string => self::draftStackAssociationTooltip($record))
                     ->toggleable(),
+                TextColumn::make('sale_update_status')
+                    ->label('Sale Partial Approval')
+                    ->state(fn (NewProductDraft $record): string => self::draftSaleUpdateStatusLabel($record))
+                    ->badge()
+                    ->color(fn (NewProductDraft $record): string => self::draftSaleUpdateStatusColor($record))
+                    ->tooltip(fn (NewProductDraft $record): string => self::draftSaleUpdateTooltip($record))
+                    ->toggleable(),
+                TextColumn::make('sale_update_preview')
+                    ->label('Sale Update Preview')
+                    ->state(fn (NewProductDraft $record): string => self::draftSaleUpdatePreview($record))
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 IconColumn::make('approved')
                     ->label('Approved')
                     ->boolean()
@@ -3628,6 +3746,44 @@ class NewProductDraftResource extends Resource
                             ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
                         );
                     }),
+                // Tables\Actions\Action::make('importSaleUpdates')
+                //     ->label('Import Sale Updates')
+                //     ->icon('heroicon-o-tag')
+                //     ->color('warning')
+                //     ->visible(fn (): bool => self::saleSchedulingTablesReady() && (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false))
+                //     ->form([
+                //         Forms\Components\FileUpload::make('file')
+                //             ->label('Sale CSV File')
+                //             ->required()
+                //             ->disk('local')
+                //             ->directory('imports')
+                //             ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                //             ->helperText('Required columns: sku, old price / current price, compare to price, sale price. Import stages sale updates only; Shopify is updated by the scheduled sale job.'),
+                //     ])
+                //     ->action(function (array $data, SaleProductUpdateImporter $importer): void {
+                //         $path = Storage::disk('local')->path($data['file']);
+                //         $result = $importer->importFromPath($path, Auth::id(), (string) $data['file']);
+
+                //         $unmatched = array_slice($result['unmatched_skus'] ?? [], 0, 8);
+                //         $failed = array_slice($result['failed_skus'] ?? [], 0, 8);
+                //         $details = [];
+                //         if ($unmatched !== []) {
+                //             $details[] = 'Unmatched: ' . implode(', ', $unmatched);
+                //         }
+                //         if ($failed !== []) {
+                //             $details[] = 'Failed: ' . implode(', ', $failed);
+                //         }
+
+                //         self::sendNotification(Notification::make()
+                //             ->title('Sale import complete')
+                //             ->body(
+                //                 "Batch #{$result['batch_id']}. Rows: {$result['total']}, Matched: {$result['matched']}, " .
+                //                 "Pending sale approval: {$result['pending']}, Unmatched: {$result['unmatched']}, Failed: {$result['failed']}." .
+                //                 ($details === [] ? '' : ' ' . implode(' ', $details))
+                //             )
+                //             ->status(($result['unmatched'] > 0 || $result['failed'] > 0) ? 'warning' : 'success')
+                //         );
+                //     }),
                 Tables\Actions\Action::make('importStackAssociations')
                     ->label('Import Stack Associations')
                     ->icon('heroicon-o-link')
@@ -3819,6 +3975,24 @@ class NewProductDraftResource extends Resource
                                 ->title('Local draft deletion processed')
                                 ->body("Deleted locally: {$deleted}. Skipped with handle: {$skippedWithHandle}.")
                                 ->success()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('approveSaleUpdates')
+                        ->label('Approve Sale Updates')
+                        ->icon('heroicon-o-tag')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->modalHeading('Approve selected sale updates?')
+                        ->modalDescription('This marks pending sale updates as sale-approved for scheduling. It does not update Shopify.')
+                        ->visible(fn (): bool => self::saleSchedulingTablesReady() && self::canApproveSaleUpdates())
+                        ->action(function ($records): void {
+                            $summary = self::approveSaleUpdatesForDrafts($records, (int) Auth::id());
+
+                            self::sendNotification(Notification::make()
+                                ->title('Sale updates approval processed')
+                                ->body("Approved: {$summary['approved']}. Skipped without pending sale update: {$summary['skipped']}.")
+                                ->status($summary['approved'] > 0 ? 'success' : 'warning')
                             );
                         })
                         ->deselectRecordsAfterCompletion(),
@@ -4159,6 +4333,64 @@ class NewProductDraftResource extends Resource
                     ->label('Edited in Last 7 Days')
                     ->indicator('Edited in Last 7 Days')
                     ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('pending_sale_updates')
+                    ->label('Pending Sale Updates')
+                    ->indicator('Pending Sale Updates')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && SaleProductUpdate::query()
+                        ->where('status', SaleProductUpdate::STATUS_PENDING)
+                        ->exists())
+                    ->query(fn (Builder $query): Builder => self::applyDraftSaleUpdateStatusFilter($query, SaleProductUpdate::STATUS_PENDING)),
+                Filter::make('sale_approved_updates')
+                    ->label('Sale Approved Updates')
+                    ->indicator('Sale Approved Updates')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && SaleProductUpdate::query()
+                        ->where('status', SaleProductUpdate::STATUS_APPROVED)
+                        ->exists())
+                    ->query(fn (Builder $query): Builder => self::applyDraftSaleUpdateStatusFilter($query, SaleProductUpdate::STATUS_APPROVED)),
+                Filter::make('latest_sale_import')
+                    ->label('Latest Sale Import')
+                    ->indicator('Latest Sale Import')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && SaleImportBatch::latestId() !== null)
+                    ->query(function (Builder $query): Builder {
+                        $batchId = SaleImportBatch::latestId();
+                        if ($batchId === null) {
+                            return $query;
+                        }
+
+                        return $query->whereHas('product.saleProductUpdates', fn (Builder $saleQuery): Builder => $saleQuery
+                            ->where('sale_import_batch_id', $batchId));
+                    }),
+                SelectFilter::make('sale_update_status')
+                    ->label('Sale Update Status')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady())
+                    ->options([
+                        SaleProductUpdate::STATUS_PENDING => 'Pending sale approval',
+                        SaleProductUpdate::STATUS_APPROVED => 'Sale approved',
+                        SaleProductUpdate::STATUS_SCHEDULED => 'Scheduled',
+                        SaleProductUpdate::STATUS_RUNNING => 'Running',
+                        SaleProductUpdate::STATUS_COMPLETED => 'Completed',
+                        SaleProductUpdate::STATUS_FAILED => 'Failed',
+                    ])
+                    ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                        $data,
+                        'Sale Update',
+                        [
+                            SaleProductUpdate::STATUS_PENDING => 'Pending sale approval',
+                            SaleProductUpdate::STATUS_APPROVED => 'Sale approved',
+                            SaleProductUpdate::STATUS_SCHEDULED => 'Scheduled',
+                            SaleProductUpdate::STATUS_RUNNING => 'Running',
+                            SaleProductUpdate::STATUS_COMPLETED => 'Completed',
+                            SaleProductUpdate::STATUS_FAILED => 'Failed',
+                        ],
+                    ))
+                    ->query(function (Builder $query, array $data): Builder {
+                        $value = trim((string) ($data['value'] ?? ''));
+                        if ($value === '') {
+                            return $query;
+                        }
+
+                        return self::applyDraftSaleUpdateStatusFilter($query, $value);
+                    }),
                 SelectFilter::make('stack_associations')
                     ->label('Stack Associations')
                     ->options([
@@ -4950,6 +5182,84 @@ class NewProductDraftResource extends Resource
             'any_with_components' => self::applyDraftHasBundleProductFilter($query, true),
             default => $query,
         };
+    }
+
+    private static function applyDraftSaleUpdateStatusFilter(Builder $query, string $status): Builder
+    {
+        if (!self::saleSchedulingTablesReady()) {
+            return $query;
+        }
+
+        return $query->whereHas('product.saleProductUpdates', fn (Builder $saleQuery): Builder => $saleQuery
+            ->where('status', $status));
+    }
+
+    private static function canApproveSaleUpdates(): bool
+    {
+        return Auth::user()?->hasAnyRole([
+            RolesEnum::SuperAdmin->value,
+            RolesEnum::Admin->value,
+        ]) ?? false;
+    }
+
+    /**
+     * @return array{approved:int, skipped:int}
+     */
+    private static function approveSaleUpdatesForDrafts($records, int $userId): array
+    {
+        if (!self::saleSchedulingTablesReady()) {
+            return [
+                'approved' => 0,
+                'skipped' => 0,
+            ];
+        }
+
+        $approved = 0;
+        $skipped = 0;
+
+        foreach ($records as $record) {
+            if (!$record instanceof NewProductDraft) {
+                continue;
+            }
+
+            $product = self::linkedProductForDraft($record);
+            if (!$product instanceof Product) {
+                $skipped++;
+                continue;
+            }
+
+            $updates = $product->saleProductUpdates()
+                ->where('status', SaleProductUpdate::STATUS_PENDING)
+                ->get();
+
+            if ($updates->isEmpty()) {
+                $skipped++;
+                continue;
+            }
+
+            foreach ($updates as $update) {
+                $update->update([
+                    'status' => SaleProductUpdate::STATUS_APPROVED,
+                    'approved_at' => now(),
+                    'approved_by' => $userId,
+                    'error_message' => null,
+                ]);
+                $approved++;
+
+                logger()->info('Sale product update approved', [
+                    'sale_product_update_id' => $update->id,
+                    'product_id' => $update->product_id,
+                    'variant_id' => $update->variant_id,
+                    'sku' => $update->sku,
+                    'approved_by' => $userId,
+                ]);
+            }
+        }
+
+        return [
+            'approved' => $approved,
+            'skipped' => $skipped,
+        ];
     }
 
     private static function applyDraftStackFilter(Builder $query): Builder

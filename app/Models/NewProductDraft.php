@@ -552,7 +552,42 @@ class NewProductDraft extends Model
                 && is_string($warning['field'] ?? null)
                 && is_string($warning['label'] ?? null)
                 && array_key_exists('draft_value', $warning)
-                && array_key_exists('shopify_value', $warning);
+                && array_key_exists('shopify_value', $warning)
+                && !static::shopifySyncWarningValuesMatch(
+                    $field,
+                    $warning['draft_value'] ?? null,
+                    $warning['shopify_value'] ?? null,
+                );
         }));
+    }
+
+    private static function shopifySyncWarningValuesMatch(string $field, mixed $draftValue, mixed $shopifyValue): bool
+    {
+        return static::normalizeShopifySyncWarningValue($field, $draftValue)
+            === static::normalizeShopifySyncWarningValue($field, $shopifyValue);
+    }
+
+    private static function normalizeShopifySyncWarningValue(string $field, mixed $value): string
+    {
+        $string = trim((string) $value);
+
+        return match ($field) {
+            'published',
+            'seo_deindex',
+            'is_on_sale' => static::normalizeBooleanShopifySyncWarningValue($string),
+            'status' => strtolower($string),
+            default => $string,
+        };
+    }
+
+    private static function normalizeBooleanShopifySyncWarningValue(string $value): string
+    {
+        $normalized = strtolower(trim($value));
+
+        return match ($normalized) {
+            '1', 'true', 'yes', 'y', 'on' => 'true',
+            '0', 'false', 'no', 'n', 'off' => 'false',
+            default => $normalized,
+        };
     }
 }

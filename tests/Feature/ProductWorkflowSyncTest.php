@@ -257,6 +257,52 @@ it('treats non-draft shopify status as authoritative for the draft without a war
     expect(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('status');
 });
 
+it('does not record sync warnings when published or status only differ by casing', function (): void {
+    $product = createWorkflowTestProduct([
+        'published' => 'false',
+        'status' => 'ACTIVE',
+        'approval_version' => 1,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'published' => 'FALSE',
+        'status' => 'active',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warningFields = collect($seeded->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($seeded->published)->toBe('false')
+        ->and($seeded->status)->toBe('active')
+        ->and($warningFields)->not->toContain('published')
+        ->and($warningFields)->not->toContain('status');
+});
+
+it('hides existing boolean casing sync warnings', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => 'boolean-warning-product',
+        'shopify_id' => 'gid://shopify/Product/9001',
+        'title' => 'Boolean Warning Product',
+        'published' => 'FALSE',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'shopify_sync_warnings' => [[
+            'field' => 'published',
+            'label' => 'Published',
+            'draft_value' => 'FALSE',
+            'shopify_value' => 'false',
+        ]],
+    ]));
+
+    expect($draft->shopifySyncWarnings())->toBe([])
+        ->and($draft->shopifySyncWarningCount())->toBe(0);
+});
+
 it('does not flag uvp short paragraph conflicts when only rich text formatting and punctuation differ', function (): void {
     $product = createWorkflowTestProduct([
         'uvp_short_paragraph' => '<p><strong>A Night in Barcelona</strong> is vibrant playful sophistication. For women who embody <strong>passion</strong>, <strong>confidence</strong>, and radiant <strong>allure</strong>.</p>',

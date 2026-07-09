@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\SaleProductUpdate;
 use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
@@ -88,6 +89,91 @@ final class ProductShopifyUpdater
         private readonly ProductHandleService $handleService,
         private readonly ProductPartialApprovalService $partialApprovalService,
     ) {}
+
+    /**
+     * @return array{product_id:int,shopify_product_id:string,variant_id:int|null,shopify_variant_id:string,tags:array<int,string>,price:string,compare_at_price:string}
+     */
+    public function syncSaleProductUpdate(SaleProductUpdate $saleUpdate): array
+    {
+        $saleUpdate->loadMissing(['product', 'variant']);
+
+        $product = $saleUpdate->product;
+        if (!$product instanceof Product) {
+            throw new \RuntimeException('Sale update has no linked product.');
+        }
+
+        $productId = $this->resolveProductId($product);
+        if ($productId === null) {
+            throw new \RuntimeException('Product has no Shopify ID and could not be resolved by handle.');
+        }
+
+        $tags = TagNormalizer::parseTokens((string) ($saleUpdate->prepared_tags ?: $product->tags));
+        $tags = array_values(array_filter(
+            $tags,
+            static fn (string $tag): bool => $tag !== 'exclude-from-the-sale'
+        ));
+        if (!in_array('sale', $tags, true)) {
+            $tags[] = 'sale';
+        }
+        $tags = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags));
+
+        $productData = $this->client->graphql($this->productUpdateMutation(), [
+            'input' => [
+                'id' => $productId,
+                'tags' => $tags,
+            ],
+        ]);
+
+        $productErrors = data_get($productData, 'productUpdate.userErrors', []);
+        if (is_array($productErrors) && $productErrors !== []) {
+            $messages = $this->formatUserErrors($productErrors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the sale tag update.');
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $shopifyVariantId = $this->shopifyVariantIdForSaleUpdate($saleUpdate, $details);
+        if ($shopifyVariantId === null) {
+            throw new \RuntimeException('Could not resolve Shopify variant for sale SKU ' . $saleUpdate->sku . '.');
+        }
+
+        $price = number_format((float) $saleUpdate->sale_price, 2, '.', '');
+        $compareAt = number_format((float) $saleUpdate->compare_at_price, 2, '.', '');
+        $variantInput = [
+            'id' => $shopifyVariantId,
+            'price' => $price,
+            'compareAtPrice' => $compareAt,
+        ];
+
+        $variantData = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+            'productId' => $productId,
+            'variants' => [$variantInput],
+        ]);
+
+        $variantErrors = data_get($variantData, 'productVariantsBulkUpdate.userErrors', []);
+        if (is_array($variantErrors) && $variantErrors !== []) {
+            $messages = $this->formatUserErrors($variantErrors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the sale variant price update.');
+        }
+
+        logger()->info('Shopify sale product update completed', [
+            'sale_product_update_id' => $saleUpdate->id,
+            'product_id' => $product->id,
+            'shopify_product_id' => $productId,
+            'variant_id' => $saleUpdate->variant_id,
+            'shopify_variant_id' => $shopifyVariantId,
+            'sku' => $saleUpdate->sku,
+        ]);
+
+        return [
+            'product_id' => (int) $product->id,
+            'shopify_product_id' => $productId,
+            'variant_id' => $saleUpdate->variant_id ? (int) $saleUpdate->variant_id : null,
+            'shopify_variant_id' => $shopifyVariantId,
+            'tags' => $tags,
+            'price' => $price,
+            'compare_at_price' => $compareAt,
+        ];
+    }
 
     /**
      * @param Collection<int, Product> $products
@@ -1789,6 +1875,38 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     {
         $data = $this->client->graphql($this->locationsQuery(), []);
         return data_get($data, 'locations.nodes.0.id');
+    }
+
+    private function shopifyVariantIdForSaleUpdate(SaleProductUpdate $saleUpdate, array $details): ?string
+    {
+        $localVariantId = trim((string) ($saleUpdate->variant?->shopify_id ?? ''));
+        if ($localVariantId !== '') {
+            return $localVariantId;
+        }
+
+        $targetSku = strtolower(trim((string) $saleUpdate->sku));
+        if ($targetSku === '') {
+            return null;
+        }
+
+        $nodes = data_get($details, 'variants.nodes', []);
+        if (!is_array($nodes)) {
+            return null;
+        }
+
+        foreach ($nodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            $sku = strtolower(trim((string) ($node['sku'] ?? '')));
+            $id = trim((string) ($node['id'] ?? ''));
+            if ($sku === $targetSku && $id !== '') {
+                return $id;
+            }
+        }
+
+        return null;
     }
 
     private function productByHandleQuery(): string

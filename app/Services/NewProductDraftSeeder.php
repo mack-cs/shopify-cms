@@ -138,6 +138,7 @@ final class NewProductDraftSeeder
                 continue;
             }
 
+            $incomingValue = $this->normalizeStoredIncomingValue($key, $incomingValue);
             $currentValue = $draft->getAttribute($key);
 
             if (in_array($key, $identityFields, true)) {
@@ -155,7 +156,8 @@ final class NewProductDraftSeeder
                 $normalizedIncomingStatus = strtolower(trim((string) $incomingValue));
 
                 if ($normalizedIncomingStatus !== '' && $normalizedIncomingStatus !== 'draft') {
-                    if (!$this->valuesMatch($key, $currentValue, $incomingValue)) {
+                    if (!$this->valuesMatch($key, $currentValue, $incomingValue)
+                        || $this->shouldStoreNormalizedMatchingValue($key, $currentValue, $incomingValue)) {
                         $changes[$key] = $incomingValue;
                     }
 
@@ -172,7 +174,15 @@ final class NewProductDraftSeeder
                 continue;
             }
 
-            if ($supportsWarnings && !$this->valuesMatch($key, $currentValue, $incomingValue)) {
+            if ($this->valuesMatch($key, $currentValue, $incomingValue)) {
+                if ($this->shouldStoreNormalizedMatchingValue($key, $currentValue, $incomingValue)) {
+                    $changes[$key] = $incomingValue;
+                }
+
+                continue;
+            }
+
+            if ($supportsWarnings) {
                 $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
             }
         }
@@ -524,8 +534,47 @@ final class NewProductDraftSeeder
             'variant_compare_at_price',
             'material_cost' => $this->normalizeDecimalComparableValue($string, 2),
             'variant_inventory_qty' => $this->normalizeIntegerComparableValue($string),
+            'published',
+            'seo_deindex',
+            'is_on_sale' => $this->normalizeBooleanComparableValue($string),
+            'status' => $this->normalizeStatusComparableValue($string),
             default => $string,
         };
+    }
+
+    private function normalizeStoredIncomingValue(string $field, mixed $value): mixed
+    {
+        return match ($field) {
+            'published',
+            'seo_deindex' => $this->normalizeBooleanComparableValue($this->stringifyValue($value)),
+            'status' => $this->normalizeStatusComparableValue($this->stringifyValue($value)),
+            default => $value,
+        };
+    }
+
+    private function normalizeBooleanComparableValue(string $value): string
+    {
+        $normalized = strtolower(trim($value));
+
+        return match ($normalized) {
+            '1', 'true', 'yes', 'y', 'on' => 'true',
+            '0', 'false', 'no', 'n', 'off' => 'false',
+            default => $normalized,
+        };
+    }
+
+    private function normalizeStatusComparableValue(string $value): string
+    {
+        return strtolower(trim($value));
+    }
+
+    private function shouldStoreNormalizedMatchingValue(string $field, mixed $currentValue, mixed $incomingValue): bool
+    {
+        if (!in_array($field, ['published', 'seo_deindex', 'status'], true)) {
+            return false;
+        }
+
+        return $this->stringifyValue($currentValue) !== $this->stringifyValue($incomingValue);
     }
 
     private function normalizeDecimalComparableValue(string $value, int $precision): string
@@ -566,6 +615,10 @@ final class NewProductDraftSeeder
             'product_category' => $this->normalizeCategoryDisplayValue($string),
             'sibling_collection' => $this->normalizeSiblingCollectionDisplayValue($string),
             'complementary_products' => $this->normalizeComplementaryProductsDisplayValue($value),
+            'published',
+            'seo_deindex',
+            'is_on_sale' => $this->normalizeBooleanComparableValue($string),
+            'status' => $this->normalizeStatusComparableValue($string),
             default => $string,
         };
     }
