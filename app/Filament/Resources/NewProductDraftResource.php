@@ -23,6 +23,7 @@ use App\Models\Setting;
 use App\Models\StyleProfile;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\SaleImportBatch;
+use App\Models\SaleImportItem;
 use App\Models\SaleProductUpdate;
 use App\Models\DropdownOption;
 use App\Models\Tag;
@@ -3758,7 +3759,7 @@ class NewProductDraftResource extends Resource
                             ->disk('local')
                             ->directory('imports')
                             ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
-                            ->helperText('Required columns: sku, old price / current price, compare to price, sale price. Import stages sale updates only; Shopify is updated by the scheduled sale job.'),
+                            ->helperText('Use SKU + Sale Price/Price + Compare-at Price. If SKU is blank, Shopify ID/Product ID/Draft ID/Handle can match single-variant products. Duplicate SKUs need product context. Import stages sale updates only; Shopify is updated by the scheduled sale job.'),
                     ])
                     ->action(function (array $data, SaleProductUpdateImporter $importer): void {
                         $path = Storage::disk('local')->path($data['file']);
@@ -3783,6 +3784,21 @@ class NewProductDraftResource extends Resource
                             )
                             ->status(($result['unmatched'] > 0 || $result['failed'] > 0) ? 'warning' : 'success')
                         );
+                    }),
+                Tables\Actions\Action::make('exportLatestSaleImport')
+                    ->label('Export Latest Sale Import')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->color('gray')
+                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && SaleImportBatch::latestId() !== null)
+                    ->action(function (): void {
+                        self::exportLatestSaleImportBatch();
+                    }),
+                Tables\Actions\Action::make('exportOnSaleProducts')
+                    ->label('Export On-Sale Products')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->color('gray')
+                    ->action(function (): void {
+                        self::exportOnSaleProducts();
                     }),
                 Tables\Actions\Action::make('importStackAssociations')
                     ->label('Import Stack Associations')
@@ -5260,6 +5276,214 @@ class NewProductDraftResource extends Resource
             'approved' => $approved,
             'skipped' => $skipped,
         ];
+    }
+
+    private static function exportLatestSaleImportBatch(): void
+    {
+        if (!self::saleSchedulingTablesReady()) {
+            self::sendNotification(Notification::make()
+                ->title('Sale export unavailable')
+                ->body('Run migrations before exporting sale imports.')
+                ->warning());
+            return;
+        }
+
+        $batch = SaleImportBatch::query()
+            ->latest('created_at')
+            ->latest('id')
+            ->first();
+
+        if (!$batch instanceof SaleImportBatch) {
+            self::sendNotification(Notification::make()
+                ->title('No sale import to export')
+                ->warning());
+            return;
+        }
+
+        $updatesByProductVariant = SaleProductUpdate::query()
+            ->where('sale_import_batch_id', $batch->id)
+            ->get()
+            ->keyBy(fn (SaleProductUpdate $update): string => (int) $update->product_id . ':' . (int) $update->variant_id);
+
+        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer->insertOne([
+            'Batch ID',
+            'Import Item Status',
+            'Sale Update Status',
+            'Product ID',
+            'Handle',
+            'Shopify ID',
+            'Variant ID',
+            'Shopify Variant ID',
+            'SKU',
+            'Current Price',
+            'Sale Price',
+            'Compare-at Price',
+            'Prepared Tags',
+            'Message',
+        ]);
+
+        SaleImportItem::query()
+            ->with(['product:id,handle,shopify_id', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
+            ->where('sale_import_batch_id', $batch->id)
+            ->orderBy('id')
+            ->chunkById(500, function ($items) use ($writer, $batch, $updatesByProductVariant): void {
+                foreach ($items as $item) {
+                    if (!$item instanceof SaleImportItem) {
+                        continue;
+                    }
+
+                    $key = (int) $item->product_id . ':' . (int) $item->variant_id;
+                    $update = $updatesByProductVariant->get($key);
+
+                    $writer->insertOne([
+                        $batch->id,
+                        $item->status,
+                        $update instanceof SaleProductUpdate ? $update->status : '',
+                        $item->product_id,
+                        $item->product?->handle,
+                        $item->product?->shopify_id,
+                        $item->variant_id,
+                        $item->variant?->shopify_id,
+                        $item->sku ?: $item->variant?->sku,
+                        $update instanceof SaleProductUpdate ? $update->current_price : $item->variant?->price,
+                        $update instanceof SaleProductUpdate ? $update->sale_price : $item->sale_price,
+                        $update instanceof SaleProductUpdate ? $update->compare_at_price : $item->compare_at_price,
+                        $update instanceof SaleProductUpdate ? $update->prepared_tags : '',
+                        $update instanceof SaleProductUpdate && $update->error_message
+                            ? $update->error_message
+                            : $item->message,
+                    ]);
+                }
+            });
+
+        $timestamp = now()->format('Ymd_His');
+        $name = "sale_import_batch_{$batch->id}_{$timestamp}.csv";
+        $path = "exports/{$name}";
+        $disk = Storage::disk('public');
+        $disk->put($path, $writer->toString());
+
+        self::sendNotification(Notification::make()
+            ->title('Sale import export ready')
+            ->body("Exported latest sale import batch #{$batch->id}.")
+            ->success()
+            ->actions([
+                \Filament\Notifications\Actions\Action::make('download')
+                    ->label('Download')
+                    ->url($disk->url($path), shouldOpenInNewTab: true),
+            ]));
+    }
+
+    private static function exportOnSaleProducts(): void
+    {
+        $query = self::applyOnSaleDraftExportFilter(
+            NewProductDraft::query()
+                ->with([
+                    'product:id,handle,title,shopify_id,tags',
+                    'product.variants:id,product_id,shopify_id,sku,price,compare_at_price,position,sync_state',
+                    'product.latestSaleProductUpdate',
+                ])
+                ->orderBy('handle')
+                ->orderBy('id')
+        );
+
+        if (!$query->exists()) {
+            self::sendNotification(Notification::make()
+                ->title('No on-sale products to export')
+                ->warning());
+            return;
+        }
+
+        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer->insertOne([
+            'Draft ID',
+            'Product ID',
+            'Handle',
+            'Title',
+            'Shopify ID',
+            'Variant ID',
+            'Shopify Variant ID',
+            'SKU',
+            'Price',
+            'Compare-at Price',
+            'Draft On Sale',
+            'Sale Update Status',
+            'Tags',
+        ]);
+
+        $count = 0;
+        $query->chunkById(500, function ($drafts) use ($writer, &$count): void {
+            foreach ($drafts as $draft) {
+                if (!$draft instanceof NewProductDraft) {
+                    continue;
+                }
+
+                $product = self::linkedProductForDraft($draft);
+                $variant = $product?->variants
+                    ? $product->variants->sortBy([
+                        ['position', 'asc'],
+                        ['id', 'asc'],
+                    ])->first()
+                    : null;
+                $saleUpdate = self::latestSaleUpdateForDraft($draft);
+
+                $writer->insertOne([
+                    $draft->id,
+                    $product?->id,
+                    $draft->handle ?: $product?->handle,
+                    $draft->title ?: $product?->title,
+                    $draft->shopify_id ?: $product?->shopify_id,
+                    $saleUpdate?->variant_id ?: $variant?->id,
+                    $saleUpdate?->variant?->shopify_id ?: $variant?->shopify_id,
+                    $saleUpdate?->sku ?: $draft->sku ?: $variant?->sku,
+                    $saleUpdate?->sale_price ?: $draft->variant_price ?: $variant?->price,
+                    $saleUpdate?->compare_at_price ?: $draft->variant_compare_at_price ?: $variant?->compare_at_price,
+                    (bool) $draft->is_on_sale ? 'yes' : 'no',
+                    $saleUpdate?->status ?? '',
+                    $saleUpdate?->prepared_tags ?: $draft->tags ?: $product?->tags,
+                ]);
+
+                $count++;
+            }
+        });
+
+        $timestamp = now()->format('Ymd_His');
+        $name = "on_sale_products_{$timestamp}.csv";
+        $path = "exports/{$name}";
+        $disk = Storage::disk('public');
+        $disk->put($path, $writer->toString());
+
+        self::sendNotification(Notification::make()
+            ->title('On-sale products export ready')
+            ->body("Exported {$count} on-sale product draft(s).")
+            ->success()
+            ->actions([
+                \Filament\Notifications\Actions\Action::make('download')
+                    ->label('Download')
+                    ->url($disk->url($path), shouldOpenInNewTab: true),
+            ]));
+    }
+
+    private static function applyOnSaleDraftExportFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $saleQuery): void {
+            $saleQuery
+                ->where('is_on_sale', true)
+                ->orWhereRaw(self::saleTagSql('new_product_drafts.tags'));
+
+            $saleQuery->orWhereHas('product', function (Builder $productQuery): void {
+                $productQuery->whereRaw(self::saleTagSql('products.tags'));
+
+                if (self::saleSchedulingTablesReady()) {
+                    $productQuery->orWhereHas('saleProductUpdates');
+                }
+            });
+        });
+    }
+
+    private static function saleTagSql(string $column): string
+    {
+        return "LOWER(CONCAT(',', REPLACE(COALESCE({$column}, ''), ' ', ''), ',')) LIKE '%,sale,%'";
     }
 
     private static function applyDraftStackFilter(Builder $query): Builder

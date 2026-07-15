@@ -89,6 +89,52 @@ it('falls back to exported Shopify product ID when sale import SKU is blank', fu
         ->and($update->metadata['shopify_variant_id'])->toBe('gid://shopify/ProductVariant/111222333');
 });
 
+it('uses product context to disambiguate duplicate SKUs in sale imports', function (): void {
+    $user = User::factory()->create();
+    $import = createSaleTestImport($user);
+    $first = createSaleTestProduct($import, 'first-duplicate-sku', 'DUP01', '200.00');
+    $second = createSaleTestProduct($import, 'second-duplicate-sku', 'DUP01', '300.00');
+    $second->forceFill([
+        'shopify_id' => 'gid://shopify/Product/900200300',
+    ])->save();
+
+    $path = tempnam(sys_get_temp_dir(), 'sale-import-duplicate-context-');
+    file_put_contents($path, implode("\n", [
+        'Handle,Shopify ID,SKU,Sale Price,Compare-at Price',
+        'second-duplicate-sku,gid://shopify/Product/900200300,DUP01,250.00,300.00',
+    ]));
+
+    $result = app(SaleProductUpdateImporter::class)->importFromPath($path, $user->id, 'duplicate-context.csv');
+
+    $update = SaleProductUpdate::query()->firstOrFail();
+
+    expect($result['matched'])->toBe(1)
+        ->and($update->product_id)->toBe($second->id)
+        ->and($update->variant_id)->toBe($second->variants()->firstOrFail()->id)
+        ->and((string) $update->sale_price)->toBe('250.00')
+        ->and($update->product_id)->not->toBe($first->id);
+});
+
+it('fails duplicate SKU sale rows without product context instead of guessing', function (): void {
+    $user = User::factory()->create();
+    $import = createSaleTestImport($user);
+    createSaleTestProduct($import, 'first-ambiguous-sku', 'DUP02', '200.00');
+    createSaleTestProduct($import, 'second-ambiguous-sku', 'DUP02', '300.00');
+
+    $path = tempnam(sys_get_temp_dir(), 'sale-import-duplicate-no-context-');
+    file_put_contents($path, implode("\n", [
+        'SKU,Sale Price,Compare-at Price',
+        'DUP02,150.00,200.00',
+    ]));
+
+    $result = app(SaleProductUpdateImporter::class)->importFromPath($path, $user->id, 'duplicate-no-context.csv');
+
+    expect($result['matched'])->toBe(0)
+        ->and($result['unmatched'])->toBe(1)
+        ->and(SaleProductUpdate::query()->count())->toBe(0)
+        ->and(SaleImportItem::query()->firstOrFail()->message)->toContain('Multiple local variants matched SKU DUP02');
+});
+
 it('schedules only sale-approved updates and queues the scheduled sale job', function (): void {
     Queue::fake();
 

@@ -21,7 +21,10 @@ use Filament\Forms\Form;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
+use League\Csv\Writer;
+use SplTempFileObject;
 
 class ScheduleSaleUpdates extends Page implements HasForms
 {
@@ -62,6 +65,20 @@ class ScheduleSaleUpdates extends Page implements HasForms
                         Placeholder::make('approved_preview')
                             ->label('')
                             ->content(fn (): HtmlString => new HtmlString($this->approvedUpdatesHtml())),
+                        Actions::make([
+                            Action::make('exportApprovedSaleProducts')
+                                ->label('Export Approved Sale Products')
+                                ->icon('heroicon-o-arrow-down-tray')
+                                ->color('gray')
+                                ->disabled(function (): bool {
+                                    $service = app(SaleProductSchedulingService::class);
+
+                                    return !$service->tablesReady() || $service->approvedCount() === 0;
+                                })
+                                ->action(function (): void {
+                                    $this->exportApprovedSaleProducts();
+                                }),
+                        ]),
                     ]),
                 Section::make('Create Scheduled Sale Job')
                     ->schema([
@@ -94,6 +111,24 @@ class ScheduleSaleUpdates extends Page implements HasForms
                         Placeholder::make('recent_imports')
                             ->label('')
                             ->content(fn (): HtmlString => new HtmlString($this->recentImportsHtml())),
+                        Actions::make([
+                            Action::make('exportLatestSaleImport')
+                                ->label('Export Latest Sale Import')
+                                ->icon('heroicon-o-arrow-down-tray')
+                                ->color('gray')
+                                ->disabled(fn (): bool => !$this->hasLatestSaleImport())
+                                ->action(function (): void {
+                                    $this->exportLatestSaleImport();
+                                }),
+                            Action::make('exportLatestSaleFailures')
+                                ->label('Export Latest Failures')
+                                ->icon('heroicon-o-exclamation-triangle')
+                                ->color('warning')
+                                ->disabled(fn (): bool => !$this->hasLatestSaleImportFailures())
+                                ->action(function (): void {
+                                    $this->exportLatestSaleImport(failuresOnly: true);
+                                }),
+                        ]),
                     ]),
                 Section::make('Recent Scheduled Jobs')
                     ->schema([
@@ -132,6 +167,100 @@ class ScheduleSaleUpdates extends Page implements HasForms
                     ->danger()
             );
         }
+    }
+
+    public function exportApprovedSaleProducts(): void
+    {
+        if (!app(SaleProductSchedulingService::class)->tablesReady()) {
+            $this->notifyExportUnavailable();
+            return;
+        }
+
+        $updates = SaleProductUpdate::query()
+            ->with(['product:id,handle,title,shopify_id', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
+            ->approvedForScheduling()
+            ->latest('approved_at')
+            ->get();
+
+        if ($updates->isEmpty()) {
+            AdminNotification::send(Notification::make()
+                ->title('No sale-approved products to export')
+                ->warning());
+            return;
+        }
+
+        $writer = $this->saleExportWriter();
+        foreach ($updates as $update) {
+            $this->insertSaleUpdateRow($writer, $update, 'approved_for_scheduling');
+        }
+
+        $this->storeSaleExport(
+            $writer,
+            'approved_sale_products_' . now()->format('Ymd_His') . '.csv',
+            'Approved sale products export ready',
+            'Exported ' . $updates->count() . ' sale-approved product update(s).'
+        );
+    }
+
+    public function exportLatestSaleImport(bool $failuresOnly = false): void
+    {
+        if (!app(SaleProductSchedulingService::class)->tablesReady()) {
+            $this->notifyExportUnavailable();
+            return;
+        }
+
+        $batch = $this->latestSaleImportBatch();
+        if (!$batch instanceof SaleImportBatch) {
+            AdminNotification::send(Notification::make()
+                ->title('No sale import to export')
+                ->warning());
+            return;
+        }
+
+        $itemsQuery = SaleImportItem::query()
+            ->with(['product:id,handle,title,shopify_id', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
+            ->where('sale_import_batch_id', $batch->id)
+            ->when($failuresOnly, fn ($query) => $query->whereIn('status', [
+                SaleImportItem::STATUS_FAILED,
+                SaleImportItem::STATUS_UNMATCHED,
+            ]))
+            ->orderBy('id');
+
+        if (!$itemsQuery->exists()) {
+            AdminNotification::send(Notification::make()
+                ->title($failuresOnly ? 'No failures in latest sale import' : 'No sale import rows to export')
+                ->warning());
+            return;
+        }
+
+        $updatesByProductVariant = SaleProductUpdate::query()
+            ->where('sale_import_batch_id', $batch->id)
+            ->get()
+            ->keyBy(fn (SaleProductUpdate $update): string => (int) $update->product_id . ':' . (int) $update->variant_id);
+
+        $writer = $this->saleExportWriter(includeImportStatus: true);
+        $count = 0;
+
+        $itemsQuery->chunkById(500, function ($items) use ($writer, $updatesByProductVariant, &$count): void {
+            foreach ($items as $item) {
+                if (!$item instanceof SaleImportItem) {
+                    continue;
+                }
+
+                $key = (int) $item->product_id . ':' . (int) $item->variant_id;
+                $update = $updatesByProductVariant->get($key);
+                $this->insertSaleImportItemRow($writer, $item, $update instanceof SaleProductUpdate ? $update : null);
+                $count++;
+            }
+        });
+
+        $prefix = $failuresOnly ? 'sale_import_failures' : 'sale_import_affected_products';
+        $this->storeSaleExport(
+            $writer,
+            $prefix . "_batch_{$batch->id}_" . now()->format('Ymd_His') . '.csv',
+            $failuresOnly ? 'Sale import failures export ready' : 'Sale import affected products export ready',
+            "Exported {$count} row(s) from sale import batch #{$batch->id}."
+        );
     }
 
     private function summaryHtml(): string
@@ -319,6 +448,131 @@ HTML;
     </table>
 </div>
 HTML;
+    }
+
+    private function hasLatestSaleImport(): bool
+    {
+        return app(SaleProductSchedulingService::class)->tablesReady()
+            && $this->latestSaleImportBatch() instanceof SaleImportBatch;
+    }
+
+    private function hasLatestSaleImportFailures(): bool
+    {
+        $batch = $this->latestSaleImportBatch();
+        if (!$batch instanceof SaleImportBatch) {
+            return false;
+        }
+
+        return SaleImportItem::query()
+            ->where('sale_import_batch_id', $batch->id)
+            ->whereIn('status', [
+                SaleImportItem::STATUS_FAILED,
+                SaleImportItem::STATUS_UNMATCHED,
+            ])
+            ->exists();
+    }
+
+    private function latestSaleImportBatch(): ?SaleImportBatch
+    {
+        if (!app(SaleProductSchedulingService::class)->tablesReady()) {
+            return null;
+        }
+
+        return SaleImportBatch::query()
+            ->latest('created_at')
+            ->latest('id')
+            ->first();
+    }
+
+    private function saleExportWriter(bool $includeImportStatus = false): Writer
+    {
+        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $headers = [
+            'Product',
+            'Handle',
+            'Shopify ID',
+            'Variant ID',
+            'Shopify Variant ID',
+            'SKU',
+            'Current Price',
+            'Sale Price',
+            'Compare-at Price',
+            'Sale Update Status',
+            'Prepared Tags',
+            'Message',
+        ];
+
+        if ($includeImportStatus) {
+            array_unshift($headers, 'Import Item Status');
+        }
+
+        $writer->insertOne($headers);
+
+        return $writer;
+    }
+
+    private function insertSaleUpdateRow(Writer $writer, SaleProductUpdate $update, string $message = ''): void
+    {
+        $writer->insertOne([
+            $update->product?->title ?: $update->product?->handle ?: 'Product #' . $update->product_id,
+            $update->product?->handle,
+            $update->product?->shopify_id,
+            $update->variant_id,
+            $update->variant?->shopify_id,
+            $update->sku ?: $update->variant?->sku,
+            $update->current_price ?? $update->variant?->price,
+            $update->sale_price,
+            $update->compare_at_price,
+            $update->status,
+            $update->prepared_tags,
+            $update->error_message ?: $message,
+        ]);
+    }
+
+    private function insertSaleImportItemRow(Writer $writer, SaleImportItem $item, ?SaleProductUpdate $update): void
+    {
+        $writer->insertOne([
+            $item->status,
+            $item->product?->title ?: $item->product?->handle ?: ($item->product_id ? 'Product #' . $item->product_id : ''),
+            $item->product?->handle,
+            $item->product?->shopify_id,
+            $item->variant_id,
+            $item->variant?->shopify_id,
+            $item->sku ?: $item->variant?->sku,
+            $update?->current_price ?? $item->variant?->price,
+            $update?->sale_price ?? $item->sale_price,
+            $update?->compare_at_price ?? $item->compare_at_price,
+            $update?->status ?? '',
+            $update?->prepared_tags ?? '',
+            $update?->error_message ?: $item->message,
+        ]);
+    }
+
+    private function storeSaleExport(Writer $writer, string $filename, string $title, string $body): void
+    {
+        $disk = Storage::disk('public');
+        $path = 'exports/' . $filename;
+        $disk->put($path, $writer->toString());
+
+        AdminNotification::send(
+            Notification::make()
+                ->title($title)
+                ->body($body)
+                ->success()
+                ->actions([
+                    \Filament\Notifications\Actions\Action::make('download')
+                        ->label('Download')
+                        ->url($disk->url($path), shouldOpenInNewTab: true),
+                ])
+        );
+    }
+
+    private function notifyExportUnavailable(): void
+    {
+        AdminNotification::send(Notification::make()
+            ->title('Sale export unavailable')
+            ->body('Run migrations before exporting sale rows.')
+            ->warning());
     }
 
     private function missingTablesHtml(): string

@@ -266,8 +266,36 @@ final class SaleProductUpdateImporter
     {
         $sku = trim((string) ($normalized['sku'] ?? ''));
         if ($sku !== '') {
+            $product = $this->productForRow($normalized);
+            if ($product instanceof Product) {
+                $variant = $this->variantForSkuOnProduct($product, $sku);
+
+                return [
+                    'variant' => $variant,
+                    'identifier' => $sku,
+                    'message' => 'No active variant with SKU ' . $sku . ' matched the identified product.',
+                ];
+            }
+
+            $matches = $this->variantsForSku($sku);
+            if ($matches->count() === 1) {
+                return [
+                    'variant' => $matches->first(),
+                    'identifier' => $sku,
+                    'message' => 'No local product variant matched SKU ' . $sku . '.',
+                ];
+            }
+
+            if ($matches->count() > 1) {
+                return [
+                    'variant' => null,
+                    'identifier' => $sku,
+                    'message' => 'Multiple local variants matched SKU ' . $sku . '. Add Shopify ID, Product ID, Handle, or Shopify Variant ID to choose the correct product variant.',
+                ];
+            }
+
             return [
-                'variant' => $this->variantForSku($sku),
+                'variant' => null,
                 'identifier' => $sku,
                 'message' => 'No local product variant matched SKU ' . $sku . '.',
             ];
@@ -284,10 +312,15 @@ final class SaleProductUpdateImporter
 
         $product = $this->productForRow($normalized);
         if ($product instanceof Product) {
+            $variant = $this->singleVariantForProduct($product);
+            $message = $variant instanceof Variant
+                ? 'Matched product by identifier.'
+                : 'Matched product has multiple active variants. Include SKU or Shopify Variant ID so the sale update targets the correct variant.';
+
             return [
-                'variant' => $this->firstVariantForProduct($product),
+                'variant' => $variant,
                 'identifier' => $this->rowIdentifier($normalized, $product),
-                'message' => 'Matched product has no active local variant to update.',
+                'message' => $message,
             ];
         }
 
@@ -320,13 +353,27 @@ final class SaleProductUpdateImporter
         ], $extra));
     }
 
-    private function variantForSku(string $sku): ?Variant
+    private function variantsForSku(string $sku)
     {
         $normalized = strtolower(trim($sku));
 
         return Variant::query()
             ->with('product')
             ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalized])
+            ->orderBy('id')
+            ->limit(2)
+            ->get();
+    }
+
+    private function variantForSkuOnProduct(Product $product, string $sku): ?Variant
+    {
+        $normalized = strtolower(trim($sku));
+
+        return $product->variants()
+            ->with('product')
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalized])
+            ->orderByRaw('position IS NULL')
+            ->orderBy('position')
             ->orderBy('id')
             ->first();
     }
@@ -405,14 +452,17 @@ final class SaleProductUpdateImporter
             ->first();
     }
 
-    private function firstVariantForProduct(Product $product): ?Variant
+    private function singleVariantForProduct(Product $product): ?Variant
     {
-        return $product->variants()
+        $variants = $product->variants()
             ->with('product')
             ->orderByRaw('position IS NULL')
             ->orderBy('position')
             ->orderBy('id')
-            ->first();
+            ->limit(2)
+            ->get();
+
+        return $variants->count() === 1 ? $variants->first() : null;
     }
 
     private function saleUpdateSku(Variant $variant, string $fallback): string
