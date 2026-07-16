@@ -662,6 +662,69 @@ it('allows resolving shopify warnings one field at a time with different decisio
     expect($draft->shopifySyncWarningCount())->toBe(0);
 });
 
+it('stores is on sale shopify warning values as booleans when applying shopify values', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => 'sale-warning-product',
+        'shopify_id' => 'gid://shopify/Product/9201',
+        'title' => 'Sale Warning Product',
+        'is_on_sale' => false,
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'shopify_sync_warnings' => [[
+            'field' => 'is_on_sale',
+            'label' => 'Is on sale',
+            'draft_value' => 'false',
+            'shopify_value' => 'true',
+        ]],
+    ]));
+
+    $result = NewProductDraftResource::resolveSingleShopifyWarning($draft->fresh(), 'is_on_sale', 'shopify');
+
+    $draft->refresh();
+
+    expect($result['resolved'])->toBeTrue();
+    expect($draft->is_on_sale)->toBeTrue();
+    expect((int) $draft->getRawOriginal('is_on_sale'))->toBe(1);
+    expect($draft->shopifySyncWarningCount())->toBe(0);
+});
+
+it('does not treat the string false as an on sale draft value', function (): void {
+    $draft = NewProductDraft::create([
+        'handle' => 'string-false-sale-product',
+        'title' => 'String False Sale Product',
+        'is_on_sale' => 'false',
+        'tags' => 'bracelets',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]);
+
+    $tags = \App\Services\TagNormalizer::parseTokens((string) $draft->tags);
+
+    expect($draft->is_on_sale)->toBeFalse();
+    expect((int) $draft->getRawOriginal('is_on_sale'))->toBe(0);
+    expect($tags)->toContain('exclude-from-the-sale');
+    expect($tags)->not->toContain('sale');
+});
+
+it('adds sale by type and collection tags to on sale drafts', function (): void {
+    $draft = NewProductDraft::create([
+        'handle' => 'untamed-charm-sale-draft',
+        'title' => 'Untamed Charm Sale Draft',
+        'type' => 'Charms',
+        'is_on_sale' => true,
+        'tags' => 'charms, untamed',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]);
+
+    $tags = \App\Services\TagNormalizer::parseTokens((string) $draft->tags);
+
+    expect($tags)->toContain('sale');
+    expect($tags)->toContain('charms-sale');
+    expect($tags)->toContain('untamed-sale');
+    expect($tags)->not->toContain('exclude-from-the-sale');
+});
+
 it('keeps sibling option name exactly in sync with the draft title', function (): void {
     $draft = NewProductDraft::create([
         'handle' => 'workflow-test-product',

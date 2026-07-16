@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
 use App\Services\HeaderStore;
+use App\Services\SaleTagService;
 use App\Services\TagNormalizer;
 use App\Models\StyleProfile;
 use App\Models\Product;
@@ -184,18 +185,18 @@ class NewProductDraft extends Model
         $this->attributes['image_path'] = is_string($value) ? trim($value) : $value;
     }
 
+    public function setIsOnSaleAttribute(mixed $value): void
+    {
+        $this->attributes['is_on_sale'] = self::booleanAttributeValue($value) ? 1 : 0;
+    }
+
     private function applyDefaultSaleTags(): void
     {
         $tags = self::normalizeBundleCollectionTags(
             TagNormalizer::parseTokens((string) ($this->attributes['tags'] ?? ''))
         );
-        $isOnSale = (bool) ($this->attributes['is_on_sale'] ?? false)
+        $isOnSale = self::booleanAttributeValue($this->attributes['is_on_sale'] ?? false)
             || in_array(self::SALE_TAG, $tags, true);
-
-        $tags = array_values(array_filter(
-            $tags,
-            fn (string $tag): bool => !in_array($tag, [self::SALE_TAG, self::EXCLUDE_FROM_SALE_TAG], true)
-        ));
 
         foreach (self::DEFAULT_NEW_PRODUCT_TAGS as $defaultTag) {
             $tags[] = $defaultTag;
@@ -212,12 +213,34 @@ class NewProductDraft extends Model
             $tags[] = $typeTag;
         }
 
-        $tags[] = $isOnSale ? self::SALE_TAG : self::EXCLUDE_FROM_SALE_TAG;
+        $tags = app(SaleTagService::class)->apply($tags, $isOnSale, $this->attributes['type'] ?? null);
 
-        $this->attributes['is_on_sale'] = $isOnSale;
+        $this->attributes['is_on_sale'] = $isOnSale ? 1 : 0;
         $this->attributes['tags'] = TagNormalizer::normalizeFromArray(
             self::normalizeBundleCollectionTags($tags)
         );
+    }
+
+    private static function booleanAttributeValue(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return (int) $value !== 0;
+        }
+
+        if (is_string($value)) {
+            $normalized = trim($value);
+            if ($normalized === '') {
+                return false;
+            }
+
+            return filter_var($normalized, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? false;
+        }
+
+        return (bool) $value;
     }
 
     private static function defaultTagForType(mixed $type): ?string

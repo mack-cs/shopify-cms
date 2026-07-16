@@ -88,6 +88,7 @@ final class ProductShopifyUpdater
         private readonly ShopifyApiClient $client,
         private readonly ProductHandleService $handleService,
         private readonly ProductPartialApprovalService $partialApprovalService,
+        private readonly SaleTagService $saleTags,
     ) {}
 
     /**
@@ -107,15 +108,11 @@ final class ProductShopifyUpdater
             throw new \RuntimeException('Product has no Shopify ID and could not be resolved by handle.');
         }
 
-        $tags = TagNormalizer::parseTokens((string) ($saleUpdate->prepared_tags ?: $product->tags));
-        $tags = array_values(array_filter(
-            $tags,
-            static fn (string $tag): bool => $tag !== 'exclude-from-the-sale'
-        ));
-        if (!in_array('sale', $tags, true)) {
-            $tags[] = 'sale';
-        }
-        $tags = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags));
+        $tags = $this->saleTags->apply(
+            (string) ($saleUpdate->prepared_tags ?: $product->tags),
+            true,
+            $product->type,
+        );
 
         $productData = $this->client->graphql($this->productUpdateMutation(), [
             'input' => [

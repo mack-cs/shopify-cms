@@ -27,8 +27,8 @@ use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
 use App\Http\Middleware\ForcePasswordChange;
 use App\Http\Middleware\RequireTwoFactorAuthentication;
-use App\Filament\Widgets\SearchTrendsWidget;
 use App\Filament\Widgets\SeoMetricsStats;
+use App\Filament\Widgets\SeoPeriodComparisonWidget;
 use App\Filament\Widgets\SeoMetricsTrendChart;
 use App\Filament\Widgets\SeoTopEntitiesStackedChart;
 
@@ -96,10 +96,10 @@ class AdminPanelProvider extends PanelProvider
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->widgets([
                 Widgets\AccountWidget::class,
-                // SearchTrendsWidget::class,
                 SeoMetricsStats::class,
                 SeoMetricsTrendChart::class,
                 SeoTopEntitiesStackedChart::class,
+                SeoPeriodComparisonWidget::class,
             ])
             ->middleware([
                 EncryptCookies::class,

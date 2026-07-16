@@ -2,8 +2,7 @@
 
 namespace App\Filament\Widgets;
 
-use App\Models\SeoMetric;
-use App\Models\SeoPeriod;
+use App\Services\SeoReportService;
 use Filament\Widgets\StatsOverviewWidget;
 use Filament\Widgets\StatsOverviewWidget\Stat;
 
@@ -11,50 +10,21 @@ class SeoMetricsStats extends StatsOverviewWidget
 {
     protected function getStats(): array
     {
-        $periods = SeoPeriod::query()
-            ->orderBy('sort_order')
-            ->pluck('id', 'label');
+        $report = app(SeoReportService::class);
+        $latest = $report->latestComparison(1);
 
-        if ($periods->isEmpty()) {
+        if (($latest['current']['label'] ?? 'No period') === 'No period') {
             return [];
         }
 
-        $periodIds = $periods->values()->all();
-        $currentPeriodId = end($periodIds);
-        $previousPeriodId = count($periodIds) > 1 ? $periodIds[count($periodIds) - 2] : null;
-
-        $current = $this->aggregateMetrics($currentPeriodId);
-        $previous = $previousPeriodId ? $this->aggregateMetrics($previousPeriodId) : null;
+        $current = $latest['current'];
+        $previous = $latest['previous'];
 
         return [
             $this->buildStat('Clicks', $current['clicks'], $previous['clicks'] ?? null),
             $this->buildStat('Impressions', $current['impressions'], $previous['impressions'] ?? null),
             $this->buildStat('CTR %', $current['ctr'], $previous['ctr'] ?? null, decimals: 2),
             $this->buildStat('Avg Position', $current['position'], $previous['position'] ?? null, decimals: 2, inverse: true),
-        ];
-    }
-
-    private function aggregateMetrics(int $periodId): array
-    {
-        $totals = SeoMetric::query()
-            ->where('period_id', $periodId)
-            ->selectRaw('sum(clicks) as clicks, sum(impressions) as impressions')
-            ->first();
-
-        $ctr = 0.0;
-        if ($totals && $totals->impressions > 0) {
-            $ctr = ($totals->clicks / $totals->impressions) * 100;
-        }
-
-        $avgPosition = SeoMetric::query()
-            ->where('period_id', $periodId)
-            ->avg('position') ?? 0;
-
-        return [
-            'clicks' => (int) ($totals->clicks ?? 0),
-            'impressions' => (int) ($totals->impressions ?? 0),
-            'ctr' => $ctr,
-            'position' => (float) $avgPosition,
         ];
     }
 

@@ -20,7 +20,11 @@ use App\Services\StackSellabilityShopifyPushService;
 use App\Services\StackSellabilitySlackNotifier;
 use App\Services\SiteAudit\SitemapDiscoveryService;
 use App\Services\SiteAudit\SiteAuditRunnerService;
+use App\Services\GoogleSearchConsoleClient;
+use App\Services\SearchConsoleCsvImporter;
+use App\Services\SearchConsoleMetricImportService;
 use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Notification as NotificationFacade;
@@ -29,6 +33,248 @@ use Illuminate\Support\Facades\Schedule;
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command(
+    'seo:import-search-console-csv
+    {file : CSV export path from Google Search Console}
+    {--type=query : Import dimension: query, page, or site}
+    {--label= : Period label, for example Jan 2026 or Apr-Jun 2026}
+    {--start= : Optional YYYY-MM-DD period start}
+    {--end= : Optional YYYY-MM-DD period end}',
+    function (string $file): int {
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page'], true)) {
+            $this->error('--type must be site, query, or page.');
+
+            return self::FAILURE;
+        }
+
+        $start = trim((string) ($this->option('start') ?? '')) ?: null;
+        $end = trim((string) ($this->option('end') ?? '')) ?: null;
+        foreach (['start' => $start, 'end' => $end] as $name => $date) {
+            if ($date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                $this->error("--{$name} must be formatted as YYYY-MM-DD.");
+
+                return self::FAILURE;
+            }
+        }
+
+        $label = trim((string) ($this->option('label') ?? ''));
+        if ($label === '') {
+            $label = $start && $end
+                ? Carbon::parse($start)->format('M Y') . ' - ' . Carbon::parse($end)->format('M Y')
+                : pathinfo($file, PATHINFO_FILENAME);
+        }
+
+        $result = app(SearchConsoleCsvImporter::class)->import($file, $type, $label, $start, $end);
+
+        $this->info("Imported Search Console CSV into SEO period #{$result['period_id']} ({$label}).");
+        $this->line("Rows: {$result['total']}; imported: {$result['imported']}; skipped: {$result['skipped']}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Import a Google Search Console CSV export into SEO dashboard metrics.');
+
+Artisan::command(
+    'seo:pull-search-console
+    {--type=site : Import dimension: site, query, page, or all}
+    {--start= : Optional YYYY-MM-DD period start. Defaults to previous full month}
+    {--end= : Optional YYYY-MM-DD period end. Defaults to previous full month}
+    {--label= : Period label. Defaults to the imported month/date range}
+    {--row-limit= : API page size. Defaults to SEARCH_CONSOLE_ROW_LIMIT}
+    {--max-rows= : Maximum rows per dimension. Defaults to SEARCH_CONSOLE_MAX_ROWS}',
+    function (): int {
+        $timezone = (string) config('search_console.timezone', 'Africa/Johannesburg');
+        $defaultMonth = now($timezone)->subMonthNoOverflow();
+        $start = trim((string) ($this->option('start') ?? ''));
+        $end = trim((string) ($this->option('end') ?? ''));
+
+        $start = $start !== '' ? $start : $defaultMonth->copy()->startOfMonth()->toDateString();
+        $end = $end !== '' ? $end : $defaultMonth->copy()->endOfMonth()->toDateString();
+
+        foreach (['start' => $start, 'end' => $end] as $name => $date) {
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                $this->error("--{$name} must be formatted as YYYY-MM-DD.");
+
+                return self::FAILURE;
+            }
+        }
+
+        if (Carbon::parse($start)->gt(Carbon::parse($end))) {
+            $this->error('--start must be before or equal to --end.');
+
+            return self::FAILURE;
+        }
+
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+            $this->error('--type must be site, query, page, or all.');
+
+            return self::FAILURE;
+        }
+
+        $label = trim((string) ($this->option('label') ?? ''));
+        if ($label === '') {
+            $startDate = Carbon::parse($start);
+            $endDate = Carbon::parse($end);
+            $label = $startDate->isSameMonth($endDate)
+                ? $startDate->format('M Y')
+                : $startDate->format('Y-m-d') . ' to ' . $endDate->format('Y-m-d');
+        }
+
+        $rowLimit = (int) ($this->option('row-limit') ?: config('search_console.row_limit', 25000));
+        $maxRows = (int) ($this->option('max-rows') ?: config('search_console.max_rows', 100000));
+        $dimensions = $type === 'all' ? ['site', 'query', 'page'] : [$type];
+        $client = app(GoogleSearchConsoleClient::class);
+        $importer = app(SearchConsoleMetricImportService::class);
+
+        foreach ($dimensions as $dimension) {
+            $this->info("Pulling {$dimension} Search Console rows for {$start} to {$end}...");
+
+            $rows = $client->searchAnalyticsRows($start, $end, $dimension, $rowLimit, $maxRows);
+            $result = $importer->importRows($rows, $dimension, $label, $start, $end);
+
+            $this->line("{$dimension}: {$result['imported']} imported, {$result['skipped']} skipped, period #{$result['period_id']}.");
+        }
+
+        return self::SUCCESS;
+    }
+)->purpose('Pull Google Search Console Search Analytics data into SEO dashboard metrics.');
+
+Artisan::command(
+    'seo:backfill-search-console
+    {--type=site : Import dimension: site, query, page, or all}
+    {--from=2023-12 : First month to import, YYYY-MM or YYYY-MM-DD}
+    {--to= : Last month to import, YYYY-MM or YYYY-MM-DD. Defaults to previous full month}
+    {--include-current : Include the current partial month when --to is omitted}
+    {--row-limit= : API page size. Defaults to SEARCH_CONSOLE_ROW_LIMIT}
+    {--max-rows= : Maximum rows per dimension. Defaults to SEARCH_CONSOLE_MAX_ROWS}
+    {--stop-on-error : Stop the backfill at the first failed month/dimension}',
+    function (): int {
+        $timezone = (string) config('search_console.timezone', 'Africa/Johannesburg');
+        $now = now($timezone);
+        $parseMonth = function (string $value, string $optionName) use ($timezone): ?Carbon {
+            $value = trim($value);
+            if (preg_match('/^\d{4}-\d{2}$/', $value) === 1) {
+                return Carbon::createFromFormat('Y-m-d', $value . '-01', $timezone)->startOfMonth();
+            }
+
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1) {
+                return Carbon::parse($value, $timezone)->startOfMonth();
+            }
+
+            $this->error("--{$optionName} must be formatted as YYYY-MM or YYYY-MM-DD.");
+
+            return null;
+        };
+
+        $fromMonth = $parseMonth((string) ($this->option('from') ?: '2023-12'), 'from');
+        if (!$fromMonth instanceof Carbon) {
+            return self::FAILURE;
+        }
+
+        $toOption = trim((string) ($this->option('to') ?? ''));
+        $toMonth = $toOption !== ''
+            ? $parseMonth($toOption, 'to')
+            : ((bool) $this->option('include-current')
+                ? $now->copy()->startOfMonth()
+                : $now->copy()->subMonthNoOverflow()->startOfMonth());
+
+        if (!$toMonth instanceof Carbon) {
+            return self::FAILURE;
+        }
+
+        if ($fromMonth->gt($toMonth)) {
+            $this->error('--from must be before or equal to --to.');
+
+            return self::FAILURE;
+        }
+
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+            $this->error('--type must be site, query, page, or all.');
+
+            return self::FAILURE;
+        }
+
+        $rowLimit = (int) ($this->option('row-limit') ?: config('search_console.row_limit', 25000));
+        $maxRows = (int) ($this->option('max-rows') ?: config('search_console.max_rows', 100000));
+        $dimensions = $type === 'all' ? ['site', 'query', 'page'] : [$type];
+        $client = app(GoogleSearchConsoleClient::class);
+        $importer = app(SearchConsoleMetricImportService::class);
+        $stopOnError = (bool) $this->option('stop-on-error');
+
+        $summary = [
+            'months' => 0,
+            'dimensions' => 0,
+            'imported' => 0,
+            'skipped_empty' => 0,
+            'failed' => 0,
+        ];
+
+        for ($month = $fromMonth->copy(); $month->lte($toMonth); $month->addMonthNoOverflow()) {
+            $startDate = $month->copy()->startOfMonth();
+            $endDate = $month->copy()->endOfMonth();
+            if ($month->isSameMonth($now)) {
+                $endDate = $now->copy()->subDay()->endOfDay();
+            }
+
+            if ($endDate->lt($startDate)) {
+                $this->warn("Skipping {$month->format('M Y')}: no finalized days are available yet.");
+                continue;
+            }
+
+            $label = $month->format('M Y');
+            $start = $startDate->toDateString();
+            $end = $endDate->toDateString();
+            $summary['months']++;
+
+            foreach ($dimensions as $dimension) {
+                $summary['dimensions']++;
+                $this->info("Pulling {$dimension} Search Console rows for {$label} ({$start} to {$end})...");
+
+                try {
+                    $rows = $client->searchAnalyticsRows($start, $end, $dimension, $rowLimit, $maxRows);
+                } catch (\Throwable $exception) {
+                    $summary['failed']++;
+                    $this->error("{$label} {$dimension} failed: {$exception->getMessage()}");
+
+                    if ($stopOnError) {
+                        return self::FAILURE;
+                    }
+
+                    continue;
+                }
+
+                if ($rows === []) {
+                    $summary['skipped_empty']++;
+                    $this->warn("{$label} {$dimension}: no rows returned; skipped.");
+                    continue;
+                }
+
+                $result = $importer->importRows($rows, $dimension, $label, $start, $end);
+                $summary['imported'] += $result['imported'];
+
+                $this->line("{$label} {$dimension}: {$result['imported']} imported, {$result['skipped']} skipped, period #{$result['period_id']}.");
+            }
+        }
+
+        $this->info(
+            "Search Console backfill complete. Months: {$summary['months']}; dimension pulls: {$summary['dimensions']}; " .
+            "rows imported: {$summary['imported']}; empty skipped: {$summary['skipped_empty']}; failed: {$summary['failed']}."
+        );
+
+        return $summary['failed'] > 0 ? self::FAILURE : self::SUCCESS;
+    }
+)->purpose('Backfill Google Search Console Search Analytics into monthly SEO dashboard periods.');
+
+if (config('search_console.auto_import_enabled')) {
+    Schedule::command('seo:pull-search-console --type=site')
+        ->monthlyOn(2, '03:00')
+        ->timezone((string) config('search_console.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->name('monthly-search-console-seo-import');
+}
 
 Artisan::command('slack:pending-work-reminder', function (): int {
     $channel = trim((string) config('services.slack.channels.reminders'));

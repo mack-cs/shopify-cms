@@ -44,6 +44,7 @@ use App\Services\ShopifyMissingDraftWorkflowService;
 use App\Services\TagNormalizer;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\ProductPartialApprovalService;
+use App\Services\SaleTagService;
 use App\Services\SaleProductUpdateImporter;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
@@ -2092,7 +2093,7 @@ class NewProductDraftResource extends Resource
         $typeTag = self::isBundleOrStackState($type, $tags)
             ? 'bundles'
             : self::defaultTagForProductType($type);
-        $tags = self::applySaleTags($tags, $isOnSale);
+        $tags = self::applySaleTags($tags, $isOnSale, $type);
 
         foreach (self::DEFAULT_NEW_PRODUCT_TAGS as $defaultTag) {
             $tags[] = $defaultTag;
@@ -2113,16 +2114,9 @@ class NewProductDraftResource extends Resource
      * @param array<int, string> $tags
      * @return array<int, string>
      */
-    private static function applySaleTags(array $tags, bool $isOnSale): array
+    private static function applySaleTags(array $tags, bool $isOnSale, mixed $type = null): array
     {
-        $tags = array_values(array_filter(
-            self::uniqueNormalizedTags($tags),
-            fn (string $tag): bool => !in_array($tag, [self::SALE_TAG, self::EXCLUDE_FROM_SALE_TAG], true)
-        ));
-
-        $tags[] = $isOnSale ? self::SALE_TAG : self::EXCLUDE_FROM_SALE_TAG;
-
-        return self::uniqueNormalizedTags($tags);
+        return app(SaleTagService::class)->apply($tags, $isOnSale, $type);
     }
 
     private static function defaultTagForProductType(mixed $type): ?string
@@ -7927,6 +7921,7 @@ class NewProductDraftResource extends Resource
         return match ($field) {
             'variant_inventory_qty' => $trimmed === '' ? null : (int) $trimmed,
             'published' => $trimmed === '' ? null : (strtolower($trimmed) === 'true' ? 'true' : 'false'),
+            'is_on_sale' => $trimmed !== '' && filter_var($trimmed, FILTER_VALIDATE_BOOLEAN),
             'variant_price',
             'variant_compare_at_price',
             'material_cost' => $trimmed === '' ? null : $trimmed,

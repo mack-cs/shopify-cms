@@ -13,8 +13,9 @@ use League\Csv\Reader;
 
 final class SaleProductUpdateImporter
 {
-    private const SALE_TAG = 'sale';
-    private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
+    public function __construct(
+        private readonly SaleTagService $saleTags,
+    ) {}
 
     /**
      * @return array{
@@ -107,7 +108,7 @@ final class SaleProductUpdateImporter
                         continue;
                     }
 
-                    $preparedTags = $this->preparedSaleTags((string) ($product->tags ?? ''));
+                    $preparedTags = $this->preparedSaleTags((string) ($product->tags ?? ''), $product->type);
                     $payload = [
                         'sku' => $sku,
                         'product_id' => $product->id,
@@ -521,16 +522,9 @@ final class SaleProductUpdateImporter
         return $int > 0 ? $int : null;
     }
 
-    private function preparedSaleTags(string $tags): string
+    private function preparedSaleTags(string $tags, mixed $type = null): string
     {
-        $tokens = array_values(array_filter(
-            TagNormalizer::parseTokens($tags),
-            fn (string $tag): bool => !in_array($tag, [self::SALE_TAG, self::EXCLUDE_FROM_SALE_TAG], true)
-        ));
-
-        $tokens[] = self::SALE_TAG;
-
-        return TagNormalizer::normalizeFromArray($tokens);
+        return (string) $this->saleTags->normalizeForStorage($tags, true, $type);
     }
 
     private function normalizeHeader(string $header): string

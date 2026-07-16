@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Services\SaleProductSchedulingService;
 use App\Services\SaleProductUpdateImporter;
+use App\Services\TagNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 
@@ -19,7 +20,7 @@ uses(RefreshDatabase::class);
 it('imports sale CSV rows by SKU and stages matched products without pushing local sale values live', function (): void {
     $user = User::factory()->create();
     $import = createSaleTestImport($user);
-    $product = createSaleTestProduct($import, 'sunset-bracelet', 'LRB0001', '99.00', 'exclude-from-the-sale, bracelets');
+    $product = createSaleTestProduct($import, 'sunset-bracelet', 'LRB0001', '99.00', 'exclude-from-the-sale, bracelets, livi-road');
     createSaleTestProduct($import, 'failed-bracelet', 'BADSALE', '80.00', 'exclude-from-the-sale, bracelets');
 
     $path = tempnam(sys_get_temp_dir(), 'sale-import-');
@@ -35,6 +36,7 @@ it('imports sale CSV rows by SKU and stages matched products without pushing loc
     $product->refresh();
     $variant = $product->variants()->firstOrFail();
     $update = SaleProductUpdate::query()->firstOrFail();
+    $preparedTags = TagNormalizer::parseTokens((string) $update->prepared_tags);
 
     expect($result['total'])->toBe(3)
         ->and($result['matched'])->toBe(1)
@@ -45,13 +47,38 @@ it('imports sale CSV rows by SKU and stages matched products without pushing loc
         ->and($update->sku)->toBe('LRB0001')
         ->and((string) $update->sale_price)->toBe('79.00')
         ->and((string) $update->compare_at_price)->toBe('99.00')
-        ->and($update->prepared_tags)->toContain('sale')
-        ->and($update->prepared_tags)->not->toContain('exclude-from-the-sale')
-        ->and($product->tags)->toBe('exclude-from-the-sale, bracelets')
+        ->and($preparedTags)->toContain('sale')
+        ->and($preparedTags)->toContain('bracelets-sale')
+        ->and($preparedTags)->toContain('livi-road-sale')
+        ->and($preparedTags)->not->toContain('exclude-from-the-sale')
+        ->and($product->tags)->toBe('exclude-from-the-sale, bracelets, livi-road')
         ->and((string) $variant->price)->toBe('99.00');
 
     expect(SaleImportItem::query()->where('status', SaleImportItem::STATUS_UNMATCHED)->value('sku'))->toBe('NOPE')
         ->and(SaleImportItem::query()->where('status', SaleImportItem::STATUS_FAILED)->value('sku'))->toBe('BADSALE');
+});
+
+it('adds sale by type and sale by collection tags when importing sale products', function (): void {
+    $user = User::factory()->create();
+    $import = createSaleTestImport($user);
+    $product = createSaleTestProduct($import, 'untamed-charm', 'CHARM01', '440.00', 'exclude-from-the-sale, charms, untamed, bracelets-sale');
+    $product->forceFill(['type' => 'Charms'])->save();
+
+    $path = tempnam(sys_get_temp_dir(), 'sale-import-tags-');
+    file_put_contents($path, implode("\n", [
+        'SKU,Sale Price,Compare-at Price',
+        'CHARM01,220.00,440.00',
+    ]));
+
+    app(SaleProductUpdateImporter::class)->importFromPath($path, $user->id, 'sale-tags.csv');
+
+    $tags = TagNormalizer::parseTokens((string) SaleProductUpdate::query()->firstOrFail()->prepared_tags);
+
+    expect($tags)->toContain('sale')
+        ->and($tags)->toContain('charms-sale')
+        ->and($tags)->toContain('untamed-sale')
+        ->and($tags)->not->toContain('bracelets-sale')
+        ->and($tags)->not->toContain('exclude-from-the-sale');
 });
 
 it('falls back to exported Shopify product ID when sale import SKU is blank', function (): void {
