@@ -3,6 +3,11 @@
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Jobs\Shopify\RunDailyShopifyPipeline;
+use App\Jobs\Shopify\RunHistoricalShopifyOrdersImport;
+use App\Jobs\Shopify\RunShopifyOrdersBackfill;
+use App\Jobs\Shopify\StartShopifyInventoryBulkExport;
+use App\Models\ShopifySyncRun;
 use App\Models\NewProductDraftAssignment;
 use App\Models\ShopifyAudit;
 use App\Models\SiteAuditRun;
@@ -86,6 +91,118 @@ Schedule::call(function (): void {
     ->name('daily-shopify-inventory-refresh')
     ->dailyAt('04:00')
     ->withoutOverlapping();
+
+Artisan::command(
+    'shopify:run-daily-pipeline
+    {--date= : Optional YYYY-MM-DD business date. Defaults to yesterday in Africa/Johannesburg}
+    {--scheduled : Mark the run as scheduler-created instead of manual}',
+    function (): int {
+        $date = trim((string) ($this->option('date') ?? ''));
+        if ($date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            $this->error('--date must be formatted as YYYY-MM-DD.');
+
+            return self::FAILURE;
+        }
+
+        $mode = (bool) $this->option('scheduled')
+            ? ShopifySyncRun::RUN_MODE_SCHEDULED
+            : ShopifySyncRun::RUN_MODE_MANUAL;
+
+        RunDailyShopifyPipeline::dispatch($date !== '' ? $date : null, $mode);
+
+        $this->info('Shopify daily pipeline queued.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue the daily Shopify orders and inventory bulk-sync pipeline.');
+
+Schedule::command('shopify:run-daily-pipeline --scheduled')
+    ->dailyAt('02:00')
+    ->timezone('Africa/Johannesburg')
+    ->withoutOverlapping()
+    ->name('shopify-daily-orders-inventory-pipeline');
+
+Artisan::command(
+    'shopify:orders-import-history
+    {--force : Skip confirmation for the one-time full historical import}',
+    function (): int {
+        if (!$this->option('force') && !$this->confirm('Queue a full unfiltered Shopify orders historical import?')) {
+            $this->warn('Aborted.');
+
+            return self::SUCCESS;
+        }
+
+        RunHistoricalShopifyOrdersImport::dispatch();
+        $this->info('Historical Shopify orders import queued.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a full unfiltered Shopify orders bulk import.');
+
+Artisan::command(
+    'shopify:orders-backfill
+    {business_date : Business date as YYYY-MM-DD}
+    {--lookback= : Complete business-day lookback. Defaults to config/shopify_sync.php}
+    {--force : Allow queueing even when another run already exists for the same date}
+    {--capture-current-inventory : Also capture a late current inventory snapshot}',
+    function (string $business_date): int {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $business_date)) {
+            $this->error('business_date must be formatted as YYYY-MM-DD.');
+
+            return self::FAILURE;
+        }
+
+        $lookback = $this->option('lookback');
+        $lookbackDays = $lookback === null || $lookback === '' ? null : max(1, (int) $lookback);
+        $exists = ShopifySyncRun::query()
+            ->where('dataset', ShopifySyncRun::DATASET_ORDERS)
+            ->whereDate('business_date', $business_date)
+            ->whereIn('status', [
+                ShopifySyncRun::STATUS_PENDING,
+                ShopifySyncRun::STATUS_STARTING,
+                ShopifySyncRun::STATUS_RUNNING,
+                ShopifySyncRun::STATUS_DOWNLOADING,
+                ShopifySyncRun::STATUS_PROCESSING,
+            ])
+            ->exists();
+
+        if ($exists && !$this->option('force')) {
+            $this->error("An orders sync is already active for {$business_date}. Use --force to queue another run intentionally.");
+
+            return self::FAILURE;
+        }
+
+        RunShopifyOrdersBackfill::dispatch(
+            $business_date,
+            $lookbackDays,
+            (bool) $this->option('capture-current-inventory'),
+        );
+
+        $this->info("Shopify orders backfill queued for {$business_date}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a deterministic Shopify orders backfill for a business date.');
+
+Artisan::command(
+    'shopify:inventory-snapshot',
+    function (): int {
+        $run = ShopifySyncRun::query()->create([
+            'dataset' => ShopifySyncRun::DATASET_INVENTORY,
+            'sync_type' => ShopifySyncRun::SYNC_TYPE_SNAPSHOT,
+            'run_mode' => ShopifySyncRun::RUN_MODE_MANUAL,
+            'business_date' => now((string) config('shopify_sync.timezone', 'Africa/Johannesburg'))->toDateString(),
+            'business_timezone' => (string) config('shopify_sync.timezone', 'Africa/Johannesburg'),
+            'status' => ShopifySyncRun::STATUS_PENDING,
+        ]);
+
+        StartShopifyInventoryBulkExport::dispatch($run->id);
+
+        $this->info("Shopify inventory snapshot queued as sync run #{$run->id}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a current Shopify inventory bulk snapshot.');
 
 Schedule::call(function (): void {
     app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_RECONCILIATION);
