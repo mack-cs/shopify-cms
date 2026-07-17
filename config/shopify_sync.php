@@ -39,7 +39,7 @@ return [
     ],
 
     's3' => [
-        'disk' => env('SHOPIFY_SYNC_S3_DISK', 's3'),
+        'disk' => env('SHOPIFY_SYNC_S3_DISK', 'shopify_sync'),
         'raw_orders_prefix' => trim(env('SHOPIFY_SYNC_RAW_ORDERS_PREFIX', 'raw/orders'), '/'),
         'raw_inventory_prefix' => trim(env('SHOPIFY_SYNC_RAW_INVENTORY_PREFIX', 'raw/inventory'), '/'),
     ],

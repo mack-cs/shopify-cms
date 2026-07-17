@@ -78,6 +78,7 @@ Artisan::command(
 Artisan::command(
     'seo:pull-search-console
     {--type=site : Import dimension: site, query, page, or all}
+    {--current-month : Import from the first day of the current month through yesterday}
     {--start= : Optional YYYY-MM-DD period start. Defaults to previous full month}
     {--end= : Optional YYYY-MM-DD period end. Defaults to previous full month}
     {--label= : Period label. Defaults to the imported month/date range}
@@ -85,12 +86,19 @@ Artisan::command(
     {--max-rows= : Maximum rows per dimension. Defaults to SEARCH_CONSOLE_MAX_ROWS}',
     function (): int {
         $timezone = (string) config('search_console.timezone', 'Africa/Johannesburg');
-        $defaultMonth = now($timezone)->subMonthNoOverflow();
+        $now = now($timezone);
+        $defaultMonth = $now->copy()->subMonthNoOverflow();
+        $currentMonth = (bool) $this->option('current-month');
         $start = trim((string) ($this->option('start') ?? ''));
         $end = trim((string) ($this->option('end') ?? ''));
 
-        $start = $start !== '' ? $start : $defaultMonth->copy()->startOfMonth()->toDateString();
-        $end = $end !== '' ? $end : $defaultMonth->copy()->endOfMonth()->toDateString();
+        if ($currentMonth && $start === '' && $end === '') {
+            $start = $now->copy()->startOfMonth()->toDateString();
+            $end = $now->copy()->subDay()->toDateString();
+        } else {
+            $start = $start !== '' ? $start : $defaultMonth->copy()->startOfMonth()->toDateString();
+            $end = $end !== '' ? $end : $defaultMonth->copy()->endOfMonth()->toDateString();
+        }
 
         foreach (['start' => $start, 'end' => $end] as $name => $date) {
             if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
@@ -101,6 +109,12 @@ Artisan::command(
         }
 
         if (Carbon::parse($start)->gt(Carbon::parse($end))) {
+            if ($currentMonth) {
+                $this->warn('No finalized Search Console days are available for the current month yet.');
+
+                return self::SUCCESS;
+            }
+
             $this->error('--start must be before or equal to --end.');
 
             return self::FAILURE;
@@ -269,6 +283,12 @@ Artisan::command(
 )->purpose('Backfill Google Search Console Search Analytics into monthly SEO dashboard periods.');
 
 if (config('search_console.auto_import_enabled')) {
+    Schedule::command('seo:pull-search-console --type=site --current-month')
+        ->dailyAt('04:00')
+        ->timezone((string) config('search_console.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->name('daily-current-month-search-console-seo-import');
+
     Schedule::command('seo:pull-search-console --type=site')
         ->monthlyOn(2, '03:00')
         ->timezone((string) config('search_console.timezone', 'Africa/Johannesburg'))

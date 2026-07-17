@@ -3,6 +3,7 @@
 namespace App\Services\Shopify;
 
 use App\Models\ShopifySyncRun;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
@@ -32,7 +33,7 @@ final class ShopifyBulkFileDownloader
             $metadataKey = dirname($rawKey) . '/metadata.json';
             $successKey = dirname($rawKey) . '/_SUCCESS';
             $metadata = $this->metadata($run, $rawKey, filesize($gzPath) ?: 0);
-            $disk = Storage::disk((string) config('shopify_sync.s3.disk', 's3'));
+            $disk = $this->disk();
 
             $rawStream = fopen($gzPath, 'rb');
             if ($rawStream === false) {
@@ -40,13 +41,20 @@ final class ShopifyBulkFileDownloader
             }
 
             try {
-                $disk->put($rawKey, $rawStream);
+                if ($disk->put($rawKey, $rawStream) === false) {
+                    throw new \RuntimeException("Unable to archive Shopify bulk file at {$rawKey}.");
+                }
             } finally {
                 fclose($rawStream);
             }
 
-            $disk->put($metadataKey, json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            $disk->put($successKey, '');
+            if ($disk->put($metadataKey, json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false) {
+                throw new \RuntimeException("Unable to archive Shopify bulk metadata at {$metadataKey}.");
+            }
+
+            if ($disk->put($successKey, '') === false) {
+                throw new \RuntimeException("Unable to write Shopify bulk success marker at {$successKey}.");
+            }
 
             return [
                 'raw_s3_key' => $rawKey,
@@ -66,9 +74,9 @@ final class ShopifyBulkFileDownloader
             throw new \RuntimeException('Sync run does not have an archived raw S3 key.');
         }
 
-        $stream = Storage::disk((string) config('shopify_sync.s3.disk', 's3'))->readStream($rawKey);
-        if ($stream === false) {
-            throw new \RuntimeException("Unable to read archived Shopify file at {$rawKey}.");
+        $stream = $this->disk()->readStream($rawKey);
+        if (!is_resource($stream)) {
+            throw new \RuntimeException("Unable to read archived Shopify file at {$rawKey}. Check SHOPIFY_SYNC_S3_DISK bucket configuration and read permissions.");
         }
 
         $path = tempnam(sys_get_temp_dir(), 'shopify-bulk-archive-') . '.jsonl.gz';
@@ -86,6 +94,25 @@ final class ShopifyBulkFileDownloader
         }
 
         return $path;
+    }
+
+    private function disk(): Filesystem
+    {
+        $diskName = (string) config('shopify_sync.s3.disk', 's3');
+        $diskConfig = config("filesystems.disks.{$diskName}", []);
+
+        if (!is_array($diskConfig) || $diskConfig === []) {
+            throw new \RuntimeException("Shopify sync filesystem disk '{$diskName}' is not configured.");
+        }
+
+        if (($diskConfig['driver'] ?? null) === 's3' && blank($diskConfig['bucket'] ?? null)) {
+            throw new \RuntimeException(
+                "Shopify sync filesystem disk '{$diskName}' is missing an S3 bucket. " .
+                'Set AWS_BUCKET or use SHOPIFY_SYNC_S3_DISK with a disk that has a bucket.',
+            );
+        }
+
+        return Storage::disk($diskName);
     }
 
     private function gzipFile(string $sourcePath, string $targetPath): void

@@ -9,6 +9,7 @@ use App\Models\ShopifySyncRun;
 use App\Models\SkuDailyDemand;
 use App\Models\User;
 use App\Models\Variant;
+use App\Services\Shopify\ShopifyBulkFileDownloader;
 use App\Services\Shopify\ShopifyDemandCalculator;
 use App\Services\Shopify\ShopifyInventoryUpsertService;
 use App\Services\Shopify\ShopifyOrderJsonlProcessor;
@@ -41,6 +42,28 @@ it('generates full and filtered order bulk queries without invalid empty parenth
         ->toContain('updated_at:>=2026-07-12T00:00:00+02:00')
         ->toContain('updated_at:<2026-07-15T00:00:00+02:00');
 });
+
+it('fails early when the Shopify sync archive disk has no S3 bucket', function (): void {
+    config([
+        'shopify_sync.s3.disk' => 'empty_sync_s3',
+        'filesystems.disks.empty_sync_s3' => [
+            'driver' => 's3',
+            'region' => 'us-east-1',
+            'bucket' => '',
+            'throw' => false,
+        ],
+    ]);
+
+    $run = ShopifySyncRun::query()->create([
+        'dataset' => ShopifySyncRun::DATASET_ORDERS,
+        'sync_type' => ShopifySyncRun::SYNC_TYPE_FULL,
+        'run_mode' => ShopifySyncRun::RUN_MODE_MANUAL,
+        'status' => ShopifySyncRun::STATUS_PROCESSING,
+        'raw_s3_key' => 'raw/orders/full/run_id=1/orders.jsonl.gz',
+    ]);
+
+    app(ShopifyBulkFileDownloader::class)->archiveToLocalTemp($run);
+})->throws(RuntimeException::class, "Shopify sync filesystem disk 'empty_sync_s3' is missing an S3 bucket.");
 
 it('streams order JSONL idempotently and calculates demand from current line items once', function (): void {
     $user = User::factory()->create();
