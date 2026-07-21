@@ -2,10 +2,16 @@
 
 namespace App\Filament\Resources;
 
+use App\Enums\RolesEnum;
+use App\Filament\Exports\ProductExporter;
+use App\Filament\Exports\ShopifyInventoryExporter;
 use App\Filament\Resources\ProductInventoryEventResource\Pages;
 use App\Models\ProductInventoryEvent;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
+use Filament\Tables\Actions\BulkAction;
+use Filament\Tables\Actions\BulkActionGroup;
+use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
@@ -96,6 +102,15 @@ class ProductInventoryEventResource extends Resource
                     ->limit(56)
                     ->tooltip(fn (ProductInventoryEvent $record): ?string => $record->to_reason)
                     ->toggleable(),
+            ])
+            ->bulkActions([
+                    ExportBulkAction::make()
+                    ->color('danger')
+                    ->extraAttributes(['class' => 'product-bulk-action product-bulk-action--export'])
+                    ->exporter(ShopifyInventoryExporter::class)
+                    ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
+
+
             ])
             ->filters([
                 SelectFilter::make('event_type')

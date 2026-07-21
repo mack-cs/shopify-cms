@@ -211,6 +211,95 @@ it('schedules only sale-approved updates and queues the scheduled sale job', fun
     Queue::assertPushed(RunScheduledSaleJob::class, fn (RunScheduledSaleJob $queued): bool => $queued->scheduledJobId === $job->id);
 });
 
+it('clears approved sale products from the scheduling queue without touching pending rows', function (): void {
+    $user = User::factory()->create();
+    $import = createSaleTestImport($user);
+    $approvedProduct = createSaleTestProduct($import, 'clear-approved-bracelet', 'CLR001', '120.00');
+    $pendingProduct = createSaleTestProduct($import, 'keep-pending-bracelet', 'CLR002', '110.00');
+
+    $approved = SaleProductUpdate::create([
+        'product_id' => $approvedProduct->id,
+        'variant_id' => $approvedProduct->variants()->firstOrFail()->id,
+        'sku' => 'CLR001',
+        'status' => SaleProductUpdate::STATUS_APPROVED,
+        'current_price' => '120.00',
+        'sale_price' => '95.00',
+        'compare_at_price' => '120.00',
+        'prepared_tags' => 'bracelets, sale',
+        'approved_at' => now(),
+        'approved_by' => $user->id,
+    ]);
+    $pending = SaleProductUpdate::create([
+        'product_id' => $pendingProduct->id,
+        'variant_id' => $pendingProduct->variants()->firstOrFail()->id,
+        'sku' => 'CLR002',
+        'status' => SaleProductUpdate::STATUS_PENDING,
+        'current_price' => '110.00',
+        'sale_price' => '88.00',
+        'compare_at_price' => '110.00',
+        'prepared_tags' => 'bracelets, sale',
+    ]);
+
+    $count = app(SaleProductSchedulingService::class)->clearApprovedForScheduling($user->id);
+
+    expect($count)->toBe(1)
+        ->and($approved->refresh()->status)->toBe(SaleProductUpdate::STATUS_CANCELLED)
+        ->and($approved->scheduled_job_id)->toBeNull()
+        ->and($approved->scheduled_at)->toBeNull()
+        ->and($pending->refresh()->status)->toBe(SaleProductUpdate::STATUS_PENDING)
+        ->and(app(SaleProductSchedulingService::class)->approvedCount())->toBe(0);
+});
+
+it('cancels scheduled sale jobs before they run', function (): void {
+    Queue::fake();
+
+    $user = User::factory()->create();
+    $import = createSaleTestImport($user);
+    $firstProduct = createSaleTestProduct($import, 'cancel-scheduled-first', 'CNL001', '120.00');
+    $secondProduct = createSaleTestProduct($import, 'cancel-scheduled-second', 'CNL002', '110.00');
+
+    $first = SaleProductUpdate::create([
+        'product_id' => $firstProduct->id,
+        'variant_id' => $firstProduct->variants()->firstOrFail()->id,
+        'sku' => 'CNL001',
+        'status' => SaleProductUpdate::STATUS_APPROVED,
+        'current_price' => '120.00',
+        'sale_price' => '95.00',
+        'compare_at_price' => '120.00',
+        'prepared_tags' => 'bracelets, sale',
+        'approved_at' => now(),
+        'approved_by' => $user->id,
+    ]);
+    $second = SaleProductUpdate::create([
+        'product_id' => $secondProduct->id,
+        'variant_id' => $secondProduct->variants()->firstOrFail()->id,
+        'sku' => 'CNL002',
+        'status' => SaleProductUpdate::STATUS_APPROVED,
+        'current_price' => '110.00',
+        'sale_price' => '88.00',
+        'compare_at_price' => '110.00',
+        'prepared_tags' => 'bracelets, sale',
+        'approved_at' => now(),
+        'approved_by' => $user->id,
+    ]);
+
+    $service = app(SaleProductSchedulingService::class);
+    $job = $service->createSaleJob(now('Africa/Johannesburg')->addHour(), $user->id);
+
+    $result = $service->cancelScheduledSaleJobs($user->id);
+
+    expect($result)->toBe(['jobs' => 1, 'updates' => 2, 'items' => 2])
+        ->and($job->refresh()->status)->toBe(ScheduledJob::STATUS_CANCELLED)
+        ->and($first->refresh()->status)->toBe(SaleProductUpdate::STATUS_CANCELLED)
+        ->and($second->refresh()->status)->toBe(SaleProductUpdate::STATUS_CANCELLED)
+        ->and(ScheduledJobItem::query()->where('scheduled_job_id', $job->id)->pluck('status')->all())
+        ->toBe([
+            ScheduledJobItem::STATUS_SKIPPED,
+            ScheduledJobItem::STATUS_SKIPPED,
+        ])
+        ->and($service->scheduledCount())->toBe(0);
+});
+
 function createSaleTestImport(User $user): Import
 {
     return Import::create([

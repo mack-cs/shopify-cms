@@ -78,6 +78,22 @@ class ScheduleSaleUpdates extends Page implements HasForms
                                 ->action(function (): void {
                                     $this->exportApprovedSaleProducts();
                                 }),
+                            Action::make('clearApprovedSaleProducts')
+                                ->label('Clear Approved Products')
+                                ->icon('heroicon-o-trash')
+                                ->color('danger')
+                                ->requiresConfirmation()
+                                ->modalHeading('Clear approved sale products?')
+                                ->modalDescription('This removes all currently approved sale updates from the scheduling queue. Pending sale approval rows stay pending, and Shopify is not updated.')
+                                ->modalSubmitActionLabel('Clear approved products')
+                                ->disabled(function (): bool {
+                                    $service = app(SaleProductSchedulingService::class);
+
+                                    return !$service->tablesReady() || $service->approvedCount() === 0;
+                                })
+                                ->action(function (SaleProductSchedulingService $service): void {
+                                    $this->clearApprovedSaleProducts($service);
+                                }),
                         ]),
                     ]),
                 Section::make('Create Scheduled Sale Job')
@@ -135,6 +151,24 @@ class ScheduleSaleUpdates extends Page implements HasForms
                         Placeholder::make('recent_jobs')
                             ->label('')
                             ->content(fn (): HtmlString => new HtmlString($this->recentJobsHtml())),
+                        Actions::make([
+                            Action::make('cancelScheduledSaleJobs')
+                                ->label('Cancel Scheduled Sale Jobs')
+                                ->icon('heroicon-o-x-circle')
+                                ->color('danger')
+                                ->requiresConfirmation()
+                                ->modalHeading('Cancel scheduled sale jobs?')
+                                ->modalDescription('This cancels sale jobs that are still waiting to run and removes their product updates from the schedule. Running or completed jobs are not changed.')
+                                ->modalSubmitActionLabel('Cancel scheduled jobs')
+                                ->disabled(function (): bool {
+                                    $service = app(SaleProductSchedulingService::class);
+
+                                    return !$service->tablesReady() || $service->scheduledCount() === 0;
+                                })
+                                ->action(function (SaleProductSchedulingService $service): void {
+                                    $this->cancelScheduledSaleJobs($service);
+                                }),
+                        ]),
                     ]),
             ]);
     }
@@ -163,6 +197,62 @@ class ScheduleSaleUpdates extends Page implements HasForms
             AdminNotification::send(
                 Notification::make()
                     ->title('Sale update scheduling failed')
+                    ->body($e->getMessage())
+                    ->danger()
+            );
+        }
+    }
+
+    public function clearApprovedSaleProducts(SaleProductSchedulingService $service): void
+    {
+        if (!static::canAccess()) {
+            AdminNotification::send(Notification::make()->title('Super Admin required')->danger());
+            return;
+        }
+
+        try {
+            $count = $service->clearApprovedForScheduling(Auth::id());
+
+            AdminNotification::send(
+                Notification::make()
+                    ->title($count > 0 ? 'Approved sale products cleared' : 'No approved sale products to clear')
+                    ->body($count > 0
+                        ? "Cleared {$count} approved sale product update(s). Shopify was not updated."
+                        : 'There were no approved sale product updates waiting to be scheduled.')
+                    ->status($count > 0 ? 'success' : 'warning')
+            );
+        } catch (\Throwable $e) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Clearing sale products failed')
+                    ->body($e->getMessage())
+                    ->danger()
+            );
+        }
+    }
+
+    public function cancelScheduledSaleJobs(SaleProductSchedulingService $service): void
+    {
+        if (!static::canAccess()) {
+            AdminNotification::send(Notification::make()->title('Super Admin required')->danger());
+            return;
+        }
+
+        try {
+            $result = $service->cancelScheduledSaleJobs(Auth::id());
+
+            AdminNotification::send(
+                Notification::make()
+                    ->title($result['jobs'] > 0 ? 'Scheduled sale jobs cancelled' : 'No scheduled sale jobs to cancel')
+                    ->body($result['jobs'] > 0
+                        ? "Cancelled {$result['jobs']} scheduled sale job(s) and {$result['updates']} product update(s). Shopify was not updated."
+                        : 'There were no scheduled sale jobs still waiting to run.')
+                    ->status($result['jobs'] > 0 ? 'success' : 'warning')
+            );
+        } catch (\Throwable $e) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Cancelling scheduled sale jobs failed')
                     ->body($e->getMessage())
                     ->danger()
             );
@@ -272,11 +362,13 @@ class ScheduleSaleUpdates extends Page implements HasForms
 
         $pending = $service->pendingCount();
         $approved = $service->approvedCount();
+        $scheduled = $service->scheduledCount();
 
         return <<<HTML
 <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
     <div><strong>{$pending}</strong> pending sale approval</div>
     <div><strong>{$approved}</strong> approved for scheduling</div>
+    <div><strong>{$scheduled}</strong> scheduled waiting to run</div>
 </div>
 HTML;
     }

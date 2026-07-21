@@ -3779,21 +3779,6 @@ class NewProductDraftResource extends Resource
                             ->status(($result['unmatched'] > 0 || $result['failed'] > 0) ? 'warning' : 'success')
                         );
                     }),
-                Tables\Actions\Action::make('exportLatestSaleImport')
-                    ->label('Export Latest Sale Import')
-                    ->icon('heroicon-o-arrow-down-tray')
-                    ->color('gray')
-                    ->visible(fn (): bool => self::saleSchedulingTablesReady() && SaleImportBatch::latestId() !== null)
-                    ->action(function (): void {
-                        self::exportLatestSaleImportBatch();
-                    }),
-                Tables\Actions\Action::make('exportOnSaleProducts')
-                    ->label('Export On-Sale Products')
-                    ->icon('heroicon-o-arrow-down-tray')
-                    ->color('gray')
-                    ->action(function (): void {
-                        self::exportOnSaleProducts();
-                    }),
                 Tables\Actions\Action::make('importStackAssociations')
                     ->label('Import Stack Associations')
                     ->icon('heroicon-o-link')
@@ -4343,6 +4328,10 @@ class NewProductDraftResource extends Resource
                     ->label('Edited in Last 7 Days')
                     ->indicator('Edited in Last 7 Days')
                     ->query(fn (Builder $query): Builder => $query->where('updated_at', '>=', now()->subDays(7))),
+                Filter::make('on_sale')
+                    ->label('On Sale')
+                    ->indicator('On Sale')
+                    ->query(fn (Builder $query): Builder => self::applyOnSaleTagFilter($query)),
                 Filter::make('pending_sale_updates')
                     ->label('Pending Sale Updates')
                     ->indicator('Pending Sale Updates')
@@ -5458,25 +5447,26 @@ class NewProductDraftResource extends Resource
             ]));
     }
 
-    private static function applyOnSaleDraftExportFilter(Builder $query): Builder
+    public static function applyOnSaleTagFilter(Builder $query): Builder
     {
         return $query->where(function (Builder $saleQuery): void {
-            $saleQuery
-                ->where('is_on_sale', true)
-                ->orWhereRaw(self::saleTagSql('new_product_drafts.tags'));
-
-            $saleQuery->orWhereHas('product', function (Builder $productQuery): void {
-                $productQuery->whereRaw(self::saleTagSql('products.tags'));
-
-                if (self::saleSchedulingTablesReady()) {
-                    $productQuery->orWhereHas('saleProductUpdates');
-                }
-            });
+            $saleQuery->whereRaw(self::saleTagSql('new_product_drafts.tags'))
+                ->orWhereHas('product', fn (Builder $productQuery): Builder => $productQuery
+                    ->whereRaw(self::saleTagSql('products.tags')));
         });
+    }
+
+    private static function applyOnSaleDraftExportFilter(Builder $query): Builder
+    {
+        return self::applyOnSaleTagFilter($query);
     }
 
     private static function saleTagSql(string $column): string
     {
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            return "LOWER(',' || REPLACE(COALESCE({$column}, ''), ' ', '') || ',') LIKE '%,sale,%'";
+        }
+
         return "LOWER(CONCAT(',', REPLACE(COALESCE({$column}, ''), ' ', ''), ',')) LIKE '%,sale,%'";
     }
 

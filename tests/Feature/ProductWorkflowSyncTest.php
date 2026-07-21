@@ -706,6 +706,45 @@ it('does not treat the string false as an on sale draft value', function (): voi
     expect($tags)->not->toContain('sale');
 });
 
+it('filters on sale drafts by the sale tag', function (): void {
+    $directSaleDraft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::query()->create([
+        'handle' => 'direct-sale-draft',
+        'title' => 'Direct Sale Draft',
+        'tags' => 'bracelets, sale',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]));
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::query()->create([
+        'handle' => 'not-sale-token-draft',
+        'title' => 'Not Sale Token Draft',
+        'tags' => 'bracelets, not-sale',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]));
+
+    $linkedProduct = createWorkflowTestProduct([
+        'handle' => 'linked-product-sale-draft',
+        'title' => 'Linked Product Sale Draft',
+        'tags' => 'necklaces, sale',
+    ]);
+
+    $linkedSaleDraft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::query()->create([
+        'handle' => $linkedProduct->handle,
+        'title' => $linkedProduct->title,
+        'tags' => 'necklaces',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]));
+
+    $handles = NewProductDraftResource::applyOnSaleTagFilter(NewProductDraft::query())
+        ->pluck('handle')
+        ->all();
+
+    expect($handles)->toContain($directSaleDraft->handle, $linkedSaleDraft->handle)
+        ->and($handles)->not->toContain('not-sale-token-draft');
+});
+
 it('adds sale by type and collection tags to on sale drafts', function (): void {
     $draft = NewProductDraft::create([
         'handle' => 'untamed-charm-sale-draft',

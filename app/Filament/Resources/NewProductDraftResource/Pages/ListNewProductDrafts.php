@@ -164,11 +164,11 @@ class ListNewProductDrafts extends ListRecords
                 ));
         }
 
-        if ($reportCounts['missing_siblings'] > 0) {
-            $tabs['missing_siblings'] = Tab::make('No Siblings')
-                ->badge((string) $reportCounts['missing_siblings'])
-                ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter(
+        if ($reportCounts['on_sale'] > 0) {
+            $tabs['on_sale'] = Tab::make('On Sale')
+                ->badge((string) $reportCounts['on_sale'])
+                ->badgeColor('success')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyOnSaleTagFilter(
                     self::applyHeaderReportScope($query)
                 ));
         }
@@ -218,7 +218,7 @@ class ListNewProductDrafts extends ListRecords
             'shopify_clash' => self::applyShopifyClashFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
-            'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(
+            'on_sale' => NewProductDraftResource::applyOnSaleTagFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
             'missing_complementary' => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(

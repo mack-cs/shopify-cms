@@ -56,6 +56,123 @@ final class SaleProductSchedulingService
             ->count();
     }
 
+    public function scheduledCount(): int
+    {
+        if (!$this->tablesReady()) {
+            return 0;
+        }
+
+        return SaleProductUpdate::query()
+            ->where('status', SaleProductUpdate::STATUS_SCHEDULED)
+            ->count();
+    }
+
+    public function clearApprovedForScheduling(?int $userId = null): int
+    {
+        if (!$this->tablesReady()) {
+            throw new \RuntimeException('Sale scheduling tables are missing. Run php artisan migrate before clearing sale updates.');
+        }
+
+        return DB::transaction(function () use ($userId): int {
+            $updates = SaleProductUpdate::query()
+                ->approvedForScheduling()
+                ->lockForUpdate()
+                ->get(['id']);
+
+            if ($updates->isEmpty()) {
+                return 0;
+            }
+
+            $count = $updates->count();
+
+            SaleProductUpdate::query()
+                ->whereKey($updates->pluck('id'))
+                ->update([
+                    'status' => SaleProductUpdate::STATUS_CANCELLED,
+                    'scheduled_job_id' => null,
+                    'scheduled_at' => null,
+                    'error_message' => 'Cleared from approved sale scheduling queue by user #' . ($userId ?? 'system') . '.',
+                    'updated_at' => now(),
+                ]);
+
+            logger()->info('Approved sale product updates cleared', [
+                'count' => $count,
+                'cleared_by' => $userId,
+            ]);
+
+            return $count;
+        });
+    }
+
+    /**
+     * @return array{jobs:int,updates:int,items:int}
+     */
+    public function cancelScheduledSaleJobs(?int $userId = null): array
+    {
+        if (!$this->tablesReady()) {
+            throw new \RuntimeException('Sale scheduling tables are missing. Run php artisan migrate before cancelling sale jobs.');
+        }
+
+        return DB::transaction(function () use ($userId): array {
+            $jobs = ScheduledJob::query()
+                ->where('type', ScheduledJob::TYPE_SALE_PRODUCT_UPDATE)
+                ->where('status', ScheduledJob::STATUS_SCHEDULED)
+                ->lockForUpdate()
+                ->get(['id']);
+
+            if ($jobs->isEmpty()) {
+                return ['jobs' => 0, 'updates' => 0, 'items' => 0];
+            }
+
+            $jobIds = $jobs->pluck('id');
+            $message = 'Cancelled by user #' . ($userId ?? 'system') . ' before the scheduled sale job ran.';
+
+            $updates = SaleProductUpdate::query()
+                ->whereIn('scheduled_job_id', $jobIds)
+                ->where('status', SaleProductUpdate::STATUS_SCHEDULED)
+                ->update([
+                    'status' => SaleProductUpdate::STATUS_CANCELLED,
+                    'error_message' => $message,
+                    'updated_at' => now(),
+                ]);
+
+            $items = ScheduledJobItem::query()
+                ->whereIn('scheduled_job_id', $jobIds)
+                ->whereIn('status', [
+                    ScheduledJobItem::STATUS_PENDING,
+                    ScheduledJobItem::STATUS_FAILED,
+                ])
+                ->update([
+                    'status' => ScheduledJobItem::STATUS_SKIPPED,
+                    'error_message' => $message,
+                    'completed_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+            ScheduledJob::query()
+                ->whereIn('id', $jobIds)
+                ->update([
+                    'status' => ScheduledJob::STATUS_CANCELLED,
+                    'completed_at' => now(),
+                    'error_summary' => $message,
+                    'updated_at' => now(),
+                ]);
+
+            logger()->info('Scheduled sale jobs cancelled', [
+                'jobs' => $jobs->count(),
+                'updates' => $updates,
+                'items' => $items,
+                'cancelled_by' => $userId,
+            ]);
+
+            return [
+                'jobs' => $jobs->count(),
+                'updates' => $updates,
+                'items' => $items,
+            ];
+        });
+    }
+
     public function createSaleJob(CarbonInterface $scheduledAt, ?int $userId = null): ScheduledJob
     {
         if (!$this->tablesReady()) {
