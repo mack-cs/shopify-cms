@@ -5,6 +5,8 @@ use App\Models\Product;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\ShopifyOrder;
 use App\Models\ShopifyOrderItem;
+use App\Models\ShopifyOrderTransaction;
+use App\Models\ShopifyRefundLineItem;
 use App\Models\ShopifySyncRun;
 use App\Models\SkuDailyDemand;
 use App\Models\User;
@@ -35,6 +37,9 @@ it('generates full and filtered order bulk queries without invalid empty parenth
 
     expect($builder->full())
         ->toContain('orders {')
+        ->toContain('paymentGatewayNames')
+        ->toContain('transactions(first: 100)')
+        ->toContain('refundLineItems(first: 250)')
         ->not->toContain('orders()');
 
     expect($builder->updatedBetween($window['window_start'], $window['window_end']))
@@ -83,6 +88,17 @@ it('streams order JSONL idempotently and calculates demand from current line ite
             'subtotalPriceSet' => ['shopMoney' => ['amount' => '200.00', 'currencyCode' => 'ZAR']],
             'totalDiscountsSet' => ['shopMoney' => ['amount' => '20.00', 'currencyCode' => 'ZAR']],
             'test' => false,
+            'paymentGatewayNames' => ['Payfast'],
+            'transactions' => [[
+                'id' => 'gid://shopify/OrderTransaction/8001',
+                'kind' => 'SALE',
+                'status' => 'SUCCESS',
+                'gateway' => 'payfast',
+                'formattedGateway' => 'Payfast',
+                'amountSet' => ['shopMoney' => ['amount' => '180.00', 'currencyCode' => 'ZAR']],
+                'processedAt' => '2026-07-14T08:31:00+02:00',
+                'test' => false,
+            ]],
             'lineItems' => [
                 'edges' => [[
                     'node' => [
@@ -111,7 +127,20 @@ it('streams order JSONL idempotently and calculates demand from current line ite
             'refunds' => [[
                 'id' => 'gid://shopify/Refund/7001',
                 'createdAt' => '2026-07-14T10:00:00+02:00',
-                'totalRefundedSet' => ['shopMoney' => ['amount' => '0.00', 'currencyCode' => 'ZAR']],
+                'totalRefundedSet' => ['shopMoney' => ['amount' => '90.00', 'currencyCode' => 'ZAR']],
+                'refundLineItems' => [
+                    'edges' => [[
+                        'node' => [
+                            'id' => 'gid://shopify/RefundLineItem/7101',
+                            'quantity' => 1,
+                            'restocked' => true,
+                            'restockType' => 'RETURN',
+                            'subtotalSet' => ['shopMoney' => ['amount' => '90.00', 'currencyCode' => 'ZAR']],
+                            'totalTaxSet' => ['shopMoney' => ['amount' => '0.00', 'currencyCode' => 'ZAR']],
+                            'lineItem' => ['id' => 'gid://shopify/LineItem/5001'],
+                        ],
+                    ]],
+                ],
             ]],
         ],
     ]);
@@ -122,6 +151,8 @@ it('streams order JSONL idempotently and calculates demand from current line ite
 
     expect(ShopifyOrder::query()->count())->toBe(1)
         ->and(ShopifyOrderItem::query()->count())->toBe(1)
+        ->and(ShopifyOrderTransaction::query()->count())->toBe(1)
+        ->and(ShopifyRefundLineItem::query()->count())->toBe(1)
         ->and(SkuDailyDemand::query()->count())->toBe(1);
 
     $demand = SkuDailyDemand::query()->firstOrFail();
@@ -129,10 +160,36 @@ it('streams order JSONL idempotently and calculates demand from current line ite
     expect($demand->sku)->toBe('LRB0001')
         ->and($demand->demand_date->toDateString())->toBe('2026-07-14')
         ->and($demand->gross_units)->toBe(2)
-        ->and($demand->net_units)->toBe(2)
+        ->and($demand->refunded_units)->toBe(1)
+        ->and($demand->net_units)->toBe(1)
         ->and((string) $demand->gross_revenue)->toBe('200.00')
         ->and((string) $demand->discount_amount)->toBe('20.00')
-        ->and((string) $demand->net_revenue)->toBe('180.00');
+        ->and((string) $demand->net_revenue)->toBe('90.00');
+});
+
+it('fails closed on analytics feeds when no bearer token is configured', function (): void {
+    config(['shopify_sync.analytics_export_token' => null]);
+
+    $this->get('/api/analytics/order-lines.csv?from=2026-07-01&to=2026-07-24')
+        ->assertUnauthorized();
+});
+
+it('serves every ML raw input as a token-protected compatible CSV', function (): void {
+    config(['shopify_sync.analytics_export_token' => 'test-analytics-token']);
+
+    $feeds = [
+        '/api/analytics/order-lines.csv?from=2026-07-01&to=2026-07-24' => 'Name,Id,"Created at"',
+        '/api/analytics/products.csv' => 'Handle,"Variant SKU","Variant Grams"',
+        '/api/analytics/inventory-events.csv?from=2026-07-01&to=2026-07-24' => '"Product id","Product inventory snapshot id"',
+        '/api/analytics/inventory-snapshots.csv?from=2026-07-01&to=2026-07-24' => '"Business date","Captured at"',
+        '/api/analytics/stack-components.csv' => '"Stack SKU","Stack Name","Bracelet 1","SKU 1"',
+    ];
+
+    foreach ($feeds as $url => $expectedHeader) {
+        $response = $this->withToken('test-analytics-token')->get($url);
+        $response->assertOk();
+        expect($response->streamedContent())->toStartWith($expectedHeader);
+    }
 });
 
 it('updates current variant inventory only from newer snapshots', function (): void {
@@ -219,7 +276,7 @@ function createShopifySyncLocalVariant(User $user, string $sku, array $variantOv
 
     $product = Product::withoutEvents(fn (): Product => Product::query()->create([
         'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Product/' . abs(crc32($sku)),
+        'shopify_id' => 'gid://shopify/Product/'.abs(crc32($sku)),
         'handle' => strtolower($sku),
         'title' => $sku,
         'status' => 'active',
@@ -228,8 +285,8 @@ function createShopifySyncLocalVariant(User $user, string $sku, array $variantOv
 
     return Variant::withoutEvents(fn (): Variant => Variant::query()->create(array_merge([
         'product_id' => $product->id,
-        'shopify_id' => 'gid://shopify/ProductVariant/' . abs(crc32($sku)),
-        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/' . abs(crc32('inventory-' . $sku)),
+        'shopify_id' => 'gid://shopify/ProductVariant/'.abs(crc32($sku)),
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/'.abs(crc32('inventory-'.$sku)),
         'sync_state' => Variant::SYNC_STATE_SYNCED,
         'sku' => $sku,
         'price' => '100.00',
@@ -239,18 +296,18 @@ function createShopifySyncLocalVariant(User $user, string $sku, array $variantOv
 }
 
 /**
- * @param array<int, array<string, mixed>> $records
+ * @param  array<int, array<string, mixed>>  $records
  */
 function writeShopifySyncGz(array $records): string
 {
-    $path = tempnam(sys_get_temp_dir(), 'shopify-sync-jsonl-') . '.gz';
+    $path = tempnam(sys_get_temp_dir(), 'shopify-sync-jsonl-').'.gz';
     $handle = gzopen($path, 'wb9');
     if ($handle === false) {
         throw new RuntimeException('Unable to create test gzip file.');
     }
 
     foreach ($records as $record) {
-        gzwrite($handle, json_encode($record, JSON_UNESCAPED_SLASHES) . "\n");
+        gzwrite($handle, json_encode($record, JSON_UNESCAPED_SLASHES)."\n");
     }
 
     gzclose($handle);

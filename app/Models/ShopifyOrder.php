@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
@@ -30,6 +30,7 @@ class ShopifyOrder extends Model
         'tax_amount',
         'refunded_amount',
         'source_name',
+        'payment_gateway_names',
         'is_test',
         'customer_accepts_marketing',
         'billing_country',
@@ -52,6 +53,7 @@ class ShopifyOrder extends Model
         'is_test' => 'boolean',
         'customer_accepts_marketing' => 'boolean',
         'tags' => 'array',
+        'payment_gateway_names' => 'array',
         'first_seen_at' => 'datetime',
         'last_seen_at' => 'datetime',
         'subtotal_amount' => 'decimal:2',
@@ -80,5 +82,10 @@ class ShopifyOrder extends Model
     public function discounts(): HasMany
     {
         return $this->hasMany(ShopifyDiscountApplication::class, 'shopify_order_db_id');
+    }
+
+    public function transactions(): HasMany
+    {
+        return $this->hasMany(ShopifyOrderTransaction::class, 'shopify_order_db_id');
     }
 }

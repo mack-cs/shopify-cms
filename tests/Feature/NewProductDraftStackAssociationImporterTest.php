@@ -47,6 +47,14 @@ it('imports stack association rows by stack sku and bracelet skus', function ():
     expect($result['component_skus_not_found'])->toBe(1);
     expect($draft->bundle_product_ids)->toBe([$kudu->id, $reed->id]);
     expect($draft->approval_version)->toBe(1);
+
+    config(['shopify_sync.analytics_export_token' => 'stack-export-token']);
+    $export = $this->withToken('stack-export-token')->get('/api/analytics/stack-components.csv');
+    $export->assertOk();
+    expect($export->streamedContent())
+        ->toContain('LRBU21')
+        ->toContain('LRB0131')
+        ->toContain('LRB0135');
 });
 
 it('forces associated stacks unsellable when any component is unsellable', function (): void {
@@ -281,7 +289,7 @@ function createStackAssociationProduct(
 ): Product {
     $product = Product::withoutEvents(fn (): Product => Product::create([
         'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Product/' . abs(crc32($handle)),
+        'shopify_id' => 'gid://shopify/Product/'.abs(crc32($handle)),
         'handle' => $handle,
         'title' => $title,
         'type' => 'Bracelets',
@@ -292,7 +300,7 @@ function createStackAssociationProduct(
 
     Variant::withoutEvents(fn (): Variant => Variant::create([
         'product_id' => $product->id,
-        'shopify_id' => 'gid://shopify/ProductVariant/' . abs(crc32($sku)),
+        'shopify_id' => 'gid://shopify/ProductVariant/'.abs(crc32($sku)),
         'sync_state' => Variant::SYNC_STATE_SYNCED,
         'sku' => $sku,
         'inventory_tracked' => true,

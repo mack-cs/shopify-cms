@@ -26,7 +26,7 @@ final class ShopifyOrderQueryBuilder
                 $windowStart->toIso8601String(),
                 $windowEnd->toIso8601String(),
             );
-            $connection = 'orders(query: "' . addcslashes($filter, '"\\') . '")';
+            $connection = 'orders(query: "'.addcslashes($filter, '"\\').'")';
         }
 
         return <<<GQL
@@ -52,6 +52,7 @@ final class ShopifyOrderQueryBuilder
         totalRefundedSet { shopMoney { amount currencyCode } }
         tags
         sourceName
+        paymentGatewayNames
         test
         customerAcceptsMarketing
         billingAddress { country province city }
@@ -106,6 +107,34 @@ final class ShopifyOrderQueryBuilder
           createdAt
           note
           totalRefundedSet { shopMoney { amount currencyCode } }
+          refundLineItems(first: 250) {
+            edges {
+              node {
+                id
+                quantity
+                restocked
+                restockType
+                subtotalSet { shopMoney { amount currencyCode } }
+                totalTaxSet { shopMoney { amount currencyCode } }
+                lineItem { id }
+                location { id name }
+              }
+            }
+          }
+        }
+        transactions(first: 100) {
+          id
+          kind
+          status
+          gateway
+          formattedGateway
+          amountSet { shopMoney { amount currencyCode } }
+          createdAt
+          processedAt
+          errorCode
+          manualPaymentGateway
+          test
+          parentTransaction { id }
         }
       }
     }

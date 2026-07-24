@@ -2,9 +2,10 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ShopifyOrderItem extends Model
 {
@@ -66,5 +67,10 @@ class ShopifyOrderItem extends Model
     public function latestSyncRun(): BelongsTo
     {
         return $this->belongsTo(ShopifySyncRun::class, 'latest_sync_run_id');
+    }
+
+    public function refundLineItems(): HasMany
+    {
+        return $this->hasMany(ShopifyRefundLineItem::class, 'shopify_order_item_db_id');
     }
 }

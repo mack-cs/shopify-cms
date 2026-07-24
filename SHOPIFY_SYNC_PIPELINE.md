@@ -1,6 +1,6 @@
 # Shopify Orders, Inventory, and Demand Pipeline
 
-This Laravel pipeline imports Shopify orders and inventory through Admin GraphQL bulk operations, archives raw JSONL to S3, and calculates SKU daily demand from deduplicated current order line items.
+This Laravel pipeline imports Shopify orders, payment transactions, line-level refunds, and inventory through Admin GraphQL bulk operations, archives raw JSONL to S3, and calculates SKU daily demand from deduplicated current order line items.
 
 ## Commands
 
@@ -91,8 +91,51 @@ Super Admins can monitor and operate the pipeline under `Shopify Sync`:
 
 - `Sync Runs`: start manual runs, poll, reprocess raw files, rerun a business date, and inspect issues.
 - `Order Data`: read current deduplicated Shopify order state.
+- `Order Lines`: search an individual SKU, see exactly when it sold, and open its parent order.
 - `Inventory`: inspect immutable inventory snapshots.
 - `SKU Demand`: review derived SKU/day demand.
+
+The `Order Data` screen also provides:
+
+- `Payment platform CSV`: successful collections, refunds, net collections, failures, order counts, and average order value by gateway.
+- `ML order lines CSV`: one row per Shopify line item with stable order and line-item IDs.
+- `ML products CSV`: the current product/variant, inventory-tracking, inventory-quantity, policy, and status data expected by the procurement pipeline.
+- `Stack components CSV`: generated from `New Product Drafts > Associated products` (`bundle_product_ids`).
+
+The `Inventory` screen provides:
+
+- `Sale inventory CSV`, which joins sale SKUs to the nearest opening inventory snapshot, SKU demand, and current availability. Missing opening snapshots are explicitly flagged instead of being reconstructed.
+- `ML inventory events CSV`, which provides the stock availability events used to avoid treating stockout days as zero-demand days.
+
+The stack/component association is maintained only in New Product Drafts. The ML export is generated from that relationship, so `raw/stack_components.csv` no longer needs a separately maintained mapping.
+
+## Secure analytics feeds
+
+Set a long random bearer token:
+
+```text
+SHOPIFY_ANALYTICS_EXPORT_TOKEN=...
+```
+
+The following fail-closed API endpoints are then available:
+
+```text
+GET /api/analytics/order-lines.csv?from=2023-01-01&to=2026-07-24
+GET /api/analytics/products.csv
+GET /api/analytics/inventory-snapshots.csv?from=2026-07-01&to=2026-07-24
+GET /api/analytics/inventory-events.csv?from=2023-01-01&to=2026-07-24
+GET /api/analytics/stack-components.csv
+Authorization: Bearer {SHOPIFY_ANALYTICS_EXPORT_TOKEN}
+```
+
+The order-line, product, inventory-event, and stack-component feeds are directly compatible with:
+
+```text
+leigh_ml_procurement_v1/raw/orders.csv
+leigh_ml_procurement_v1/raw/products.csv
+leigh_ml_procurement_v1/raw/inventory_events.csv
+leigh_ml_procurement_v1/raw/stack_components.csv
+```
 
 ## Idempotency
 
@@ -101,8 +144,19 @@ Reprocessing a raw file is safe:
 - orders upsert by `shopify_order_id`
 - line items upsert by `shopify_line_item_id`
 - refunds upsert by `shopify_refund_id`
+- refund line items upsert by `shopify_refund_line_item_id`
+- payment transactions upsert by `shopify_transaction_id`
 - discounts upsert by deterministic `discount_key`
 - inventory snapshots upsert by `sync_run_id + inventory_item_id + location_id`
 - demand rows upsert by `sku + demand_date`
+
+`refunded_units` and refunded product revenue are calculated from refund line items linked to the original Shopify line item. Cancelled orders and test orders are excluded from net demand. Only the configured financial statuses in `SHOPIFY_SYNC_DEMAND_FINANCIAL_STATUSES` are included.
+
+After deploying a schema/query change that adds Shopify fields, run a new full historical import. Reprocessing an older raw archive cannot create fields that were not present in the original Shopify bulk query:
+
+```bash
+php artisan migrate --force
+php artisan shopify:orders-import-history --force
+```
 
 Current inventory updates only when the incoming snapshot timestamp is newer than the variant's `inventory_last_synced_at`.

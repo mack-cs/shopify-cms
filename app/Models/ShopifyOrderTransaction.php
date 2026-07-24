@@ -2,32 +2,38 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
-class ShopifyRefund extends Model
+class ShopifyOrderTransaction extends Model
 {
-    use HasFactory;
-
     protected $fillable = [
-        'shopify_refund_id',
+        'shopify_transaction_id',
         'shopify_order_id',
         'shopify_order_db_id',
-        'order_name',
-        'refund_created_at_shopify',
-        'note',
-        'refunded_amount',
+        'parent_transaction_id',
+        'kind',
+        'status',
+        'gateway',
+        'formatted_gateway',
+        'amount',
         'currency_code',
+        'created_at_shopify',
+        'processed_at_shopify',
+        'error_code',
+        'manual_payment_gateway',
+        'is_test',
         'latest_sync_run_id',
         'first_seen_at',
         'last_seen_at',
     ];
 
     protected $casts = [
-        'refund_created_at_shopify' => 'datetime',
-        'refunded_amount' => 'decimal:2',
+        'amount' => 'decimal:2',
+        'created_at_shopify' => 'datetime',
+        'processed_at_shopify' => 'datetime',
+        'manual_payment_gateway' => 'boolean',
+        'is_test' => 'boolean',
         'first_seen_at' => 'datetime',
         'last_seen_at' => 'datetime',
     ];
@@ -35,10 +41,5 @@ class ShopifyRefund extends Model
     public function order(): BelongsTo
     {
         return $this->belongsTo(ShopifyOrder::class, 'shopify_order_db_id');
-    }
-
-    public function lineItems(): HasMany
-    {
-        return $this->hasMany(ShopifyRefundLineItem::class, 'shopify_refund_db_id');
     }
 }

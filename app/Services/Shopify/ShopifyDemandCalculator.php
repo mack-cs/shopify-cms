@@ -3,6 +3,7 @@
 namespace App\Services\Shopify;
 
 use App\Models\ShopifyOrderItem;
+use App\Models\ShopifySyncRun;
 use App\Models\SkuDailyDemand;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
@@ -11,8 +12,8 @@ use Illuminate\Support\Collection;
 final class ShopifyDemandCalculator
 {
     /**
-     * @param array<int, string> $skus
-     * @param array<int, string|\DateTimeInterface> $dates
+     * @param  array<int, string>  $skus
+     * @param  array<int, string|\DateTimeInterface>  $dates
      * @return array{sku_dates:int}
      */
     public function recalculate(array $skus, array $dates): array
@@ -31,7 +32,7 @@ final class ShopifyDemandCalculator
         return ['sku_dates' => $count];
     }
 
-    public function recalculateForRun(\App\Models\ShopifySyncRun $run): array
+    public function recalculateForRun(ShopifySyncRun $run): array
     {
         return $this->recalculate(
             (array) data_get($run->metadata, 'affected_skus', []),
@@ -43,7 +44,7 @@ final class ShopifyDemandCalculator
     {
         $timezone = (string) config('shopify_sync.timezone', 'Africa/Johannesburg');
         $items = ShopifyOrderItem::query()
-            ->with('order')
+            ->with(['order', 'refundLineItems'])
             ->where('sku', $sku)
             ->where(function ($query) use ($date, $timezone): void {
                 $start = Carbon::parse($date, $timezone)->startOfDay()->utc();
@@ -74,7 +75,7 @@ final class ShopifyDemandCalculator
     }
 
     /**
-     * @param Collection<int, ShopifyOrderItem> $items
+     * @param  Collection<int, ShopifyOrderItem>  $items
      * @return array<string, mixed>
      */
     private function summarize(Collection $items): array
@@ -89,7 +90,16 @@ final class ShopifyDemandCalculator
 
         foreach ($items as $item) {
             $order = $item->order;
-            if (!$order || $order->is_test) {
+            if (! $order || $order->is_test) {
+                continue;
+            }
+
+            $includedFinancialStatuses = array_map(
+                static fn (mixed $status): string => strtoupper(trim((string) $status)),
+                (array) config('shopify_sync.orders.included_financial_statuses', []),
+            );
+            if ($includedFinancialStatuses !== []
+                && ! in_array(strtoupper((string) $order->financial_status), $includedFinancialStatuses, true)) {
                 continue;
             }
 
@@ -104,10 +114,17 @@ final class ShopifyDemandCalculator
 
             if ($isCancelled) {
                 $cancelledUnits += $quantity;
+
                 continue;
             }
 
-            $netRevenue += (float) ($item->discounted_total ?? 0);
+            $itemRefundedUnits = min(
+                $quantity,
+                (int) $item->refundLineItems->sum('quantity'),
+            );
+            $itemRefundedAmount = (float) $item->refundLineItems->sum('subtotal_amount');
+            $refundedUnits += $itemRefundedUnits;
+            $netRevenue += max(0, (float) ($item->discounted_total ?? 0) - $itemRefundedAmount);
         }
 
         return [

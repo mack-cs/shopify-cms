@@ -2,6 +2,7 @@
 
 return [
     'timezone' => env('SHOPIFY_SYNC_TIMEZONE', 'Africa/Johannesburg'),
+    'analytics_export_token' => env('SHOPIFY_ANALYTICS_EXPORT_TOKEN'),
 
     'shopify' => [
         'shop' => env('SHOPIFY_SYNC_SHOP') ?: env('SHOPIFY_SHOP'),
@@ -23,7 +24,7 @@ return [
         'batch_size' => (int) env('SHOPIFY_SYNC_ORDER_BATCH_SIZE', 500),
         'included_financial_statuses' => array_values(array_filter(array_map(
             'trim',
-            explode(',', env('SHOPIFY_SYNC_DEMAND_FINANCIAL_STATUSES', 'PAID,PARTIALLY_PAID,FULFILLED,UNFULFILLED'))
+            explode(',', env('SHOPIFY_SYNC_DEMAND_FINANCIAL_STATUSES', 'PAID,PARTIALLY_PAID,PARTIALLY_REFUNDED,REFUNDED'))
         ))),
     ],
 

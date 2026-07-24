@@ -4,6 +4,7 @@ namespace App\Services\Shopify;
 
 use App\Models\ShopifyOrder;
 use App\Models\ShopifyOrderItem;
+use App\Models\ShopifyRefund;
 use App\Models\ShopifySyncIssue;
 use App\Models\ShopifySyncRun;
 use App\Models\Variant;
@@ -12,11 +13,10 @@ final class ShopifyOrderJsonlProcessor
 {
     public function __construct(
         private readonly ShopifyOrderUpsertService $upserts,
-    ) {
-    }
+    ) {}
 
     /**
-     * @return array{source_lines:int,orders:int,order_items:int,refunds:int,discounts:int,unclassified:int,invalid_json:int,affected_skus:array<int, string>,affected_dates:array<int, string>}
+     * @return array{source_lines:int,orders:int,order_items:int,refunds:int,refund_line_items:int,discounts:int,transactions:int,unclassified:int,invalid_json:int,affected_skus:array<int, string>,affected_dates:array<int, string>}
      */
     public function process(string $gzPath, ShopifySyncRun $run): array
     {
@@ -30,7 +30,9 @@ final class ShopifyOrderJsonlProcessor
             'orders' => 0,
             'order_items' => 0,
             'refunds' => 0,
+            'refund_line_items' => 0,
             'discounts' => 0,
+            'transactions' => 0,
             'unclassified' => 0,
             'invalid_json' => 0,
             'affected_skus' => [],
@@ -38,7 +40,7 @@ final class ShopifyOrderJsonlProcessor
         ];
 
         try {
-            while (!gzeof($handle)) {
+            while (! gzeof($handle)) {
                 $line = gzgets($handle);
                 if ($line === false) {
                     break;
@@ -52,9 +54,10 @@ final class ShopifyOrderJsonlProcessor
                 $counts['source_lines']++;
                 $record = json_decode($line, true);
 
-                if (!is_array($record)) {
+                if (! is_array($record)) {
                     $counts['invalid_json']++;
                     $this->issue($run, ShopifySyncIssue::TYPE_INVALID_JSON, 'Invalid JSONL row encountered.', ['line' => $counts['source_lines']]);
+
                     continue;
                 }
 
@@ -74,7 +77,9 @@ final class ShopifyOrderJsonlProcessor
             'orders_processed' => $counts['orders'],
             'order_items_processed' => $counts['order_items'],
             'refunds_processed' => $counts['refunds'],
+            'refund_line_items_processed' => $counts['refund_line_items'],
             'discounts_processed' => $counts['discounts'],
+            'transactions_processed' => $counts['transactions'],
             'metadata' => array_merge($run->metadata ?? [], [
                 'source_lines' => $counts['source_lines'],
                 'unclassified' => $counts['unclassified'],
@@ -92,8 +97,8 @@ final class ShopifyOrderJsonlProcessor
     }
 
     /**
-     * @param array<string, mixed> $record
-     * @param array<string, mixed> $counts
+     * @param  array<string, mixed>  $record
+     * @param  array<string, mixed>  $counts
      */
     private function processRecord(array $record, ShopifySyncRun $run, array &$counts): void
     {
@@ -116,6 +121,14 @@ final class ShopifyOrderJsonlProcessor
             return;
         }
 
+        if (str_starts_with($id, 'gid://shopify/RefundLineItem/')) {
+            if ($this->upserts->upsertRefundLineItem($record, $run) !== null) {
+                $counts['refund_line_items']++;
+            }
+
+            return;
+        }
+
         if (array_key_exists('allocationMethod', $record) || array_key_exists('targetSelection', $record)) {
             $discount = $this->upserts->upsertDiscount($record, $run);
             if ($discount !== null) {
@@ -133,20 +146,45 @@ final class ShopifyOrderJsonlProcessor
     }
 
     /**
-     * @param array<string, mixed> $record
-     * @param array<string, mixed> $counts
+     * @param  array<string, mixed>  $record
+     * @param  array<string, mixed>  $counts
      */
     private function processNestedOrderData(array $record, ShopifySyncRun $run, ShopifyOrder $order, array &$counts): void
     {
         foreach ($record['refunds'] ?? [] as $refund) {
-            if (is_array($refund) && $this->upserts->upsertRefund($refund, $run, $order) !== null) {
-                $counts['refunds']++;
+            if (! is_array($refund)) {
+                continue;
+            }
+
+            $storedRefund = $this->upserts->upsertRefund($refund, $run, $order);
+            if (! $storedRefund instanceof ShopifyRefund) {
+                continue;
+            }
+
+            $counts['refunds']++;
+
+            foreach (data_get($refund, 'refundLineItems.edges', []) as $edge) {
+                $node = data_get($edge, 'node');
+                if (! is_array($node)) {
+                    continue;
+                }
+
+                $node['__parentId'] = $storedRefund->shopify_refund_id;
+                if ($this->upserts->upsertRefundLineItem($node, $run, $storedRefund, $order) !== null) {
+                    $counts['refund_line_items']++;
+                }
+            }
+        }
+
+        foreach ($record['transactions'] ?? [] as $transaction) {
+            if (is_array($transaction) && $this->upserts->upsertTransaction($transaction, $run, $order) !== null) {
+                $counts['transactions']++;
             }
         }
 
         foreach (data_get($record, 'lineItems.edges', []) as $edge) {
             $node = data_get($edge, 'node');
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -159,7 +197,7 @@ final class ShopifyOrderJsonlProcessor
 
         foreach (data_get($record, 'discountApplications.edges', []) as $edge) {
             $node = data_get($edge, 'node');
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -171,11 +209,11 @@ final class ShopifyOrderJsonlProcessor
     }
 
     /**
-     * @param array<string, mixed> $counts
+     * @param  array<string, mixed>  $counts
      */
     private function trackAffectedItem(mixed $item, array &$counts): void
     {
-        if (!$item instanceof ShopifyOrderItem) {
+        if (! $item instanceof ShopifyOrderItem) {
             return;
         }
 
@@ -193,7 +231,7 @@ final class ShopifyOrderJsonlProcessor
 
     private function recordOrderItemMappingIssue(ShopifySyncRun $run, ?ShopifyOrderItem $item): void
     {
-        if (!$item instanceof ShopifyOrderItem) {
+        if (! $item instanceof ShopifyOrderItem) {
             return;
         }
 
@@ -251,7 +289,7 @@ final class ShopifyOrderJsonlProcessor
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function issue(ShopifySyncRun $run, string $type, string $message, array $payload): void
     {

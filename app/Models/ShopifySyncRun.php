@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
@@ -13,24 +13,37 @@ class ShopifySyncRun extends Model
     use HasFactory;
 
     public const DATASET_ORDERS = 'orders';
+
     public const DATASET_INVENTORY = 'inventory';
 
     public const SYNC_TYPE_FULL = 'full';
+
     public const SYNC_TYPE_DAILY = 'daily';
+
     public const SYNC_TYPE_SNAPSHOT = 'snapshot';
+
     public const SYNC_TYPE_HISTORICAL_RANGE = 'historical_range';
 
     public const RUN_MODE_SCHEDULED = 'scheduled';
+
     public const RUN_MODE_MANUAL = 'manual';
+
     public const RUN_MODE_BACKFILL = 'backfill';
 
     public const STATUS_PENDING = 'pending';
+
     public const STATUS_STARTING = 'starting';
+
     public const STATUS_RUNNING = 'running';
+
     public const STATUS_DOWNLOADING = 'downloading';
+
     public const STATUS_PROCESSING = 'processing';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_FAILED = 'failed';
+
     public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [
@@ -56,7 +69,9 @@ class ShopifySyncRun extends Model
         'orders_processed',
         'order_items_processed',
         'refunds_processed',
+        'refund_line_items_processed',
         'discounts_processed',
+        'transactions_processed',
         'inventory_items_processed',
         'inventory_levels_processed',
         'poll_attempts',
@@ -124,7 +139,7 @@ class ShopifySyncRun extends Model
 
     public function durationSeconds(): ?int
     {
-        if (!$this->started_at instanceof Carbon) {
+        if (! $this->started_at instanceof Carbon) {
             return null;
         }
 
