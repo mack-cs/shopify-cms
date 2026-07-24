@@ -20,6 +20,8 @@ class ShopifyOrderItem extends Model
         'sku',
         'title',
         'quantity',
+        'current_quantity',
+        'refundable_quantity',
         'vendor',
         'taxable',
         'requires_shipping',
@@ -46,6 +48,8 @@ class ShopifyOrderItem extends Model
 
     protected $casts = [
         'quantity' => 'integer',
+        'current_quantity' => 'integer',
+        'refundable_quantity' => 'integer',
         'taxable' => 'boolean',
         'requires_shipping' => 'boolean',
         'original_unit_price' => 'decimal:2',
@@ -72,5 +76,14 @@ class ShopifyOrderItem extends Model
     public function refundLineItems(): HasMany
     {
         return $this->hasMany(ShopifyRefundLineItem::class, 'shopify_order_item_db_id');
+    }
+
+    public function getAdjustedUnitsAttribute(): int
+    {
+        if ($this->current_quantity === null) {
+            return 0;
+        }
+
+        return max(0, (int) $this->quantity - max(0, (int) $this->current_quantity));
     }
 }

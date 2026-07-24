@@ -39,7 +39,9 @@ it('generates full and filtered order bulk queries without invalid empty parenth
         ->toContain('orders {')
         ->toContain('paymentGatewayNames')
         ->toContain('transactions(first: 100)')
-        ->toContain('refundLineItems(first: 250)')
+        ->toContain('currentQuantity')
+        ->toContain('refundableQuantity')
+        ->not->toContain('refundLineItems(')
         ->not->toContain('orders()');
 
     expect($builder->updatedBetween($window['window_start'], $window['window_end']))
@@ -105,6 +107,8 @@ it('streams order JSONL idempotently and calculates demand from current line ite
                         'id' => 'gid://shopify/LineItem/5001',
                         'title' => 'Bracelet',
                         'quantity' => 2,
+                        'currentQuantity' => 1,
+                        'refundableQuantity' => 1,
                         'sku' => 'LRB0001',
                         'originalUnitPriceSet' => ['shopMoney' => ['amount' => '100.00', 'currencyCode' => 'ZAR']],
                         'discountedTotalSet' => ['shopMoney' => ['amount' => '180.00', 'currencyCode' => 'ZAR']],
@@ -128,19 +132,6 @@ it('streams order JSONL idempotently and calculates demand from current line ite
                 'id' => 'gid://shopify/Refund/7001',
                 'createdAt' => '2026-07-14T10:00:00+02:00',
                 'totalRefundedSet' => ['shopMoney' => ['amount' => '90.00', 'currencyCode' => 'ZAR']],
-                'refundLineItems' => [
-                    'edges' => [[
-                        'node' => [
-                            'id' => 'gid://shopify/RefundLineItem/7101',
-                            'quantity' => 1,
-                            'restocked' => true,
-                            'restockType' => 'RETURN',
-                            'subtotalSet' => ['shopMoney' => ['amount' => '90.00', 'currencyCode' => 'ZAR']],
-                            'totalTaxSet' => ['shopMoney' => ['amount' => '0.00', 'currencyCode' => 'ZAR']],
-                            'lineItem' => ['id' => 'gid://shopify/LineItem/5001'],
-                        ],
-                    ]],
-                ],
             ]],
         ],
     ]);
@@ -152,7 +143,7 @@ it('streams order JSONL idempotently and calculates demand from current line ite
     expect(ShopifyOrder::query()->count())->toBe(1)
         ->and(ShopifyOrderItem::query()->count())->toBe(1)
         ->and(ShopifyOrderTransaction::query()->count())->toBe(1)
-        ->and(ShopifyRefundLineItem::query()->count())->toBe(1)
+        ->and(ShopifyRefundLineItem::query()->count())->toBe(0)
         ->and(SkuDailyDemand::query()->count())->toBe(1);
 
     $demand = SkuDailyDemand::query()->firstOrFail();

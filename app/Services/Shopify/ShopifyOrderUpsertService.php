@@ -107,6 +107,8 @@ final class ShopifyOrderUpsertService
             'sku' => $sku,
             'title' => $this->nullIfBlank($record['title'] ?? null),
             'quantity' => (int) ($record['quantity'] ?? 0),
+            'current_quantity' => $this->intOrNull($record['currentQuantity'] ?? null),
+            'refundable_quantity' => $this->intOrNull($record['refundableQuantity'] ?? null),
             'vendor' => $this->nullIfBlank($record['vendor'] ?? null),
             'taxable' => array_key_exists('taxable', $record) ? (bool) $record['taxable'] : null,
             'requires_shipping' => array_key_exists('requiresShipping', $record) ? (bool) $record['requiresShipping'] : null,

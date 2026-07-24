@@ -7,7 +7,6 @@ use App\Filament\Resources\SkuDailyDemandResource\Pages;
 use App\Models\SkuDailyDemand;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
-use Filament\Tables;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
 use Filament\Tables\Table;
@@ -17,9 +16,13 @@ use Illuminate\Support\Facades\Auth;
 class SkuDailyDemandResource extends Resource
 {
     protected static ?string $model = SkuDailyDemand::class;
+
     protected static ?string $navigationIcon = 'heroicon-o-chart-bar';
+
     protected static ?string $navigationGroup = 'Shopify Sync';
+
     protected static ?string $navigationLabel = 'SKU Demand';
+
     protected static ?int $navigationSort = 4;
 
     public static function form(Form $form): Form
@@ -36,7 +39,7 @@ class SkuDailyDemandResource extends Resource
                 TextColumn::make('sku')->searchable()->sortable(),
                 TextColumn::make('gross_units')->sortable(),
                 TextColumn::make('cancelled_units')->sortable(),
-                TextColumn::make('refunded_units')->sortable(),
+                TextColumn::make('refunded_units')->label('Refunded/removed units')->sortable(),
                 TextColumn::make('net_units')->sortable(),
                 TextColumn::make('order_count')->sortable(),
                 TextColumn::make('gross_revenue')->money('ZAR')->sortable(),

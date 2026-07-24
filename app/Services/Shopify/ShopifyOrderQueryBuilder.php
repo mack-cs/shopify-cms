@@ -76,6 +76,8 @@ final class ShopifyOrderQueryBuilder
               id
               title
               quantity
+              currentQuantity
+              refundableQuantity
               sku
               vendor
               taxable
@@ -107,20 +109,6 @@ final class ShopifyOrderQueryBuilder
           createdAt
           note
           totalRefundedSet { shopMoney { amount currencyCode } }
-          refundLineItems(first: 250) {
-            edges {
-              node {
-                id
-                quantity
-                restocked
-                restockType
-                subtotalSet { shopMoney { amount currencyCode } }
-                totalTaxSet { shopMoney { amount currencyCode } }
-                lineItem { id }
-                location { id name }
-              }
-            }
-          }
         }
         transactions(first: 100) {
           id

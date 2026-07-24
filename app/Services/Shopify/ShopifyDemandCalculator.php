@@ -44,7 +44,7 @@ final class ShopifyDemandCalculator
     {
         $timezone = (string) config('shopify_sync.timezone', 'Africa/Johannesburg');
         $items = ShopifyOrderItem::query()
-            ->with(['order', 'refundLineItems'])
+            ->with('order')
             ->where('sku', $sku)
             ->where(function ($query) use ($date, $timezone): void {
                 $start = Carbon::parse($date, $timezone)->startOfDay()->utc();
@@ -118,13 +118,16 @@ final class ShopifyDemandCalculator
                 continue;
             }
 
-            $itemRefundedUnits = min(
-                $quantity,
-                (int) $item->refundLineItems->sum('quantity'),
-            );
-            $itemRefundedAmount = (float) $item->refundLineItems->sum('subtotal_amount');
+            $currentQuantity = $item->current_quantity === null
+                ? $quantity
+                : max(0, min($quantity, (int) $item->current_quantity));
+            $itemRefundedUnits = max(0, $quantity - $currentQuantity);
+            $discountedTotal = (float) ($item->discounted_total ?? 0);
+            $itemRefundedAmount = $quantity > 0
+                ? $discountedTotal * ($itemRefundedUnits / $quantity)
+                : 0.0;
             $refundedUnits += $itemRefundedUnits;
-            $netRevenue += max(0, (float) ($item->discounted_total ?? 0) - $itemRefundedAmount);
+            $netRevenue += max(0, $discountedTotal - $itemRefundedAmount);
         }
 
         return [

@@ -47,10 +47,9 @@ class ShopifyOrderItemResource extends Resource
                 TextColumn::make('sku')->searchable()->sortable(),
                 TextColumn::make('title')->label('Line item')->searchable()->wrap(),
                 TextColumn::make('quantity')->sortable(),
-                TextColumn::make('refund_line_items_sum_quantity')
-                    ->label('Refunded units')
-                    ->default(0)
-                    ->sortable(),
+                TextColumn::make('adjusted_units')
+                    ->label('Refunded/removed')
+                    ->default(0),
                 TextColumn::make('original_unit_price')
                     ->label('Unit price')
                     ->money(fn (ShopifyOrderItem $record): string => $record->currency_code ?: 'ZAR')
@@ -70,8 +69,7 @@ class ShopifyOrderItemResource extends Resource
     public static function getEloquentQuery(): Builder
     {
         return parent::getEloquentQuery()
-            ->with('order')
-            ->withSum('refundLineItems', 'quantity');
+            ->with('order');
     }
 
     public static function canViewAny(): bool

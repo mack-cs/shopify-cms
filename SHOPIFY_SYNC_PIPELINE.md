@@ -1,6 +1,6 @@
 # Shopify Orders, Inventory, and Demand Pipeline
 
-This Laravel pipeline imports Shopify orders, payment transactions, line-level refunds, and inventory through Admin GraphQL bulk operations, archives raw JSONL to S3, and calculates SKU daily demand from deduplicated current order line items.
+This Laravel pipeline imports Shopify orders, payment transactions, order-level refunds, bulk-compatible current line quantities, and inventory through Admin GraphQL bulk operations, archives raw JSONL to S3, and calculates SKU daily demand from deduplicated current order line items.
 
 ## Commands
 
@@ -144,13 +144,12 @@ Reprocessing a raw file is safe:
 - orders upsert by `shopify_order_id`
 - line items upsert by `shopify_line_item_id`
 - refunds upsert by `shopify_refund_id`
-- refund line items upsert by `shopify_refund_line_item_id`
 - payment transactions upsert by `shopify_transaction_id`
 - discounts upsert by deterministic `discount_key`
 - inventory snapshots upsert by `sync_run_id + inventory_item_id + location_id`
 - demand rows upsert by `sku + demand_date`
 
-`refunded_units` and refunded product revenue are calculated from refund line items linked to the original Shopify line item. Cancelled orders and test orders are excluded from net demand. Only the configured financial statuses in `SHOPIFY_SYNC_DEMAND_FINANCIAL_STATUSES` are included.
+Net units and net product revenue use Shopify line-item `currentQuantity`. The stored `refunded_units` metric therefore represents units removed by refunds or order edits; the CMS labels it `Refunded/removed units`. Cancelled orders and test orders are excluded from net demand. Only the configured financial statuses in `SHOPIFY_SYNC_DEMAND_FINANCIAL_STATUSES` are included.
 
 After deploying a schema/query change that adds Shopify fields, run a new full historical import. Reprocessing an older raw archive cannot create fields that were not present in the original Shopify bulk query:
 
