@@ -2,6 +2,7 @@
 
 use App\Models\Import;
 use App\Models\Product;
+use App\Models\SaleProductUpdate;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\ShopifyOrder;
 use App\Models\ShopifyOrderItem;
@@ -11,6 +12,7 @@ use App\Models\ShopifySyncRun;
 use App\Models\SkuDailyDemand;
 use App\Models\User;
 use App\Models\Variant;
+use App\Services\Shopify\ShopifyAnalyticsExportService;
 use App\Services\Shopify\ShopifyBulkFileDownloader;
 use App\Services\Shopify\ShopifyDemandCalculator;
 use App\Services\Shopify\ShopifyInventoryUpsertService;
@@ -181,6 +183,56 @@ it('serves every ML raw input as a token-protected compatible CSV', function ():
         $response->assertOk();
         expect($response->streamedContent())->toStartWith($expectedHeader);
     }
+});
+
+it('makes tracked zero stock distinguishable from untracked inventory in the sale report', function (): void {
+    $user = User::factory()->create();
+    $tracked = createShopifySyncLocalVariant($user, 'TRACKED-ZERO', [
+        'inventory_tracked' => true,
+        'inventory_qty' => 0,
+        'current_available_quantity' => 0,
+        'inventory_policy' => 'deny',
+        'inventory_last_synced_at' => '2026-07-24 08:00:00',
+    ]);
+    $untracked = createShopifySyncLocalVariant($user, 'UNTRACKED', [
+        'inventory_tracked' => false,
+        'inventory_qty' => 0,
+        'current_available_quantity' => null,
+        'inventory_policy' => 'continue',
+    ]);
+
+    foreach ([$tracked, $untracked] as $variant) {
+        SaleProductUpdate::query()->create([
+            'product_id' => $variant->product_id,
+            'variant_id' => $variant->id,
+            'sku' => $variant->sku,
+            'status' => SaleProductUpdate::STATUS_COMPLETED,
+            'sale_price' => '80.00',
+            'compare_at_price' => '100.00',
+            'pushed_at' => '2026-07-01 08:00:00',
+        ]);
+    }
+
+    $response = app(ShopifyAnalyticsExportService::class)
+        ->saleInventoryCsv('2026-07-01', '2026-07-24');
+    ob_start();
+    $response->sendContent();
+    $content = (string) ob_get_clean();
+    $lines = preg_split('/\r\n|\r|\n/', trim($content));
+    $rows = collect(array_map('str_getcsv', $lines));
+    $header = $rows->shift();
+    $bySku = $rows->keyBy(fn (array $row): string => $row[0]);
+
+    $trackedRow = array_combine($header, $bySku->get('TRACKED-ZERO'));
+    $untrackedRow = array_combine($header, $bySku->get('UNTRACKED'));
+
+    expect($trackedRow['Current inventory tracked'])->toBe('Yes')
+        ->and($trackedRow['Inventory policy'])->toBe('deny')
+        ->and($trackedRow['Current inventory status'])->toBe('Tracked - zero stock')
+        ->and($trackedRow['Current available units'])->toBe('0')
+        ->and($untrackedRow['Current inventory tracked'])->toBe('No')
+        ->and($untrackedRow['Current inventory status'])->toBe('Not tracked')
+        ->and($untrackedRow['Current available units'])->toBe('');
 });
 
 it('updates current variant inventory only from newer snapshots', function (): void {

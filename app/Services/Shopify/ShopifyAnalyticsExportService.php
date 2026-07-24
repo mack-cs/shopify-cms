@@ -472,7 +472,13 @@ final class ShopifyAnalyticsExportService
                 (int) ($demand?->refunded_units ?? 0),
                 (int) ($demand?->net_units ?? 0),
                 $demand?->net_revenue ?? '0.00',
-                $variant?->current_available_quantity ?? $variant?->inventory_qty,
+                $this->inventoryTrackedLabel($variant),
+                $variant?->inventory_policy,
+                $this->currentInventoryStatus($variant),
+                $variant?->inventory_last_synced_at?->toIso8601String(),
+                $variant?->inventory_tracked === true
+                    ? ($variant->current_available_quantity ?? $variant->inventory_qty)
+                    : null,
                 $openingAvailable === null ? null : $openingAvailable - (int) ($demand?->net_units ?? 0),
                 $openingAvailable === null
                     ? 'No inventory snapshot existed on or before the requested start date'
@@ -497,6 +503,10 @@ final class ShopifyAnalyticsExportService
                 'Refunded/removed units',
                 'Net units sold',
                 'Net product revenue',
+                'Current inventory tracked',
+                'Inventory policy',
+                'Current inventory status',
+                'Inventory last synced at',
                 'Current available units',
                 'Theoretical remaining from opening stock',
                 'Data quality note',
@@ -507,6 +517,46 @@ final class ShopifyAnalyticsExportService
                 }
             },
         );
+    }
+
+    private function inventoryTrackedLabel(?Variant $variant): string
+    {
+        return match ($variant?->inventory_tracked) {
+            true => 'Yes',
+            false => 'No',
+            default => 'Unknown',
+        };
+    }
+
+    private function currentInventoryStatus(?Variant $variant): string
+    {
+        if (! $variant) {
+            return 'SKU not found in current variants';
+        }
+
+        if ($variant->inventory_tracked === false) {
+            return 'Not tracked';
+        }
+
+        if ($variant->inventory_tracked === null) {
+            return 'Tracking status unknown';
+        }
+
+        $available = $variant->current_available_quantity ?? $variant->inventory_qty;
+
+        if ($available === null) {
+            return 'Tracked - quantity unavailable';
+        }
+
+        if ($available < 0) {
+            return 'Tracked - negative stock';
+        }
+
+        if ($available === 0) {
+            return 'Tracked - zero stock';
+        }
+
+        return 'Tracked - in stock';
     }
 
     /**
