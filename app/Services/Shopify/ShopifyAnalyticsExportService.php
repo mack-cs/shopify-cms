@@ -465,6 +465,8 @@ final class ShopifyAnalyticsExportService
             $rows[] = [
                 $sku,
                 $variant?->product?->title ?? $snapshot?->product_title,
+                $variant?->product?->status,
+                $this->activeProductLabel($variant?->product?->status),
                 $variant?->product?->vendor,
                 $this->saleTagService->collectionNamesForExport($variant?->product?->tags),
                 $variant?->product?->tags,
@@ -503,6 +505,8 @@ final class ShopifyAnalyticsExportService
             [
                 'SKU',
                 'Product',
+                'Product status',
+                'Active product',
                 'Vendor',
                 'Collections',
                 'Product tags',
@@ -551,7 +555,18 @@ final class ShopifyAnalyticsExportService
             2,
             '.',
             '',
-        );
+        ) . '%';
+    }
+
+    private function activeProductLabel(mixed $status): string
+    {
+        $status = strtolower(trim((string) $status));
+
+        if ($status === '') {
+            return 'Unknown';
+        }
+
+        return $status === 'active' ? 'Yes' : 'No';
     }
 
     private function inventoryTrackedLabel(?Variant $variant): string

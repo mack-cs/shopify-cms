@@ -268,7 +268,7 @@ class ScheduleSaleUpdates extends Page implements HasForms
         }
 
         $updates = SaleProductUpdate::query()
-            ->with(['product:id,handle,title,shopify_id,vendor,tags', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
+            ->with(['product:id,handle,title,shopify_id,status,vendor,tags', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
             ->approvedForScheduling()
             ->latest('approved_at')
             ->get();
@@ -309,7 +309,7 @@ class ScheduleSaleUpdates extends Page implements HasForms
         }
 
         $itemsQuery = SaleImportItem::query()
-            ->with(['product:id,handle,title,shopify_id,vendor,tags', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
+            ->with(['product:id,handle,title,shopify_id,status,vendor,tags', 'variant:id,product_id,shopify_id,sku,price,compare_at_price'])
             ->where('sale_import_batch_id', $batch->id)
             ->when($failuresOnly, fn ($query) => $query->whereIn('status', [
                 SaleImportItem::STATUS_FAILED,
@@ -381,7 +381,7 @@ HTML;
         }
 
         $updates = SaleProductUpdate::query()
-            ->with(['product:id,handle,title,vendor,tags', 'variant:id,sku,price,compare_at_price'])
+            ->with(['product:id,handle,title,status,vendor,tags', 'variant:id,sku,price,compare_at_price'])
             ->approvedForScheduling()
             ->latest('approved_at')
             ->limit(25)
@@ -397,8 +397,8 @@ HTML;
             $current = e((string) ($update->current_price ?? $update->variant?->price ?? '-'));
             $sale = e((string) $update->sale_price);
             $compare = e((string) $update->compare_at_price);
-            $discountPercentage = $this->discountPercentage($update->sale_price, $update->compare_at_price);
-            $discount = e($discountPercentage === null ? '-' : $discountPercentage . '%');
+            $discount = e($this->discountPercentage($update->sale_price, $update->compare_at_price) ?? '-');
+            $productStatus = e((string) ($update->product?->status ?: 'Unknown'));
             $vendor = e((string) ($update->product?->vendor ?: '-'));
             $collections = e($this->saleCollections(
                 $update->product?->tags ?: $update->prepared_tags
@@ -413,6 +413,7 @@ HTML;
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$sale}</td>
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$compare}</td>
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$discount}</td>
+    <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$productStatus}</td>
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$vendor}</td>
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$collections}</td>
     <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{$tags}</td>
@@ -434,6 +435,7 @@ HTML;
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Sale</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Compare-at</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Discount %</th>
+                <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Product status</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Vendor</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Collections</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid #d1d5db;">Prepared tags</th>
@@ -603,6 +605,8 @@ HTML;
             'Sale Price',
             'Compare-at Price',
             'Discount Percentage',
+            'Product Status',
+            'Active Product',
             'Vendor',
             'Collections',
             'Sale Update Status',
@@ -632,6 +636,8 @@ HTML;
             $update->sale_price,
             $update->compare_at_price,
             $this->discountPercentage($update->sale_price, $update->compare_at_price),
+            $update->product?->status,
+            $this->activeProductLabel($update->product?->status),
             $update->product?->vendor,
             $this->saleCollections($update->product?->tags ?: $update->prepared_tags),
             $update->status,
@@ -657,6 +663,8 @@ HTML;
                 $update?->sale_price ?? $item->sale_price,
                 $update?->compare_at_price ?? $item->compare_at_price,
             ),
+            $item->product?->status,
+            $this->activeProductLabel($item->product?->status),
             $item->product?->vendor,
             $this->saleCollections($item->product?->tags ?: $update?->prepared_tags),
             $update?->status ?? '',
@@ -686,7 +694,18 @@ HTML;
             2,
             '.',
             ''
-        );
+        ) . '%';
+    }
+
+    private function activeProductLabel(mixed $status): string
+    {
+        $status = strtolower(trim((string) $status));
+
+        if ($status === '') {
+            return 'Unknown';
+        }
+
+        return $status === 'active' ? 'Yes' : 'No';
     }
 
     private function storeSaleExport(Writer $writer, string $filename, string $title, string $body): void
