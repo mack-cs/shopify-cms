@@ -12,11 +12,16 @@ use App\Models\ShopifyOrderItem;
 use App\Models\ShopifyOrderTransaction;
 use App\Models\SkuDailyDemand;
 use App\Models\Variant;
+use App\Services\SaleTagService;
 use Illuminate\Support\Carbon;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class ShopifyAnalyticsExportService
 {
+    public function __construct(private readonly SaleTagService $saleTagService)
+    {
+    }
+
     public function mlProductsCsv(): StreamedResponse
     {
         return $this->csvResponse(
@@ -460,9 +465,16 @@ final class ShopifyAnalyticsExportService
             $rows[] = [
                 $sku,
                 $variant?->product?->title ?? $snapshot?->product_title,
+                $variant?->product?->vendor,
+                $this->saleTagService->collectionNamesForExport($variant?->product?->tags),
+                $variant?->product?->tags,
                 $sale?->pushed_at?->toIso8601String(),
                 $sale?->sale_price ?? $variant?->price,
                 $sale?->compare_at_price ?? $variant?->compare_at_price,
+                $this->discountPercentage(
+                    $sale?->sale_price ?? $variant?->price,
+                    $sale?->compare_at_price ?? $variant?->compare_at_price,
+                ),
                 $openingDate,
                 $openingCapturedAt,
                 $openingSource,
@@ -491,9 +503,13 @@ final class ShopifyAnalyticsExportService
             [
                 'SKU',
                 'Product',
+                'Vendor',
+                'Collections',
+                'Product tags',
                 'Sale activated at',
                 'Sale price',
                 'Compare-at price',
+                'Discount percentage',
                 'Opening snapshot business date',
                 'Opening snapshot captured at',
                 'Opening snapshot source',
@@ -516,6 +532,25 @@ final class ShopifyAnalyticsExportService
                     fputcsv($handle, $row);
                 }
             },
+        );
+    }
+
+    private function discountPercentage(mixed $salePrice, mixed $compareAtPrice): ?string
+    {
+        if (! is_numeric((string) $salePrice) || ! is_numeric((string) $compareAtPrice)) {
+            return null;
+        }
+
+        $compareAtPrice = (float) $compareAtPrice;
+        if ($compareAtPrice <= 0) {
+            return null;
+        }
+
+        return number_format(
+            (($compareAtPrice - (float) $salePrice) / $compareAtPrice) * 100,
+            2,
+            '.',
+            '',
         );
     }
 

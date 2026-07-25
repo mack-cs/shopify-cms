@@ -26,6 +26,14 @@ final class SaleTagService
         'elements-of-desire' => 'elements-of-desire-sale',
     ];
 
+    private const COLLECTION_LABELS = [
+        'livi-road' => 'Livi Road',
+        'elevated-basics' => 'Elevated Basics',
+        'untamed' => 'Untamed',
+        'pata-pata' => 'Pata Pata',
+        'elements-of-desire' => 'Elements of Desire',
+    ];
+
     /**
      * @param array<int, string>|string|null $tags
      * @return array<int, string>
@@ -64,6 +72,34 @@ final class SaleTagService
     public function normalizeForStorage(array|string|null $tags, bool $isOnSale, mixed $type = null): ?string
     {
         return TagNormalizer::normalizeFromArray($this->apply($tags, $isOnSale, $type));
+    }
+
+    /**
+     * @param array<int, string>|string|null $tags
+     * @return array<int, string>
+     */
+    public function collectionNames(array|string|null $tags): array
+    {
+        $tokens = is_array($tags)
+            ? TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags))
+            : TagNormalizer::parseTokens($tags);
+        $names = [];
+
+        foreach (self::COLLECTION_LABELS as $tag => $label) {
+            if (in_array($tag, $tokens, true) || in_array($tag . '-sale', $tokens, true)) {
+                $names[] = $label;
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * @param array<int, string>|string|null $tags
+     */
+    public function collectionNamesForExport(array|string|null $tags): string
+    {
+        return implode('; ', $this->collectionNames($tags));
     }
 
     /**

@@ -200,6 +200,10 @@ it('makes tracked zero stock distinguishable from untracked inventory in the sal
         'current_available_quantity' => null,
         'inventory_policy' => 'continue',
     ]);
+    $tracked->product->forceFill([
+        'vendor' => 'Leigh Avenue',
+        'tags' => 'sale, elevated-basics, elevated-basics-necklaces',
+    ])->save();
 
     foreach ([$tracked, $untracked] as $variant) {
         SaleProductUpdate::query()->create([
@@ -227,6 +231,9 @@ it('makes tracked zero stock distinguishable from untracked inventory in the sal
     $untrackedRow = array_combine($header, $bySku->get('UNTRACKED'));
 
     expect($trackedRow['Current inventory tracked'])->toBe('Yes')
+        ->and($trackedRow['Vendor'])->toBe('Leigh Avenue')
+        ->and($trackedRow['Collections'])->toBe('Elevated Basics')
+        ->and($trackedRow['Discount percentage'])->toBe('20.00')
         ->and($trackedRow['Inventory policy'])->toBe('deny')
         ->and($trackedRow['Current inventory status'])->toBe('Tracked - zero stock')
         ->and($trackedRow['Current available units'])->toBe('0')
