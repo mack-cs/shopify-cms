@@ -7,6 +7,7 @@ use App\Jobs\InventorySyncJob;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
+use App\Services\BulkInventoryTrackingService;
 use App\Services\InventoryAccessService;
 use App\Services\ProductInventoryHistoryRecorder;
 use App\Services\InventoryOperationContext;
@@ -298,6 +299,71 @@ class InventoryResource extends Resource
             ])
             ->bulkActions([
                 BulkActionGroup::make([
+                    BulkAction::make('startTracking')
+                        ->label('Start Tracking Inventory')
+                        ->icon('heroicon-o-check-circle')
+                        ->color('warning')
+                        ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                        ->requiresConfirmation()
+                        ->modalHeading('Start tracking selected inventory?')
+                        ->modalDescription('Only selected variants currently marked Not Tracked will change. Already tracked variants and variants with an unknown tracking state are skipped.')
+                        ->modalSubmitActionLabel('Start Tracking')
+                        ->form([
+                            Forms\Components\TextInput::make('inventory_qty')
+                                ->label('Starting quantity for every changed variant')
+                                ->helperText('The same starting quantity is assigned to each selected Not Tracked variant.')
+                                ->numeric()
+                                ->integer()
+                                ->minValue(0)
+                                ->default(0)
+                                ->required(),
+                            Forms\Components\Toggle::make('push_to_shopify')
+                                ->label('Push changed variants to Shopify after updating')
+                                ->helperText('Leave this off to review the local changes first. You can use the existing bulk Push To Shopify action later.')
+                                ->default(false),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $result = app(BulkInventoryTrackingService::class)->startTracking(
+                                $records,
+                                (int) ($data['inventory_qty'] ?? 0),
+                                Auth::id(),
+                            );
+
+                            if (($data['push_to_shopify'] ?? false) && !empty($result['changed_variant_ids'])) {
+                                InventorySyncJob::dispatch(
+                                    $result['changed_variant_ids'],
+                                    'push',
+                                    Auth::id(),
+                                    'inventory_' . now()->format('YmdHis'),
+                                );
+                            }
+
+                            $body = "Updated {$result['updated']} variant(s).";
+                            if ($result['already_tracked'] > 0) {
+                                $body .= " Already tracked: {$result['already_tracked']}.";
+                            }
+                            if ($result['unknown_skipped'] > 0) {
+                                $body .= " Unknown tracking state skipped: {$result['unknown_skipped']}.";
+                            }
+                            if (($data['push_to_shopify'] ?? false) && $result['updated'] > 0) {
+                                $body .= ' Shopify push queued.';
+                            }
+
+                            $notification = Notification::make()
+                                ->title($result['updated'] > 0
+                                    ? 'Bulk inventory tracking updated'
+                                    : 'No untracked variants changed')
+                                ->body($body);
+
+                            if ($result['updated'] > 0) {
+                                $notification->success();
+                            } else {
+                                $notification->warning();
+                            }
+
+                            $notification->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('refreshFromShopify')
                         ->label('Read From Shopify')
                         ->visible(fn (): bool => app(InventoryAccessService::class)->canAccess(Auth::user()))
