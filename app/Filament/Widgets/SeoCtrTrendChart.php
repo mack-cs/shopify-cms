@@ -6,20 +6,18 @@ use App\Services\SeoReportService;
 use Filament\Widgets\ChartWidget;
 use Filament\Widgets\Concerns\InteractsWithPageFilters;
 
-class SeoMetricsTrendChart extends ChartWidget
+class SeoCtrTrendChart extends ChartWidget
 {
     use InteractsWithPageFilters;
 
-    protected static ?string $heading = 'Traffic Trend';
+    protected static ?string $heading = 'CTR Trend';
 
-    protected static ?int $sort = 1;
-
-    protected int|string|array $columnSpan = 'full';
+    protected static ?int $sort = 3;
 
     protected function getData(): array
     {
         return app(SeoReportService::class)->dashboardTrendData(
-            'traffic',
+            'ctr',
             $this->periodId(),
             $this->entityType(),
             12,
@@ -34,31 +32,11 @@ class SeoMetricsTrendChart extends ChartWidget
     protected function getOptions(): array
     {
         return [
-            'interaction' => [
-                'mode' => 'index',
-                'intersect' => false,
-            ],
+            'interaction' => ['mode' => 'index', 'intersect' => false],
             'scales' => [
-                'clicks' => [
-                    'type' => 'linear',
-                    'position' => 'left',
+                'y' => [
                     'beginAtZero' => true,
-                    'title' => [
-                        'display' => true,
-                        'text' => 'Clicks',
-                    ],
-                ],
-                'impressions' => [
-                    'type' => 'linear',
-                    'position' => 'right',
-                    'beginAtZero' => true,
-                    'grid' => [
-                        'drawOnChartArea' => false,
-                    ],
-                    'title' => [
-                        'display' => true,
-                        'text' => 'Impressions',
-                    ],
+                    'title' => ['display' => true, 'text' => 'CTR %'],
                 ],
             ],
         ];

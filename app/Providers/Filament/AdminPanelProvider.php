@@ -2,35 +2,36 @@
 
 namespace App\Providers\Filament;
 
+use App\Filament\Pages\Dashboard;
+use App\Filament\Widgets\SeoCtrTrendChart;
+use App\Filament\Widgets\SeoMetricsStats;
+use App\Filament\Widgets\SeoMetricsTrendChart;
+use App\Filament\Widgets\SeoPeriodComparisonWidget;
+use App\Filament\Widgets\SeoRankingTrendChart;
+use App\Filament\Widgets\SeoReportingContextWidget;
+use App\Http\Controllers\Auth\RedirectToLoginController;
 use App\Http\Controllers\DeleteApprovalAlertController;
 use App\Http\Controllers\PartialApprovalAlertController;
 use App\Http\Middleware\AuthenticatePanelUser;
-use App\Http\Controllers\Auth\RedirectToLoginController;
+use App\Http\Middleware\ForcePasswordChange;
+use App\Http\Middleware\RequireTwoFactorAuthentication;
 use Filament\Http\Controllers\Auth\LogoutController;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
 use Filament\Http\Middleware\DispatchServingFilamentEvent;
 use Filament\Navigation\NavigationGroup;
-use Filament\Pages;
 use Filament\Panel;
 use Filament\PanelProvider;
-use Filament\Support\Colors\Color;
 use Filament\Support\Assets\Css;
+use Filament\Support\Colors\Color;
 use Filament\View\PanelsRenderHook;
-use Filament\Widgets;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
-use Illuminate\Support\Facades\Route;
 use Illuminate\Session\Middleware\StartSession;
+use Illuminate\Support\Facades\Route;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
-use App\Http\Middleware\ForcePasswordChange;
-use App\Http\Middleware\RequireTwoFactorAuthentication;
-use App\Filament\Widgets\SeoMetricsStats;
-use App\Filament\Widgets\SeoPeriodComparisonWidget;
-use App\Filament\Widgets\SeoMetricsTrendChart;
-use App\Filament\Widgets\SeoTopEntitiesStackedChart;
 
 class AdminPanelProvider extends PanelProvider
 {
@@ -91,14 +92,15 @@ class AdminPanelProvider extends PanelProvider
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\\Filament\\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
             ->pages([
-                Pages\Dashboard::class,
+                Dashboard::class,
             ])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->widgets([
-                Widgets\AccountWidget::class,
+                SeoReportingContextWidget::class,
                 SeoMetricsStats::class,
                 SeoMetricsTrendChart::class,
-                SeoTopEntitiesStackedChart::class,
+                SeoRankingTrendChart::class,
+                SeoCtrTrendChart::class,
                 SeoPeriodComparisonWidget::class,
             ])
             ->middleware([
