@@ -40,6 +40,7 @@ return [
             'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'inventory' => env('SLACK_INVENTORY_UPDATES_CHANNEL', env('SLACK_INVENTORY_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
             'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
+            'duplicate_skus' => env('SLACK_DUPLICATE_SKU_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
         ],
 
         'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
@@ -49,6 +50,10 @@ return [
             'trim',
             explode(',', env('SLACK_REMINDER_TIMES', '09:00,13:00,16:00'))
         ))),
+        'duplicate_sku_recipient_email' => env('DUPLICATE_SKU_RECIPIENT_EMAIL', 'nick@leighavenue.co.za'),
+        'duplicate_sku_recipient_user_id' => env('DUPLICATE_SKU_RECIPIENT_SLACK_ID', 'U0B5DM894DS'),
+        'duplicate_sku_reminder_time' => env('DUPLICATE_SKU_REMINDER_TIME', '08:00'),
+        'duplicate_sku_reminder_timezone' => env('DUPLICATE_SKU_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
     ],
 
     'shopify' => [

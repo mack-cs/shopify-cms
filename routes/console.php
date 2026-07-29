@@ -23,6 +23,7 @@ use App\Services\SiteAudit\SiteAuditRunnerService;
 use App\Services\GoogleSearchConsoleClient;
 use App\Services\SearchConsoleCsvImporter;
 use App\Services\SearchConsoleMetricImportService;
+use App\Services\DuplicateSkuReminderService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -345,6 +346,35 @@ foreach (config('services.slack.reminder_times', []) as $time) {
         ->withoutOverlapping()
         ->name('slack-pending-work-reminder-' . str_replace(':', '', (string) $time));
 }
+
+Artisan::command('sku:audit-duplicates', function (DuplicateSkuReminderService $reminders): int {
+    $result = $reminders->sendDailyReminder();
+
+    if ($result['conflict_count'] === 0) {
+        $this->info('No duplicate SKUs were found across products. No reminder was sent.');
+
+        return self::SUCCESS;
+    }
+
+    $this->info(
+        "Found {$result['conflict_count']} duplicate SKU(s) across {$result['product_count']} products. "
+        . 'Email: ' . ($result['email_sent'] ? 'sent' : 'not sent') . '. '
+        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+    );
+
+    foreach ($result['errors'] as $error) {
+        $this->error($error);
+    }
+
+    return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
+})->purpose('Detect SKUs used by multiple products and remind the responsible person by email and Slack.');
+
+Schedule::command('sku:audit-duplicates')
+    ->dailyAt((string) config('services.slack.duplicate_sku_reminder_time', '08:00'))
+    ->timezone((string) config('services.slack.duplicate_sku_reminder_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-duplicate-sku-audit');
 
 Schedule::job(new ReconcileProductImageBackupsJob())
     ->dailyAt('02:00')
