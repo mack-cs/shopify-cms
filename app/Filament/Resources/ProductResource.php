@@ -1971,6 +1971,16 @@ class ProductResource extends Resource
                     ->modalHeading('Request deletion for archived duplicate-SKU products?')
                     ->modalDescription('Only selected archived products that currently share a SKU with another product will be submitted. This creates approval requests; it does not delete anything immediately.')
                     ->form([
+                        Select::make('target_approver_id')
+                            ->label('Send approval request to')
+                            ->options(fn (): array => app(DeletionRequestWorkflowService::class)
+                                ->eligibleApproversQuery(new Product(), (int) Auth::id())
+                                ->pluck('name', 'id')
+                                ->all())
+                            ->searchable()
+                            ->preload()
+                            ->required()
+                            ->helperText('This person will be mentioned in Slack and will see the requests in their Assigned to me queue.'),
                         Textarea::make('reason')
                             ->label('Reason')
                             ->default('Archived product shares a SKU with another product.')
@@ -1982,13 +1992,15 @@ class ProductResource extends Resource
                             ->requestArchivedDuplicates(
                                 $records,
                                 (int) Auth::id(),
+                                (int) $data['target_approver_id'],
                                 $data['reason'] ?? null,
                             );
 
                         $body = "Requested: {$summary['requested']}. "
                             . "Skipped not archived/duplicate: {$summary['skipped_ineligible']}. "
                             . "Skipped with open request: {$summary['skipped_existing']}. "
-                            . "Failed: {$summary['failed']}.";
+                            . "Failed: {$summary['failed']}. "
+                            . 'Slack: ' . ($summary['slack_sent'] ? 'sent.' : 'not sent.');
 
                         self::sendNotification(
                             Notification::make()

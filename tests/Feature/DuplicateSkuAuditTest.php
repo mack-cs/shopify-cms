@@ -1,12 +1,15 @@
 <?php
 
 use App\Mail\DuplicateSkuReminderMail;
+use App\Enums\RolesEnum;
+use App\Jobs\ProcessDeletionRequestJob;
 use App\Models\DeletionRequest;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
 use App\Notifications\DuplicateSkuSlackNotification;
+use App\Notifications\DuplicateSkuDeletionRequestSlackNotification;
 use App\Services\DuplicateSkuAuditService;
 use App\Services\DuplicateSkuCsvExporter;
 use App\Services\DuplicateSkuDeletionRequestService;
@@ -15,6 +18,8 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Queue;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -166,7 +171,21 @@ it('exports one CSV row for every variant affected by a cross-product SKU confli
 });
 
 it('requests deletion only for selected archived products that have duplicate SKUs', function (): void {
+    Notification::fake();
+    Queue::fake();
+    config(['services.slack.channels.duplicate_skus' => '#product-data-alerts']);
+
     $import = duplicateSkuTestImport();
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $targetApprover = User::factory()->create([
+        'name' => 'Deletion Approver',
+        'email' => 'approver@leighavenue.co.za',
+        'is_active' => true,
+        'slack_user_id' => 'U0APPROVER1',
+        'slack_notifications_enabled' => true,
+    ]);
+    $targetApprover->assignRole(RolesEnum::Admin->value);
+
     $active = duplicateSkuTestProduct($import, 'active-sku-owner', 'active');
     $archivedDuplicate = duplicateSkuTestProduct($import, 'archived-duplicate', 'archived');
     $archivedUnique = duplicateSkuTestProduct($import, 'archived-unique', 'archived');
@@ -182,29 +201,67 @@ it('requests deletion only for selected archived products that have duplicate SK
         ->requestArchivedDuplicates(
             collect([$archivedDuplicate, $active, $archivedUnique]),
             (int) $import->created_by,
+            $targetApprover->id,
             'Remove archived duplicate SKU product.',
         );
 
-    expect($summary)->toBe([
+    expect($summary)->toMatchArray([
         'selected' => 3,
         'requested' => 1,
         'skipped_ineligible' => 2,
         'skipped_existing' => 0,
         'failed' => 0,
-    ]);
+        'slack_sent' => true,
+    ])->and($summary['request_ids'])->toHaveCount(1);
 
     $request = DeletionRequest::query()->sole();
     expect($request->deletable_type)->toBe(Product::class)
         ->and((int) $request->deletable_id)->toBe($archivedDuplicate->id)
         ->and($request->status)->toBe(DeletionRequest::STATUS_PENDING)
+        ->and((int) $request->target_approver_id)->toBe($targetApprover->id)
         ->and($request->reason)->toBe('Remove archived duplicate SKU product.')
         ->and($request->approvalCount())->toBe(1)
         ->and(Product::query()->whereKey($archivedDuplicate->id)->exists())->toBeTrue();
+
+    Notification::assertSentOnDemand(
+        DuplicateSkuDeletionRequestSlackNotification::class,
+        function (
+            DuplicateSkuDeletionRequestSlackNotification $notification,
+            array $channels,
+            AnonymousNotifiable $notifiable
+        ): bool {
+            $json = json_encode($notification->toSlack($notifiable)->toArray(), JSON_UNESCAPED_SLASHES);
+
+            return $channels === ['slack']
+                && $notifiable->routeNotificationFor('slack') === '#product-data-alerts'
+                && is_string($json)
+                && str_contains($json, '<@U0APPROVER1>')
+                && str_contains($json, 'Archived Duplicate')
+                && str_contains($json, 'activeTab=assigned_to_me');
+        }
+    );
+
+    $unassignedUser = User::factory()->create(['is_active' => true]);
+    expect(fn () => app(\App\Services\DeletionRequestWorkflowService::class)
+        ->approveRequest($request, $unassignedUser->id))
+        ->toThrow(\RuntimeException::class, 'assigned to another approver');
+
+    $approval = app(\App\Services\DeletionRequestWorkflowService::class)
+        ->approveRequest($request, $targetApprover->id);
+
+    expect($approval['queued'])->toBeTrue()
+        ->and($approval['request']->status)->toBe(DeletionRequest::STATUS_PROCESSING);
+
+    Queue::assertPushed(
+        ProcessDeletionRequestJob::class,
+        fn (ProcessDeletionRequestJob $job): bool => $job->deletionRequestId === $request->id
+    );
 
     $repeat = app(DuplicateSkuDeletionRequestService::class)
         ->requestArchivedDuplicates(
             collect([$archivedDuplicate]),
             (int) $import->created_by,
+            $targetApprover->id,
         );
 
     expect($repeat['requested'])->toBe(0)

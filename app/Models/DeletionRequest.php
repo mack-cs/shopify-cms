@@ -20,6 +20,7 @@ class DeletionRequest extends Model
         'deletable_id',
         'import_id',
         'requested_by',
+        'target_approver_id',
         'completed_by',
         'rejected_by',
         'entity_type',
@@ -52,6 +53,11 @@ class DeletionRequest extends Model
     public function requester(): BelongsTo
     {
         return $this->belongsTo(User::class, 'requested_by');
+    }
+
+    public function targetApprover(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'target_approver_id');
     }
 
     public function completedBy(): BelongsTo

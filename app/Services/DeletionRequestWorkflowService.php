@@ -13,15 +13,31 @@ use App\Models\ShopifyCollection;
 use App\Models\User;
 use App\Services\AdminNotification;
 use Filament\Notifications\Notification;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
 final class DeletionRequestWorkflowService
 {
-    public function submit(Model $record, int $userId, ?string $reason = null): DeletionRequest
+    public function submit(
+        Model $record,
+        int $userId,
+        ?string $reason = null,
+        ?int $targetApproverId = null,
+    ): DeletionRequest
     {
         $existing = $this->openRequestFor($record);
         if ($existing) {
             throw new \RuntimeException('A delete request is already pending for this record.');
+        }
+
+        if ($targetApproverId !== null) {
+            $isEligible = $this->eligibleApproversQuery($record, $userId)
+                ->whereKey($targetApproverId)
+                ->exists();
+
+            if (!$isEligible) {
+                throw new \RuntimeException('The selected deletion approver is not eligible for this request.');
+            }
         }
 
         $request = DeletionRequest::create([
@@ -29,6 +45,7 @@ final class DeletionRequestWorkflowService
             'deletable_id' => $record->getKey(),
             'import_id' => $this->importIdFor($record),
             'requested_by' => $userId,
+            'target_approver_id' => $targetApproverId,
             'entity_type' => $this->entityTypeFor($record),
             'entity_title' => $this->entityTitleFor($record),
             'entity_handle' => $this->entityHandleFor($record),
@@ -50,6 +67,7 @@ final class DeletionRequestWorkflowService
             'handle' => $request->entity_handle,
             'shopify_id' => $request->shopify_id,
             'approvals' => 1,
+            'target_approver_id' => $targetApproverId,
         ]);
 
         $this->notifyApprovers($request, $record, $userId);
@@ -81,6 +99,13 @@ final class DeletionRequestWorkflowService
 
         if ($request->userHasApproved($userId)) {
             throw new \RuntimeException('You have already approved this delete request.');
+        }
+
+        if (
+            $request->target_approver_id !== null
+            && (int) $request->target_approver_id !== $userId
+        ) {
+            throw new \RuntimeException('This delete request is assigned to another approver.');
         }
 
         DeletionRequestApproval::create([
@@ -143,6 +168,13 @@ final class DeletionRequestWorkflowService
 
         if ($request->userHasApproved($userId)) {
             throw new \RuntimeException('You cannot reject a delete request you already approved.');
+        }
+
+        if (
+            $request->target_approver_id !== null
+            && (int) $request->target_approver_id !== $userId
+        ) {
+            throw new \RuntimeException('This delete request is assigned to another approver.');
         }
 
         $request->forceFill([
@@ -229,7 +261,7 @@ final class DeletionRequestWorkflowService
 
     private function notifyApprovers(DeletionRequest $request, Model $record, int $requestedBy): void
     {
-        $recipientIds = $this->approverUserIdsFor($record, $requestedBy);
+        $recipientIds = $this->approverUserIdsFor($request, $record, $requestedBy);
         if ($recipientIds === []) {
             return;
         }
@@ -273,24 +305,46 @@ final class DeletionRequestWorkflowService
     /**
      * @return array<int>
      */
-    private function approverUserIdsFor(Model $record, int $requestedBy): array
+    private function approverUserIdsFor(
+        DeletionRequest $request,
+        Model $record,
+        int $requestedBy,
+    ): array
+    {
+        $targetApproverId = (int) $request->target_approver_id;
+
+        if ($targetApproverId > 0) {
+            return [$targetApproverId];
+        }
+
+        return $this->eligibleApproversQuery($record, $requestedBy)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+    }
+
+    public function eligibleApproversQuery(Model $record, ?int $excludeUserId = null): Builder
     {
         $roles = match (true) {
             $record instanceof NewProductDraft => [RolesEnum::SuperAdmin->value, RolesEnum::Admin->value],
-            $record instanceof Product, $record instanceof ShopifyCollection => [RolesEnum::SuperAdmin->value],
+            $record instanceof Product => [RolesEnum::SuperAdmin->value, RolesEnum::Admin->value],
+            $record instanceof ShopifyCollection => [RolesEnum::SuperAdmin->value],
             default => [],
         };
 
         if ($roles === []) {
-            return [];
+            return User::query()->whereRaw('1 = 0');
         }
 
-        return User::query()
+        $query = User::query()
             ->where('is_active', true)
-            ->where('id', '!=', $requestedBy)
             ->whereHas('roles', fn ($query) => $query->whereIn('name', $roles))
-            ->pluck('id')
-            ->map(fn ($id): int => (int) $id)
-            ->all();
+            ->orderBy('name');
+
+        if ($excludeUserId !== null && $excludeUserId > 0) {
+            $query->whereKeyNot($excludeUserId);
+        }
+
+        return $query;
     }
 }
