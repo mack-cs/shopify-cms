@@ -1,6 +1,7 @@
 <?php
 
 use App\Mail\DuplicateSkuReminderMail;
+use App\Models\DeletionRequest;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\User;
@@ -8,6 +9,7 @@ use App\Models\Variant;
 use App\Notifications\DuplicateSkuSlackNotification;
 use App\Services\DuplicateSkuAuditService;
 use App\Services\DuplicateSkuCsvExporter;
+use App\Services\DuplicateSkuDeletionRequestService;
 use App\Services\DuplicateSkuReminderService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Notifications\AnonymousNotifiable;
@@ -161,6 +163,53 @@ it('exports one CSV row for every variant affected by a cross-product SKU confli
         ->and($csv)->toContain('Colour: Gold')
         ->and($csv)->toContain('Leigh Avenue')
         ->and($csv)->not->toContain('UNIQUE-EXPORT');
+});
+
+it('requests deletion only for selected archived products that have duplicate SKUs', function (): void {
+    $import = duplicateSkuTestImport();
+    $active = duplicateSkuTestProduct($import, 'active-sku-owner', 'active');
+    $archivedDuplicate = duplicateSkuTestProduct($import, 'archived-duplicate', 'archived');
+    $archivedUnique = duplicateSkuTestProduct($import, 'archived-unique', 'archived');
+
+    duplicateSkuTestVariant($active, 'DELETE-CANDIDATE');
+    duplicateSkuTestVariant($archivedDuplicate, 'delete-candidate');
+    duplicateSkuTestVariant($archivedUnique, 'ARCHIVED-BUT-UNIQUE');
+
+    $audit = app(DuplicateSkuAuditService::class);
+    expect($audit->conflictingProductIds('archived'))->toBe([$archivedDuplicate->id]);
+
+    $summary = app(DuplicateSkuDeletionRequestService::class)
+        ->requestArchivedDuplicates(
+            collect([$archivedDuplicate, $active, $archivedUnique]),
+            (int) $import->created_by,
+            'Remove archived duplicate SKU product.',
+        );
+
+    expect($summary)->toBe([
+        'selected' => 3,
+        'requested' => 1,
+        'skipped_ineligible' => 2,
+        'skipped_existing' => 0,
+        'failed' => 0,
+    ]);
+
+    $request = DeletionRequest::query()->sole();
+    expect($request->deletable_type)->toBe(Product::class)
+        ->and((int) $request->deletable_id)->toBe($archivedDuplicate->id)
+        ->and($request->status)->toBe(DeletionRequest::STATUS_PENDING)
+        ->and($request->reason)->toBe('Remove archived duplicate SKU product.')
+        ->and($request->approvalCount())->toBe(1)
+        ->and(Product::query()->whereKey($archivedDuplicate->id)->exists())->toBeTrue();
+
+    $repeat = app(DuplicateSkuDeletionRequestService::class)
+        ->requestArchivedDuplicates(
+            collect([$archivedDuplicate]),
+            (int) $import->created_by,
+        );
+
+    expect($repeat['requested'])->toBe(0)
+        ->and($repeat['skipped_existing'])->toBe(1)
+        ->and(DeletionRequest::query()->count())->toBe(1);
 });
 
 function duplicateSkuTestImport(): Import

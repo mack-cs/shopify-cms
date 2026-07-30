@@ -10,6 +10,7 @@ use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
 use App\Models\Product;
 use App\Services\DuplicateSkuCsvExporter;
+use App\Services\DuplicateSkuAuditService;
 use App\Services\LocalCatalogResetService;
 use Filament\Notifications\Notification;
 use Filament\Actions;
@@ -92,6 +93,7 @@ class ListProducts extends ListRecords
     {
         $reportCounts = $this->reportTabCounts();
         $statusCounts = $this->statusTabCounts();
+        $archivedDuplicateIds = app(DuplicateSkuAuditService::class)->conflictingProductIds('archived');
         $tabs = [
             'all' => Tab::make('All'),
         ];
@@ -104,6 +106,11 @@ class ListProducts extends ListRecords
             $tabs[$key] = Tab::make($label)
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
         }
+
+        $tabs['archived_duplicate_skus'] = Tab::make('Archived Duplicate SKUs')
+            ->badge((string) count($archivedDuplicateIds))
+            ->badgeColor($archivedDuplicateIds === [] ? 'gray' : 'danger')
+            ->modifyQueryUsing(fn (Builder $query): Builder => $query->whereKey($archivedDuplicateIds));
 
         $extraStatuses = Product::query()
             ->whereNotNull('status')

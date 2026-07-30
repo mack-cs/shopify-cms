@@ -66,6 +66,7 @@ use App\Services\HeaderStore;
 use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
 use App\Services\DeletionRequestWorkflowService;
+use App\Services\DuplicateSkuDeletionRequestService;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Services\NewProductDraftSeeder;
@@ -1961,6 +1962,42 @@ class ProductResource extends Resource
                 }),
         ])->bulkActions([
             BulkActionGroup::make([
+                BulkAction::make('requestDeleteArchivedDuplicates')
+                    ->label('Request Delete Archived Duplicates')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn (): bool => static::canDeleteAny())
+                    ->requiresConfirmation()
+                    ->modalHeading('Request deletion for archived duplicate-SKU products?')
+                    ->modalDescription('Only selected archived products that currently share a SKU with another product will be submitted. This creates approval requests; it does not delete anything immediately.')
+                    ->form([
+                        Textarea::make('reason')
+                            ->label('Reason')
+                            ->default('Archived product shares a SKU with another product.')
+                            ->rows(3)
+                            ->maxLength(1000),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        $summary = app(DuplicateSkuDeletionRequestService::class)
+                            ->requestArchivedDuplicates(
+                                $records,
+                                (int) Auth::id(),
+                                $data['reason'] ?? null,
+                            );
+
+                        $body = "Requested: {$summary['requested']}. "
+                            . "Skipped not archived/duplicate: {$summary['skipped_ineligible']}. "
+                            . "Skipped with open request: {$summary['skipped_existing']}. "
+                            . "Failed: {$summary['failed']}.";
+
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Archived duplicate deletion requests processed')
+                                ->body($body)
+                                ->status($summary['requested'] > 0 ? 'warning' : 'info')
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkApprove')
                     ->label('Bulk Approve')
                     ->icon('heroicon-o-check-badge')

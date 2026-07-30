@@ -10,6 +10,30 @@ use Illuminate\Support\Facades\DB;
 final class DuplicateSkuAuditService
 {
     /**
+     * @return array<int, int>
+     */
+    public function conflictingProductIds(?string $status = null): array
+    {
+        $normalizedStatus = strtolower(trim((string) $status));
+
+        return collect($this->findConflicts())
+            ->flatMap(fn (array $conflict): array => $conflict['products'])
+            ->filter(function (array $product) use ($normalizedStatus): bool {
+                if ($normalizedStatus === '') {
+                    return true;
+                }
+
+                return strtolower(trim((string) $product['status'])) === $normalizedStatus;
+            })
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+    }
+
+    /**
      * Find SKUs used by variants belonging to more than one distinct product.
      *
      * SKU matching is case-insensitive and ignores surrounding whitespace.
