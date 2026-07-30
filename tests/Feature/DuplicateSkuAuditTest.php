@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Notifications\DuplicateSkuSlackNotification;
 use App\Services\DuplicateSkuAuditService;
+use App\Services\DuplicateSkuCsvExporter;
 use App\Services\DuplicateSkuReminderService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Notifications\AnonymousNotifiable;
@@ -120,6 +121,46 @@ it('sends no reminder when every SKU belongs to only one product', function (): 
 
     Mail::assertNothingSent();
     Notification::assertNothingSent();
+});
+
+it('exports one CSV row for every variant affected by a cross-product SKU conflict', function (): void {
+    $import = duplicateSkuTestImport();
+    $first = duplicateSkuTestProduct($import, 'first-export-product', 'active');
+    $second = duplicateSkuTestProduct($import, 'second-export-product', 'draft');
+    $unaffected = duplicateSkuTestProduct($import, 'unaffected-product', 'active');
+
+    $first->update(['vendor' => 'Leigh Avenue', 'shopify_id' => 'gid://shopify/Product/100']);
+    $second->update(['vendor' => 'Supplier Two', 'shopify_id' => 'gid://shopify/Product/200']);
+
+    $firstVariant = duplicateSkuTestVariant($first, ' shared-export ');
+    $firstVariant->update([
+        'shopify_id' => 'gid://shopify/ProductVariant/101',
+        'option1_name' => 'Colour',
+        'option1_value' => 'Gold',
+        'price' => 499.95,
+        'inventory_tracked' => true,
+        'inventory_qty' => 4,
+    ]);
+    duplicateSkuTestVariant($second, 'SHARED-EXPORT');
+    duplicateSkuTestVariant($unaffected, 'UNIQUE-EXPORT');
+
+    $response = app(DuplicateSkuCsvExporter::class)->download();
+
+    ob_start();
+    $response->sendContent();
+    $csv = (string) ob_get_clean();
+    $lines = array_values(array_filter(preg_split('/\r\n|\r|\n/', trim($csv)) ?: []));
+
+    expect($response->headers->get('content-type'))->toContain('text/csv')
+        ->and($response->headers->get('content-disposition'))->toContain('duplicate_sku_products_')
+        ->and($lines)->toHaveCount(3)
+        ->and($lines[0])->toContain('duplicate_sku,products_sharing_sku')
+        ->and($csv)->toContain('SHARED-EXPORT,2')
+        ->and($csv)->toContain('gid://shopify/Product/100')
+        ->and($csv)->toContain('gid://shopify/ProductVariant/101')
+        ->and($csv)->toContain('Colour: Gold')
+        ->and($csv)->toContain('Leigh Avenue')
+        ->and($csv)->not->toContain('UNIQUE-EXPORT');
 });
 
 function duplicateSkuTestImport(): Import

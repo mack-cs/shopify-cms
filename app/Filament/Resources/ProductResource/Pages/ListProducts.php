@@ -9,6 +9,7 @@ use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
 use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
 use App\Models\Product;
+use App\Services\DuplicateSkuCsvExporter;
 use App\Services\LocalCatalogResetService;
 use Filament\Notifications\Notification;
 use Filament\Actions;
@@ -32,6 +33,12 @@ class ListProducts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('exportDuplicateSkus')
+                ->label('Export Duplicate SKUs')
+                ->icon('heroicon-o-arrow-down-tray')
+                ->color('warning')
+                ->tooltip('Download every product and variant sharing a SKU with another product.')
+                ->action(fn (DuplicateSkuCsvExporter $exporter) => $exporter->download()),
             Actions\Action::make('resetLocalCatalog')
                 ->label('Reset Local Catalog')
                 ->icon('heroicon-o-trash')
