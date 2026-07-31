@@ -8,6 +8,20 @@ return new class extends Migration
 {
     public function up(): void
     {
+        /*
+         * MySQL creates the table before adding its foreign keys. If an earlier
+         * deployment failed while adding a key, these unregistered report tables
+         * can remain behind. They cannot contain a completed report because this
+         * migration was never recorded, so rebuild only these two new tables.
+         */
+        if (
+            Schema::hasTable('product_movement_report_rows')
+            || Schema::hasTable('product_movement_report_runs')
+        ) {
+            Schema::dropIfExists('product_movement_report_rows');
+            Schema::dropIfExists('product_movement_report_runs');
+        }
+
         Schema::create('product_movement_report_runs', function (Blueprint $table): void {
             $table->id();
             $table->foreignId('requested_by')->nullable()->constrained('users')->nullOnDelete();
@@ -25,8 +39,13 @@ return new class extends Migration
 
         Schema::create('product_movement_report_rows', function (Blueprint $table): void {
             $table->id();
-            $table->foreignId('product_movement_report_run_id')
-                ->constrained('product_movement_report_runs')
+            $table->foreignId('product_movement_report_run_id');
+            $table->foreign(
+                'product_movement_report_run_id',
+                'pm_report_rows_run_fk'
+            )
+                ->references('id')
+                ->on('product_movement_report_runs')
                 ->cascadeOnDelete();
             $table->foreignId('product_id')->nullable()->constrained('products')->nullOnDelete();
             $table->foreignId('variant_id')->nullable()->constrained('variants')->nullOnDelete();
