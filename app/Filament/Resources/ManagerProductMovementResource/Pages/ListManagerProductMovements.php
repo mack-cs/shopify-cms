@@ -3,7 +3,6 @@
 namespace App\Filament\Resources\ManagerProductMovementResource\Pages;
 
 use App\Filament\Resources\ManagerProductMovementResource;
-use App\Filament\Resources\ManagerProductMovementResource\Widgets\ManagerMovementStats;
 use App\Jobs\GenerateProductMovementReportJob;
 use App\Services\ProductMovementReportService;
 use Filament\Actions\Action;
@@ -12,16 +11,71 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 
 final class ListManagerProductMovements extends ListRecords
 {
     protected static string $resource = ManagerProductMovementResource::class;
+    protected static string $view = 'filament.resources.manager-product-movements.list';
 
-    protected function getHeaderWidgets(): array
+    /**
+     * Keep these statistics inside this page component. Using
+     * InteractsWithPageTable from a header widget creates a second instance of
+     * this same page and can invalidate Livewire's signed component snapshot.
+     *
+     * @return array<int,array{label:string,value:string,color:string}>
+     */
+    public function getManagerStats(): array
+    {
+        $query = $this->getFilteredTableQuery();
+
+        return [
+            $this->managerStat('Products analysed', $this->uniqueProductCount(clone $query), 'gray'),
+            $this->managerStat(
+                'Fast moving',
+                $this->uniqueProductCount((clone $query)->where('movement_classification', 'fast_moving')),
+                'success',
+            ),
+            $this->managerStat(
+                'Slow moving',
+                $this->uniqueProductCount((clone $query)->where('movement_classification', 'slow_moving')),
+                'warning',
+            ),
+            $this->managerStat(
+                'No sales',
+                $this->uniqueProductCount((clone $query)->where('movement_classification', 'no_sales')),
+                'danger',
+            ),
+            $this->managerStat(
+                'Need restocking',
+                $this->uniqueProductCount((clone $query)->where('recommended_action', 'restock')),
+                'success',
+            ),
+            $this->managerStat(
+                'Need review',
+                $this->uniqueProductCount(
+                    (clone $query)->whereIn('recommended_action', ['review', 'insufficient_data'])
+                ),
+                'danger',
+            ),
+        ];
+    }
+
+    private function uniqueProductCount(Builder $query): int
+    {
+        return (int) $query->reorder()->distinct()->count('product_id');
+    }
+
+    /**
+     * @return array{label:string,value:string,color:string}
+     */
+    private function managerStat(string $label, int $value, string $color): array
     {
         return [
-            ManagerMovementStats::class,
+            'label' => $label,
+            'value' => number_format($value),
+            'color' => $color,
         ];
     }
 

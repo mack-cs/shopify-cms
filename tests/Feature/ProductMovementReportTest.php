@@ -239,6 +239,11 @@ it('mounts the manager report export as a direct action without the expiring map
         ->assertHasNoTableActionErrors();
 
     expect(DB::table('exports')->where('user_id', $user->id)->count())->toBe(1);
+
+    $component
+        ->mountAction('generateReport')
+        ->assertActionMounted('generateReport')
+        ->assertHasNoActionErrors();
 });
 
 function movementReportImport(User $user): Import
