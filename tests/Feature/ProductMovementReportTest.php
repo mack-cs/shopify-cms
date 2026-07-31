@@ -1,7 +1,9 @@
 <?php
 
+use App\Enums\RolesEnum;
 use App\Filament\Exports\ManagerProductMovementExporter;
 use App\Filament\Exports\ProductMovementReportRowExporter;
+use App\Filament\Resources\ManagerProductMovementResource\Pages\ListManagerProductMovements;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
@@ -13,7 +15,10 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Services\ProductMovementReportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -212,6 +217,28 @@ it('keeps movement and stock separate so a fast seller at zero stock is recommen
         ->and($row->current_inventory_status)->toBe('out_of_stock')
         ->and($row->recommended_action)->toBe('restock')
         ->and($row->manager_reason)->toContain('0 units remaining');
+});
+
+it('mounts the manager report export as a direct action without the expiring mapping modal', function (): void {
+    $user = User::factory()->create();
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($user);
+    Bus::fake();
+
+    $component = Livewire::test(ListManagerProductMovements::class)
+        ->assertSuccessful();
+
+    $exportAction = $component->instance()->getTable()->getAction('export');
+
+    expect($exportAction)->not->toBeNull()
+        ->and($exportAction->hasColumnMapping())->toBeFalse();
+
+    $component
+        ->callTableAction('export')
+        ->assertHasNoTableActionErrors();
+
+    expect(DB::table('exports')->where('user_id', $user->id)->count())->toBe(1);
 });
 
 function movementReportImport(User $user): Import

@@ -134,6 +134,10 @@ final class ManagerProductMovementResource extends Resource
                 ExportAction::make()
                     ->label('Export Manager Report')
                     ->icon('heroicon-o-document-arrow-down')
+                    // Manager columns are intentionally fixed. Skipping Filament's
+                    // Livewire column-mapping modal also makes this a single request,
+                    // which avoids production session expiry while mounting the modal.
+                    ->columnMapping(false)
                     ->formats([ExportFormat::Csv, ExportFormat::Xlsx])
                     ->exporter(ManagerProductMovementExporter::class),
             ])
