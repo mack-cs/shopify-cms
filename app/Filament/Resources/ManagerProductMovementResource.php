@@ -26,6 +26,8 @@ final class ManagerProductMovementResource extends Resource
     protected static ?string $navigationLabel = 'Manager Product Movement';
     protected static ?string $navigationIcon = 'heroicon-o-presentation-chart-line';
     protected static ?int $navigationSort = 5;
+    protected static ?string $modelLabel = 'manager product movement';
+    protected static ?string $pluralModelLabel = 'Manager Product Movement Report';
 
     public static function form(Form $form): Form
     {
@@ -41,6 +43,17 @@ final class ManagerProductMovementResource extends Resource
                 TextColumn::make('variant_title')->label('Variant')->searchable()->toggleable(),
                 TextColumn::make('sku')->searchable()->sortable(),
                 TextColumn::make('vendor')->searchable()->sortable(),
+                TextColumn::make('product_status')
+                    ->label('Product Status')
+                    ->formatStateUsing(fn (?string $state): string => str((string) $state)->title()->toString())
+                    ->badge()
+                    ->color(fn (?string $state): string => match (strtolower((string) $state)) {
+                        'active' => 'success',
+                        'draft' => 'warning',
+                        'archived' => 'gray',
+                        default => 'gray',
+                    })
+                    ->sortable(),
                 TextColumn::make('product_type')->label('Product type')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('current_inventory')->label('Current Inventory')->numeric()->sortable(),
                 TextColumn::make('current_inventory_status')
@@ -62,8 +75,15 @@ final class ManagerProductMovementResource extends Resource
                         : '-')
                     ->sortable(),
                 TextColumn::make('net_units_sold')->label('Units Sold (Selected Period)')->numeric()->sortable(),
-                TextColumn::make('average_units_per_month')->label('Average per Month')->numeric(2)->sortable(),
-                TextColumn::make('last_sale_date')->label('Last Sale')->date()->placeholder('No sales')->sortable(),
+                TextColumn::make('average_units_per_month')
+                    ->label('Average Units Sold per Month')
+                    ->numeric(1)
+                    ->sortable(),
+                TextColumn::make('last_sale_date')
+                    ->label('Last Sale')
+                    ->date('d M Y')
+                    ->placeholder('No sales')
+                    ->sortable(),
                 TextColumn::make('movement_classification')
                     ->label('Movement Category')
                     ->formatStateUsing(fn (string $state): string => self::movementLabel($state))
@@ -99,6 +119,14 @@ final class ManagerProductMovementResource extends Resource
                     ->options(fn (): array => self::distinctOptions('product_type'))
                     ->searchable()
                     ->preload(),
+                SelectFilter::make('product_status')
+                    ->label('Product status')
+                    ->options([
+                        'active' => 'Active',
+                        'draft' => 'Draft',
+                        'archived' => 'Archived',
+                    ])
+                    ->default('active'),
                 SelectFilter::make('current_inventory_status')
                     ->label('Stock')
                     ->options([

@@ -169,6 +169,7 @@ it('includes zero-sale variants without snapshots and exposes all required queue
         'variant_title',
         'sku',
         'vendor',
+        'product_status',
         'product_type',
         'current_inventory',
         'currently_on_sale',

@@ -4,6 +4,7 @@ namespace App\Filament\Exports;
 
 use App\Filament\Resources\ManagerProductMovementResource;
 use App\Models\ProductMovementReportRow;
+use Carbon\Carbon;
 use Filament\Actions\Exports\ExportColumn;
 use Filament\Actions\Exports\Exporter;
 use Filament\Actions\Exports\Models\Export;
@@ -19,6 +20,9 @@ final class ManagerProductMovementExporter extends Exporter
             ExportColumn::make('variant_title')->label('Variant title'),
             ExportColumn::make('sku')->label('SKU'),
             ExportColumn::make('vendor')->label('Vendor'),
+            ExportColumn::make('product_status')
+                ->label('Product Status')
+                ->formatStateUsing(fn ($state): string => str((string) $state)->title()->toString()),
             ExportColumn::make('product_type')->label('Product type'),
             ExportColumn::make('current_inventory')->label('Current inventory'),
             ExportColumn::make('currently_on_sale')
@@ -30,8 +34,14 @@ final class ManagerProductMovementExporter extends Exporter
                     ? number_format((float) $state, 2) . '%'
                     : '-'),
             ExportColumn::make('net_units_sold')->label('Units Sold (Selected Period)'),
-            ExportColumn::make('average_units_per_month')->label('Average Units Sold per Month'),
-            ExportColumn::make('last_sale_date')->label('Last Sale Date'),
+            ExportColumn::make('average_units_per_month')
+                ->label('Average Units Sold per Month')
+                ->formatStateUsing(fn ($state): string => number_format((float) $state, 1)),
+            ExportColumn::make('last_sale_date')
+                ->label('Last Sale Date')
+                ->formatStateUsing(fn ($state): string => blank($state)
+                    ? ''
+                    : Carbon::parse($state)->format('d M Y')),
             ExportColumn::make('movement_classification')
                 ->label('Movement Category')
                 ->formatStateUsing(fn ($state): string => ManagerProductMovementResource::movementLabel((string) $state)),
