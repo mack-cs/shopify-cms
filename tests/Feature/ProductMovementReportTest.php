@@ -1,5 +1,6 @@
 <?php
 
+use App\Filament\Exports\ManagerProductMovementExporter;
 use App\Filament\Exports\ProductMovementReportRowExporter;
 use App\Models\Import;
 use App\Models\Product;
@@ -63,6 +64,10 @@ it('classifies every catalogue variant from orders and only observed inventory s
     config([
         'product_movement.classification.minimum_snapshot_days' => 2,
         'product_movement.classification.out_of_stock_ratio' => 0.66,
+        'product_movement.classification.fast_score' => 0,
+        'product_movement.classification.fast_average_monthly_units' => 0,
+        'product_movement.classification.fast_consistency_percentage' => 0,
+        'product_movement.classification.fast_recent_days' => 999,
     ]);
 
     $service = app(ProductMovementReportService::class);
@@ -90,15 +95,21 @@ it('classifies every catalogue variant from orders and only observed inventory s
         ->and($sellingRow->closing_snapshot_inventory)->toBe(3)
         ->and((float) $sellingRow->units_sold_per_30_in_stock_days)->toBe(60.0)
         ->and($sellingRow->currently_on_sale)->toBeTrue()
-        ->and((float) $sellingRow->discount_percentage)->toBe(20.0);
+        ->and((float) $sellingRow->discount_percentage)->toBe(20.0)
+        ->and($sellingRow->movement_classification)->toBe('fast_moving')
+        ->and($sellingRow->recommended_action)->toBe('maintain')
+        ->and($sellingRow->manager_reason)->toContain('Sold 4 units');
 
     $noSalesRow = ProductMovementReportRow::query()->where('variant_id', $noSales->id)->firstOrFail();
     expect($noSalesRow->movement_classification)->toBe('no_sales')
         ->and($noSalesRow->net_units_sold)->toBe(0)
-        ->and($noSalesRow->has_snapshot_history)->toBeTrue();
+        ->and($noSalesRow->has_snapshot_history)->toBeTrue()
+        ->and($noSalesRow->recommended_action)->toBe('review');
 
     $unavailableRow = ProductMovementReportRow::query()->where('variant_id', $unavailable->id)->firstOrFail();
-    expect($unavailableRow->movement_classification)->toBe('out_of_stock_or_unavailable')
+    expect($unavailableRow->movement_classification)->toBe('no_sales')
+        ->and($unavailableRow->current_inventory_status)->toBe('out_of_stock')
+        ->and($unavailableRow->recommended_action)->toBe('review')
         ->and($unavailableRow->out_of_stock_days)->toBe(2);
 });
 
@@ -143,6 +154,64 @@ it('includes zero-sale variants without snapshots and exposes all required queue
         'discount_percentage',
         'data_quality_note',
     );
+
+    $managerExportColumns = collect(ManagerProductMovementExporter::getColumns())
+        ->map(fn ($column): string => $column->getName())
+        ->all();
+
+    expect($managerExportColumns)->toBe([
+        'product_title',
+        'variant_title',
+        'sku',
+        'vendor',
+        'product_type',
+        'current_inventory',
+        'currently_on_sale',
+        'discount_percentage',
+        'net_units_sold',
+        'average_units_per_month',
+        'last_sale_date',
+        'movement_classification',
+        'recommended_action',
+        'manager_reason',
+    ]);
+});
+
+it('keeps movement and stock separate so a fast seller at zero stock is recommended for restocking', function (): void {
+    $user = User::factory()->create();
+    $variant = movementReportVariant(
+        movementReportImport($user),
+        'sold-out-fast-product',
+        'SOLD-OUT-FAST',
+        [
+            'inventory_tracked' => true,
+            'inventory_qty' => 0,
+            'current_available_quantity' => 0,
+        ],
+    );
+    DB::table('products')->where('id', $variant->product_id)->update([
+        'created_at' => '2025-01-01 00:00:00',
+    ]);
+
+    $order = movementReportOrder('2001', '2026-03-25 10:00:00', false);
+    movementReportOrderItem($order, $variant, '6001', 12, 12);
+
+    config([
+        'product_movement.classification.fast_score' => 0,
+        'product_movement.classification.fast_average_monthly_units' => 0,
+        'product_movement.classification.fast_consistency_percentage' => 0,
+        'product_movement.classification.fast_recent_days' => 999,
+    ]);
+
+    $service = app(ProductMovementReportService::class);
+    $run = $service->createRun('2026-01-01', '2026-03-31', $user->id);
+    $service->generate($run);
+
+    $row = ProductMovementReportRow::query()->sole();
+    expect($row->movement_classification)->toBe('fast_moving')
+        ->and($row->current_inventory_status)->toBe('out_of_stock')
+        ->and($row->recommended_action)->toBe('restock')
+        ->and($row->manager_reason)->toContain('0 units remaining');
 });
 
 function movementReportImport(User $user): Import

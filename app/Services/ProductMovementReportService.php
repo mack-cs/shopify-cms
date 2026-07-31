@@ -384,6 +384,19 @@ final class ProductMovementReportService
             $end,
             $snapshot,
         );
+        $recommendation = $this->managerRecommendation(
+            $classification,
+            $net,
+            $averageMonthly,
+            $monthsWithSales,
+            $months,
+            $currentInventory,
+            $onSale,
+            $daysSinceLastSale,
+            $createdAt,
+            $end,
+            $snapshot,
+        );
         $notes = $this->qualityNotes($run, $variant, $product, $sales, $snapshot, $createdAt);
 
         return [
@@ -427,6 +440,8 @@ final class ProductMovementReportService
             'current_inventory_status' => $this->inventoryStatus($variant, $currentInventory),
             'movement_score' => round($score, 2),
             'movement_classification' => $classification,
+            'recommended_action' => $recommendation['action'],
+            'manager_reason' => $recommendation['reason'],
             'currently_on_sale' => $onSale,
             'current_price' => $price,
             'compare_at_price' => $compareAt,
@@ -475,6 +490,8 @@ final class ProductMovementReportService
             'current_inventory_status' => 'unknown',
             'movement_score' => 0,
             'movement_classification' => 'insufficient_data',
+            'recommended_action' => 'insufficient_data',
+            'manager_reason' => 'This product has no current variant, so there is not enough information to assess it reliably.',
             'currently_on_sale' => false,
             'has_snapshot_history' => false,
             'data_quality_note' => 'Product has no current local variant, so variant-level sales and inventory matching could not be performed.',
@@ -584,23 +601,13 @@ final class ProductMovementReportService
         array $snapshot,
     ): string {
         $settings = (array) config('product_movement.classification', []);
-        $snapshotDays = $snapshot['days'];
-        if (
-            is_int($snapshotDays)
-            && $snapshotDays >= (int) ($settings['minimum_snapshot_days'] ?? 7)
-            && $snapshotDays > 0
-            && (($snapshot['out_of_stock_days'] ?? 0) / $snapshotDays) >= (float) ($settings['out_of_stock_ratio'] ?? 0.70)
-        ) {
-            return 'out_of_stock_or_unavailable';
-        }
-
         $ageDays = $createdAt ? Carbon::parse($createdAt)->diffInDays($end, false) : null;
         if (
             $ageDays !== null
             && $ageDays < (int) ($settings['recent_product_days'] ?? 60)
             && $net < (int) ($settings['recent_product_sales_threshold'] ?? 3)
         ) {
-            return 'insufficient_data';
+            return 'new_product';
         }
 
         if ($net <= 0) {
@@ -626,6 +633,103 @@ final class ProductMovementReportService
         }
 
         return 'slow_moving';
+    }
+
+    /**
+     * @param array<string,mixed> $snapshot
+     * @return array{action:string,reason:string}
+     */
+    private function managerRecommendation(
+        string $classification,
+        int $net,
+        float $averageMonthly,
+        int $monthsWithSales,
+        float $monthsAnalysed,
+        ?int $currentInventory,
+        bool $onSale,
+        ?int $daysSinceLastSale,
+        mixed $createdAt,
+        Carbon $end,
+        array $snapshot,
+    ): array {
+        $period = $this->managerPeriodLabel($monthsAnalysed);
+        $stock = $currentInventory === null ? 'an unknown stock quantity' : "{$currentInventory} units remaining";
+
+        if ($classification === 'fast_moving') {
+            $needsStock = $currentInventory !== null
+                && $currentInventory <= max(2, (int) ceil($averageMonthly));
+
+            return [
+                'action' => $needsStock ? 'restock' : 'maintain',
+                'reason' => $needsStock
+                    ? "Sold {$net} units in {$period} and has {$stock}."
+                    : "Sold {$net} units in {$period} and sold in {$monthsWithSales} months.",
+            ];
+        }
+
+        if ($classification === 'medium_moving') {
+            $needsStock = $currentInventory !== null
+                && $currentInventory <= max(1, (int) ceil($averageMonthly));
+
+            return [
+                'action' => $needsStock ? 'restock' : 'maintain',
+                'reason' => 'Sells an average of ' . number_format($averageMonthly, 1)
+                    . " units per month and sold in {$monthsWithSales} months.",
+            ];
+        }
+
+        if ($classification === 'slow_moving') {
+            return [
+                'action' => $onSale ? 'monitor' : 'promote',
+                'reason' => $currentInventory !== null
+                    ? "Has {$currentInventory} units available but sold only {$net} units in {$period}"
+                        . ($onSale ? ' and is already on sale.' : '.')
+                    : "Sold only {$net} units in {$period}"
+                        . ($onSale ? ' and is already on sale.' : '.'),
+            ];
+        }
+
+        if ($classification === 'no_sales') {
+            return [
+                'action' => 'review',
+                'reason' => $currentInventory !== null && $currentInventory > 0
+                    ? "Currently has {$currentInventory} units in stock but recorded no sales in {$period}."
+                    : "Recorded no sales in {$period}.",
+            ];
+        }
+
+        if ($classification === 'new_product') {
+            $ageDays = $createdAt ? max(0, Carbon::parse($createdAt)->diffInDays($end, false)) : null;
+
+            return [
+                'action' => 'insufficient_data',
+                'reason' => $ageDays === null
+                    ? 'This is a new product and needs more selling time.'
+                    : "This product has only been available for {$ageDays} days.",
+            ];
+        }
+
+        if ($classification === 'out_of_stock_or_unavailable') {
+            return [
+                'action' => 'review',
+                'reason' => "The product was out of stock for {$snapshot['out_of_stock_days']} of "
+                    . "{$snapshot['days']} observed snapshot days.",
+            ];
+        }
+
+        return [
+            'action' => 'insufficient_data',
+            'reason' => 'There is not enough order or inventory information to assess this product reliably.',
+        ];
+    }
+
+    private function managerPeriodLabel(float $months): string
+    {
+        $rounded = (int) round($months);
+
+        return abs($months - $rounded) < 0.15
+            ? "the past {$rounded} " . ($rounded === 1 ? 'month' : 'months')
+            : 'the selected period';
     }
 
     /**

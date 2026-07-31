@@ -23,9 +23,9 @@ final class ProductMovementReportRowResource extends Resource
 {
     protected static ?string $model = ProductMovementReportRow::class;
     protected static ?string $navigationGroup = 'Shopify Sync';
-    protected static ?string $navigationLabel = 'Product Movement';
+    protected static ?string $navigationLabel = 'Detailed Product Movement Analysis';
     protected static ?string $navigationIcon = 'heroicon-o-chart-bar';
-    protected static ?int $navigationSort = 5;
+    protected static ?int $navigationSort = 6;
 
     public static function form(Form $form): Form
     {
@@ -166,6 +166,7 @@ final class ProductMovementReportRowResource extends Resource
             'slow_moving' => 'Slow-moving',
             'no_sales' => 'No sales',
             'out_of_stock_or_unavailable' => 'Out of stock or unavailable',
+            'new_product' => 'New product',
             'insufficient_data' => 'Insufficient data',
         ];
     }
