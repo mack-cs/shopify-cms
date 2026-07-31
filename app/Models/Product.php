@@ -14,7 +14,7 @@ use App\Services\CategoryTypeMap;
 class Product extends Model
 {
     protected $fillable = [
-        'import_id','shopify_id','handle','approved_handle','title','body_html','vendor','tags',
+        'import_id','shopify_id','shopify_created_at','handle','approved_handle','title','body_html','vendor','tags',
         'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
@@ -31,6 +31,7 @@ class Product extends Model
         'has_errors' => 'boolean',
         'error_fields' => 'array',
         'last_synced_at' => 'datetime',
+        'shopify_created_at' => 'datetime',
         'image_imported_at' => 'datetime',
         'seo_updated_at' => 'datetime',
         'first_image_auto_rename_completed_at' => 'datetime',

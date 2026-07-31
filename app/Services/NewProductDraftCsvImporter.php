@@ -219,7 +219,14 @@ final class NewProductDraftCsvImporter
                     } elseif ($handle) {
                         $draftQuery->where('handle', '!=', $handle);
                     }
-                    if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+
+                    $variantQuery = Variant::query()->where('sku', $sku);
+                    $linkedProductId = $draft ? $this->linkedProductId($draft) : null;
+                    if ($linkedProductId !== null) {
+                        $variantQuery->where('product_id', '!=', $linkedProductId);
+                    }
+
+                    if ($draftQuery->exists() || $variantQuery->exists()) {
                         $skippedDuplicateSku++;
                         continue;
                     }
@@ -334,6 +341,31 @@ final class NewProductDraftCsvImporter
         return NewProductDraft::query()
             ->where('shopify_id', $trimmedShopifyId)
             ->first();
+    }
+
+    private function linkedProductId(NewProductDraft $draft): ?int
+    {
+        $shopifyId = trim((string) ($draft->shopify_id ?? ''));
+        if ($shopifyId !== '') {
+            $productId = Product::query()
+                ->where('shopify_id', $shopifyId)
+                ->value('id');
+
+            if ($productId !== null) {
+                return (int) $productId;
+            }
+        }
+
+        $handle = trim((string) ($draft->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $productId = Product::query()
+            ->where('handle', $handle)
+            ->value('id');
+
+        return $productId === null ? null : (int) $productId;
     }
 
     /**

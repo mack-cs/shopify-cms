@@ -229,10 +229,19 @@ final class ProductInventorySyncService
     {
         $details = $this->shopifyProductInventoryDetails($product);
         $remoteStatus = strtolower(trim((string) ($details['status'] ?? '')));
+        $remoteCreatedAt = trim((string) ($details['createdAt'] ?? ''));
 
-        InventoryOperationContext::run(function () use ($product, $variants, $details, $remoteStatus, $userId): void {
+        InventoryOperationContext::run(function () use ($product, $variants, $details, $remoteStatus, $remoteCreatedAt, $userId): void {
+            $productChanged = false;
             if ($remoteStatus !== '' && $remoteStatus !== strtolower(trim((string) ($product->status ?? '')))) {
                 $product->status = $remoteStatus;
+                $productChanged = true;
+            }
+            if ($remoteCreatedAt !== '' && $product->shopify_created_at?->toIso8601String() !== $remoteCreatedAt) {
+                $product->shopify_created_at = $remoteCreatedAt;
+                $productChanged = true;
+            }
+            if ($productChanged) {
                 $product->save();
             }
 
@@ -253,6 +262,9 @@ final class ProductInventorySyncService
                 $updates = [
                     'shopify_id' => trim((string) ($remoteVariant['id'] ?? '')) ?: $variant->shopify_id,
                     'shopify_inventory_item_id' => $this->normalizeShopifyInventoryItemId(data_get($remoteVariant, 'inventoryItem.id')),
+                    'shopify_available_for_sale' => data_get($remoteVariant, 'availableForSale'),
+                    'price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'price')),
+                    'compare_at_price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'compareAtPrice')),
                     'inventory_tracked' => data_get($remoteVariant, 'inventoryItem.tracked'),
                     'inventory_qty' => data_get($remoteVariant, 'inventoryItem.tracked') === false
                         ? null
@@ -490,6 +502,15 @@ final class ProductInventorySyncService
         return (int) $value;
     }
 
+    private function normalizeRemoteMoney(mixed $value): ?string
+    {
+        if ($value === null || !is_numeric((string) $value)) {
+            return null;
+        }
+
+        return number_format((float) $value, 2, '.', '');
+    }
+
     private function normalizeShopifyInventoryItemId(mixed $value): ?string
     {
         $id = trim((string) ($value ?? ''));
@@ -547,10 +568,14 @@ query ProductInventoryById($id: ID!) {
   product(id: $id) {
     id
     status
+    createdAt
     variants(first: 250) {
       nodes {
         id
         sku
+        availableForSale
+        price
+        compareAtPrice
         inventoryQuantity
         inventoryItem {
           id
@@ -570,10 +595,14 @@ query ProductInventoryByHandle($handle: String!) {
   productByHandle(handle: $handle) {
     id
     status
+    createdAt
     variants(first: 250) {
       nodes {
         id
         sku
+        availableForSale
+        price
+        compareAtPrice
         inventoryQuantity
         inventoryItem {
           id
