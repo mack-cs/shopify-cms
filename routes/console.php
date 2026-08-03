@@ -418,6 +418,14 @@ Schedule::command('shopify:run-daily-pipeline --scheduled')
     ->withoutOverlapping()
     ->name('shopify-daily-orders-inventory-pipeline');
 
+Schedule::command('product-movement:generate --months=6')
+    ->fridays()
+    ->at('00:00')
+    ->timezone((string) config('product_movement.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('weekly-product-movement-report');
+
 Artisan::command(
     'shopify:orders-import-history
     {--force : Skip confirmation for the one-time full historical import}',

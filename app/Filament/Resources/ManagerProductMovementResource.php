@@ -2,7 +2,7 @@
 
 namespace App\Filament\Resources;
 
-use App\Enums\RolesEnum;
+use App\Enums\PermissionEnum;
 use App\Filament\Exports\ManagerProductMovementExporter;
 use App\Filament\Resources\ManagerProductMovementResource\Pages;
 use App\Models\ProductMovementReportRow;
@@ -162,9 +162,9 @@ final class ManagerProductMovementResource extends Resource
                 ExportAction::make()
                     ->label('Export Manager Report')
                     ->icon('heroicon-o-document-arrow-down')
-                    // Manager columns are intentionally fixed. Skipping Filament's
-                    // Livewire column-mapping modal also makes this a single request,
-                    // which avoids production session expiry while mounting the modal.
+                    ->authorize(fn (): bool => self::canViewAny())
+                    // Manager columns are intentionally fixed, so one click queues
+                    // both business-friendly export formats without a mapping step.
                     ->columnMapping(false)
                     ->formats([ExportFormat::Csv, ExportFormat::Xlsx])
                     ->exporter(ManagerProductMovementExporter::class),
@@ -175,10 +175,7 @@ final class ManagerProductMovementResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasAnyRole([
-            RolesEnum::SuperAdmin->value,
-            RolesEnum::Admin->value,
-        ]) ?? false;
+        return Auth::user()?->can(PermissionEnum::ManagerReportAccess->value) ?? false;
     }
 
     public static function canCreate(): bool

@@ -1,9 +1,12 @@
 <?php
 
+use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Filament\Exports\ManagerProductMovementExporter;
 use App\Filament\Exports\ProductMovementReportRowExporter;
 use App\Filament\Resources\ManagerProductMovementResource\Pages\ListManagerProductMovements;
+use App\Filament\Resources\ManagerProductMovementResource;
+use App\Jobs\GenerateProductMovementReportJob;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
@@ -16,7 +19,10 @@ use App\Models\Variant;
 use App\Services\ProductMovementReportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Carbon;
 use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 
@@ -224,6 +230,7 @@ it('mounts the manager report export as a direct action without the expiring map
     $user = User::factory()->create();
     Role::findOrCreate(RolesEnum::Admin->value);
     $user->assignRole(RolesEnum::Admin->value);
+    $user->givePermissionTo(PermissionEnum::ManagerReportAccess->value);
     $this->actingAs($user);
     Bus::fake();
 
@@ -245,6 +252,42 @@ it('mounts the manager report export as a direct action without the expiring map
         ->mountAction('generateReport')
         ->assertActionMounted('generateReport')
         ->assertHasNoActionErrors();
+});
+
+it('only exposes the manager report to users assigned the Is Manager permission', function (): void {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $admin = User::factory()->create();
+    $admin->assignRole(RolesEnum::Admin->value);
+
+    $this->actingAs($admin);
+    expect(ManagerProductMovementResource::canViewAny())->toBeFalse();
+
+    $admin->givePermissionTo(PermissionEnum::ManagerReportAccess->value);
+    expect(ManagerProductMovementResource::canViewAny())->toBeTrue();
+});
+
+it('queues one shared six-month movement run for the weekly schedule', function (): void {
+    Queue::fake();
+    Carbon::setTestNow(Carbon::parse('2026-08-07 00:00:00', 'Africa/Johannesburg'));
+
+    try {
+        expect(Artisan::call('product-movement:generate'))->toBe(0);
+
+        $run = \App\Models\ProductMovementReportRun::query()->sole();
+        expect($run->analysis_start_date->toDateString())->toBe('2026-02-08')
+            ->and($run->analysis_end_date->toDateString())->toBe('2026-08-07')
+            ->and($run->requested_by)->toBeNull();
+
+        Queue::assertPushed(
+            GenerateProductMovementReportJob::class,
+            fn (GenerateProductMovementReportJob $job): bool => $job->runId === $run->id,
+        );
+
+        expect(Artisan::call('product-movement:generate'))->toBe(0)
+            ->and(\App\Models\ProductMovementReportRun::query()->count())->toBe(1);
+    } finally {
+        Carbon::setTestNow();
+    }
 });
 
 function movementReportImport(User $user): Import

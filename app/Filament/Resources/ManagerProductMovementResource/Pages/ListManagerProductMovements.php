@@ -86,6 +86,7 @@ final class ListManagerProductMovements extends ListRecords
                 ->label('Generate / Refresh Report')
                 ->icon('heroicon-o-arrow-path')
                 ->color('primary')
+                ->authorize(fn (): bool => ManagerProductMovementResource::canViewAny())
                 ->form([
                     Select::make('period')
                         ->options([

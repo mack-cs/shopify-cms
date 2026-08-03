@@ -69,19 +69,30 @@ class UserResource extends Resource
                         ->whereIn('name', [
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
+                            PermissionEnum::ManagerReportAccess->value,
                         ])
-                        ->pluck('name', 'id')
+                        ->get(['id', 'name'])
+                        ->mapWithKeys(fn (Permission $permission): array => [
+                            $permission->id => match ($permission->name) {
+                                PermissionEnum::InventoryUpdate->value => 'Inventory Update',
+                                PermissionEnum::InventoryStatusUpdate->value => 'Inventory Status Update',
+                                PermissionEnum::ManagerReportAccess->value => 'Is Manager',
+                                default => $permission->name,
+                            },
+                        ])
                         ->all())
                     ->descriptions(fn (): array => Permission::query()
                         ->whereIn('name', [
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
+                            PermissionEnum::ManagerReportAccess->value,
                         ])
                         ->get(['id', 'name'])
                         ->mapWithKeys(fn (Permission $permission): array => [
                             $permission->id => match ($permission->name) {
                                 PermissionEnum::InventoryUpdate->value => 'Allows updating tracked inventory and quantity.',
                                 PermissionEnum::InventoryStatusUpdate->value => 'Allows updating product status from inventory.',
+                                PermissionEnum::ManagerReportAccess->value => 'Allows access to the manager movement report, on-demand generation and exports.',
                                 default => '',
                             },
                         ])
