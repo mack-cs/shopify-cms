@@ -29,6 +29,7 @@ final class ProductMovementReportRow extends Model
         'current_price' => 'decimal:2',
         'compare_at_price' => 'decimal:2',
         'discount_percentage' => 'decimal:2',
+        'contributing_stack_skus' => 'array',
     ];
 
     public function run(): BelongsTo

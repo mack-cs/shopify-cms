@@ -9,8 +9,10 @@ use App\Filament\Resources\ManagerProductMovementResource;
 use App\Filament\Resources\ProductMovementReportRowResource;
 use App\Jobs\GenerateProductMovementReportJob;
 use App\Models\Import;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
+use App\Models\ProductMovementReportRun;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\ShopifyOrder;
 use App\Models\ShopifyOrderItem;
@@ -153,9 +155,13 @@ it('includes zero-sale variants without snapshots and exposes all required queue
         ->all();
 
     expect($exportColumns)->toContain(
+        'run.completed_at',
         'shopify_product_id',
         'shopify_variant_id',
         'gross_units_sold',
+        'direct_net_units_sold',
+        'stack_attributed_net_units',
+        'contributing_stack_skus',
         'refunded_units',
         'net_units_sold',
         'sales_consistency_percentage',
@@ -172,22 +178,88 @@ it('includes zero-sale variants without snapshots and exposes all required queue
         ->all();
 
     expect($managerExportColumns)->toBe([
+        'run.completed_at',
         'product_title',
         'variant_title',
         'sku',
         'vendor',
         'product_status',
+        'movement_product_kind',
         'product_type',
         'current_inventory',
         'currently_on_sale',
         'discount_percentage',
+        'direct_net_units_sold',
+        'stack_attributed_net_units',
         'net_units_sold',
+        'contributing_stack_skus',
         'average_units_per_month',
         'last_sale_date',
         'movement_classification',
         'recommended_action',
         'manager_reason',
     ]);
+});
+
+it('keeps stack movement separate while attributing stack demand and refunds to linked components', function (): void {
+    $user = User::factory()->create();
+    $import = movementReportImport($user);
+    $stack = movementReportVariant($import, 'summer-stack', 'STACK-001');
+    $firstComponent = movementReportVariant($import, 'first-bracelet', 'COMP-001');
+    $secondComponent = movementReportVariant($import, 'second-bracelet', 'COMP-002');
+
+    DB::table('products')->where('id', $stack->product_id)->update(['is_bundle' => true]);
+    DB::table('products')->whereIn('id', [
+        $stack->product_id,
+        $firstComponent->product_id,
+        $secondComponent->product_id,
+    ])->update(['created_at' => '2025-01-01 00:00:00']);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::query()->create([
+        'handle' => 'summer-stack',
+        'shopify_id' => $stack->product->shopify_id,
+        'sku' => 'STACK-001',
+        'title' => 'Summer Stack',
+        'origin' => NewProductDraft::ORIGIN_PRODUCT_MIRROR,
+        'bundle_product_ids' => [
+            $firstComponent->product_id,
+            $secondComponent->product_id,
+        ],
+    ]));
+
+    $stackOrder = movementReportOrder('3001', '2026-03-10 10:00:00', false);
+    movementReportOrderItem($stackOrder, $stack, '7001', 3, 2);
+    $componentOrder = movementReportOrder('3002', '2026-03-12 10:00:00', false);
+    movementReportOrderItem($componentOrder, $secondComponent, '7002', 2, 2);
+
+    $service = app(ProductMovementReportService::class);
+    $run = $service->createRun('2026-01-01', '2026-03-31', $user->id);
+    $service->generate($run);
+
+    $stackRow = ProductMovementReportRow::query()->where('variant_id', $stack->id)->firstOrFail();
+    expect($stackRow->movement_product_kind)->toBe('stack')
+        ->and($stackRow->direct_gross_units_sold)->toBe(3)
+        ->and($stackRow->direct_refunded_units)->toBe(1)
+        ->and($stackRow->direct_net_units_sold)->toBe(2)
+        ->and($stackRow->stack_attributed_net_units)->toBe(0)
+        ->and($stackRow->net_units_sold)->toBe(2);
+
+    $firstRow = ProductMovementReportRow::query()->where('variant_id', $firstComponent->id)->firstOrFail();
+    expect($firstRow->movement_product_kind)->toBe('component')
+        ->and($firstRow->direct_net_units_sold)->toBe(0)
+        ->and($firstRow->stack_attributed_gross_units)->toBe(3)
+        ->and($firstRow->stack_attributed_refunded_units)->toBe(1)
+        ->and($firstRow->stack_attributed_net_units)->toBe(2)
+        ->and($firstRow->net_units_sold)->toBe(2)
+        ->and($firstRow->contributing_stack_skus)->toBe(['STACK-001']);
+
+    $secondRow = ProductMovementReportRow::query()->where('variant_id', $secondComponent->id)->firstOrFail();
+    expect($secondRow->movement_product_kind)->toBe('component')
+        ->and($secondRow->direct_net_units_sold)->toBe(2)
+        ->and($secondRow->stack_attributed_net_units)->toBe(2)
+        ->and($secondRow->net_units_sold)->toBe(4)
+        ->and($secondRow->order_count)->toBe(2)
+        ->and($secondRow->manager_reason)->not->toBeEmpty();
 });
 
 it('keeps movement and stock separate so a fast seller at zero stock is recommended for restocking', function (): void {
@@ -235,8 +307,19 @@ it('mounts the manager report export as a direct action without the expiring map
     $this->actingAs($user);
     Bus::fake();
 
+    ProductMovementReportRun::query()->create([
+        'requested_by' => $user->id,
+        'analysis_start_date' => '2026-02-04',
+        'analysis_end_date' => '2026-08-03',
+        'months_analysed' => 6,
+        'status' => ProductMovementReportRun::STATUS_COMPLETED,
+        'row_count' => 0,
+        'completed_at' => Carbon::parse('2026-08-03 12:00:00', 'Africa/Johannesburg'),
+    ]);
+
     $component = Livewire::test(ListManagerProductMovements::class)
-        ->assertSuccessful();
+        ->assertSuccessful()
+        ->assertSee('Report generated 03 Aug 2026 at 12:00 SAST');
 
     $exportAction = $component->instance()->getTable()->getAction('export');
 

@@ -16,6 +16,13 @@ final class ManagerProductMovementExporter extends Exporter
     public static function getColumns(): array
     {
         return [
+            ExportColumn::make('run.completed_at')
+                ->label('Report Generated At')
+                ->formatStateUsing(fn ($state): string => blank($state)
+                    ? ''
+                    : Carbon::parse($state)
+                        ->timezone((string) config('product_movement.timezone', 'Africa/Johannesburg'))
+                        ->format('d M Y H:i T')),
             ExportColumn::make('product_title')->label('Product title'),
             ExportColumn::make('variant_title')->label('Variant title'),
             ExportColumn::make('sku')->label('SKU'),
@@ -23,6 +30,13 @@ final class ManagerProductMovementExporter extends Exporter
             ExportColumn::make('product_status')
                 ->label('Product Status')
                 ->formatStateUsing(fn ($state): string => str((string) $state)->title()->toString()),
+            ExportColumn::make('movement_product_kind')
+                ->label('Product Role')
+                ->formatStateUsing(fn ($state): string => match ((string) $state) {
+                    'stack' => 'Stack',
+                    'component' => 'Stack Component',
+                    default => 'Standard Product',
+                }),
             ExportColumn::make('product_type')->label('Product type'),
             ExportColumn::make('current_inventory')->label('Current inventory'),
             ExportColumn::make('currently_on_sale')
@@ -33,7 +47,12 @@ final class ManagerProductMovementExporter extends Exporter
                 ->formatStateUsing(fn ($state, ProductMovementReportRow $record): string => $record->currently_on_sale && $state !== null
                     ? number_format((float) $state, 2) . '%'
                     : '-'),
-            ExportColumn::make('net_units_sold')->label('Units Sold (Selected Period)'),
+            ExportColumn::make('direct_net_units_sold')->label('Direct Units Sold'),
+            ExportColumn::make('stack_attributed_net_units')->label('Sold Through Stacks'),
+            ExportColumn::make('net_units_sold')->label('Total Demand Units'),
+            ExportColumn::make('contributing_stack_skus')
+                ->label('Contributing Stack SKUs')
+                ->formatStateUsing(fn ($state): string => collect((array) $state)->filter()->implode(', ')),
             ExportColumn::make('average_units_per_month')
                 ->label('Average Units Sold per Month')
                 ->formatStateUsing(fn ($state): string => number_format((float) $state, 1)),

@@ -3,6 +3,7 @@
 namespace App\Filament\Exports;
 
 use App\Models\ProductMovementReportRow;
+use Carbon\Carbon;
 use Filament\Actions\Exports\ExportColumn;
 use Filament\Actions\Exports\Exporter;
 use Filament\Actions\Exports\Models\Export;
@@ -13,7 +14,7 @@ final class ProductMovementReportRowExporter extends Exporter
 
     public static function getColumns(): array
     {
-        return collect([
+        $columns = collect([
             'shopify_product_id' => 'Product ID',
             'shopify_variant_id' => 'Variant ID',
             'product_title' => 'Product title',
@@ -23,10 +24,18 @@ final class ProductMovementReportRowExporter extends Exporter
             'product_type' => 'Product type',
             'product_status' => 'Product status',
             'variant_status' => 'Variant status',
+            'movement_product_kind' => 'Product role',
             'product_created_at' => 'Product created date',
             'analysis_start_date' => 'Analysis start date',
             'analysis_end_date' => 'Analysis end date',
             'months_analysed' => 'Months analysed',
+            'direct_gross_units_sold' => 'Direct gross units sold',
+            'direct_refunded_units' => 'Direct refunded units',
+            'direct_net_units_sold' => 'Direct net units sold',
+            'stack_attributed_gross_units' => 'Stack-attributed gross units',
+            'stack_attributed_refunded_units' => 'Stack-attributed refunded units',
+            'stack_attributed_net_units' => 'Stack-attributed net units',
+            'contributing_stack_skus' => 'Contributing stack SKUs',
             'gross_units_sold' => 'Gross units sold',
             'refunded_units' => 'Refunded units',
             'net_units_sold' => 'Net units sold',
@@ -57,9 +66,36 @@ final class ProductMovementReportRowExporter extends Exporter
             'discount_percentage' => 'Discount percentage',
             'has_snapshot_history' => 'Has snapshot history',
             'data_quality_note' => 'Data quality or classification note',
-        ])->map(
-            fn (string $label, string $column): ExportColumn => ExportColumn::make($column)->label($label)
-        )->values()->all();
+        ])->map(function (string $label, string $column): ExportColumn {
+            $exportColumn = ExportColumn::make($column)->label($label);
+
+            if ($column === 'contributing_stack_skus') {
+                return $exportColumn->formatStateUsing(
+                    fn ($state): string => collect((array) $state)->filter()->implode(', ')
+                );
+            }
+
+            if ($column === 'movement_product_kind') {
+                return $exportColumn->formatStateUsing(fn ($state): string => match ((string) $state) {
+                    'stack' => 'Stack',
+                    'component' => 'Stack Component',
+                    default => 'Standard Product',
+                });
+            }
+
+            return $exportColumn;
+        })->values()->all();
+
+        return [
+            ExportColumn::make('run.completed_at')
+                ->label('Report generated at')
+                ->formatStateUsing(fn ($state): string => blank($state)
+                    ? ''
+                    : Carbon::parse($state)
+                        ->timezone((string) config('product_movement.timezone', 'Africa/Johannesburg'))
+                        ->format('d M Y H:i T')),
+            ...$columns,
+        ];
     }
 
     public static function getCompletedNotificationBody(Export $export): string

@@ -40,6 +40,11 @@ final class ProductMovementReportRowResource extends Resource
                 TextColumn::make('product_title')->label('Product')->searchable()->wrap()->sortable(),
                 TextColumn::make('variant_title')->label('Variant')->searchable()->toggleable(),
                 TextColumn::make('sku')->searchable()->sortable(),
+                TextColumn::make('movement_product_kind')
+                    ->label('Product role')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): string => str((string) $state)->replace('_', ' ')->title()->toString())
+                    ->sortable(),
                 TextColumn::make('movement_classification')
                     ->label('Movement')
                     ->badge()
@@ -54,7 +59,14 @@ final class ProductMovementReportRowResource extends Resource
                     })
                     ->sortable(),
                 TextColumn::make('movement_score')->label('Score')->numeric(2)->sortable(),
-                TextColumn::make('net_units_sold')->label('Net units')->numeric()->sortable(),
+                TextColumn::make('direct_net_units_sold')->label('Direct net units')->numeric()->sortable(),
+                TextColumn::make('stack_attributed_net_units')->label('Stack-attributed net units')->numeric()->sortable(),
+                TextColumn::make('net_units_sold')->label('Total demand units')->numeric()->sortable(),
+                TextColumn::make('contributing_stack_skus')
+                    ->label('Contributing stack SKUs')
+                    ->formatStateUsing(fn ($state): string => collect((array) $state)->filter()->implode(', '))
+                    ->placeholder('-')
+                    ->toggleable(),
                 TextColumn::make('average_units_per_month')->label('Avg/month')->numeric(2)->sortable(),
                 TextColumn::make('sales_consistency_percentage')->label('Consistency')->suffix('%')->numeric(2)->sortable(),
                 TextColumn::make('days_since_last_sale')->label('Days since sale')->numeric()->sortable(),
@@ -91,6 +103,13 @@ final class ProductMovementReportRowResource extends Resource
                 SelectFilter::make('movement_classification')
                     ->label('Movement')
                     ->options(self::classificationOptions()),
+                SelectFilter::make('movement_product_kind')
+                    ->label('Product role')
+                    ->options([
+                        'stack' => 'Stack',
+                        'component' => 'Stack component',
+                        'standard' => 'Standard product',
+                    ]),
                 SelectFilter::make('vendor')
                     ->options(fn (): array => self::distinctOptions('vendor'))
                     ->searchable()

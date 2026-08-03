@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ProductMovementReportRowResource\Pages;
 
 use App\Filament\Resources\ProductMovementReportRowResource;
 use App\Jobs\GenerateProductMovementReportJob;
+use App\Models\ProductMovementReportRun;
 use App\Services\ProductMovementReportService;
 use Filament\Actions\Action;
 use Filament\Forms\Components\DatePicker;
@@ -11,11 +12,32 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 
 final class ListProductMovementReportRows extends ListRecords
 {
     protected static string $resource = ProductMovementReportRowResource::class;
+
+    public function getSubheading(): ?string
+    {
+        $runId = data_get($this->tableFilters, 'product_movement_report_run_id.value');
+        $run = ProductMovementReportRun::query()
+            ->where('status', ProductMovementReportRun::STATUS_COMPLETED)
+            ->when(filled($runId), fn (Builder $query): Builder => $query->whereKey((int) $runId))
+            ->latest('id')
+            ->first();
+
+        if (!$run instanceof ProductMovementReportRun || $run->completed_at === null) {
+            return 'No completed product movement report is available yet.';
+        }
+
+        $timezone = (string) config('product_movement.timezone', 'Africa/Johannesburg');
+
+        return 'Report generated ' . $run->completed_at->copy()->timezone($timezone)->format('d M Y \a\t H:i T')
+            . ' · Reporting period ' . $run->analysis_start_date->format('d M Y')
+            . ' to ' . $run->analysis_end_date->format('d M Y');
+    }
 
     protected function getHeaderActions(): array
     {

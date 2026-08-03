@@ -54,6 +54,20 @@ final class ManagerProductMovementResource extends Resource
                         default => 'gray',
                     })
                     ->sortable(),
+                TextColumn::make('movement_product_kind')
+                    ->label('Product Role')
+                    ->formatStateUsing(fn (?string $state): string => match ((string) $state) {
+                        'stack' => 'Stack',
+                        'component' => 'Stack Component',
+                        default => 'Standard Product',
+                    })
+                    ->badge()
+                    ->color(fn (?string $state): string => match ((string) $state) {
+                        'stack' => 'primary',
+                        'component' => 'info',
+                        default => 'gray',
+                    })
+                    ->sortable(),
                 TextColumn::make('product_type')->label('Product type')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('current_inventory')->label('Current Inventory')->numeric()->sortable(),
                 TextColumn::make('current_inventory_status')
@@ -74,7 +88,14 @@ final class ManagerProductMovementResource extends Resource
                         ? number_format((float) $state, 2) . '%'
                         : '-')
                     ->sortable(),
-                TextColumn::make('net_units_sold')->label('Units Sold (Selected Period)')->numeric()->sortable(),
+                TextColumn::make('direct_net_units_sold')->label('Direct Units Sold')->numeric()->sortable(),
+                TextColumn::make('stack_attributed_net_units')->label('Sold Through Stacks')->numeric()->sortable(),
+                TextColumn::make('net_units_sold')->label('Total Demand Units')->numeric()->sortable(),
+                TextColumn::make('contributing_stack_skus')
+                    ->label('Contributing Stack SKUs')
+                    ->formatStateUsing(fn ($state): string => collect((array) $state)->filter()->implode(', '))
+                    ->placeholder('-')
+                    ->wrap(),
                 TextColumn::make('average_units_per_month')
                     ->label('Average Units Sold per Month')
                     ->numeric(1)
@@ -127,6 +148,13 @@ final class ManagerProductMovementResource extends Resource
                         'archived' => 'Archived',
                     ])
                     ->default('active'),
+                SelectFilter::make('movement_product_kind')
+                    ->label('Product role')
+                    ->options([
+                        'stack' => 'Stack',
+                        'component' => 'Stack Component',
+                        'standard' => 'Standard Product',
+                    ]),
                 SelectFilter::make('current_inventory_status')
                     ->label('Stock')
                     ->options([

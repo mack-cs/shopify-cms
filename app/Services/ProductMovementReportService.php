@@ -6,6 +6,7 @@ use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
+use App\Models\NewProductDraft;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\ShopifyOrderItem;
 use App\Models\Variant;
@@ -127,7 +128,10 @@ final class ProductMovementReportService
      * @return array{
      *   shopify:array<string,int>,
      *   sku:array<string,int|null>,
-     *   product:array<int,array<int,int>>
+     *   product:array<int,array<int,int>>,
+     *   variant_skus:array<int,string>,
+     *   product_by_shopify:array<string,int>,
+     *   product_by_handle:array<string,int>
      * }
      */
     private function variantIdentity(): array
@@ -135,6 +139,7 @@ final class ProductMovementReportService
         $shopify = [];
         $skuGroups = [];
         $products = [];
+        $variantSkus = [];
 
         Variant::query()
             ->active()
@@ -152,6 +157,7 @@ final class ProductMovementReportService
                     if ($sku !== '') {
                         $skuGroups[$sku][] = $variantId;
                     }
+                    $variantSkus[$variantId] = trim((string) $variant->sku);
                     $products[(int) $variant->product_id][] = $variantId;
                 }
             });
@@ -161,10 +167,31 @@ final class ProductMovementReportService
             $sku[$key] = count(array_unique($ids)) === 1 ? (int) $ids[0] : null;
         }
 
+        $productByShopify = [];
+        $productByHandle = [];
+        Product::query()
+            ->select(['id', 'shopify_id', 'handle'])
+            ->orderBy('id')
+            ->chunkById(1000, function (Collection $catalogueProducts) use (&$productByShopify, &$productByHandle): void {
+                foreach ($catalogueProducts as $product) {
+                    $shopifyId = trim((string) $product->shopify_id);
+                    $handle = strtolower(trim((string) $product->handle));
+                    if ($shopifyId !== '') {
+                        $productByShopify[$shopifyId] = (int) $product->id;
+                    }
+                    if ($handle !== '') {
+                        $productByHandle[$handle] = (int) $product->id;
+                    }
+                }
+            });
+
         return [
             'shopify' => $shopify,
             'sku' => $sku,
             'product' => $products,
+            'variant_skus' => $variantSkus,
+            'product_by_shopify' => $productByShopify,
+            'product_by_handle' => $productByHandle,
         ];
     }
 
@@ -175,6 +202,18 @@ final class ProductMovementReportService
     private function salesMetrics(array $identity, Carbon $utcStart, Carbon $utcEnd, string $timezone): array
     {
         $metrics = [];
+        $attribution = $this->stackComponentAttribution($identity);
+
+        foreach (array_keys($attribution['component_variants']) as $variantId) {
+            $metrics[$variantId] = $this->emptySales();
+            $metrics[$variantId]['product_kind'] = 'component';
+        }
+        foreach (array_keys($attribution['stack_variants']) as $variantId) {
+            $metrics[$variantId] ??= $this->emptySales();
+            $metrics[$variantId]['product_kind'] = 'stack';
+            $metrics[$variantId]['attribution_notes'] = $attribution['notes_by_stack'][$variantId] ?? [];
+        }
+
         $includedStatuses = array_map(
             static fn (mixed $status): string => strtoupper(trim((string) $status)),
             (array) config('shopify_sync.orders.included_financial_statuses', []),
@@ -197,7 +236,7 @@ final class ProductMovementReportService
                         });
                 }))
             ->orderBy('id')
-            ->chunkById(1000, function (Collection $items) use (&$metrics, $identity, $includedStatuses, $timezone): void {
+            ->chunkById(1000, function (Collection $items) use (&$metrics, $identity, $attribution, $includedStatuses, $timezone): void {
                 foreach ($items as $item) {
                     $order = $item->order;
                     if (
@@ -235,24 +274,166 @@ final class ProductMovementReportService
                         : max(0, min($quantity, (int) $item->current_quantity));
                     $refunded = max(0, $quantity - $currentQuantity);
 
-                    $metrics[$variantId] ??= $this->emptySales();
-                    $metrics[$variantId]['gross'] += $quantity;
-                    $metrics[$variantId]['refunded'] += $refunded;
-                    $metrics[$variantId]['net'] += max(0, $quantity - $refunded);
-                    $metrics[$variantId]['orders'][(string) $order->shopify_order_id] = true;
-                    $metrics[$variantId]['months'][substr($date, 0, 7)] = true;
-                    $metrics[$variantId]['first'] = $metrics[$variantId]['first'] === null
-                        ? $date
-                        : min($metrics[$variantId]['first'], $date);
-                    $metrics[$variantId]['last'] = $metrics[$variantId]['last'] === null
-                        ? $date
-                        : max($metrics[$variantId]['last'], $date);
-                    $metrics[$variantId]['daily_net'][$date] =
-                        ($metrics[$variantId]['daily_net'][$date] ?? 0) + max(0, $quantity - $refunded);
+                    $this->recordSale(
+                        $metrics,
+                        $variantId,
+                        $quantity,
+                        $refunded,
+                        $date,
+                        (string) $order->shopify_order_id,
+                        'direct',
+                    );
+
+                    foreach ($attribution['by_stack_variant'][$variantId] ?? [] as $component) {
+                        $this->recordSale(
+                            $metrics,
+                            (int) $component['variant_id'],
+                            $quantity * (int) $component['quantity'],
+                            $refunded * (int) $component['quantity'],
+                            $date,
+                            (string) $order->shopify_order_id,
+                            'stack',
+                            (string) $component['stack_sku'],
+                        );
+                    }
                 }
             });
 
         return $metrics;
+    }
+
+    /**
+     * @param array<string,mixed> $identity
+     * @return array{
+     *   by_stack_variant:array<int,array<int,array{variant_id:int,quantity:int,stack_sku:string}>>,
+     *   stack_variants:array<int,bool>,
+     *   component_variants:array<int,bool>,
+     *   notes_by_stack:array<int,array<int,string>>
+     * }
+     */
+    private function stackComponentAttribution(array $identity): array
+    {
+        $result = [
+            'by_stack_variant' => [],
+            'stack_variants' => [],
+            'component_variants' => [],
+            'notes_by_stack' => [],
+        ];
+
+        NewProductDraft::query()
+            ->whereNotNull('bundle_product_ids')
+            ->orderBy('id')
+            ->chunkById(250, function (Collection $drafts) use (&$result, $identity): void {
+                foreach ($drafts as $draft) {
+                    if (!$draft instanceof NewProductDraft) {
+                        continue;
+                    }
+
+                    $stackProductId = $this->draftProductId($draft, $identity);
+                    $stackVariantIds = $stackProductId === null
+                        ? []
+                        : array_values(array_unique(array_map('intval', $identity['product'][$stackProductId] ?? [])));
+                    if ($stackVariantIds === []) {
+                        continue;
+                    }
+
+                    $componentProductIds = collect((array) $draft->bundle_product_ids)
+                        ->map(fn ($id): int => (int) $id)
+                        ->filter(fn (int $id): bool => $id > 0)
+                        ->unique()
+                        ->values();
+
+                    foreach ($stackVariantIds as $stackVariantId) {
+                        $result['stack_variants'][$stackVariantId] = true;
+                        $stackSku = trim((string) ($identity['variant_skus'][$stackVariantId] ?? $draft->sku));
+
+                        foreach ($componentProductIds as $componentProductId) {
+                            $componentVariantIds = array_values(array_unique(array_map(
+                                'intval',
+                                $identity['product'][(int) $componentProductId] ?? [],
+                            )));
+
+                            if (count($componentVariantIds) !== 1) {
+                                $result['notes_by_stack'][$stackVariantId][] = count($componentVariantIds) === 0
+                                    ? "Linked component product {$componentProductId} has no active variant and was not attributed."
+                                    : "Linked component product {$componentProductId} has multiple active variants and was not attributed.";
+                                continue;
+                            }
+
+                            $componentVariantId = (int) $componentVariantIds[0];
+                            $result['component_variants'][$componentVariantId] = true;
+                            $result['by_stack_variant'][$stackVariantId][$componentVariantId] = [
+                                'variant_id' => $componentVariantId,
+                                'quantity' => 1,
+                                'stack_sku' => $stackSku,
+                            ];
+                        }
+                    }
+                }
+            });
+
+        return $result;
+    }
+
+    /**
+     * @param array<string,mixed> $identity
+     */
+    private function draftProductId(NewProductDraft $draft, array $identity): ?int
+    {
+        $shopifyId = trim((string) $draft->shopify_id);
+        if ($shopifyId !== '' && isset($identity['product_by_shopify'][$shopifyId])) {
+            return (int) $identity['product_by_shopify'][$shopifyId];
+        }
+
+        $handle = strtolower(trim((string) $draft->handle));
+
+        return $handle !== '' && isset($identity['product_by_handle'][$handle])
+            ? (int) $identity['product_by_handle'][$handle]
+            : null;
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $metrics
+     */
+    private function recordSale(
+        array &$metrics,
+        int $variantId,
+        int $gross,
+        int $refunded,
+        string $date,
+        string $orderId,
+        string $source,
+        ?string $stackSku = null,
+    ): void {
+        $gross = max(0, $gross);
+        $refunded = max(0, min($gross, $refunded));
+        $net = max(0, $gross - $refunded);
+        $metrics[$variantId] ??= $this->emptySales();
+
+        $metrics[$variantId]['gross'] += $gross;
+        $metrics[$variantId]['refunded'] += $refunded;
+        $metrics[$variantId]['net'] += $net;
+        $metrics[$variantId]["{$source}_gross"] += $gross;
+        $metrics[$variantId]["{$source}_refunded"] += $refunded;
+        $metrics[$variantId]["{$source}_net"] += $net;
+        $metrics[$variantId]['orders'][$orderId] = true;
+        $metrics[$variantId]['months'][substr($date, 0, 7)] = true;
+        $metrics[$variantId]['first'] = $metrics[$variantId]['first'] === null
+            ? $date
+            : min($metrics[$variantId]['first'], $date);
+        $metrics[$variantId]['last'] = $metrics[$variantId]['last'] === null
+            ? $date
+            : max($metrics[$variantId]['last'], $date);
+        $metrics[$variantId]['daily_net'][$date] = ($metrics[$variantId]['daily_net'][$date] ?? 0) + $net;
+
+        if ($source === 'stack') {
+            $metrics[$variantId]['product_kind'] = $metrics[$variantId]['product_kind'] === 'stack'
+                ? 'stack'
+                : 'component';
+            if ($net > 0 && trim((string) $stackSku) !== '') {
+                $metrics[$variantId]['contributing_stack_skus'][trim((string) $stackSku)] = true;
+            }
+        }
     }
 
     /**
@@ -350,6 +531,11 @@ final class ProductMovementReportService
         $gross = (int) $sales['gross'];
         $refunded = (int) $sales['refunded'];
         $net = (int) $sales['net'];
+        $productKind = $product->is_bundle || ($sales['product_kind'] ?? 'standard') === 'stack'
+            ? 'stack'
+            : (string) ($sales['product_kind'] ?? 'standard');
+        $contributingStackSkus = array_keys((array) ($sales['contributing_stack_skus'] ?? []));
+        sort($contributingStackSkus);
         $monthsWithSales = count($sales['months']);
         $consistency = $calendarMonths > 0 ? ($monthsWithSales / $calendarMonths) * 100 : 0;
         $lastSale = $sales['last'] ? Carbon::parse($sales['last']) : null;
@@ -412,10 +598,20 @@ final class ProductMovementReportService
             'product_type' => $product->type,
             'product_status' => strtolower(trim((string) $product->status)) ?: 'unknown',
             'variant_status' => $this->variantStatus($variant, $product),
+            'movement_product_kind' => $productKind,
             'product_created_at' => $createdAt,
             'analysis_start_date' => $start->toDateString(),
             'analysis_end_date' => $end->toDateString(),
             'months_analysed' => round($months, 2),
+            'direct_gross_units_sold' => (int) $sales['direct_gross'],
+            'direct_refunded_units' => (int) $sales['direct_refunded'],
+            'direct_net_units_sold' => (int) $sales['direct_net'],
+            'stack_attributed_gross_units' => (int) $sales['stack_gross'],
+            'stack_attributed_refunded_units' => (int) $sales['stack_refunded'],
+            'stack_attributed_net_units' => (int) $sales['stack_net'],
+            'contributing_stack_skus' => $contributingStackSkus === []
+                ? null
+                : json_encode($contributingStackSkus, JSON_UNESCAPED_SLASHES),
             'gross_units_sold' => $gross,
             'refunded_units' => $refunded,
             'net_units_sold' => $net,
@@ -475,10 +671,18 @@ final class ProductMovementReportService
             'product_type' => $product->type,
             'product_status' => strtolower(trim((string) $product->status)) ?: 'unknown',
             'variant_status' => 'missing',
+            'movement_product_kind' => $product->is_bundle ? 'stack' : 'standard',
             'product_created_at' => $product->shopify_created_at ?? $product->created_at,
             'analysis_start_date' => $start->toDateString(),
             'analysis_end_date' => $end->toDateString(),
             'months_analysed' => $run->months_analysed,
+            'direct_gross_units_sold' => 0,
+            'direct_refunded_units' => 0,
+            'direct_net_units_sold' => 0,
+            'stack_attributed_gross_units' => 0,
+            'stack_attributed_refunded_units' => 0,
+            'stack_attributed_net_units' => 0,
+            'contributing_stack_skus' => null,
             'gross_units_sold' => 0,
             'refunded_units' => 0,
             'net_units_sold' => 0,
@@ -766,6 +970,12 @@ final class ProductMovementReportService
         if (($sales['gross'] ?? 0) === 0) {
             $notes[] = 'No qualifying non-cancelled Shopify order lines in the selected period.';
         }
+        if (($sales['stack_net'] ?? 0) > 0) {
+            $notes[] = (int) $sales['stack_net'] . ' net unit(s) were attributed from linked stack order lines.';
+        }
+        foreach ((array) ($sales['attribution_notes'] ?? []) as $attributionNote) {
+            $notes[] = (string) $attributionNote;
+        }
         if (strtolower(trim((string) $product->status)) === 'archived') {
             $notes[] = 'Product is currently archived.';
         }
@@ -833,6 +1043,15 @@ final class ProductMovementReportService
             'gross' => 0,
             'refunded' => 0,
             'net' => 0,
+            'direct_gross' => 0,
+            'direct_refunded' => 0,
+            'direct_net' => 0,
+            'stack_gross' => 0,
+            'stack_refunded' => 0,
+            'stack_net' => 0,
+            'product_kind' => 'standard',
+            'contributing_stack_skus' => [],
+            'attribution_notes' => [],
             'orders' => [],
             'months' => [],
             'first' => null,

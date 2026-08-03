@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ManagerProductMovementResource\Pages;
 
 use App\Filament\Resources\ManagerProductMovementResource;
 use App\Jobs\GenerateProductMovementReportJob;
+use App\Models\ProductMovementReportRun;
 use App\Services\ProductMovementReportService;
 use Filament\Actions\Action;
 use Filament\Forms\Components\DatePicker;
@@ -18,6 +19,31 @@ final class ListManagerProductMovements extends ListRecords
 {
     protected static string $resource = ManagerProductMovementResource::class;
     protected static string $view = 'filament.resources.manager-product-movements.list';
+
+    public function getSubheading(): ?string
+    {
+        return $this->reportTimestampSubheading();
+    }
+
+    private function reportTimestampSubheading(): ?string
+    {
+        $runId = data_get($this->tableFilters, 'product_movement_report_run_id.value');
+        $run = ProductMovementReportRun::query()
+            ->where('status', ProductMovementReportRun::STATUS_COMPLETED)
+            ->when(filled($runId), fn (Builder $query): Builder => $query->whereKey((int) $runId))
+            ->latest('id')
+            ->first();
+
+        if (!$run instanceof ProductMovementReportRun || $run->completed_at === null) {
+            return 'No completed product movement report is available yet.';
+        }
+
+        $timezone = (string) config('product_movement.timezone', 'Africa/Johannesburg');
+
+        return 'Report generated ' . $run->completed_at->copy()->timezone($timezone)->format('d M Y \a\t H:i T')
+            . ' · Reporting period ' . $run->analysis_start_date->format('d M Y')
+            . ' to ' . $run->analysis_end_date->format('d M Y');
+    }
 
     /**
      * Keep these statistics inside this page component. Using
