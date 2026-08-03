@@ -24,6 +24,7 @@ final class ListProductMovementReportRows extends ListRecords
                 ->label('Generate report')
                 ->icon('heroicon-o-arrow-path')
                 ->color('primary')
+                ->authorize(fn (): bool => ProductMovementReportRowResource::canViewAny())
                 ->form([
                     Select::make('period')
                         ->options([

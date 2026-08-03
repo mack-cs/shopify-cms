@@ -118,6 +118,7 @@ final class ProductMovementReportRowResource extends Resource
                 ExportAction::make()
                     ->label('Export filtered report')
                     ->icon('heroicon-o-document-arrow-down')
+                    ->authorize(fn (): bool => self::canViewAny())
                     ->formats([ExportFormat::Csv, ExportFormat::Xlsx])
                     ->exporter(ProductMovementReportRowExporter::class),
             ])
@@ -127,10 +128,7 @@ final class ProductMovementReportRowResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasAnyRole([
-            RolesEnum::SuperAdmin->value,
-            RolesEnum::Admin->value,
-        ]) ?? false;
+        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
     }
 
     public static function canCreate(): bool

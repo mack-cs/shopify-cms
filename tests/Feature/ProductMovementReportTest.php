@@ -6,6 +6,7 @@ use App\Filament\Exports\ManagerProductMovementExporter;
 use App\Filament\Exports\ProductMovementReportRowExporter;
 use App\Filament\Resources\ManagerProductMovementResource\Pages\ListManagerProductMovements;
 use App\Filament\Resources\ManagerProductMovementResource;
+use App\Filament\Resources\ProductMovementReportRowResource;
 use App\Jobs\GenerateProductMovementReportJob;
 use App\Models\Import;
 use App\Models\Product;
@@ -264,6 +265,25 @@ it('only exposes the manager report to users assigned the Is Manager permission'
 
     $admin->givePermissionTo(PermissionEnum::ManagerReportAccess->value);
     expect(ManagerProductMovementResource::canViewAny())->toBeTrue();
+});
+
+it('keeps the detailed movement analysis restricted to the system SuperAdmin', function (): void {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    Role::findOrCreate(RolesEnum::SuperAdmin->value);
+
+    $managerAdmin = User::factory()->create();
+    $managerAdmin->assignRole(RolesEnum::Admin->value);
+    $managerAdmin->givePermissionTo(PermissionEnum::ManagerReportAccess->value);
+
+    $this->actingAs($managerAdmin);
+    expect(ManagerProductMovementResource::canViewAny())->toBeTrue()
+        ->and(ProductMovementReportRowResource::canViewAny())->toBeFalse();
+
+    $systemAdmin = User::factory()->create();
+    $systemAdmin->assignRole(RolesEnum::SuperAdmin->value);
+
+    $this->actingAs($systemAdmin);
+    expect(ProductMovementReportRowResource::canViewAny())->toBeTrue();
 });
 
 it('queues one shared six-month movement run for the weekly schedule', function (): void {
