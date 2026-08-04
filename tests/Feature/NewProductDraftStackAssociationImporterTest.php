@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Services\NewProductDraftStackAssociationImporter;
 use App\Services\StackBundleSellabilityService;
+use App\Services\StackComponentCsvExporter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -55,6 +56,40 @@ it('imports stack association rows by stack sku and bracelet skus', function ():
         ->toContain('LRBU21')
         ->toContain('LRB0131')
         ->toContain('LRB0135');
+});
+
+it('exports every linked stack component from the product drafts section without a four component limit', function (): void {
+    $import = createStackAssociationImport();
+    $components = collect(range(1, 5))->map(fn (int $index): Product => createStackAssociationProduct(
+        $import,
+        "component-{$index}",
+        "Component {$index}",
+        "COMP-{$index}",
+    ));
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'STACK-ALL',
+        'handle' => 'all-components-stack',
+        'title' => 'All Components Stack',
+        'vendor' => 'Leigh Avenue',
+        'status' => 'active',
+        'bundle_product_ids' => $components->pluck('id')->all(),
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $response = app(StackComponentCsvExporter::class)->download();
+    ob_start();
+    ($response->getCallback())();
+    $csv = (string) ob_get_clean();
+
+    expect($response->headers->get('content-disposition'))
+        ->toContain('product_draft_stacks_and_components_')
+        ->and($csv)->toContain('stack_draft_id')
+        ->and($csv)->toContain('STACK-ALL')
+        ->and($csv)->toContain('COMP-1')
+        ->and($csv)->toContain('COMP-5')
+        ->and(substr_count($csv, 'STACK-ALL'))->toBe(5);
 });
 
 it('forces associated stacks unsellable when any component is unsellable', function (): void {

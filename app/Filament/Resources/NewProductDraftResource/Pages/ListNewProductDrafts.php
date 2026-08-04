@@ -10,6 +10,7 @@ use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProduct
 use App\Models\NewProductDraft;
 use App\Models\Status;
 use App\Services\LocalCatalogResetService;
+use App\Services\StackComponentCsvExporter;
 use Filament\Actions;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
@@ -75,6 +76,12 @@ class ListNewProductDrafts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('exportStackComponents')
+                ->label('Export Stacks & Components')
+                ->icon('heroicon-o-link')
+                ->color('info')
+                ->tooltip('Download every product draft stack and all of its linked component products as CSV.')
+                ->action(fn (StackComponentCsvExporter $exporter) => $exporter->download()),
             Actions\Action::make('resetLocalCatalog')
                 ->label('Reset Local Catalog')
                 ->icon('heroicon-o-trash')
