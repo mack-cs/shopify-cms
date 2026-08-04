@@ -12,22 +12,24 @@ final class StackComponentCsvExporter
 {
     public function download(): StreamedResponse
     {
-        $filename = 'product_draft_stacks_and_components_' . now()->format('Y-m-d_His') . '.csv';
-        $exportedAt = now()->format('Y-m-d H:i:s T');
+        $componentColumns = max(4, $this->largestComponentCount());
+        $filename = 'stack_components_' . now()->format('Y-m-d_His') . '.csv';
 
-        return response()->streamDownload(function () use ($exportedAt): void {
+        return response()->streamDownload(function () use ($componentColumns): void {
             $handle = fopen('php://output', 'wb');
 
             if ($handle === false) {
                 throw new \RuntimeException('Unable to open the stacks and components CSV stream.');
             }
 
-            fputcsv($handle, $this->headers());
+            // Excel uses the BOM to identify UTF-8 names such as Cafe with an accent correctly.
+            fwrite($handle, "\xEF\xBB\xBF");
+            fputcsv($handle, $this->headers($componentColumns));
 
             NewProductDraft::query()
                 ->whereNotNull('bundle_product_ids')
                 ->orderBy('id')
-                ->chunkById(250, function (Collection $drafts) use ($handle, $exportedAt): void {
+                ->chunkById(250, function (Collection $drafts) use ($handle, $componentColumns): void {
                     $componentIds = $drafts
                         ->flatMap(fn (NewProductDraft $draft): array => $this->componentIds($draft))
                         ->unique()
@@ -40,16 +42,12 @@ final class StackComponentCsvExporter
                         ->keyBy('id');
 
                     foreach ($drafts as $draft) {
-                        foreach ($this->componentIds($draft) as $position => $componentId) {
-                            $component = $components->get($componentId);
-                            fputcsv($handle, $this->row(
-                                $draft,
-                                $component instanceof Product ? $component : null,
-                                $componentId,
-                                $position + 1,
-                                $exportedAt,
-                            ));
+                        $ids = $this->componentIds($draft);
+                        if ($ids === []) {
+                            continue;
                         }
+
+                        fputcsv($handle, $this->row($draft, $ids, $components, $componentColumns));
                     }
                 });
 
@@ -63,28 +61,24 @@ final class StackComponentCsvExporter
     /**
      * @return array<int, string>
      */
-    public function headers(): array
+    public function headers(int $componentColumns = 4): array
     {
-        return [
-            'exported_at',
-            'stack_draft_id',
-            'stack_shopify_product_id',
-            'stack_handle',
-            'stack_sku',
-            'stack_title',
-            'stack_vendor',
-            'stack_status',
-            'component_position',
-            'component_product_id',
-            'component_shopify_product_id',
-            'component_handle',
-            'component_skus',
-            'component_title',
-            'component_vendor',
-            'component_status',
-            'component_variant_count',
-            'data_quality_note',
-        ];
+        $headers = ['Stack SKU', 'Stack Name'];
+
+        foreach (range(1, max(1, $componentColumns)) as $position) {
+            $headers[] = "Bracelet {$position}";
+            $headers[] = "SKU {$position}";
+        }
+
+        return $headers;
+    }
+
+    private function largestComponentCount(): int
+    {
+        return (int) NewProductDraft::query()
+            ->whereNotNull('bundle_product_ids')
+            ->get(['bundle_product_ids'])
+            ->max(fn (NewProductDraft $draft): int => count($this->componentIds($draft)));
     }
 
     /**
@@ -100,49 +94,37 @@ final class StackComponentCsvExporter
     }
 
     /**
+     * @param array<int, int> $componentIds
+     * @param Collection<int, Product> $components
      * @return array<int, string>
      */
     private function row(
         NewProductDraft $draft,
-        ?Product $component,
-        int $componentId,
-        int $position,
-        string $exportedAt,
+        array $componentIds,
+        Collection $components,
+        int $componentColumns,
     ): array {
-        $variants = $component?->variants ?? collect();
-        $componentSkus = $variants
-            ->map(fn (Variant $variant): string => trim((string) $variant->sku))
-            ->filter()
-            ->unique()
-            ->implode(' | ');
-
-        $qualityNote = match (true) {
-            $component === null => 'Linked component product is missing from the local Products catalogue.',
-            $variants->isEmpty() => 'Linked component product has no variants.',
-            $componentSkus === '' => 'Linked component variants have no SKU.',
-            $variants->count() > 1 => 'Linked component has multiple variants; all component SKUs are listed.',
-            default => '',
-        };
-
-        return [
-            $exportedAt,
-            (string) $draft->id,
-            trim((string) $draft->shopify_id),
-            trim((string) $draft->handle),
-            trim((string) $draft->sku),
+        $stackSku = trim((string) $draft->sku);
+        $row = [
+            $stackSku === '' ? '0' : $stackSku,
             trim((string) $draft->title),
-            trim((string) $draft->vendor),
-            trim((string) $draft->status),
-            (string) $position,
-            (string) $componentId,
-            trim((string) $component?->shopify_id),
-            trim((string) $component?->handle),
-            $componentSkus,
-            trim((string) $component?->title),
-            trim((string) $component?->vendor),
-            trim((string) $component?->status),
-            (string) $variants->count(),
-            $qualityNote,
         ];
+
+        foreach (range(0, max(1, $componentColumns) - 1) as $position) {
+            $component = $components->get($componentIds[$position] ?? 0);
+            $row[] = $component instanceof Product ? trim((string) $component->title) : '';
+            $row[] = $component instanceof Product ? $this->componentSku($component) : '';
+        }
+
+        return $row;
+    }
+
+    private function componentSku(Product $component): string
+    {
+        $variant = $component->variants
+            ->first(fn (Variant $variant): bool => trim((string) $variant->sku) !== '')
+            ?? $component->variants->first();
+
+        return $variant instanceof Variant ? trim((string) $variant->sku) : '';
     }
 }

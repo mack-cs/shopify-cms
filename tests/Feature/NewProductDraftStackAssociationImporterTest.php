@@ -58,7 +58,7 @@ it('imports stack association rows by stack sku and bracelet skus', function ():
         ->toContain('LRB0135');
 });
 
-it('exports every linked stack component from the product drafts section without a four component limit', function (): void {
+it('exports stack components from product drafts in the stock teams wide sku format', function (): void {
     $import = createStackAssociationImport();
     $components = collect(range(1, 5))->map(fn (int $index): Product => createStackAssociationProduct(
         $import,
@@ -84,12 +84,13 @@ it('exports every linked stack component from the product drafts section without
     $csv = (string) ob_get_clean();
 
     expect($response->headers->get('content-disposition'))
-        ->toContain('product_draft_stacks_and_components_')
-        ->and($csv)->toContain('stack_draft_id')
+        ->toContain('stack_components_')
+        ->and($csv)->toContain('"Stack SKU","Stack Name","Bracelet 1","SKU 1"')
+        ->and($csv)->toContain('"Bracelet 5","SKU 5"')
         ->and($csv)->toContain('STACK-ALL')
         ->and($csv)->toContain('COMP-1')
         ->and($csv)->toContain('COMP-5')
-        ->and(substr_count($csv, 'STACK-ALL'))->toBe(5);
+        ->and(substr_count($csv, 'STACK-ALL'))->toBe(1);
 });
 
 it('forces associated stacks unsellable when any component is unsellable', function (): void {
