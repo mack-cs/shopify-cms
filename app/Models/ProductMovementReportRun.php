@@ -15,6 +15,7 @@ final class ProductMovementReportRun extends Model
 
     protected $fillable = [
         'requested_by',
+        'calculation_date',
         'analysis_start_date',
         'analysis_end_date',
         'months_analysed',
@@ -23,16 +24,21 @@ final class ProductMovementReportRun extends Model
         'row_count',
         'started_at',
         'completed_at',
+        'source_data_timestamp',
+        'duration_ms',
+        'source_version',
         'failure_message',
     ];
 
     protected $casts = [
         'analysis_start_date' => 'date',
         'analysis_end_date' => 'date',
+        'calculation_date' => 'date',
         'months_analysed' => 'decimal:2',
         'settings' => 'array',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
+        'source_data_timestamp' => 'datetime',
     ];
 
     public function requester(): BelongsTo

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\ShopifyAnalyticsExportController;
+use App\Http\Controllers\ProcurementPredictionController;
 use Illuminate\Support\Facades\Route;
 
 Route::middleware(['analytics.token', 'throttle:10,1'])->prefix('analytics')->group(function (): void {
@@ -9,4 +10,6 @@ Route::middleware(['analytics.token', 'throttle:10,1'])->prefix('analytics')->gr
     Route::get('/inventory-snapshots.csv', [ShopifyAnalyticsExportController::class, 'inventorySnapshots']);
     Route::get('/inventory-events.csv', [ShopifyAnalyticsExportController::class, 'inventoryEvents']);
     Route::get('/stack-components.csv', [ShopifyAnalyticsExportController::class, 'stackComponents']);
+    Route::get('/product-movement.csv', [ShopifyAnalyticsExportController::class, 'productMovement']);
+    Route::post('/procurement-predictions', [ProcurementPredictionController::class, 'store']);
 });

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\Shopify\ShopifyAnalyticsExportService;
+use App\Services\ProductMovementMlExportService;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -41,6 +42,15 @@ class ShopifyAnalyticsExportController extends Controller
     public function stackComponents(): StreamedResponse
     {
         return $this->exports->stackComponentsCsv();
+    }
+
+    public function productMovement(Request $request, ProductMovementMlExportService $exports): StreamedResponse
+    {
+        $validated = $request->validate([
+            'run_id' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        return $exports->download(isset($validated['run_id']) ? (int) $validated['run_id'] : null);
     }
 
     /**

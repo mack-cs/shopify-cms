@@ -38,6 +38,12 @@ final class ShopifyAnalyticsExportService
                 'Variant Taxable',
                 'Variant Barcode',
                 'Status',
+                'Product ID',
+                'Variant ID',
+                'Product Title',
+                'Variant Title',
+                'Vendor',
+                'Product Type',
             ],
             function ($handle): void {
                 Variant::query()
@@ -64,6 +70,14 @@ final class ShopifyAnalyticsExportService
                                 $variant->taxable ? 'TRUE' : 'FALSE',
                                 $variant->barcode,
                                 $variant->product->status,
+                                $variant->product->shopify_id,
+                                $variant->shopify_id,
+                                $variant->product->title,
+                                collect([$variant->option1_value, $variant->option2_value, $variant->option3_value])
+                                    ->filter(fn ($value): bool => filled(trim((string) $value)))
+                                    ->implode(' / '),
+                                $variant->product->vendor,
+                                $variant->product->type,
                             ]);
                         }
                     });

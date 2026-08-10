@@ -13,6 +13,7 @@ use App\Models\Variant;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 final class ProductMovementReportService
 {
@@ -34,8 +35,33 @@ final class ProductMovementReportService
         ]);
     }
 
+    public function createDailyRun(string $calculationDate, int $months, ?int $userId = null): ProductMovementReportRun
+    {
+        if ($months < 1 || $months > 120) {
+            throw new \InvalidArgumentException('Product Movement months must be between 1 and 120.');
+        }
+
+        $timezone = (string) config('product_movement.timezone', 'Africa/Johannesburg');
+        $end = Carbon::parse($calculationDate, $timezone)->startOfDay();
+        $start = $end->copy()->subMonthsNoOverflow($months)->addDay();
+
+        return ProductMovementReportRun::query()->firstOrCreate(
+            ['calculation_date' => $end],
+            [
+                'requested_by' => $userId,
+                'analysis_start_date' => $start->toDateString(),
+                'analysis_end_date' => $end->toDateString(),
+                'months_analysed' => $this->monthsAnalysed($start, $end),
+                'status' => ProductMovementReportRun::STATUS_QUEUED,
+                'settings' => config('product_movement'),
+                'source_version' => (string) config('procurement.movement_source_version', 'product-movement-v2'),
+            ],
+        );
+    }
+
     public function generate(ProductMovementReportRun $run): ProductMovementReportRun
     {
+        $startedAt = microtime(true);
         $start = $run->analysis_start_date->copy()->startOfDay();
         $end = $run->analysis_end_date->copy()->startOfDay();
         $timezone = (string) config('product_movement.timezone', 'Africa/Johannesburg');
@@ -47,7 +73,14 @@ final class ProductMovementReportService
             'started_at' => now(),
             'completed_at' => null,
             'failure_message' => null,
+            'source_data_timestamp' => now(),
+            'source_version' => $run->source_version
+                ?: (string) config('procurement.movement_source_version', 'product-movement-v2'),
         ])->save();
+        Log::info('Product Movement generation started', [
+            'run_id' => $run->id,
+            'calculation_date' => $run->calculation_date?->toDateString(),
+        ]);
         $run->rows()->delete();
 
         $identity = $this->variantIdentity();
@@ -119,7 +152,13 @@ final class ProductMovementReportService
             'status' => ProductMovementReportRun::STATUS_COMPLETED,
             'row_count' => $rowCount,
             'completed_at' => now(),
+            'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
         ])->save();
+        Log::info('Product Movement generation completed', [
+            'run_id' => $run->id,
+            'row_count' => $rowCount,
+            'duration_ms' => $run->duration_ms,
+        ]);
 
         return $run->fresh() ?? $run;
     }

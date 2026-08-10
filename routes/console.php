@@ -426,6 +426,15 @@ Schedule::command('product-movement:generate --months=6')
     ->onOneServer()
     ->name('weekly-product-movement-report');
 
+if (config('procurement.product_movement_daily') && config('procurement.pipeline_daily')) {
+    Schedule::command('procurement:run')
+        ->dailyAt((string) config('procurement.daily_time', '06:30'))
+        ->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->onOneServer()
+        ->name('daily-procurement-prediction-pipeline');
+}
+
 Artisan::command(
     'shopify:orders-import-history
     {--force : Skip confirmation for the one-time full historical import}',
