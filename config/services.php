@@ -58,6 +58,7 @@ return [
 
     'shopify' => [
         'shop' => env('SHOPIFY_SHOP'),
+        'storefront_url' => env('SHOPIFY_STOREFRONT_URL', 'https://leighavenue.co.za'),
         'admin_access_token' => env('SHOPIFY_ADMIN_ACCESS_TOKEN'),
         'api_version' => env('SHOPIFY_API_VERSION', '2026-01'),
         'webhook_secret' => env('SHOPIFY_WEBHOOK_SECRET', env('SHOPIFY_API_SECRET', env('SHOPIFY_API_SECRET_KEY'))),
