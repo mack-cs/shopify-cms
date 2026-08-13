@@ -122,6 +122,10 @@ it('uses an inventory item webhook to refresh Shopify truth and force affected s
     ]);
 
     $records = createInventoryWebhookStackRecords(componentQty: 5, stackTracked: false, stackQty: null);
+    $records['component_variant']->forceFill([
+        'current_inventory_quantity' => -41,
+        'current_available_quantity' => -41,
+    ])->save();
 
     fakeShopifyInventoryProduct(
         $records['component'],
@@ -135,6 +139,7 @@ it('uses an inventory item webhook to refresh Shopify truth and force affected s
 
     $records['draft']->refresh();
     $records['stack_variant']->refresh();
+    $records['component_variant']->refresh();
 
     expect($summary['affected_stacks'])->toBe(1);
     expect($summary['forced_unsellable'])->toBe(1);
@@ -143,6 +148,9 @@ it('uses an inventory item webhook to refresh Shopify truth and force affected s
     expect($records['stack_variant']->inventory_tracked)->toBeTrue();
     expect($records['stack_variant']->inventory_qty)->toBe(0);
     expect($records['stack_variant']->inventory_local_dirty)->toBeTrue();
+    expect($records['component_variant']->inventory_qty)->toBe(0);
+    expect($records['component_variant']->current_inventory_quantity)->toBe(0);
+    expect($records['component_variant']->current_available_quantity)->toBe(0);
 });
 
 it('uses a product update webhook to refresh component status and force affected stacks unsellable', function (): void {

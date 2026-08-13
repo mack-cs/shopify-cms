@@ -5,14 +5,20 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Variant extends Model
 {
     public const SYNC_STATE_SYNCED = 'synced';
+
     public const SYNC_STATE_LOCAL_NEW = 'local_new';
+
     public const SYNC_STATE_LOCAL_UPDATED = 'local_updated';
+
     public const SYNC_STATE_LOCAL_DELETED = 'local_deleted';
+
     public const SYNC_STATE_REMOTE_DELETED = 'remote_deleted';
+
     public const SYNC_STATE_CONFLICT = 'conflict';
 
     protected $fillable = [
@@ -67,7 +73,6 @@ class Variant extends Model
         'position',
     ];
 
-
     protected $casts = [
         'price' => 'decimal:2',
         'compare_at_price' => 'decimal:2',
@@ -103,6 +108,11 @@ class Variant extends Model
     public function image(): BelongsTo
     {
         return $this->belongsTo(Image::class);
+    }
+
+    public function procurementIncomingStock(): HasOne
+    {
+        return $this->hasOne(ProcurementIncomingStock::class);
     }
 
     public function scopeActive(Builder $query): Builder

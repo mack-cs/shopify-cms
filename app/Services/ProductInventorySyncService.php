@@ -259,6 +259,10 @@ final class ProductInventorySyncService
                     continue;
                 }
 
+                $available = data_get($remoteVariant, 'inventoryItem.tracked') === false
+                    ? null
+                    : $this->normalizeRemoteInventoryQuantity(data_get($remoteVariant, 'inventoryQuantity'));
+
                 $updates = [
                     'shopify_id' => trim((string) ($remoteVariant['id'] ?? '')) ?: $variant->shopify_id,
                     'shopify_inventory_item_id' => $this->normalizeShopifyInventoryItemId(data_get($remoteVariant, 'inventoryItem.id')),
@@ -266,9 +270,9 @@ final class ProductInventorySyncService
                     'price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'price')),
                     'compare_at_price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'compareAtPrice')),
                     'inventory_tracked' => data_get($remoteVariant, 'inventoryItem.tracked'),
-                    'inventory_qty' => data_get($remoteVariant, 'inventoryItem.tracked') === false
-                        ? null
-                        : $this->normalizeRemoteInventoryQuantity(data_get($remoteVariant, 'inventoryQuantity')),
+                    'inventory_qty' => $available,
+                    'current_inventory_quantity' => $available,
+                    'current_available_quantity' => $available,
                     'inventory_local_dirty' => false,
                     'inventory_sync_error' => null,
                     'inventory_last_synced_at' => now(),

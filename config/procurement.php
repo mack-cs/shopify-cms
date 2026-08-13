@@ -9,7 +9,7 @@ return [
     'timezone' => env('PROCUREMENT_TIMEZONE', 'Africa/Johannesburg'),
     'movement_months' => (int) env('PROCUREMENT_MOVEMENT_MONTHS', 6),
     'python_executable' => env('PROCUREMENT_PYTHON_EXECUTABLE', 'python'),
-    'pipeline_path' => env('PROCUREMENT_PIPELINE_PATH', 'D:\\python_projects\\leigh_ml_procurement_v1'),
+    'pipeline_path' => env('PROCUREMENT_PIPELINE_PATH', 'D:\\python_projects\\leigh_ml_procurement_v1_with_incoming_stock'),
     'process_timeout_seconds' => (int) env('PROCUREMENT_PROCESS_TIMEOUT_SECONDS', 7200),
     'queue' => env('PROCUREMENT_QUEUE', 'procurement'),
     'movement_source_version' => env('PROCUREMENT_MOVEMENT_SOURCE_VERSION', 'product-movement-v2'),

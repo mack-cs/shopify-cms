@@ -35,7 +35,7 @@ final class ProductMovementMlExportService
                 ->orderBy('id')
                 ->chunkById(1000, function ($rows) use ($handle, $run): void {
                     foreach ($rows as $row) {
-                        if (!$row instanceof ProductMovementReportRow) {
+                        if (! $row instanceof ProductMovementReportRow) {
                             continue;
                         }
                         fputcsv($handle, $this->row($row, $run));
@@ -81,7 +81,7 @@ final class ProductMovementMlExportService
             ->latest('id')
             ->first();
 
-        if (!$run instanceof ProductMovementReportRun) {
+        if (! $run instanceof ProductMovementReportRun) {
             throw new \RuntimeException('No successfully completed daily Product Movement snapshot is available.');
         }
 
@@ -93,6 +93,7 @@ final class ProductMovementMlExportService
         return ProductMovementReportRow::query()
             ->where('product_movement_report_run_id', $run->id)
             ->whereRaw("LOWER(COALESCE(product_status, '')) = ?", ['active'])
+            ->whereRaw("LOWER(COALESCE(movement_product_kind, 'standard')) != ?", ['stack'])
             ->whereNotNull('shopify_product_id')->where('shopify_product_id', '!=', '')
             ->whereNotNull('shopify_variant_id')->where('shopify_variant_id', '!=', '')
             ->whereNotNull('sku')->whereRaw('TRIM(sku) NOT IN (?, ?)', ['', '0']);
@@ -112,6 +113,7 @@ final class ProductMovementMlExportService
                 $reason = $this->exclusionReason($row);
                 if ($reason === null) {
                     $eligible++;
+
                     continue;
                 }
                 $reasons[$reason] = ($reasons[$reason] ?? 0) + 1;
@@ -131,6 +133,9 @@ final class ProductMovementMlExportService
         if (strtolower(trim((string) $row->product_status)) !== 'active') {
             return 'product_not_active';
         }
+        if (strtolower(trim((string) $row->movement_product_kind)) === 'stack') {
+            return 'stack_product';
+        }
         if (trim((string) $row->shopify_product_id) === '') {
             return 'missing_shopify_product_id';
         }
@@ -140,6 +145,7 @@ final class ProductMovementMlExportService
         if (in_array(strtoupper(trim((string) $row->sku)), ['', '0', 'NAN', 'NONE'], true)) {
             return 'invalid_sku';
         }
+
         return null;
     }
 

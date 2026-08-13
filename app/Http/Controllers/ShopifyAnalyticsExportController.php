@@ -2,8 +2,9 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\Shopify\ShopifyAnalyticsExportService;
+use App\Services\ProcurementIncomingStockExportService;
 use App\Services\ProductMovementMlExportService;
+use App\Services\Shopify\ShopifyAnalyticsExportService;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -51,6 +52,15 @@ class ShopifyAnalyticsExportController extends Controller
         ]);
 
         return $exports->download(isset($validated['run_id']) ? (int) $validated['run_id'] : null);
+    }
+
+    public function incomingStock(Request $request, ProcurementIncomingStockExportService $exports): StreamedResponse
+    {
+        $validated = $request->validate([
+            'run_uuid' => ['required', 'uuid'],
+        ]);
+
+        return $exports->download($validated['run_uuid']);
     }
 
     /**

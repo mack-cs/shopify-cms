@@ -49,6 +49,17 @@ final class ProcurementPredictionIngestService
             'predictions.*.predicted_weekly_demand' => ['nullable', 'numeric'],
             'predictions.*.selected_prediction_method' => ['nullable', 'string', 'max:64'],
             'predictions.*.current_inventory' => ['nullable', 'numeric'],
+            'predictions.*.quantity_on_order_phase_1' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.quantity_on_order_phase_2' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.quantity_on_order_phase_3' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.total_quantity_on_order' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.quantity_on_order' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.projected_inventory_position' => ['nullable', 'numeric'],
+            'predictions.*.recommended_order_before_incoming_stock' => ['nullable', 'numeric'],
+            'predictions.*.recommended_order_qty_before_incoming_stock' => ['nullable', 'numeric'],
+            'predictions.*.additional_order_required' => ['nullable', 'numeric'],
+            'predictions.*.incoming_stock_covers_requirement' => ['nullable', 'boolean'],
+            'predictions.*.stockout_before_incoming_arrival' => ['nullable', 'boolean'],
             'predictions.*.in_stock_days' => ['nullable', 'numeric', 'min:0'],
             'predictions.*.out_of_stock_days' => ['nullable', 'numeric', 'min:0'],
             'predictions.*.attention_horizon_days' => ['required', 'integer', 'min:1'],
@@ -78,7 +89,7 @@ final class ProcurementPredictionIngestService
                 ->lockForUpdate()
                 ->first();
 
-            if (!$run instanceof ProcurementPredictionRun) {
+            if (! $run instanceof ProcurementPredictionRun) {
                 throw ValidationException::withMessages([
                     'run_uuid' => 'The CMS did not create this procurement run.',
                 ]);
@@ -128,7 +139,7 @@ final class ProcurementPredictionIngestService
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      * @return array<string,mixed>
      */
     private function predictionRow(array $row, int $runId): array
@@ -141,6 +152,11 @@ final class ProcurementPredictionIngestService
             'units_sold_per_30_in_stock_days', 'ml_predicted_weekly_demand',
             'weighted_predicted_weekly_demand', 'predicted_weekly_demand',
             'selected_prediction_method', 'current_inventory', 'in_stock_days', 'out_of_stock_days',
+            'quantity_on_order_phase_1', 'quantity_on_order_phase_2',
+            'quantity_on_order_phase_3', 'total_quantity_on_order',
+            'projected_inventory_position', 'recommended_order_before_incoming_stock',
+            'additional_order_required', 'incoming_stock_covers_requirement',
+            'stockout_before_incoming_arrival',
             'attention_horizon_days', 'lead_time_days_used', 'lead_time_source',
             'estimated_days_of_stock_remaining', 'predicted_runout_date',
             'stock_required_for_attention_horizon', 'stock_required_for_lead_time',
@@ -154,11 +170,34 @@ final class ProcurementPredictionIngestService
         ], array_keys($row)));
         if ($missing !== []) {
             throw ValidationException::withMessages([
-                'predictions' => 'Prediction row is missing: ' . implode(', ', $missing),
+                'predictions' => 'Prediction row is missing: '.implode(', ', $missing),
             ]);
         }
 
         $result = array_intersect_key($row, array_flip($columns));
+        $hasPhases = array_key_exists('quantity_on_order_phase_1', $row)
+            || array_key_exists('quantity_on_order_phase_2', $row)
+            || array_key_exists('quantity_on_order_phase_3', $row);
+        $legacyTotal = (int) ($row['total_quantity_on_order'] ?? $row['quantity_on_order'] ?? 0);
+        $phase1 = (int) ($row['quantity_on_order_phase_1'] ?? ($hasPhases ? 0 : $legacyTotal));
+        $phase2 = (int) ($row['quantity_on_order_phase_2'] ?? 0);
+        $phase3 = (int) ($row['quantity_on_order_phase_3'] ?? 0);
+        $phaseTotal = $phase1 + $phase2 + $phase3;
+        if (array_key_exists('total_quantity_on_order', $row) && $phaseTotal !== $legacyTotal) {
+            throw ValidationException::withMessages([
+                'predictions' => "Incoming-stock phase total does not match total_quantity_on_order for SKU [{$row['sku']}].",
+            ]);
+        }
+        $result['quantity_on_order_phase_1'] = $phase1;
+        $result['quantity_on_order_phase_2'] = $phase2;
+        $result['quantity_on_order_phase_3'] = $phase3;
+        $result['total_quantity_on_order'] = $phaseTotal;
+        $result['recommended_order_before_incoming_stock'] = $row['recommended_order_before_incoming_stock']
+            ?? $row['recommended_order_qty_before_incoming_stock'] ?? null;
+        $result['additional_order_required'] = $row['additional_order_required']
+            ?? $row['preliminary_order_quantity'] ?? null;
+        $result['incoming_stock_covers_requirement'] = (bool) ($row['incoming_stock_covers_requirement'] ?? false);
+        $result['stockout_before_incoming_arrival'] = (bool) ($row['stockout_before_incoming_arrival'] ?? false);
         $result['procurement_prediction_run_id'] = $runId;
         $result['created_at'] = now();
         $result['updated_at'] = now();

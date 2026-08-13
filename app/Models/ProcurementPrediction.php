@@ -12,6 +12,8 @@ final class ProcurementPrediction extends Model
     protected $casts = [
         'movement_classification_matches' => 'boolean',
         'currently_on_sale' => 'boolean',
+        'incoming_stock_covers_requirement' => 'boolean',
+        'stockout_before_incoming_arrival' => 'boolean',
         'predicted_runout_date' => 'date',
         'recommended_order_by_date' => 'date',
         'generated_at' => 'datetime',

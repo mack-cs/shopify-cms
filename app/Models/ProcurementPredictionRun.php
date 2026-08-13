@@ -9,8 +9,11 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 final class ProcurementPredictionRun extends Model
 {
     public const STATUS_QUEUED = 'queued';
+
     public const STATUS_RUNNING = 'running';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_FAILED = 'failed';
 
     protected $guarded = [];
@@ -22,6 +25,8 @@ final class ProcurementPredictionRun extends Model
         'product_movement_generated_at' => 'datetime',
         'selected_model_information' => 'array',
         'metadata' => 'array',
+        'incoming_stock_snapshot_at' => 'datetime',
+        'sheets_published_at' => 'datetime',
     ];
 
     public function movementRun(): BelongsTo
@@ -37,5 +42,10 @@ final class ProcurementPredictionRun extends Model
     public function predictions(): HasMany
     {
         return $this->hasMany(ProcurementPrediction::class);
+    }
+
+    public function incomingStockInputs(): HasMany
+    {
+        return $this->hasMany(ProcurementPredictionInput::class);
     }
 }

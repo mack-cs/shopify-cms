@@ -21,9 +21,13 @@ use Illuminate\Support\Facades\Auth;
 final class ProcurementPredictionResource extends Resource
 {
     protected static ?string $model = ProcurementPrediction::class;
+
     protected static ?string $navigationGroup = 'Shopify Sync';
+
     protected static ?string $navigationLabel = 'Procurement Predictions';
+
     protected static ?string $navigationIcon = 'heroicon-o-shopping-cart';
+
     protected static ?int $navigationSort = 6;
 
     public static function form(Form $form): Form
@@ -42,6 +46,8 @@ final class ProcurementPredictionResource extends Resource
                 TextColumn::make('vendor')->searchable()->sortable(),
                 TextColumn::make('cms_movement_classification')->label('Movement')->badge()->sortable(),
                 TextColumn::make('current_inventory')->label('Current Inventory')->numeric()->sortable(),
+                TextColumn::make('total_quantity_on_order')->label('Total On Order')->numeric()->sortable(),
+                TextColumn::make('projected_inventory_position')->label('Projected Inventory')->numeric()->sortable(),
                 TextColumn::make('average_weekly_demand')->label('Average Weekly Demand')->numeric(2)->sortable(),
                 TextColumn::make('predicted_weekly_demand')->label('Predicted Weekly Demand')->numeric(2)->sortable(),
                 TextColumn::make('units_sold_per_30_in_stock_days')->label('Units / 30 In-stock Days')->numeric(2)->sortable(),
@@ -56,7 +62,11 @@ final class ProcurementPredictionResource extends Resource
                         'ORDER_NOW' => 'danger', 'ATTENTION_WITHIN_3_WEEKS' => 'warning',
                         'MONITOR' => 'info', 'NO_ACTION' => 'success', default => 'gray',
                     })->sortable(),
-                TextColumn::make('preliminary_order_quantity')->label('Preliminary Order Qty')->numeric()->sortable(),
+                TextColumn::make('recommended_order_before_incoming_stock')
+                    ->label('Recommended Before Incoming')->numeric()->sortable()->toggleable(),
+                TextColumn::make('additional_order_required')->label('Additional Order Required')->numeric()->sortable(),
+                TextColumn::make('preliminary_order_quantity')->label('Legacy Preliminary Qty')
+                    ->numeric()->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('data_quality_warning')->label('Data-quality Warning')->placeholder('-')->wrap()->toggleable(),
                 TextColumn::make('action_reason')->label('Action Reason')->wrap(),
             ])
@@ -96,9 +106,20 @@ final class ProcurementPredictionResource extends Resource
         return Auth::user()?->can(PermissionEnum::ManagerReportAccess->value) ?? false;
     }
 
-    public static function canCreate(): bool { return false; }
-    public static function canEdit($record): bool { return false; }
-    public static function canDelete($record): bool { return false; }
+    public static function canCreate(): bool
+    {
+        return false;
+    }
+
+    public static function canEdit($record): bool
+    {
+        return false;
+    }
+
+    public static function canDelete($record): bool
+    {
+        return false;
+    }
 
     public static function getPages(): array
     {
@@ -119,7 +140,7 @@ final class ProcurementPredictionResource extends Resource
         return ProcurementPredictionRun::query()->where('status', ProcurementPredictionRun::STATUS_COMPLETED)
             ->latest('calculation_date')->limit(30)->get()
             ->mapWithKeys(fn (ProcurementPredictionRun $run): array => [
-                $run->id => $run->calculation_date->format('d M Y') . " ({$run->total_prediction_rows} predictions)",
+                $run->id => $run->calculation_date->format('d M Y')." ({$run->total_prediction_rows} predictions)",
             ])->all();
     }
 
@@ -127,6 +148,7 @@ final class ProcurementPredictionResource extends Resource
     {
         $id = ProcurementPredictionRun::query()->where('status', ProcurementPredictionRun::STATUS_COMPLETED)
             ->latest('calculation_date')->value('id');
+
         return $id === null ? null : (int) $id;
     }
 

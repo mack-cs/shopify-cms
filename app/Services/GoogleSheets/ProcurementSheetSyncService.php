@@ -1,0 +1,280 @@
+<?php
+
+namespace App\Services\GoogleSheets;
+
+use App\Models\ProcurementCollectionConfig;
+use App\Models\ProcurementIncomingStock;
+use App\Models\Variant;
+use App\Services\OperationalProcurementCollectionResolver;
+use App\Services\ProcurementIncomingStockService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+
+final class ProcurementSheetSyncService
+{
+    public function __construct(
+        private readonly GoogleSheetsClient $sheets,
+        private readonly ProcurementSheetSchema $schema,
+        private readonly ProcurementIncomingStockService $incomingStock,
+        private readonly OperationalProcurementCollectionResolver $collections,
+        private readonly ProcurementSheetDatasetBuilder $dataset,
+    ) {}
+
+    public function enabled(): bool
+    {
+        return (bool) config('google_sheets.enabled', false);
+    }
+
+    /** @return array{tabs:int,rows:int,changed:int} */
+    public function pullHumanInputs(): array
+    {
+        if (! $this->enabled()) {
+            return ['tabs' => 0, 'rows' => 0, 'changed' => 0];
+        }
+        $variantGroups = Variant::query()->active()->whereNotNull('sku')
+            ->with('product')->get()
+            ->groupBy(fn (Variant $variant): string => strtoupper(trim((string) $variant->sku)));
+        $stats = ['tabs' => 0, 'rows' => 0, 'changed' => 0];
+        $pending = [];
+
+        foreach ($this->collections->configured() as $collection) {
+            $tab = trim((string) $collection->google_sheet_tab_name);
+            $values = $this->sheets->values($tab);
+            $headers = array_shift($values) ?? [];
+            $map = $this->mapForTab($tab, $headers);
+            $seen = [];
+            foreach ($values as $offset => $row) {
+                $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+                if ($sku === '') {
+                    continue;
+                }
+                if (isset($seen[$sku])) {
+                    throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+                }
+                $seen[$sku] = true;
+                $matches = $variantGroups->get($sku, collect());
+                if ($matches->count() !== 1) {
+                    Log::warning('Google Sheet incoming-stock SKU could not be matched uniquely', [
+                        'tab' => $tab, 'sku' => $sku, 'matches' => $matches->count(),
+                    ]);
+
+                    continue;
+                }
+                /** @var Variant $variant */
+                $variant = $matches->first();
+                try {
+                    $resolved = $this->collections->resolve($variant->product);
+                } catch (\DomainException $exception) {
+                    Log::warning($exception->getMessage(), ['tab' => $tab, 'sku' => $sku]);
+
+                    continue;
+                }
+                if ($resolved->id !== $collection->id) {
+                    Log::warning('Google Sheet SKU is in the wrong operational collection tab', [
+                        'sku' => $sku, 'tab' => $tab, 'expected_tab' => $resolved->google_sheet_tab_name,
+                    ]);
+
+                    continue;
+                }
+                $pending[] = [
+                    'variant' => $variant,
+                    'phases' => [
+                        'quantity_on_order_phase_1' => $this->incomingStock->normalizeQuantity(
+                            $row[$map['quantity_on_order_phase_1']] ?? null,
+                            'quantity_on_order_phase_1'
+                        ),
+                        'quantity_on_order_phase_2' => $this->incomingStock->normalizeQuantity(
+                            $row[$map['quantity_on_order_phase_2']] ?? null,
+                            'quantity_on_order_phase_2'
+                        ),
+                        'quantity_on_order_phase_3' => $this->incomingStock->normalizeQuantity(
+                            $row[$map['quantity_on_order_phase_3']] ?? null,
+                            'quantity_on_order_phase_3'
+                        ),
+                    ],
+                    'tab' => $tab,
+                    'row' => $offset + 2,
+                ];
+                $stats['rows']++;
+            }
+            $stats['tabs']++;
+        }
+
+        DB::transaction(function () use ($pending, &$stats): void {
+            foreach ($pending as $item) {
+                /** @var Variant $variant */
+                $variant = $item['variant'];
+                $before = $variant->procurementIncomingStock;
+                $previous = [
+                    (int) ($before?->quantity_on_order_phase_1 ?? 0),
+                    (int) ($before?->quantity_on_order_phase_2 ?? 0),
+                    (int) ($before?->quantity_on_order_phase_3 ?? 0),
+                ];
+                $next = array_values($item['phases']);
+                $this->incomingStock->updateFromSheet(
+                    $variant, $item['phases'], $item['tab'], $item['row']
+                );
+                if ($before === null || $previous !== $next) {
+                    $stats['changed']++;
+                }
+            }
+        });
+
+        return $stats;
+    }
+
+    /** @return array{master_rows:int,brand_rows:int,tabs:int} */
+    public function publish(): array
+    {
+        if (! $this->enabled()) {
+            return ['master_rows' => 0, 'brand_rows' => 0, 'tabs' => 0];
+        }
+        $records = $this->dataset->records();
+        if ($records === []) {
+            throw new \RuntimeException('Refusing to publish an empty procurement dataset.');
+        }
+        $staleSkus = collect($records)->where('_prediction_stale', true)->pluck('sku')->values();
+        if ($staleSkus->isNotEmpty()) {
+            throw new \RuntimeException(
+                "Refusing to publish because {$staleSkus->count()} SKU(s) have incoming-stock changes ".
+                'that are not included in the latest completed prediction. Run php artisan procurement:run first.'
+            );
+        }
+
+        $masterTab = trim((string) config('google_sheets.master_tab', 'master-file'));
+        $masterValues = $this->sheets->values($masterTab);
+        $masterMap = $this->mapForTab($masterTab, array_shift($masterValues) ?? []);
+        $brandSheets = [];
+        foreach ($this->collections->configured() as $collection) {
+            $tab = trim((string) $collection->google_sheet_tab_name);
+            $values = $this->sheets->values($tab);
+            $headers = $values[0] ?? [];
+            $this->mapForTab($tab, $headers);
+            $brandSheets[$collection->id] = $values;
+        }
+
+        $this->backupBeforePublish($masterTab, $masterValues, $brandSheets);
+        $this->sheets->replaceBody($masterTab, array_map(
+            fn (array $record): array => $this->orderedRow($record, $masterMap),
+            $records
+        ), count($masterValues));
+
+        $brandRows = 0;
+        foreach ($this->collections->configured() as $collection) {
+            $desired = collect($records)->where('_collection_id', $collection->id)
+                ->keyBy('sku')->all();
+            $brandRows += $this->publishBrand($collection, $desired, $brandSheets[$collection->id]);
+        }
+
+        return [
+            'master_rows' => count($records), 'brand_rows' => $brandRows,
+            'tabs' => $this->collections->configured()->count(),
+        ];
+    }
+
+    /** @param array<string,array<string,mixed>> $desired */
+    private function publishBrand(ProcurementCollectionConfig $collection, array $desired, array $values): int
+    {
+        $tab = trim((string) $collection->google_sheet_tab_name);
+        $headers = array_shift($values) ?? [];
+        $map = $this->mapForTab($tab, $headers);
+        $existing = [];
+        foreach ($values as $offset => $row) {
+            $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+            if ($sku === '') {
+                continue;
+            }
+            if (isset($existing[$sku])) {
+                throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+            }
+            $existing[$sku] = $offset + 2;
+        }
+
+        $updates = [];
+        $append = [];
+        foreach ($desired as $sku => $record) {
+            if (! isset($existing[$sku])) {
+                $append[] = $this->orderedRow($record, $map);
+
+                continue;
+            }
+            foreach (ProcurementSheetSchema::FIELDS as $field => $header) {
+                if (in_array($field, ProcurementSheetSchema::HUMAN_OWNED_FIELDS, true)) {
+                    continue;
+                }
+                $column = $this->schema->columnName($map[$field]);
+                $updates[] = [
+                    'range' => $this->sheets->range($tab, $column.$existing[$sku]),
+                    'values' => [[$this->cell($record[$field] ?? null)]],
+                ];
+            }
+        }
+        $this->sheets->batchUpdateValues($updates);
+        $this->sheets->append($tab, $append);
+        $staleRows = [];
+        foreach ($existing as $sku => $row) {
+            if (! isset($desired[$sku])) {
+                $outstanding = ProcurementIncomingStock::query()
+                    ->where('sku', $sku)->sum('total_quantity_on_order');
+                if ($outstanding > 0) {
+                    Log::warning('Removing an inactive procurement Sheet row with outstanding incoming stock retained in Laravel', [
+                        'tab' => $tab, 'sku' => $sku, 'total_quantity_on_order' => $outstanding,
+                    ]);
+                }
+                $staleRows[] = $row;
+            }
+        }
+        $this->sheets->deleteRows($tab, $staleRows);
+
+        return count($desired);
+    }
+
+    /** @param array<string,mixed> $record @param array<string,int> $map */
+    private function orderedRow(array $record, array $map): array
+    {
+        $row = array_fill(0, max($map) + 1, '');
+        foreach ($map as $field => $index) {
+            $row[$index] = $this->cell($record[$field] ?? null);
+        }
+
+        return $row;
+    }
+
+    private function cell(mixed $value): mixed
+    {
+        if (is_bool($value)) {
+            return $value ? 'TRUE' : 'FALSE';
+        }
+
+        return $value ?? '';
+    }
+
+    /** @param array<int,mixed> $headers @return array<string,int> */
+    private function mapForTab(string $tab, array $headers): array
+    {
+        try {
+            return $this->schema->map($headers);
+        } catch (\RuntimeException $exception) {
+            throw new \RuntimeException(
+                "Google Sheet tab [{$tab}] has an invalid header row: {$exception->getMessage()}",
+                previous: $exception,
+            );
+        }
+    }
+
+    /** @param array<int,array<int,mixed>> $masterValues @param array<int,array<int,array<int,mixed>>> $brandSheets */
+    private function backupBeforePublish(string $masterTab, array $masterValues, array $brandSheets): void
+    {
+        $tabs = [$masterTab => $masterValues];
+        foreach ($this->collections->configured() as $collection) {
+            $tabs[$collection->google_sheet_tab_name] = $brandSheets[$collection->id] ?? [];
+        }
+        $name = now()->format('Y-m-d_His_u').'_'.Str::uuid().'.json';
+        Storage::disk('local')->put(
+            'procurement-sheet-backups/'.$name,
+            json_encode(['captured_at' => now()->toIso8601String(), 'tabs' => $tabs], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
+        );
+    }
+}

@@ -4,11 +4,14 @@ namespace App\Jobs;
 
 use App\Models\ProcurementPredictionRun;
 use App\Models\ProductMovementReportRun;
+use App\Services\GoogleSheets\ProcurementSheetSyncService;
+use App\Services\ProcurementIncomingStockService;
 use App\Services\ProcurementPythonRunner;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -18,16 +21,30 @@ final class RunProcurementPipelineJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 14400;
+
     public int $tries = 1;
 
-    public function __construct(public readonly int $runId)
+    public function __construct(public readonly int $runId) {}
+
+    public function middleware(): array
     {
+        return [
+            (new WithoutOverlapping('procurement-cycle'))
+                ->shared()
+                ->withPrefix('')
+                ->expireAfter((int) config('google_sheets.lock_seconds', 14400)),
+        ];
     }
 
-    public function handle(ProcurementPythonRunner $runner): void
-    {
+    public function handle(
+        ProcurementPythonRunner $runner,
+        ?ProcurementIncomingStockService $incomingStock = null,
+        ?ProcurementSheetSyncService $sheets = null,
+    ): void {
+        $incomingStock ??= app(ProcurementIncomingStockService::class);
+        $sheets ??= app(ProcurementSheetSyncService::class);
         $run = ProcurementPredictionRun::query()->find($this->runId);
-        if (!$run instanceof ProcurementPredictionRun || $run->status === ProcurementPredictionRun::STATUS_COMPLETED) {
+        if (! $run instanceof ProcurementPredictionRun || $run->status === ProcurementPredictionRun::STATUS_COMPLETED) {
             return;
         }
 
@@ -39,8 +56,11 @@ final class RunProcurementPipelineJob implements ShouldQueue
         ])->save();
 
         try {
+            $sheets->pullHumanInputs();
+            $incomingStock->snapshotForRun($run);
+
             $movementRun = $run->movementRun;
-            if (!$movementRun instanceof ProductMovementReportRun) {
+            if (! $movementRun instanceof ProductMovementReportRun) {
                 throw new \RuntimeException('The procurement run has no Product Movement snapshot.');
             }
 
@@ -56,6 +76,26 @@ final class RunProcurementPipelineJob implements ShouldQueue
             $run->refresh();
             if ($run->status !== ProcurementPredictionRun::STATUS_COMPLETED) {
                 throw new \RuntimeException('Python completed without publishing a complete prediction run to the CMS.');
+            }
+
+            $incomingStock->markRunUsed($run);
+            if ($sheets->enabled()) {
+                try {
+                    $sheets->publish();
+                    $run->forceFill([
+                        'sheets_published_at' => now(),
+                        'sheet_publish_status' => 'completed',
+                        'sheet_publish_error' => null,
+                    ])->save();
+                } catch (Throwable $sheetException) {
+                    $run->forceFill([
+                        'sheet_publish_status' => 'failed',
+                        'sheet_publish_error' => $this->summarizeError($sheetException),
+                    ])->save();
+                    Log::error('Procurement Google Sheet publishing failed', [
+                        'run_id' => $run->id, 'error' => $sheetException->getMessage(),
+                    ]);
+                }
             }
 
             Log::info('Procurement prediction completed', [
@@ -90,7 +130,7 @@ final class RunProcurementPipelineJob implements ShouldQueue
         }
 
         return class_basename($exception)
-            . ": output truncated; the final error was:\n"
-            . mb_substr($message, -11500);
+            .": output truncated; the final error was:\n"
+            .mb_substr($message, -11500);
     }
 }
