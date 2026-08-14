@@ -45,6 +45,53 @@ it('normalizes blank phases calculates totals audits changes and snapshots them'
         ->and($run->fresh()?->incoming_stock_input_hash)->not->toBeNull();
 });
 
+it('counts only complete supplier order phases while preserving raw quantities', function (
+    ?string $orderId,
+    mixed $eta,
+    int $expectedConfirmed,
+): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    $stock = app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
+        'ignore' => false,
+        'quantity_on_order_phase_1' => 100,
+        'order_id_phase_1' => $orderId,
+        'eta_date_phase_1' => $eta,
+        'quantity_on_order_phase_2' => 0,
+        'quantity_on_order_phase_3' => 0,
+    ], 'livi-road');
+
+    expect($stock->quantity_on_order_phase_1)->toBe(100)
+        ->and($stock->order_id_phase_1)->toBe($orderId)
+        ->and($stock->confirmed_quantity_on_order_phase_1)->toBe($expectedConfirmed)
+        ->and($stock->total_confirmed_quantity_on_order)->toBe($expectedConfirmed);
+})->with([
+    'complete order' => ['PO-123', '2026-10-01', 100],
+    'missing order ID' => [null, '2026-10-01', 0],
+    'missing ETA' => ['PO-123', null, 0],
+    'quantity only' => [null, null, 0],
+]);
+
+it('normalizes Google serial dates and snapshots ignore plus complete phase details', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
+        'ignore' => 'TRUE',
+        'quantity_on_order_phase_1' => 100,
+        'order_id_phase_1' => 'PO-123-A',
+        'eta_date_phase_1' => 46301,
+        'quantity_on_order_phase_2' => 0,
+        'quantity_on_order_phase_3' => 0,
+    ], 'livi-road');
+    $run = procurementSheetRun();
+    app(ProcurementIncomingStockService::class)->snapshotForRun($run);
+    $input = $run->incomingStockInputs()->where('variant_id', $variant->id)->firstOrFail();
+
+    expect($input->ignore)->toBeTrue()
+        ->and($input->order_id_phase_1)->toBe('PO-123-A')
+        ->and($input->eta_date_phase_1->toDateString())->toBe('2026-10-06')
+        ->and($input->confirmed_quantity_on_order_phase_1)->toBe(100)
+        ->and($input->procurement_actioned)->toBeTrue();
+});
+
 it('serves the immutable incoming-stock snapshot through the protected analytics feed', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
@@ -64,9 +111,10 @@ it('serves the immutable incoming-stock snapshot through the protected analytics
     $response->assertOk();
     expect($response->streamedContent())
         ->toContain('quantity_on_order_phase_1')
+        ->toContain('total_confirmed_quantity_on_order')
         ->toContain('total_quantity_on_order')
         ->toContain('LRB0004')
-        ->toContain(',60,0,0,60,60,livi-road,');
+        ->toContain(',FALSE,60,,,0,');
 });
 
 it('matches headers independent of case whitespace and column position', function (): void {
@@ -77,6 +125,17 @@ it('matches headers independent of case whitespace and column position', functio
 
     expect($map['last_updated'])->toBe(0)
         ->and($headers[$map['sku']])->toBe('SKU');
+});
+
+it('keeps the required procurement column groups in the exact report order', function (): void {
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    expect(array_slice($headers, 4, 5))->toBe([
+        'Currently on Sale', 'Sale Percentage', 'Current Inventory', 'Action Required', 'Ignore',
+    ])->and(array_slice($headers, 9, 9))->toBe([
+        'Quantity On Order - Phase 1', 'Order ID - Phase 1', 'ETA Date - Phase 1',
+        'Quantity On Order - Phase 2', 'Order ID - Phase 2', 'ETA Date - Phase 2',
+        'Quantity On Order - Phase 3', 'Order ID - Phase 3', 'ETA Date - Phase 3',
+    ])->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
 it('reads sorted brand rows by SKU and shuffled headers', function (): void {
@@ -144,7 +203,7 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $row[0] = 'LRB0004';
     $row[6] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:X")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AF")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -195,13 +254,13 @@ it('never writes human phase cells in an existing brand row but writes them to M
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:X")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AF")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:X")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AF")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
-            $row[6] = 60;
+            $row[9] = 60;
 
             return Http::response(['values' => [$headers, $row]]);
         }
@@ -222,7 +281,7 @@ it('never writes human phase cells in an existing brand row but writes them to M
     $resolver = new OperationalProcurementCollectionResolver;
     $sync = new ProcurementSheetSyncService(
         $client, new ProcurementSheetSchema, app(ProcurementIncomingStockService::class),
-        $resolver, new ProcurementSheetDatasetBuilder($resolver),
+        $resolver, new ProcurementSheetDatasetBuilder($resolver, app(\App\Services\SalePercentageCalculator::class)),
     );
 
     $sync->publish();
@@ -230,10 +289,17 @@ it('never writes human phase cells in an existing brand row but writes them to M
     $ranges = collect(Http::recorded())
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
-    expect($ranges)->toContain("'master-file'!A2:X2")
-        ->and($ranges)->not->toContain("'livi-road'!G2")
-        ->and($ranges)->not->toContain("'livi-road'!H2")
-        ->and($ranges)->not->toContain("'livi-road'!I2");
+    expect($ranges)->toContain("'master-file'!A2:AF2")
+        ->and($ranges)->not->toContain("'livi-road'!I2")
+        ->and($ranges)->not->toContain("'livi-road'!J2")
+        ->and($ranges)->not->toContain("'livi-road'!K2")
+        ->and($ranges)->not->toContain("'livi-road'!L2")
+        ->and($ranges)->not->toContain("'livi-road'!M2")
+        ->and($ranges)->not->toContain("'livi-road'!N2")
+        ->and($ranges)->not->toContain("'livi-road'!O2")
+        ->and($ranges)->not->toContain("'livi-road'!P2")
+        ->and($ranges)->not->toContain("'livi-road'!Q2")
+        ->and($ranges)->not->toContain("'livi-road'!R2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -265,6 +331,7 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
         'quantity_on_order_phase_1' => 4, 'quantity_on_order_phase_2' => 0,
         'quantity_on_order_phase_3' => 0,
+        'order_id_phase_1' => 'PO-123', 'eta_date_phase_1' => '2026-10-01',
     ], 'livi-road');
     $run = procurementSheetRun();
     app(ProcurementIncomingStockService::class)->snapshotForRun($run);
@@ -284,14 +351,39 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
         ->and($record['projected_inventory_position'])->toBe(19);
 });
 
+it('uses the shared CMS sale percentage calculation in procurement sheets', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'price' => 75, 'compare_at_price' => 100,
+    ])->save());
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'LRB0004');
+    expect($record['currently_on_sale'])->toBeTrue()
+        ->and($record['sale_percentage'])->toBe(25.0);
+
+    Variant::withoutEvents(fn () => $variant->forceFill(['compare_at_price' => null])->save());
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'LRB0004');
+    expect($record['currently_on_sale'])->toBeFalse()
+        ->and($record['sale_percentage'])->toBeNull();
+});
+
 it('persists the complete ML incoming-stock prediction contract', function (): void {
     $run = procurementSheetRun();
     $payload = procurementSheetPredictionPayload($run);
     $payload['predictions'][0] = array_merge($payload['predictions'][0], [
         'quantity_on_order_phase_1' => 60,
+        'order_id_phase_1' => 'PO-123',
+        'eta_date_phase_1' => '2026-10-01',
+        'confirmed_quantity_on_order_phase_1' => 60,
         'quantity_on_order_phase_2' => 30,
         'quantity_on_order_phase_3' => 0,
         'total_quantity_on_order' => 90,
+        'total_confirmed_quantity_on_order' => 60,
         'projected_inventory_position' => 90,
         'recommended_order_before_incoming_stock' => 124,
         'additional_order_required' => 34,
@@ -302,9 +394,28 @@ it('persists the complete ML incoming-stock prediction contract', function (): v
     $saved = app(ProcurementPredictionIngestService::class)->persist($payload);
     $prediction = $saved->predictions()->firstOrFail();
     expect($prediction->total_quantity_on_order)->toBe(90)
+        ->and($prediction->total_confirmed_quantity_on_order)->toBe(60)
+        ->and($prediction->procurement_actioned)->toBeTrue()
         ->and($prediction->projected_inventory_position)->toBe(90)
         ->and($prediction->recommended_order_before_incoming_stock)->toBe(124)
         ->and($prediction->additional_order_required)->toBe(34);
+});
+
+it('enforces zero procurement recommendations for ignored prediction rows', function (): void {
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0]['ignore'] = true;
+    $payload['predictions'][0]['recommended_order_before_incoming_stock'] = 100;
+    $payload['predictions'][0]['additional_order_required'] = 100;
+
+    $prediction = app(ProcurementPredictionIngestService::class)->persist($payload)
+        ->predictions()->firstOrFail();
+
+    expect($prediction->ignore)->toBeTrue()
+        ->and($prediction->current_inventory)->toBeNull()
+        ->and($prediction->action_status)->toBe('NO_ACTION')
+        ->and($prediction->additional_order_required)->toBe(0)
+        ->and($prediction->recommended_order_before_incoming_stock)->toBe(0);
 });
 
 it('does not double count an order phase after stock is received into Shopify inventory', function (): void {
@@ -388,6 +499,7 @@ function procurementSheetPredictionPayload(ProcurementPredictionRun $run): array
             'shopify_variant_id' => 'gid://shopify/ProductVariant/LRB0004',
             'sku' => 'LRB0004', 'attention_horizon_days' => 21,
             'lead_time_days_used' => 56, 'lead_time_source' => 'GLOBAL_DEFAULT',
+            'ignore' => false,
             'preliminary_order_quantity' => 34, 'currently_on_sale' => false,
             'action_status' => 'ORDER_NOW', 'generated_at' => now()->toIso8601String(),
         ]],
@@ -408,6 +520,6 @@ function procurementTestSheetSync(): ProcurementSheetSyncService
     return new ProcurementSheetSyncService(
         new GoogleSheetsClient($tokens), new ProcurementSheetSchema,
         app(ProcurementIncomingStockService::class), $resolver,
-        new ProcurementSheetDatasetBuilder($resolver),
+        new ProcurementSheetDatasetBuilder($resolver, app(\App\Services\SalePercentageCalculator::class)),
     );
 }

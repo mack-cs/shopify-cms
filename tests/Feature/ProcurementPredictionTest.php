@@ -92,11 +92,21 @@ it('rolls back prediction replacement when persistence fails', function (): void
     ProcurementPrediction::query()->create(array_merge(predictionPayload($run)['predictions'][0], [
         'procurement_prediction_run_id' => $run->id,
     ]));
-    DB::statement("CREATE TRIGGER fail_procurement_prediction_insert BEFORE INSERT ON procurement_predictions BEGIN SELECT RAISE(FAIL, 'forced persistence failure'); END");
+    $trigger = DB::getDriverName() === 'mysql'
+        ? "CREATE TRIGGER fail_procurement_prediction_insert AFTER DELETE ON procurement_predictions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced persistence failure'"
+        : "CREATE TRIGGER fail_procurement_prediction_insert AFTER DELETE ON procurement_predictions BEGIN SELECT RAISE(ABORT, 'forced persistence failure'); END";
+    DB::statement($trigger);
     $payload = predictionPayload($run);
+    $expectedException = DB::getDriverName() === 'mysql'
+        ? \PDOException::class
+        : \Illuminate\Database\QueryException::class;
 
-    expect(fn () => app(ProcurementPredictionIngestService::class)->persist($payload))
-        ->toThrow(\Illuminate\Database\QueryException::class);
+    try {
+        expect(fn () => app(ProcurementPredictionIngestService::class)->persist($payload))
+            ->toThrow($expectedException);
+    } finally {
+        DB::statement('DROP TRIGGER IF EXISTS fail_procurement_prediction_insert');
+    }
 
     expect(ProcurementPrediction::query()->where('procurement_prediction_run_id', $run->id)->count())->toBe(1)
         ->and($run->fresh()?->status)->toBe(ProcurementPredictionRun::STATUS_RUNNING);
@@ -288,6 +298,7 @@ function predictionPayload(ProcurementPredictionRun $run): array
             'predicted_weekly_demand' => 3,
             'selected_prediction_method' => 'weighted_recent_demand',
             'current_inventory' => 5,
+            'ignore' => false,
             'attention_horizon_days' => 21,
             'lead_time_days_used' => 56,
             'lead_time_source' => 'GLOBAL_DEFAULT',

@@ -38,7 +38,10 @@ final class ProcurementPredictionResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->defaultSort('action_status')
+            ->modifyQueryUsing(fn (Builder $query): Builder => $query
+                ->orderByRaw("CASE action_status WHEN 'ORDER_NOW' THEN 0 WHEN 'ATTENTION_WITHIN_3_WEEKS' THEN 1 WHEN 'MANUAL_REVIEW' THEN 2 WHEN 'INSUFFICIENT_DATA' THEN 3 WHEN 'MONITOR' THEN 4 WHEN 'NO_ACTION' THEN 5 ELSE 99 END")
+                ->orderBy('procurement_actioned')
+                ->orderBy('sku'))
             ->columns([
                 TextColumn::make('sku')->searchable()->sortable(),
                 TextColumn::make('product_name')->label('Product')->searchable()->wrap()->sortable(),
@@ -46,7 +49,24 @@ final class ProcurementPredictionResource extends Resource
                 TextColumn::make('vendor')->searchable()->sortable(),
                 TextColumn::make('cms_movement_classification')->label('Movement')->badge()->sortable(),
                 TextColumn::make('current_inventory')->label('Current Inventory')->numeric()->sortable(),
+                TextColumn::make('action_status')->label('Action Required')->badge()
+                    ->formatStateUsing(fn (string $state): string => str($state)->replace('_', ' ')->title()->toString())
+                    ->color(fn (string $state): string => match ($state) {
+                        'ORDER_NOW' => 'danger', 'ATTENTION_WITHIN_3_WEEKS' => 'warning',
+                        'MONITOR' => 'info', 'NO_ACTION' => 'success', default => 'gray',
+                    })->sortable(),
+                TextColumn::make('ignore')->label('Ignore')->formatStateUsing(fn (bool $state): string => $state ? 'Yes' : 'No')->badge(),
+                TextColumn::make('quantity_on_order_phase_1')->label('Phase 1 Qty')->numeric()->toggleable(),
+                TextColumn::make('order_id_phase_1')->label('Phase 1 Order ID')->placeholder('-')->toggleable(),
+                TextColumn::make('eta_date_phase_1')->label('Phase 1 ETA')->date('d M Y')->placeholder('-')->toggleable(),
+                TextColumn::make('quantity_on_order_phase_2')->label('Phase 2 Qty')->numeric()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('order_id_phase_2')->label('Phase 2 Order ID')->placeholder('-')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('eta_date_phase_2')->label('Phase 2 ETA')->date('d M Y')->placeholder('-')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('quantity_on_order_phase_3')->label('Phase 3 Qty')->numeric()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('order_id_phase_3')->label('Phase 3 Order ID')->placeholder('-')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('eta_date_phase_3')->label('Phase 3 ETA')->date('d M Y')->placeholder('-')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('total_quantity_on_order')->label('Total On Order')->numeric()->sortable(),
+                TextColumn::make('total_confirmed_quantity_on_order')->label('Confirmed On Order')->numeric()->sortable(),
                 TextColumn::make('projected_inventory_position')->label('Projected Inventory')->numeric()->sortable(),
                 TextColumn::make('average_weekly_demand')->label('Average Weekly Demand')->numeric(2)->sortable(),
                 TextColumn::make('predicted_weekly_demand')->label('Predicted Weekly Demand')->numeric(2)->sortable(),
@@ -56,12 +76,7 @@ final class ProcurementPredictionResource extends Resource
                 TextColumn::make('currently_on_sale')->label('On Sale')
                     ->formatStateUsing(fn (bool $state): string => $state ? 'Yes' : 'No')
                     ->badge()->color(fn (bool $state): string => $state ? 'warning' : 'gray')->sortable(),
-                TextColumn::make('action_status')->label('Action Required')->badge()
-                    ->formatStateUsing(fn (string $state): string => str($state)->replace('_', ' ')->title()->toString())
-                    ->color(fn (string $state): string => match ($state) {
-                        'ORDER_NOW' => 'danger', 'ATTENTION_WITHIN_3_WEEKS' => 'warning',
-                        'MONITOR' => 'info', 'NO_ACTION' => 'success', default => 'gray',
-                    })->sortable(),
+                TextColumn::make('sale_percentage')->label('Sale %')->numeric(2)->suffix('%')->placeholder('-'),
                 TextColumn::make('recommended_order_before_incoming_stock')
                     ->label('Recommended Before Incoming')->numeric()->sortable()->toggleable(),
                 TextColumn::make('additional_order_required')->label('Additional Order Required')->numeric()->sortable(),

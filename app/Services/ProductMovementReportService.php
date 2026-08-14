@@ -586,7 +586,7 @@ final class ProductMovementReportService
         $price = $variant->price === null ? null : (float) $variant->price;
         $compareAt = $variant->compare_at_price === null ? null : (float) $variant->compare_at_price;
         $onSale = $price !== null && $compareAt !== null && $compareAt > $price;
-        $discount = $onSale && $compareAt > 0 ? (($compareAt - $price) / $compareAt) * 100 : null;
+        $discount = app(SalePercentageCalculator::class)->percentage($price, $compareAt);
         $averageMonthly = $net / $months;
         $average30Days = $periodDays > 0 ? ($net / $periodDays) * 30 : 0;
         $score = $this->movementScore(

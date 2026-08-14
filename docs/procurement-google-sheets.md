@@ -8,7 +8,7 @@ Laravel is the only orchestrator. Shopify and Google Sheets write state into Lar
 2. Create a service account and JSON key.
 3. Share the procurement workbook with the JSON key's `client_email` as Editor.
 4. Permit that service account to edit the workbook's protected system ranges.
-5. Keep human users restricted to the three phase columns in brand tabs.
+5. Keep human users restricted to `Ignore` plus each phase's Quantity, Order ID, and ETA columns in brand tabs.
 6. Store the key outside the repository and configure its absolute path or base64 value.
 
 ```dotenv
@@ -62,13 +62,21 @@ The scheduled `procurement:run` sequence is:
 6. Python atomically publishes predictions to Laravel.
 7. Laravel publishes Master and brand system-owned cells.
 
+## Supplier-order workflow
+
+The user-owned fields are `Ignore` and the Quantity, Order ID, and ETA for each of the three phases. Laravel always preserves the raw values. A phase contributes incoming stock to predictions only when quantity is greater than zero and both Order ID and ETA are present. Existing historical quantities therefore remain visible but count as zero confirmed incoming until users complete those fields.
+
+`Ignore = TRUE` marks an end-of-life SKU. Inventory remains visible and sellable, but the procurement pipeline forces its recommendation to `NO_ACTION` with zero additional order quantity. Archiving remains a separate established CMS workflow.
+
+The report layout is 32 columns (`A:AF`). `Action Required` and `Ignore` follow `Current Inventory`; `Sale Percentage` follows `Currently on Sale`; each supplier phase is grouped Quantity, Order ID, ETA; and `Last Updated` remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
+
 A Google write failure is stored on the completed prediction run and does not remove the successful report. Retry output with `php artisan procurement:sheets-publish`.
 
 ## LRB0004 lifecycle check
 
-1. Set Shopify inventory to `0` and Phase 1 to `60` in the appropriate brand tab.
+1. Set Shopify inventory to `0`, Phase 1 quantity to `60`, a supplier Order ID, and an ETA in the appropriate brand tab.
 2. Run `php artisan procurement:run` and process the `procurement` queue.
-3. Confirm Laravel and the authenticated incoming-stock CSV contain phases `60,0,0` and total `60`.
+3. Confirm Laravel and the authenticated incoming-stock CSV retain raw phases `60,0,0` and confirmed total `60`.
 4. Confirm the prediction and both Sheet views use projected inventory `60`.
 5. Before receiving inventory, set Phase 1 to `0`; then receive `60` into Shopify.
 6. Run the Shopify inventory synchronization and procurement cycle again.

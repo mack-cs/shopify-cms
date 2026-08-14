@@ -8,11 +8,15 @@ use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
 use App\Models\Variant;
 use App\Services\OperationalProcurementCollectionResolver;
+use App\Services\SalePercentageCalculator;
 use Illuminate\Support\Facades\Log;
 
 final class ProcurementSheetDatasetBuilder
 {
-    public function __construct(private readonly OperationalProcurementCollectionResolver $collections) {}
+    public function __construct(
+        private readonly OperationalProcurementCollectionResolver $collections,
+        private readonly SalePercentageCalculator $salePercentages,
+    ) {}
 
     /** @return array<int,array<string,mixed>> */
     public function records(): array
@@ -48,6 +52,7 @@ final class ProcurementSheetDatasetBuilder
                     $phase2 = (int) ($stock?->quantity_on_order_phase_2 ?? 0);
                     $phase3 = (int) ($stock?->quantity_on_order_phase_3 ?? 0);
                     $total = $phase1 + $phase2 + $phase3;
+                    $confirmedTotal = (int) ($stock?->total_confirmed_quantity_on_order ?? 0);
                     $current = $variant->inventory_tracked === true
                         ? ($variant->current_inventory_quantity ?? $variant->inventory_qty)
                         : null;
@@ -64,20 +69,32 @@ final class ProcurementSheetDatasetBuilder
                     $records[] = [
                         '_collection_id' => $collectionId,
                         '_prediction_stale' => $predictionStale,
+                        '_procurement_actioned' => $confirmedTotal > 0,
                         'sku' => $sku,
                         'product' => $variant->product?->title,
                         'vendor' => $variant->product?->vendor,
                         'product_type' => $variant->product?->type,
                         'currently_on_sale' => $variant->compare_at_price !== null
                             && (float) $variant->compare_at_price > (float) $variant->price,
+                        'sale_percentage' => $this->salePercentages->percentage(
+                            $variant->price, $variant->compare_at_price
+                        ),
                         'current_inventory' => $current,
+                        'action_required' => $prediction?->action_status,
+                        'ignore' => (bool) ($stock?->ignore ?? false),
                         'quantity_on_order_phase_1' => $phase1,
+                        'order_id_phase_1' => $stock?->order_id_phase_1,
+                        'eta_date_phase_1' => $stock?->eta_date_phase_1?->toDateString(),
                         'quantity_on_order_phase_2' => $phase2,
+                        'order_id_phase_2' => $stock?->order_id_phase_2,
+                        'eta_date_phase_2' => $stock?->eta_date_phase_2?->toDateString(),
                         'quantity_on_order_phase_3' => $phase3,
+                        'order_id_phase_3' => $stock?->order_id_phase_3,
+                        'eta_date_phase_3' => $stock?->eta_date_phase_3?->toDateString(),
                         'total_quantity_on_order' => $total,
                         // This operational column must move with live inventory even
                         // between prediction runs; the ML value is a point-in-time snapshot.
-                        'projected_inventory_position' => ($current ?? 0) + $total,
+                        'projected_inventory_position' => ($current ?? 0) + $confirmedTotal,
                         'predicted_weekly_demand' => $prediction?->predicted_weekly_demand,
                         'estimated_days_of_stock_remaining' => $prediction?->estimated_days_of_stock_remaining,
                         'predicted_runout_date' => $prediction?->predicted_runout_date?->toDateString(),
@@ -88,7 +105,6 @@ final class ProcurementSheetDatasetBuilder
                             ?? $prediction?->preliminary_order_quantity,
                         'cms_movement_classification' => $prediction?->cms_movement_classification
                             ?? $movementRow?->movement_classification,
-                        'action_required' => $prediction?->action_status,
                         'action_reason' => $prediction?->action_reason,
                         'stockout_before_incoming_arrival' => (bool) ($prediction?->stockout_before_incoming_arrival ?? false),
                         'incoming_stock_covers_requirement' => (bool) ($prediction?->incoming_stock_covers_requirement ?? false),
@@ -100,6 +116,22 @@ final class ProcurementSheetDatasetBuilder
                     ];
                 }
             });
+
+        $priority = [
+            'ORDER_NOW' => 0, 'ATTENTION_WITHIN_3_WEEKS' => 1, 'MANUAL_REVIEW' => 2,
+            'INSUFFICIENT_DATA' => 3, 'MONITOR' => 4, 'NO_ACTION' => 5,
+        ];
+        usort($records, static function (array $left, array $right) use ($priority): int {
+            return [
+                $priority[$left['action_required'] ?? ''] ?? 99,
+                (int) ($left['_procurement_actioned'] ?? false),
+                $left['sku'],
+            ] <=> [
+                $priority[$right['action_required'] ?? ''] ?? 99,
+                (int) ($right['_procurement_actioned'] ?? false),
+                $right['sku'],
+            ];
+        });
 
         return $records;
     }

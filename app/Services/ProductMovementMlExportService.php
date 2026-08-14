@@ -65,7 +65,7 @@ final class ProductMovementMlExportService
             'out_of_stock_days', 'units_sold_per_30_in_stock_days',
             'current_inventory', 'opening_inventory', 'average_inventory', 'closing_inventory',
             'movement_score', 'movement_classification', 'movement_reason',
-            'currently_on_sale', 'price', 'compare_at_price',
+            'currently_on_sale', 'discount_percentage', 'price', 'compare_at_price',
             'data_quality_status', 'data_quality_note', 'generated_at', 'source_version',
             'direct_net_units_sold', 'stack_attributed_net_units', 'movement_product_kind',
         ];
@@ -191,6 +191,7 @@ final class ProductMovementMlExportService
             $this->standardClassification((string) $row->movement_classification),
             $row->manager_reason,
             $row->currently_on_sale ? 'true' : 'false',
+            $row->discount_percentage,
             $row->current_price,
             $row->compare_at_price,
             $qualityNote === '' ? 'OK' : 'WARNING',

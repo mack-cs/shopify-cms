@@ -11,10 +11,18 @@ final class ProcurementIncomingStock extends Model
     protected $guarded = [];
 
     protected $casts = [
+        'ignore' => 'boolean',
         'quantity_on_order_phase_1' => 'integer',
         'quantity_on_order_phase_2' => 'integer',
         'quantity_on_order_phase_3' => 'integer',
+        'confirmed_quantity_on_order_phase_1' => 'integer',
+        'confirmed_quantity_on_order_phase_2' => 'integer',
+        'confirmed_quantity_on_order_phase_3' => 'integer',
         'total_quantity_on_order' => 'integer',
+        'total_confirmed_quantity_on_order' => 'integer',
+        'eta_date_phase_1' => 'date:Y-m-d',
+        'eta_date_phase_2' => 'date:Y-m-d',
+        'eta_date_phase_3' => 'date:Y-m-d',
         'detected_at' => 'datetime',
         'input_changed_at' => 'datetime',
     ];
@@ -43,5 +51,10 @@ final class ProcurementIncomingStock extends Model
         return $this->input_changed_at !== null
             && ($run->incoming_stock_snapshot_at === null
                 || $this->input_changed_at->gt($run->incoming_stock_snapshot_at));
+    }
+
+    public function hasConfirmedOrder(): bool
+    {
+        return (int) $this->total_confirmed_quantity_on_order > 0;
     }
 }

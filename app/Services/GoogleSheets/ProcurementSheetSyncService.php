@@ -41,7 +41,7 @@ final class ProcurementSheetSyncService
 
         foreach ($this->collections->configured() as $collection) {
             $tab = trim((string) $collection->google_sheet_tab_name);
-            $values = $this->sheets->values($tab);
+            $values = $this->currentLayoutValues($tab);
             $headers = array_shift($values) ?? [];
             $map = $this->mapForTab($tab, $headers);
             $seen = [];
@@ -80,7 +80,8 @@ final class ProcurementSheetSyncService
                 }
                 $pending[] = [
                     'variant' => $variant,
-                    'phases' => [
+                    'workflow' => [
+                        'ignore' => $this->incomingStock->normalizeBoolean($row[$map['ignore']] ?? null),
                         'quantity_on_order_phase_1' => $this->incomingStock->normalizeQuantity(
                             $row[$map['quantity_on_order_phase_1']] ?? null,
                             'quantity_on_order_phase_1'
@@ -93,6 +94,12 @@ final class ProcurementSheetSyncService
                             $row[$map['quantity_on_order_phase_3']] ?? null,
                             'quantity_on_order_phase_3'
                         ),
+                        'order_id_phase_1' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_1']] ?? null),
+                        'eta_date_phase_1' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_1']] ?? null, 'eta_date_phase_1'),
+                        'order_id_phase_2' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_2']] ?? null),
+                        'eta_date_phase_2' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_2']] ?? null, 'eta_date_phase_2'),
+                        'order_id_phase_3' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_3']] ?? null),
+                        'eta_date_phase_3' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_3']] ?? null, 'eta_date_phase_3'),
                     ],
                     'tab' => $tab,
                     'row' => $offset + 2,
@@ -107,16 +114,12 @@ final class ProcurementSheetSyncService
                 /** @var Variant $variant */
                 $variant = $item['variant'];
                 $before = $variant->procurementIncomingStock;
-                $previous = [
-                    (int) ($before?->quantity_on_order_phase_1 ?? 0),
-                    (int) ($before?->quantity_on_order_phase_2 ?? 0),
-                    (int) ($before?->quantity_on_order_phase_3 ?? 0),
-                ];
-                $next = array_values($item['phases']);
+                $previous = $before?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
                 $this->incomingStock->updateFromSheet(
-                    $variant, $item['phases'], $item['tab'], $item['row']
+                    $variant, $item['workflow'], $item['tab'], $item['row']
                 );
-                if ($before === null || $previous !== $next) {
+                $after = $variant->procurementIncomingStock()->first()?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
+                if ($before === null || json_encode($previous) !== json_encode($after)) {
                     $stats['changed']++;
                 }
             }
@@ -144,12 +147,12 @@ final class ProcurementSheetSyncService
         }
 
         $masterTab = trim((string) config('google_sheets.master_tab', 'master-file'));
-        $masterValues = $this->sheets->values($masterTab);
+        $masterValues = $this->currentLayoutValues($masterTab);
         $masterMap = $this->mapForTab($masterTab, array_shift($masterValues) ?? []);
         $brandSheets = [];
         foreach ($this->collections->configured() as $collection) {
             $tab = trim((string) $collection->google_sheet_tab_name);
-            $values = $this->sheets->values($tab);
+            $values = $this->currentLayoutValues($tab);
             $headers = $values[0] ?? [];
             $this->mapForTab($tab, $headers);
             $brandSheets[$collection->id] = $values;
@@ -262,6 +265,25 @@ final class ProcurementSheetSyncService
                 previous: $exception,
             );
         }
+    }
+
+    /** @return array<int,array<int,mixed>> */
+    private function currentLayoutValues(string $tab): array
+    {
+        $values = $this->sheets->values($tab);
+        if ($this->schema->isCurrentLayout($values[0] ?? [])) {
+            return $values;
+        }
+
+        $upgraded = $this->schema->upgradeLayout($values);
+        $name = now()->format('Y-m-d_His_u').'_layout_'.Str::slug($tab).'_'.Str::uuid().'.json';
+        Storage::disk('local')->put(
+            'procurement-sheet-backups/'.$name,
+            json_encode(['captured_at' => now()->toIso8601String(), 'tabs' => [$tab => $values]], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
+        );
+        $this->sheets->replaceAll($tab, $upgraded, count($values));
+
+        return $upgraded;
     }
 
     /** @param array<int,array<int,mixed>> $masterValues @param array<int,array<int,array<int,mixed>>> $brandSheets */

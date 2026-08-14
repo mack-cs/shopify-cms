@@ -680,21 +680,7 @@ HTML;
 
     private function discountPercentage(mixed $salePrice, mixed $compareAtPrice): ?string
     {
-        if (!is_numeric((string) $salePrice) || !is_numeric((string) $compareAtPrice)) {
-            return null;
-        }
-
-        $compareAtPrice = (float) $compareAtPrice;
-        if ($compareAtPrice <= 0) {
-            return null;
-        }
-
-        return number_format(
-            (($compareAtPrice - (float) $salePrice) / $compareAtPrice) * 100,
-            2,
-            '.',
-            ''
-        ) . '%';
+        return app(\App\Services\SalePercentageCalculator::class)->formatted($salePrice, $compareAtPrice);
     }
 
     private function activeProductLabel(mixed $status): string

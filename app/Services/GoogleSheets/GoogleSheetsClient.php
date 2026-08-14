@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Http;
 final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
-    private const DATA_COLUMNS = 'A:X';
+    private const DATA_COLUMNS = 'A:AF';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 
@@ -49,7 +49,7 @@ final class GoogleSheetsClient
     {
         if ($rows !== []) {
             $this->batchUpdateValues([[
-                'range' => $this->range($tab, 'A2:X'.(count($rows) + 1)),
+                'range' => $this->range($tab, 'A2:AF'.(count($rows) + 1)),
                 'values' => $rows,
             ]]);
         }
@@ -57,8 +57,26 @@ final class GoogleSheetsClient
             $firstStaleRow = count($rows) + 2;
             $lastExistingRow = $existingRowCount + 1;
             $clear = $this->request()->withBody('{}', 'application/json')
-                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:X{$lastExistingRow}")).':clear');
+                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AF{$lastExistingRow}")).':clear');
             $this->ensureSuccess($clear->successful(), $clear->body(), 'clear stale Master rows');
+        }
+    }
+
+    /** @param array<int,array<int,mixed>> $rows */
+    public function replaceAll(string $tab, array $rows, int $existingRowCount): void
+    {
+        if ($rows !== []) {
+            $this->batchUpdateValues([[
+                'range' => $this->range($tab, 'A1:AF'.count($rows)),
+                'values' => $rows,
+            ]]);
+        }
+        if ($existingRowCount > count($rows)) {
+            $firstStaleRow = count($rows) + 1;
+            $clear = $this->request()->withBody('{}', 'application/json')->post(
+                $this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AF{$existingRowCount}")).':clear'
+            );
+            $this->ensureSuccess($clear->successful(), $clear->body(), 'clear stale schema-upgrade rows');
         }
     }
 

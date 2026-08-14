@@ -49,10 +49,23 @@ final class ProcurementPredictionIngestService
             'predictions.*.predicted_weekly_demand' => ['nullable', 'numeric'],
             'predictions.*.selected_prediction_method' => ['nullable', 'string', 'max:64'],
             'predictions.*.current_inventory' => ['nullable', 'numeric'],
+            'predictions.*.ignore' => ['required', 'boolean'],
+            'predictions.*.sale_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'predictions.*.quantity_on_order_phase_1' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.order_id_phase_1' => ['nullable', 'string', 'max:255'],
+            'predictions.*.eta_date_phase_1' => ['nullable', 'date'],
+            'predictions.*.confirmed_quantity_on_order_phase_1' => ['nullable', 'integer', 'min:0'],
             'predictions.*.quantity_on_order_phase_2' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.order_id_phase_2' => ['nullable', 'string', 'max:255'],
+            'predictions.*.eta_date_phase_2' => ['nullable', 'date'],
+            'predictions.*.confirmed_quantity_on_order_phase_2' => ['nullable', 'integer', 'min:0'],
             'predictions.*.quantity_on_order_phase_3' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.order_id_phase_3' => ['nullable', 'string', 'max:255'],
+            'predictions.*.eta_date_phase_3' => ['nullable', 'date'],
+            'predictions.*.confirmed_quantity_on_order_phase_3' => ['nullable', 'integer', 'min:0'],
             'predictions.*.total_quantity_on_order' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.total_confirmed_quantity_on_order' => ['nullable', 'integer', 'min:0'],
+            'predictions.*.procurement_actioned' => ['nullable', 'boolean'],
             'predictions.*.quantity_on_order' => ['nullable', 'integer', 'min:0'],
             'predictions.*.projected_inventory_position' => ['nullable', 'numeric'],
             'predictions.*.recommended_order_before_incoming_stock' => ['nullable', 'numeric'],
@@ -151,9 +164,15 @@ final class ProcurementPredictionIngestService
             'sales_consistency', 'net_units_sold', 'average_weekly_demand',
             'units_sold_per_30_in_stock_days', 'ml_predicted_weekly_demand',
             'weighted_predicted_weekly_demand', 'predicted_weekly_demand',
-            'selected_prediction_method', 'current_inventory', 'in_stock_days', 'out_of_stock_days',
-            'quantity_on_order_phase_1', 'quantity_on_order_phase_2',
-            'quantity_on_order_phase_3', 'total_quantity_on_order',
+            'selected_prediction_method', 'current_inventory', 'ignore', 'sale_percentage',
+            'in_stock_days', 'out_of_stock_days',
+            'quantity_on_order_phase_1', 'order_id_phase_1', 'eta_date_phase_1',
+            'confirmed_quantity_on_order_phase_1',
+            'quantity_on_order_phase_2', 'order_id_phase_2', 'eta_date_phase_2',
+            'confirmed_quantity_on_order_phase_2',
+            'quantity_on_order_phase_3', 'order_id_phase_3', 'eta_date_phase_3',
+            'confirmed_quantity_on_order_phase_3',
+            'total_quantity_on_order', 'total_confirmed_quantity_on_order', 'procurement_actioned',
             'projected_inventory_position', 'recommended_order_before_incoming_stock',
             'additional_order_required', 'incoming_stock_covers_requirement',
             'stockout_before_incoming_arrival',
@@ -165,7 +184,7 @@ final class ProcurementPredictionIngestService
         ];
 
         $missing = array_values(array_diff([
-            'shopify_variant_id', 'sku', 'attention_horizon_days', 'lead_time_days_used',
+            'shopify_variant_id', 'sku', 'ignore', 'attention_horizon_days', 'lead_time_days_used',
             'lead_time_source', 'action_status', 'generated_at',
         ], array_keys($row)));
         if ($missing !== []) {
@@ -192,12 +211,46 @@ final class ProcurementPredictionIngestService
         $result['quantity_on_order_phase_2'] = $phase2;
         $result['quantity_on_order_phase_3'] = $phase3;
         $result['total_quantity_on_order'] = $phaseTotal;
+        $confirmed = [];
+        foreach ([1, 2, 3] as $phase) {
+            $quantity = (int) $result["quantity_on_order_phase_{$phase}"];
+            $orderId = trim((string) ($row["order_id_phase_{$phase}"] ?? ''));
+            $eta = $row["eta_date_phase_{$phase}"] ?? null;
+            $derived = $quantity > 0 && $orderId !== '' && $eta !== null ? $quantity : 0;
+            $provided = (int) ($row["confirmed_quantity_on_order_phase_{$phase}"] ?? $derived);
+            if ($provided !== $derived) {
+                throw ValidationException::withMessages([
+                    'predictions' => "Confirmed Phase {$phase} quantity is invalid for SKU [{$row['sku']}].",
+                ]);
+            }
+            $result["order_id_phase_{$phase}"] = $orderId === '' ? null : $orderId;
+            $result["eta_date_phase_{$phase}"] = $eta;
+            $result["confirmed_quantity_on_order_phase_{$phase}"] = $provided;
+            $confirmed[] = $provided;
+        }
+        $confirmedTotal = array_sum($confirmed);
+        if (array_key_exists('total_confirmed_quantity_on_order', $row)
+            && (int) $row['total_confirmed_quantity_on_order'] !== $confirmedTotal) {
+            throw ValidationException::withMessages([
+                'predictions' => "Confirmed incoming-stock total is invalid for SKU [{$row['sku']}].",
+            ]);
+        }
+        $result['ignore'] = (bool) $row['ignore'];
+        $result['total_confirmed_quantity_on_order'] = $confirmedTotal;
+        $result['procurement_actioned'] = $confirmedTotal > 0;
         $result['recommended_order_before_incoming_stock'] = $row['recommended_order_before_incoming_stock']
             ?? $row['recommended_order_qty_before_incoming_stock'] ?? null;
         $result['additional_order_required'] = $row['additional_order_required']
             ?? $row['preliminary_order_quantity'] ?? null;
         $result['incoming_stock_covers_requirement'] = (bool) ($row['incoming_stock_covers_requirement'] ?? false);
         $result['stockout_before_incoming_arrival'] = (bool) ($row['stockout_before_incoming_arrival'] ?? false);
+        if ($result['ignore']) {
+            $result['recommended_order_before_incoming_stock'] = 0;
+            $result['additional_order_required'] = 0;
+            $result['preliminary_order_quantity'] = 0;
+            $result['action_status'] = 'NO_ACTION';
+            $result['action_reason'] = 'SKU is marked Ignore / end of life; sell through remaining inventory and do not replenish.';
+        }
         $result['procurement_prediction_run_id'] = $runId;
         $result['created_at'] = now();
         $result['updated_at'] = now();
