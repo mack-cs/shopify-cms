@@ -51,7 +51,6 @@ final class ProcurementSheetDatasetBuilder
                     $phase1 = (int) ($stock?->quantity_on_order_phase_1 ?? 0);
                     $phase2 = (int) ($stock?->quantity_on_order_phase_2 ?? 0);
                     $phase3 = (int) ($stock?->quantity_on_order_phase_3 ?? 0);
-                    $total = $phase1 + $phase2 + $phase3;
                     $confirmedTotal = (int) ($stock?->total_confirmed_quantity_on_order ?? 0);
                     $current = $variant->inventory_tracked === true
                         ? ($variant->current_inventory_quantity ?? $variant->inventory_qty)
@@ -92,7 +91,10 @@ final class ProcurementSheetDatasetBuilder
                         'quantity_on_order_phase_3' => $phase3,
                         'order_id_phase_3' => $stock?->order_id_phase_3,
                         'eta_date_phase_3' => $stock?->eta_date_phase_3?->format('d/m/Y'),
-                        'total_quantity_on_order' => $total,
+                        // The report total is actionable incoming stock only. Raw phase
+                        // quantities remain visible, but require both Order ID and ETA
+                        // before they count toward this total or any prediction.
+                        'total_quantity_on_order' => $confirmedTotal,
                         // This operational column must move with live inventory even
                         // between prediction runs; the ML value is a point-in-time snapshot.
                         'projected_inventory_position' => ($current ?? 0) + $confirmedTotal,
