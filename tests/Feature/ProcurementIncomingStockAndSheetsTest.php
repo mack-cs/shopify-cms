@@ -130,12 +130,13 @@ it('matches headers independent of case whitespace and column position', functio
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect(array_slice($headers, 4, 5))->toBe([
-        'Currently on Sale', 'Sale Percentage', 'Current Inventory', 'Action Required', 'Ignore',
+        'Currently on Sale', 'Sale Percentage', 'Current Inventory', 'cms_movement_classification', 'Ignore',
     ])->and(array_slice($headers, 9, 9))->toBe([
         'Quantity On Order - Phase 1', 'Order ID - Phase 1', 'ETA Date - Phase 1',
         'Quantity On Order - Phase 2', 'Order ID - Phase 2', 'ETA Date - Phase 2',
         'Quantity On Order - Phase 3', 'Order ID - Phase 3', 'ETA Date - Phase 3',
-    ])->and($headers[array_key_last($headers)])->toBe('Last Updated');
+    ])->and($headers[27])->toBe('Action Required')
+        ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
 it('reads sorted brand rows by SKU and shuffled headers', function (): void {
@@ -265,7 +266,10 @@ it('never writes human phase cells in an existing brand row but writes them to M
             return Http::response(['values' => [$headers, $row]]);
         }
         if ($request->method() === 'GET') {
-            return Http::response(['sheets' => [['properties' => ['title' => 'livi-road', 'sheetId' => 1]]]]);
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
         }
 
         return Http::response(['ok' => true]);
@@ -336,19 +340,24 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
     $run = procurementSheetRun();
     app(ProcurementIncomingStockService::class)->snapshotForRun($run);
     app(ProcurementPredictionIngestService::class)->persist(procurementSheetPredictionPayload($run));
+    $run->predictions()->update(['predicted_runout_date' => '2026-08-16']);
     app(ProcurementIncomingStockService::class)->markRunUsed($run->fresh());
 
     Variant::withoutEvents(fn () => $variant->forceFill([
         'inventory_qty' => 15,
         'current_inventory_quantity' => 15,
         'current_available_quantity' => 15,
+        'inventory_last_synced_at' => '2026-10-02 14:35:00',
     ])->save());
 
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
 
     expect($record['current_inventory'])->toBe(15)
-        ->and($record['projected_inventory_position'])->toBe(19);
+        ->and($record['projected_inventory_position'])->toBe(19)
+        ->and($record['eta_date_phase_1'])->toBe('01/10/2026')
+        ->and($record['predicted_runout_date'])->toBe('16/08/2026')
+        ->and($record['last_updated'])->toStartWith('02/10/2026 ');
 });
 
 it('uses the shared CMS sale percentage calculation in procurement sheets', function (): void {

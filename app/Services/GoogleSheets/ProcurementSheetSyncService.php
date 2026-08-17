@@ -163,6 +163,7 @@ final class ProcurementSheetSyncService
             fn (array $record): array => $this->orderedRow($record, $masterMap),
             $records
         ), count($masterValues));
+        $this->formatDateColumns($masterTab, $masterMap);
 
         $brandRows = 0;
         foreach ($this->collections->configured() as $collection) {
@@ -175,6 +176,15 @@ final class ProcurementSheetSyncService
             'master_rows' => count($records), 'brand_rows' => $brandRows,
             'tabs' => $this->collections->configured()->count(),
         ];
+    }
+
+    /** @param array<string,int> $map */
+    private function formatDateColumns(string $tab, array $map): void
+    {
+        $this->sheets->formatDateColumns($tab, [
+            $map['eta_date_phase_1'], $map['eta_date_phase_2'], $map['eta_date_phase_3'],
+            $map['predicted_runout_date'],
+        ], [$map['last_updated']]);
     }
 
     /** @param array<string,array<string,mixed>> $desired */
@@ -216,6 +226,7 @@ final class ProcurementSheetSyncService
         }
         $this->sheets->batchUpdateValues($updates);
         $this->sheets->append($tab, $append);
+        $this->formatDateColumns($tab, $map);
         $staleRows = [];
         foreach ($existing as $sku => $row) {
             if (! isset($desired[$sku])) {

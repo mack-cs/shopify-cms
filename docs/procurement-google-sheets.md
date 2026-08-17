@@ -68,7 +68,7 @@ The user-owned fields are `Ignore` and the Quantity, Order ID, and ETA for each 
 
 `Ignore = TRUE` marks an end-of-life SKU. Inventory remains visible and sellable, but the procurement pipeline forces its recommendation to `NO_ACTION` with zero additional order quantity. Archiving remains a separate established CMS workflow.
 
-The report layout is 32 columns (`A:AF`). `Action Required` and `Ignore` follow `Current Inventory`; `Sale Percentage` follows `Currently on Sale`; each supplier phase is grouped Quantity, Order ID, ETA; and `Last Updated` remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
+The report layout is 32 columns (`A:AF`). `cms_movement_classification` is column H, `Ignore` is column I, and `Action Required` is column AB. `Sale Percentage` follows `Currently on Sale`; each supplier phase is grouped Quantity, Order ID, ETA; and `Last Updated` remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
 
 A Google write failure is stored on the completed prediction run and does not remove the successful report. Retry output with `php artisan procurement:sheets-publish`.
 

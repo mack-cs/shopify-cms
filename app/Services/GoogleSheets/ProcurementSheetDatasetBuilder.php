@@ -84,20 +84,20 @@ final class ProcurementSheetDatasetBuilder
                         'ignore' => (bool) ($stock?->ignore ?? false),
                         'quantity_on_order_phase_1' => $phase1,
                         'order_id_phase_1' => $stock?->order_id_phase_1,
-                        'eta_date_phase_1' => $stock?->eta_date_phase_1?->toDateString(),
+                        'eta_date_phase_1' => $stock?->eta_date_phase_1?->format('d/m/Y'),
                         'quantity_on_order_phase_2' => $phase2,
                         'order_id_phase_2' => $stock?->order_id_phase_2,
-                        'eta_date_phase_2' => $stock?->eta_date_phase_2?->toDateString(),
+                        'eta_date_phase_2' => $stock?->eta_date_phase_2?->format('d/m/Y'),
                         'quantity_on_order_phase_3' => $phase3,
                         'order_id_phase_3' => $stock?->order_id_phase_3,
-                        'eta_date_phase_3' => $stock?->eta_date_phase_3?->toDateString(),
+                        'eta_date_phase_3' => $stock?->eta_date_phase_3?->format('d/m/Y'),
                         'total_quantity_on_order' => $total,
                         // This operational column must move with live inventory even
                         // between prediction runs; the ML value is a point-in-time snapshot.
                         'projected_inventory_position' => ($current ?? 0) + $confirmedTotal,
                         'predicted_weekly_demand' => $prediction?->predicted_weekly_demand,
                         'estimated_days_of_stock_remaining' => $prediction?->estimated_days_of_stock_remaining,
-                        'predicted_runout_date' => $prediction?->predicted_runout_date?->toDateString(),
+                        'predicted_runout_date' => $prediction?->predicted_runout_date?->format('d/m/Y'),
                         'lead_time_days' => $prediction?->lead_time_days_used,
                         'stock_required_for_lead_time' => $prediction?->stock_required_for_lead_time,
                         'recommended_order_before_incoming_stock' => $prediction?->recommended_order_before_incoming_stock,
@@ -112,7 +112,7 @@ final class ProcurementSheetDatasetBuilder
                         // not the sheet publish time, so stale stock remains visible.
                         'last_updated' => $variant->inventory_last_synced_at
                             ?->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
-                            ->format('Y-m-d H:i:s'),
+                            ->format('d/m/Y H:i'),
                     ];
                 }
             });

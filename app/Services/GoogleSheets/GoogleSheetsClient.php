@@ -103,6 +103,45 @@ final class GoogleSheetsClient
         $this->ensureSuccess($response->successful(), $response->body(), 'delete rows');
     }
 
+    /** @param array<int,int> $dateColumns @param array<int,int> $dateTimeColumns */
+    public function formatDateColumns(string $tab, array $dateColumns, array $dateTimeColumns = []): void
+    {
+        $metadata = $this->request()->get($this->baseUrl(), ['fields' => 'sheets.properties']);
+        $this->ensureSuccess($metadata->successful(), $metadata->body(), 'metadata');
+        $sheet = collect((array) $metadata->json('sheets', []))->first(
+            fn (array $item): bool => data_get($item, 'properties.title') === $tab
+        );
+        if (! is_array($sheet)) {
+            throw new \RuntimeException("Google Sheet tab [{$tab}] was not found.");
+        }
+
+        $sheetId = (int) data_get($sheet, 'properties.sheetId');
+        $requests = [];
+        foreach ([['columns' => $dateColumns, 'pattern' => 'dd/MM/yyyy'],
+            ['columns' => $dateTimeColumns, 'pattern' => 'dd/MM/yyyy HH:mm']] as $group) {
+            foreach ($group['columns'] as $column) {
+                $requests[] = ['repeatCell' => [
+                    'range' => [
+                        'sheetId' => $sheetId,
+                        'startRowIndex' => 1,
+                        'startColumnIndex' => $column,
+                        'endColumnIndex' => $column + 1,
+                    ],
+                    'cell' => ['userEnteredFormat' => ['numberFormat' => [
+                        'type' => $group['pattern'] === 'dd/MM/yyyy' ? 'DATE' : 'DATE_TIME',
+                        'pattern' => $group['pattern'],
+                    ]]],
+                    'fields' => 'userEnteredFormat.numberFormat',
+                ]];
+            }
+        }
+        if ($requests === []) {
+            return;
+        }
+        $response = $this->request()->post($this->baseUrl().':batchUpdate', ['requests' => $requests]);
+        $this->ensureSuccess($response->successful(), $response->body(), 'format date columns');
+    }
+
     private function request(): PendingRequest
     {
         return Http::withToken($this->tokens->token())
