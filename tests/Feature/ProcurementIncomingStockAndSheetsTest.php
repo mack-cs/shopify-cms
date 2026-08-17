@@ -63,7 +63,9 @@ it('counts only complete supplier order phases while preserving raw quantities',
     expect($stock->quantity_on_order_phase_1)->toBe(100)
         ->and($stock->order_id_phase_1)->toBe($orderId)
         ->and($stock->confirmed_quantity_on_order_phase_1)->toBe($expectedConfirmed)
-        ->and($stock->total_confirmed_quantity_on_order)->toBe($expectedConfirmed);
+        ->and($stock->total_confirmed_quantity_on_order)->toBe($expectedConfirmed)
+        ->and(collect(app(ProcurementSheetDatasetBuilder::class)->records())
+            ->firstWhere('sku', 'LRB0004')['total_quantity_on_order'])->toBe($expectedConfirmed);
 })->with([
     'complete order' => ['PO-123', '2026-10-01', 100],
     'missing order ID' => [null, '2026-10-01', 0],
@@ -90,6 +92,13 @@ it('normalizes Google serial dates and snapshots ignore plus complete phase deta
         ->and($input->eta_date_phase_1->toDateString())->toBe('2026-10-06')
         ->and($input->confirmed_quantity_on_order_phase_1)->toBe(100)
         ->and($input->procurement_actioned)->toBeTrue();
+});
+
+it('normalizes day month year ETA values returned by formatted Google Sheets', function (): void {
+    $service = app(ProcurementIncomingStockService::class);
+
+    expect($service->normalizeEtaDate('28/08/2026', 'eta_date_phase_1'))->toBe('2026-08-28')
+        ->and($service->normalizeEtaDate('04/09/2026', 'eta_date_phase_2'))->toBe('2026-09-04');
 });
 
 it('serves the immutable incoming-stock snapshot through the protected analytics feed', function (): void {

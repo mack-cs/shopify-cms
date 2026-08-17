@@ -60,7 +60,18 @@ final class ProcurementIncomingStockService
                 return Carbon::create(1899, 12, 30)->addDays((int) floor((float) $value))->toDateString();
             }
 
-            return Carbon::parse(trim((string) $value))->toDateString();
+            $normalized = trim((string) $value);
+            if (preg_match('/^\d{1,2}\/\d{1,2}\/\d{4}$/', $normalized)) {
+                $date = Carbon::createFromFormat('!d/m/Y', $normalized);
+                $errors = \DateTimeImmutable::getLastErrors();
+                if (is_array($errors) && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0)) {
+                    throw new \InvalidArgumentException('Invalid day/month/year date.');
+                }
+
+                return $date->toDateString();
+            }
+
+            return Carbon::parse($normalized)->toDateString();
         } catch (\Throwable) {
             throw ValidationException::withMessages([$field => 'ETA must be a valid date.']);
         }
