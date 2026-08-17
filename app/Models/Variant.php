@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Variant extends Model
 {
@@ -113,6 +114,11 @@ class Variant extends Model
     public function procurementIncomingStock(): HasOne
     {
         return $this->hasOne(ProcurementIncomingStock::class);
+    }
+
+    public function supplierOrderLines(): HasMany
+    {
+        return $this->hasMany(ProcurementSupplierOrderLine::class);
     }
 
     public function scopeActive(Builder $query): Builder

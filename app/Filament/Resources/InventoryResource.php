@@ -7,8 +7,12 @@ use App\Jobs\InventorySyncJob;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
+use App\Models\ProcurementSupplierOrderLine;
 use App\Services\BulkInventoryTrackingService;
+use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\InventoryAccessService;
+use App\Services\Procurement\SupplierOrderService;
+use App\Services\Procurement\SupplierReceiptService;
 use App\Services\ProductInventoryHistoryRecorder;
 use App\Services\InventoryOperationContext;
 use Filament\Forms;
@@ -27,6 +31,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Str;
 
 class InventoryResource extends Resource
 {
@@ -46,7 +51,7 @@ class InventoryResource extends Resource
     {
         return $table
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
-                ->with('product')
+                ->with(['product', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
                 ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery
                     ->whereRaw('LOWER(COALESCE(status, "")) != ?', ['archived'])))
             ->defaultSort('id', 'desc')
@@ -95,6 +100,16 @@ class InventoryResource extends Resource
                         default => $record->inventory_qty !== null ? (string) ((int) $record->inventory_qty) : 'Unknown',
                     })
                     ->sortable(),
+                TextColumn::make('quantity_on_order')
+                    ->label('Qty On Order')
+                    ->state(fn (Variant $record): int => $record->supplierOrderLines
+                        ->where('status', 'open')->sum(fn ($line): int => $line->quantity_outstanding))
+                    ->badge()->color('info'),
+                TextColumn::make('next_eta')
+                    ->label('Next ETA')
+                    ->state(fn (Variant $record): ?string => $record->supplierOrderLines
+                        ->where('status', 'open')->filter(fn ($line) => $line->quantity_outstanding > 0 && $line->eta_date)
+                        ->sortBy('eta_date')->first()?->eta_date?->format('d/m/Y')),
                 TextColumn::make('sellable_state')
                     ->label('Sellable')
                     ->state(function (Variant $record): string {
@@ -174,6 +189,45 @@ class InventoryResource extends Resource
                     }),
             ])
             ->actions([
+                Action::make('addSupplierOrder')
+                    ->label('Add Stock On Order')->icon('heroicon-o-truck')
+                    ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                    ->form([
+                        Forms\Components\TextInput::make('order_number')->label('Order ID')->required()->maxLength(255),
+                        Forms\Components\TextInput::make('quantity_ordered')->label('Quantity Ordered')->integer()->minValue(1)->required(),
+                        Forms\Components\DatePicker::make('eta_date')->label('ETA')->displayFormat('d/m/Y')->native(false)->required(),
+                    ])
+                    ->action(function (Variant $record, array $data): void {
+                        app(SupplierOrderService::class)->createForVariant($record, $data['order_number'], $data['quantity_ordered'], $data['eta_date'], Auth::id());
+                        try { app(ProcurementSheetSyncService::class)->publishOperational([$record->id]); }
+                        catch (\Throwable $e) {
+                            Notification::make()->title('Order saved; Sheet update failed')->body($e->getMessage())->warning()->send();
+                            return;
+                        }
+                        Notification::make()->title('Supplier order added')->body('The CMS ledger and procurement Sheets were updated.')->success()->send();
+                    }),
+                Action::make('receiveSupplierStock')
+                    ->label('Receive Stock')->icon('heroicon-o-inbox-arrow-down')->color('success')
+                    ->visible(fn (Variant $record): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
+                        && $record->supplierOrderLines->where('status', 'open')->contains(fn ($line) => $line->quantity_outstanding > 0))
+                    ->form([
+                        Forms\Components\Select::make('line_id')->label('Supplier Order')->required()
+                            ->options(fn (Variant $record): array => $record->supplierOrderLines->where('status', 'open')
+                                ->filter(fn ($line) => $line->quantity_outstanding > 0)
+                                ->mapWithKeys(fn ($line): array => [$line->id => (($line->order?->order_number ?: 'Legacy order').' — '.$line->quantity_outstanding.' outstanding')])->all()),
+                        Forms\Components\TextInput::make('quantity_received')->label('Quantity Received')->integer()->minValue(1)->required(),
+                        Forms\Components\Hidden::make('idempotency_key')->default(fn (): string => (string) Str::uuid()),
+                    ])
+                    ->action(function (Variant $record, array $data): void {
+                        $line = ProcurementSupplierOrderLine::query()->where('variant_id', $record->id)->findOrFail($data['line_id']);
+                        app(SupplierReceiptService::class)->create($line, $data['quantity_received'], $data['idempotency_key'], Auth::id());
+                        Notification::make()->title('Receipt queued')->body('The Shopify delta adjustment will run on the procurement queue.')->success()->send();
+                    }),
+                Action::make('viewSupplierOrders')
+                    ->label('Order Details')->icon('heroicon-o-eye')->color('gray')
+                    ->modalHeading(fn (Variant $record): string => 'Supplier orders — '.($record->sku ?: "Variant {$record->id}"))
+                    ->modalContent(fn (Variant $record) => view('filament.inventory.supplier-orders', ['variant' => $record->load(['supplierOrderLines.order', 'supplierOrderLines.receipts'])]))
+                    ->modalSubmitAction(false)->modalCancelActionLabel('Close'),
                 Action::make('editInventory')
                     ->label('Update Inventory')
                     ->icon('heroicon-o-pencil-square')

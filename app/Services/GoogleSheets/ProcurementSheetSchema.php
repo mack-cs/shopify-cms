@@ -38,9 +38,6 @@ final class ProcurementSheetSchema
 
     public const HUMAN_OWNED_FIELDS = [
         'ignore',
-        'quantity_on_order_phase_1', 'order_id_phase_1', 'eta_date_phase_1',
-        'quantity_on_order_phase_2', 'order_id_phase_2', 'eta_date_phase_2',
-        'quantity_on_order_phase_3', 'order_id_phase_3', 'eta_date_phase_3',
     ];
 
     /** @param array<int,mixed> $headers @return array<string,int> */

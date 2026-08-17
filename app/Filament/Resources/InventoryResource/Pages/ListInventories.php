@@ -6,10 +6,12 @@ use App\Filament\Resources\InventoryResource;
 use App\Filament\Resources\InventoryResource\Widgets\InventoryRunBanner;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Models\Variant;
+use App\Models\ProcurementSupplierImportBatch;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
 use App\Services\ProductInventoryCsvExporter;
 use App\Services\ProductInventoryCsvImporter;
+use App\Services\Procurement\SupplierOrderCsvService;
 use Filament\Actions;
 use Filament\Forms\Components\FileUpload;
 use Filament\Notifications\Actions\Action as NotificationAction;
@@ -28,6 +30,45 @@ class ListInventories extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('previewSupplierOrdersCsv')
+                ->label('Upload Supplier Orders')->icon('heroicon-o-truck')->color('info')
+                ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->modalDescription('CSV headers: SKU, Order ID, Quantity Ordered, ETA. This step validates and stores a preview only; it does not create orders.')
+                ->form([FileUpload::make('file')->label('Supplier orders CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
+                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                    try {
+                        $path = Storage::disk('local')->path((string) $data['file']);
+                        $batch = $csv->preview($path, 'order', Auth::id(), basename((string) $data['file']));
+                        $body = $this->supplierPreviewBody($batch);
+                        Notification::make()->title('Supplier order preview ready')->body($body)
+                            ->when($batch->invalid_count > 0, fn ($n) => $n->warning(), fn ($n) => $n->success())->persistent()->send();
+                    } catch (Throwable $e) { Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send(); }
+                }),
+            Actions\Action::make('previewSupplierReceiptsCsv')
+                ->label('Upload Receipts')->icon('heroicon-o-inbox-arrow-down')->color('success')
+                ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->modalDescription('CSV headers: Order ID, SKU, Quantity Received. This step validates and stores a preview only; Shopify is not updated until confirmation.')
+                ->form([FileUpload::make('file')->label('Supplier receipts CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
+                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                    try {
+                        $path = Storage::disk('local')->path((string) $data['file']);
+                        $batch = $csv->preview($path, 'receipt', Auth::id(), basename((string) $data['file']));
+                        $body = $this->supplierPreviewBody($batch);
+                        Notification::make()->title('Receipt preview ready')->body($body)
+                            ->when($batch->invalid_count > 0, fn ($n) => $n->warning(), fn ($n) => $n->success())->persistent()->send();
+                    } catch (Throwable $e) { Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send(); }
+                }),
+            Actions\Action::make('confirmSupplierImport')
+                ->label('Confirm Supplier Import')->icon('heroicon-o-check-circle')->color('warning')
+                ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->requiresConfirmation()->modalDescription('Orders will be committed immediately. Receipt rows will queue delta adjustments in Shopify. A completed preview cannot be processed twice.')
+                ->form([\Filament\Forms\Components\TextInput::make('batch_uuid')->label('Preview ID')->required()->uuid()])
+                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                    try {
+                        $batch = $csv->confirm((string) $data['batch_uuid'], Auth::id());
+                        Notification::make()->title('Supplier import confirmed')->body($batch->type === 'receipt' ? 'Receipt adjustments were queued on the procurement queue.' : 'Orders and procurement Sheets were updated.')->success()->send();
+                    } catch (Throwable $e) { Notification::make()->title('Confirmation failed')->body($e->getMessage())->danger()->send(); }
+                }),
             Actions\Action::make('checkShopifyInventory')
                 ->label('Check Shopify Inventory')
                 ->icon('heroicon-o-arrow-path')
@@ -133,6 +174,21 @@ class ListInventories extends ListRecords
         return [
             InventoryRunBanner::class,
         ];
+    }
+
+    private function supplierPreviewBody(ProcurementSupplierImportBatch $batch): string
+    {
+        $lines = collect($batch->preview_rows)->take(10)->map(function (array $row) use ($batch): string {
+            $quantity = $row[$batch->type === 'order' ? 'quantity_ordered' : 'quantity_received'] ?? '';
+            $eta = $batch->type === 'order' ? ' · ETA '.($row['eta'] ?? '') : '';
+            $errors = (array) data_get($batch->errors, (string) ($row['_row'] ?? ''), []);
+            $result = $errors === [] ? 'VALID' : 'INVALID: '.implode('; ', $errors);
+            return "Row {$row['_row']}: ".($row['sku'] ?? '').' · '.($row['order_id'] ?? '')." · Qty {$quantity}{$eta} · {$result}";
+        })->implode("\n");
+        $next = $batch->invalid_count > 0
+            ? 'Correct the CSV and upload the corrected file.'
+            : 'Use Confirm Supplier Import and paste the preview ID below.';
+        return "Preview ID: {$batch->uuid}\n{$batch->valid_count} valid, {$batch->invalid_count} invalid.\n{$lines}\n{$next}";
     }
 
     public function getTabs(): array

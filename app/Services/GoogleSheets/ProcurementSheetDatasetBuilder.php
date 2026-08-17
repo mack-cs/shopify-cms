@@ -67,6 +67,7 @@ final class ProcurementSheetDatasetBuilder
                     }
 
                     $records[] = [
+                        '_variant_id' => $variant->id,
                         '_collection_id' => $collectionId,
                         '_prediction_stale' => $predictionStale,
                         '_procurement_actioned' => $confirmedTotal > 0,

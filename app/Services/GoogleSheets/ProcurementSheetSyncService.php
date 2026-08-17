@@ -82,24 +82,11 @@ final class ProcurementSheetSyncService
                     'variant' => $variant,
                     'workflow' => [
                         'ignore' => $this->incomingStock->normalizeBoolean($row[$map['ignore']] ?? null),
-                        'quantity_on_order_phase_1' => $this->incomingStock->normalizeQuantity(
-                            $row[$map['quantity_on_order_phase_1']] ?? null,
-                            'quantity_on_order_phase_1'
-                        ),
-                        'quantity_on_order_phase_2' => $this->incomingStock->normalizeQuantity(
-                            $row[$map['quantity_on_order_phase_2']] ?? null,
-                            'quantity_on_order_phase_2'
-                        ),
-                        'quantity_on_order_phase_3' => $this->incomingStock->normalizeQuantity(
-                            $row[$map['quantity_on_order_phase_3']] ?? null,
-                            'quantity_on_order_phase_3'
-                        ),
-                        'order_id_phase_1' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_1']] ?? null),
-                        'eta_date_phase_1' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_1']] ?? null, 'eta_date_phase_1'),
-                        'order_id_phase_2' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_2']] ?? null),
-                        'eta_date_phase_2' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_2']] ?? null, 'eta_date_phase_2'),
-                        'order_id_phase_3' => $this->incomingStock->normalizeOrderId($row[$map['order_id_phase_3']] ?? null),
-                        'eta_date_phase_3' => $this->incomingStock->normalizeEtaDate($row[$map['eta_date_phase_3']] ?? null, 'eta_date_phase_3'),
+                        ...collect([1, 2, 3])->flatMap(fn (int $phase): array => [
+                            "quantity_on_order_phase_{$phase}" => (int) ($variant->procurementIncomingStock?->{"quantity_on_order_phase_{$phase}"} ?? 0),
+                            "order_id_phase_{$phase}" => $variant->procurementIncomingStock?->{"order_id_phase_{$phase}"},
+                            "eta_date_phase_{$phase}" => $variant->procurementIncomingStock?->{"eta_date_phase_{$phase}"}?->toDateString(),
+                        ])->all(),
                     ],
                     'tab' => $tab,
                     'row' => $offset + 2,
@@ -176,6 +163,61 @@ final class ProcurementSheetSyncService
             'master_rows' => count($records), 'brand_rows' => $brandRows,
             'tabs' => $this->collections->configured()->count(),
         ];
+    }
+
+    /** Publish live inventory/order fields without requiring a fresh ML prediction. */
+    public function publishOperational(array $variantIds = []): array
+    {
+        if (! $this->enabled()) return ['rows' => 0, 'tabs' => 0];
+        $allRecords = collect($this->dataset->records());
+        $records = $allRecords;
+        if ($variantIds !== []) {
+            $records = $records->whereIn('_variant_id', array_map('intval', $variantIds));
+        }
+        $ambiguitySource = $variantIds === [] ? $records : $allRecords->whereIn('sku', $records->pluck('sku'));
+        $ambiguous = $ambiguitySource->groupBy('sku')->filter(fn ($group) => $group->count() > 1)->keys();
+        if ($ambiguous->isNotEmpty()) {
+            if ($variantIds !== []) {
+                throw new \RuntimeException('Cannot operationally publish duplicate catalog SKU(s): '.$ambiguous->implode(', ').'.');
+            }
+            Log::warning('Skipping duplicate catalog SKUs during operational procurement Sheet publish', ['skus' => $ambiguous->all()]);
+            $records = $records->reject(fn (array $record): bool => $ambiguous->contains($record['sku']));
+        }
+        $fields = ['current_inventory', 'quantity_on_order_phase_1', 'order_id_phase_1', 'eta_date_phase_1',
+            'quantity_on_order_phase_2', 'order_id_phase_2', 'eta_date_phase_2', 'quantity_on_order_phase_3',
+            'order_id_phase_3', 'eta_date_phase_3', 'total_quantity_on_order', 'projected_inventory_position', 'last_updated'];
+        $tabs = [[
+            'name' => trim((string) config('google_sheets.master_tab', 'master-file')),
+            'collection_id' => null,
+        ]];
+        foreach ($this->collections->configured() as $collection) {
+            $tabs[] = ['name' => trim((string) $collection->google_sheet_tab_name), 'collection_id' => $collection->id];
+        }
+        $updated = 0;
+        foreach ($tabs as $tabConfig) {
+            $tab = $tabConfig['name'];
+            $tabRecords = $tabConfig['collection_id'] === null
+                ? $records : $records->where('_collection_id', $tabConfig['collection_id']);
+            $targetSkus = $tabRecords->pluck('sku')->flip();
+            $values = $this->currentLayoutValues($tab); $map = $this->mapForTab($tab, array_shift($values) ?? []); $rows = [];
+            foreach ($values as $offset => $row) {
+                $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+                if ($sku === '' || ! $targetSkus->has($sku)) continue;
+                if (isset($rows[$sku])) throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+                $rows[$sku] = $offset + 2;
+            }
+            $updates = [];
+            foreach ($tabRecords as $record) {
+                if (! isset($rows[$record['sku']])) continue;
+                foreach ($fields as $field) {
+                    $column = $this->schema->columnName($map[$field]);
+                    $updates[] = ['range' => $this->sheets->range($tab, $column.$rows[$record['sku']]), 'values' => [[$this->cell($record[$field] ?? null)]]];
+                }
+                $updated++;
+            }
+            $this->sheets->batchUpdateValues($updates); $this->formatDateColumns($tab, $map);
+        }
+        return ['rows' => $updated, 'tabs' => count($tabs)];
     }
 
     /** @param array<string,int> $map */

@@ -2,9 +2,10 @@
 
 namespace App\Services;
 
+use App\Contracts\ShopifyGraphqlGateway;
 use Illuminate\Support\Facades\Http;
 
-final class ShopifyApiClient
+final class ShopifyApiClient implements ShopifyGraphqlGateway
 {
     public function __construct(
         private readonly AwsSecretService $awsSecretService,

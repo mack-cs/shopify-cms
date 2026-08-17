@@ -60,6 +60,7 @@ return [
         'shop' => env('SHOPIFY_SHOP'),
         'admin_access_token' => env('SHOPIFY_ADMIN_ACCESS_TOKEN'),
         'api_version' => env('SHOPIFY_API_VERSION', '2026-01'),
+        'inventory_location_id' => env('SHOPIFY_INVENTORY_LOCATION_ID'),
         'webhook_secret' => env('SHOPIFY_WEBHOOK_SECRET', env('SHOPIFY_API_SECRET', env('SHOPIFY_API_SECRET_KEY'))),
         'verify_webhooks' => filter_var(env('SHOPIFY_WEBHOOK_VERIFY', false), FILTER_VALIDATE_BOOLEAN),
         'secret_id' => env('AWS_SHOPIFY_SECRET_ID', 'prod/leighavenue/shopify'),

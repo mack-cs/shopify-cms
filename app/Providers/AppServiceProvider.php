@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Contracts\ShopifyGraphqlGateway;
+use App\Services\ShopifyApiClient;
 use App\Models\Approval;
 use App\Models\Image;
 use App\Models\Product;
@@ -25,7 +27,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->bind(ShopifyGraphqlGateway::class, ShopifyApiClient::class);
     }
 
     /**

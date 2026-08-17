@@ -139,7 +139,7 @@ it('keeps the required procurement column groups in the exact report order', fun
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
-it('reads sorted brand rows by SKU and shuffled headers', function (): void {
+it('pulls Ignore but does not import CMS-owned order phases from brand Sheets', function (): void {
     [$import, $first] = procurementSheetVariant('LRB0004', 'livi-road');
     [, $second] = procurementSheetVariant('LRB0005', 'livi-road');
     ProcurementCollectionConfig::query()->create([
@@ -155,6 +155,7 @@ it('reads sorted brand rows by SKU and shuffled headers', function (): void {
         $values = array_fill(0, count($headers), '');
         $values[$map['sku']] = $sku;
         $values[$map['quantity_on_order_phase_1']] = $phase;
+        $values[$map['ignore']] = 'TRUE';
 
         return $values;
     };
@@ -164,8 +165,10 @@ it('reads sorted brand rows by SKU and shuffled headers', function (): void {
 
     procurementTestSheetSync()->pullHumanInputs();
 
-    expect(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('total_quantity_on_order'))->toBe(60)
-        ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('total_quantity_on_order'))->toBe(30);
+    expect(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('total_quantity_on_order'))->toBe(0)
+        ->and(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('ignore'))->toBeTrue()
+        ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('total_quantity_on_order'))->toBe(0)
+        ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('ignore'))->toBeTrue();
 });
 
 it('marks predictions stale after a human phase changes', function (): void {
@@ -231,7 +234,7 @@ it('fails operational collection resolution for zero or multiple brand mappings'
     expect(fn () => $resolver->resolve($variant->product))->toThrow(DomainException::class, 'multiple configured');
 });
 
-it('never writes human phase cells in an existing brand row but writes them to Master', function (): void {
+it('preserves human Ignore but writes CMS-owned phase cells in brand rows and Master', function (): void {
     [$import, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     ProcurementCollectionConfig::query()->create([
         'shopify_collection_id' => 'gid://shopify/Collection/1',
@@ -295,15 +298,47 @@ it('never writes human phase cells in an existing brand row but writes them to M
         ->filter()->values();
     expect($ranges)->toContain("'master-file'!A2:AF2")
         ->and($ranges)->not->toContain("'livi-road'!I2")
-        ->and($ranges)->not->toContain("'livi-road'!J2")
-        ->and($ranges)->not->toContain("'livi-road'!K2")
-        ->and($ranges)->not->toContain("'livi-road'!L2")
-        ->and($ranges)->not->toContain("'livi-road'!M2")
-        ->and($ranges)->not->toContain("'livi-road'!N2")
-        ->and($ranges)->not->toContain("'livi-road'!O2")
-        ->and($ranges)->not->toContain("'livi-road'!P2")
-        ->and($ranges)->not->toContain("'livi-road'!Q2")
-        ->and($ranges)->not->toContain("'livi-road'!R2");
+        ->and($ranges)->toContain("'livi-road'!J2")
+        ->and($ranges)->toContain("'livi-road'!K2")
+        ->and($ranges)->toContain("'livi-road'!L2")
+        ->and($ranges)->toContain("'livi-road'!R2");
+});
+
+it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
+        'ignore' => true, 'quantity_on_order_phase_1' => 9, 'order_id_phase_1' => 'PO-OPS',
+        'eta_date_phase_1' => '2026-09-20', 'quantity_on_order_phase_2' => 0, 'quantity_on_order_phase_3' => 0,
+    ], 'cms:supplier-orders');
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    Http::fake(function (Request $request) use ($headers) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
+            $row = array_fill(0, count($headers), ''); $row[0] = 'LRB0004';
+            return Http::response(['values' => [$headers, $row]]);
+        }
+        if ($request->method() === 'GET') return Http::response(['sheets' => [
+            ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+            ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+        ]]);
+        return Http::response(['ok' => true]);
+    });
+
+    procurementTestSheetSync()->publishOperational([$variant->id]);
+    $ranges = collect(Http::recorded())->flatMap(
+        fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range')
+    )->filter()->values();
+
+    expect($ranges)->toContain("'master-file'!G2")
+        ->and($ranges)->toContain("'master-file'!J2")
+        ->and($ranges)->toContain("'livi-road'!AF2")
+        ->and($ranges)->not->toContain("'master-file'!I2")
+        ->and($ranges)->not->toContain("'master-file'!U2")
+        ->and($ranges)->not->toContain("'livi-road'!AB2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
