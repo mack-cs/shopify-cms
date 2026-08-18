@@ -120,7 +120,7 @@ it('exports populated templates only for selected eligible products', function (
         ->toContain('EXPORT-SELECTED')
         ->not->toContain('EXPORT-UNLISTED')
         ->and($exporter->receipts(collect([$selected, $excluded])))
-        ->toContain('PO-EXPORT,EXPORT-SELECTED')
+        ->toContain('PO-EXPORT,EXPORT-SELECTED,8')
         ->not->toContain('EXPORT-UNLISTED');
 });
 

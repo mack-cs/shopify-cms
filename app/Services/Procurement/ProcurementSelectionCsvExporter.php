@@ -27,7 +27,11 @@ final class ProcurementSelectionCsvExporter
         foreach ($this->variants($selected) as $variant) {
             foreach ($variant->supplierOrderLines->where('status', 'open') as $line) {
                 if ($line->quantity_outstanding > 0) {
-                    $writer->insertOne([$line->order?->order_number, $variant->sku, '']);
+                    $writer->insertOne([
+                        $line->order?->order_number,
+                        $variant->sku,
+                        $line->quantity_outstanding,
+                    ]);
                 }
             }
         }
