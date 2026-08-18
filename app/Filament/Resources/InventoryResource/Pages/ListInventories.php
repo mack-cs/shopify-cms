@@ -5,8 +5,8 @@ namespace App\Filament\Resources\InventoryResource\Pages;
 use App\Filament\Resources\InventoryResource;
 use App\Filament\Resources\InventoryResource\Widgets\InventoryRunBanner;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementSupplierImportBatch;
-use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
@@ -237,8 +237,8 @@ class ListInventories extends ListRecords
                 ->badge((string) Variant::query()->whereHas('product')->count()),
             'orders' => Tab::make('Supplier Orders')
                 ->icon('heroicon-o-truck')
-                ->badge((string) ProcurementSupplierOrderLine::query()
-                    ->where('status', 'open')->distinct('variant_id')->count('variant_id'))
+                ->badge((string) ProcurementIncomingStock::query()
+                    ->where('total_quantity_on_order', '>', 0)->count())
                 ->badgeColor('info'),
         ];
     }

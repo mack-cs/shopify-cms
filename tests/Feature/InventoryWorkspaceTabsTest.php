@@ -3,6 +3,7 @@
 use App\Enums\PermissionEnum;
 use App\Filament\Resources\InventoryResource\Pages\ListInventories;
 use App\Models\Import;
+use App\Models\ProcurementIncomingStock;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
@@ -47,6 +48,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertSet('activeTab', 'everyday')
         ->assertTableColumnVisible('product.id')
         ->assertTableColumnHidden('quantity_on_order')
+        ->assertTableFilterHidden('order_state')
         ->assertTableActionVisible('editInventory', $variant)
         ->assertTableActionVisible('updateStatus', $variant)
         ->assertTableActionVisible('refreshFromShopify', $variant)
@@ -63,6 +65,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableColumnVisible('inventory_qty')
         ->assertTableColumnVisible('quantity_on_order')
         ->assertTableColumnVisible('next_eta')
+        ->assertTableFilterVisible('order_state')
         ->assertTableActionVisible('addSupplierOrder', $variant)
         ->assertTableActionVisible('viewSupplierOrders', $variant)
         ->assertTableActionVisible('refreshFromShopify', $variant)
@@ -74,4 +77,59 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertSee('Upload Receipts')
         ->assertSee('Confirm Supplier Import')
         ->assertDontSee('Import Stock CSV');
+});
+
+it('filters products by any incomplete or complete on-order quantities', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+
+    $import = Import::query()->create([
+        'filename' => 'order-filter.csv',
+        'mode' => 'append',
+        'status' => 'ready',
+        'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id,
+        'handle' => 'order-filter-product',
+        'title' => 'Order Filter Product',
+        'status' => 'active',
+    ]);
+
+    $none = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-NONE']);
+    $incomplete = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-INCOMPLETE']);
+    $complete = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-COMPLETE']);
+
+    ProcurementIncomingStock::query()->create([
+        'variant_id' => $incomplete->id,
+        'sku' => $incomplete->sku,
+        'quantity_on_order_phase_1' => 20,
+        'total_quantity_on_order' => 20,
+        'total_confirmed_quantity_on_order' => 0,
+    ]);
+    ProcurementIncomingStock::query()->create([
+        'variant_id' => $complete->id,
+        'sku' => $complete->sku,
+        'quantity_on_order_phase_1' => 15,
+        'order_id_phase_1' => 'PO-COMPLETE',
+        'eta_date_phase_1' => '2026-09-30',
+        'confirmed_quantity_on_order_phase_1' => 15,
+        'total_quantity_on_order' => 15,
+        'total_confirmed_quantity_on_order' => 15,
+    ]);
+
+    $this->actingAs($user);
+
+    Livewire::test(ListInventories::class)
+        ->set('activeTab', 'orders')
+        ->filterTable('order_state', 'any_on_order')
+        ->assertCanSeeTableRecords([$incomplete, $complete])
+        ->assertCanNotSeeTableRecords([$none])
+        ->filterTable('order_state', 'incomplete_details')
+        ->assertCanSeeTableRecords([$incomplete])
+        ->assertCanNotSeeTableRecords([$none, $complete])
+        ->filterTable('order_state', 'complete_details')
+        ->assertCanSeeTableRecords([$complete])
+        ->assertCanNotSeeTableRecords([$none, $incomplete]);
 });

@@ -55,7 +55,7 @@ class InventoryResource extends Resource
     {
         return $table
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
-                ->with(['product', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
+                ->with(['product', 'procurementIncomingStock', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
                 ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery
                     ->whereRaw('LOWER(COALESCE(status, "")) != ?', ['archived'])))
             ->defaultSort('id', 'desc')
@@ -110,15 +110,24 @@ class InventoryResource extends Resource
                     ->sortable(),
                 TextColumn::make('quantity_on_order')
                     ->label('Qty On Order')
-                    ->state(fn (Variant $record): int => $record->supplierOrderLines
-                        ->where('status', 'open')->sum(fn ($line): int => $line->quantity_outstanding))
+                    ->state(fn (Variant $record): int => (int) ($record->procurementIncomingStock?->total_quantity_on_order ?? 0))
                     ->badge()->color('info')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('next_eta')
                     ->label('Next ETA')
-                    ->state(fn (Variant $record): ?string => $record->supplierOrderLines
-                        ->where('status', 'open')->filter(fn ($line) => $line->quantity_outstanding > 0 && $line->eta_date)
-                        ->sortBy('eta_date')->first()?->eta_date?->format('d/m/Y'))
+                    ->state(function (Variant $record): ?string {
+                        $stock = $record->procurementIncomingStock;
+                        $etas = collect(range(1, 3))->map(function (int $phase) use ($stock) {
+                            $hasQuantity = (int) ($stock?->{"quantity_on_order_phase_{$phase}"} ?? 0) > 0;
+                            $hasOrderId = filled($stock?->{"order_id_phase_{$phase}"});
+
+                            return $hasQuantity && $hasOrderId
+                                ? $stock?->{"eta_date_phase_{$phase}"}
+                                : null;
+                        })->filter()->sort();
+
+                        return $etas->first()?->format('d/m/Y');
+                    })
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('sellable_state')
                     ->label('Sellable')
@@ -190,6 +199,27 @@ class InventoryResource extends Resource
                             'out_of_stock' => $query->where('inventory_tracked', true)->where('inventory_qty', '<=', 0),
                             'not_tracked' => $query->where(fn (Builder $builder) => $builder
                                 ->where('inventory_tracked', false)->orWhereNull('inventory_tracked')),
+                            default => $query,
+                        };
+                    }),
+                SelectFilter::make('order_state')
+                    ->label('On Order Status')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                    ->options([
+                        'any_on_order' => 'Any Quantity On Order',
+                        'incomplete_details' => 'Missing Order ID or ETA',
+                        'complete_details' => 'Complete Order ID and ETA',
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return match ($data['value'] ?? null) {
+                            'any_on_order' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
+                                ->where('total_quantity_on_order', '>', 0)),
+                            'incomplete_details' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
+                                ->where('total_quantity_on_order', '>', 0)
+                                ->whereColumn('total_confirmed_quantity_on_order', '<', 'total_quantity_on_order')),
+                            'complete_details' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
+                                ->where('total_quantity_on_order', '>', 0)
+                                ->whereColumn('total_confirmed_quantity_on_order', 'total_quantity_on_order')),
                             default => $query,
                         };
                     }),
