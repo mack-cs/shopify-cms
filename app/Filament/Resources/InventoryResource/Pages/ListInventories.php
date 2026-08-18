@@ -11,12 +11,9 @@ use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
 use App\Services\Procurement\SupplierOrderCsvService;
-use App\Services\ProductInventoryCsvExporter;
 use App\Services\ProductInventoryCsvImporter;
 use Filament\Actions;
 use Filament\Forms\Components\FileUpload;
-use Filament\Forms\Components\TextInput;
-use Filament\Notifications\Actions\Action as NotificationAction;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
@@ -32,36 +29,26 @@ class ListInventories extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
-            Actions\ActionGroup::make([
-                Actions\Action::make('downloadSupplierOrdersTemplate')
-                    ->label('Pending Orders Template')->icon('heroicon-o-arrow-down-tray')
-                    ->action(fn () => response()->download(
-                        resource_path('templates/procurement-supplier-orders.csv'),
-                        'procurement-supplier-orders.csv',
-                    )),
-                Actions\Action::make('downloadSupplierReceiptsTemplate')
-                    ->label('Received Orders Template')->icon('heroicon-o-arrow-down-tray')
-                    ->action(fn () => response()->download(
-                        resource_path('templates/procurement-supplier-receipts.csv'),
-                        'procurement-supplier-receipts.csv',
-                    )),
-            ])->label('CSV Templates')->icon('heroicon-o-document-arrow-down')->color('gray')->button()
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())),
             Actions\Action::make('previewSupplierOrdersCsv')
                 ->label('Upload Supplier Orders')->icon('heroicon-o-truck')->color('info')
                 ->modalWidth(MaxWidth::Medium)
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('CSV headers: SKU, Order ID, Quantity Ordered, ETA. This step validates and stores a preview only; it does not create orders.')
+                ->modalDescription('Upload the selected-order CSV after filling in Order ID, Quantity Ordered, and ETA. Valid rows are saved immediately; invalid rows are rejected.')
                 ->form([FileUpload::make('file')->label('Supplier orders CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
                 ->action(function (array $data, SupplierOrderCsvService $csv): void {
                     try {
                         $path = Storage::disk('local')->path((string) $data['file']);
                         $batch = $csv->preview($path, 'order', Auth::id(), basename((string) $data['file']));
-                        $body = $this->supplierPreviewBody($batch);
-                        Notification::make()->title('Supplier order preview ready')->body($body)
-                            ->when($batch->invalid_count > 0, fn ($n) => $n->warning(), fn ($n) => $n->success())->persistent()->send();
+                        if ($batch->invalid_count > 0) {
+                            Notification::make()->title('Order upload needs corrections')->body($this->supplierPreviewBody($batch))->warning()->persistent()->send();
+
+                            return;
+                        }
+                        $csv->confirm($batch->uuid, Auth::id());
+                        Notification::make()->title('Supplier orders uploaded')
+                            ->body("{$batch->valid_count} row(s) saved. Use Review Upload → Latest Orders Upload to check them.")
+                            ->success()->send();
                     } catch (Throwable $e) {
                         Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
                     }
@@ -71,32 +58,23 @@ class ListInventories extends ListRecords
                 ->modalWidth(MaxWidth::Medium)
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('CSV headers: Order ID, SKU, Quantity Received. This step validates and stores a preview only; Shopify is not updated until confirmation.')
+                ->modalDescription('Upload received quantities. Valid rows are staged for review and will not change Shopify until selected and pushed.')
                 ->form([FileUpload::make('file')->label('Supplier receipts CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
                 ->action(function (array $data, SupplierOrderCsvService $csv): void {
                     try {
                         $path = Storage::disk('local')->path((string) $data['file']);
                         $batch = $csv->preview($path, 'receipt', Auth::id(), basename((string) $data['file']));
-                        $body = $this->supplierPreviewBody($batch);
-                        Notification::make()->title('Receipt preview ready')->body($body)
-                            ->when($batch->invalid_count > 0, fn ($n) => $n->warning(), fn ($n) => $n->success())->persistent()->send();
+                        if ($batch->invalid_count > 0) {
+                            Notification::make()->title('Received-order upload needs corrections')->body($this->supplierPreviewBody($batch))->warning()->persistent()->send();
+
+                            return;
+                        }
+                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false);
+                        Notification::make()->title('Received quantities staged')
+                            ->body("{$batch->valid_count} row(s) are awaiting review. Filter by Awaiting Shopify Push, select approved rows, then use Push Received To Shopify.")
+                            ->success()->persistent()->send();
                     } catch (Throwable $e) {
                         Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
-                    }
-                }),
-            Actions\Action::make('confirmSupplierImport')
-                ->label('Confirm Supplier Import')->icon('heroicon-o-check-circle')->color('warning')
-                ->modalWidth(MaxWidth::Medium)
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->requiresConfirmation()->modalDescription('Orders will be committed immediately. Receipt rows will queue delta adjustments in Shopify. A completed preview cannot be processed twice.')
-                ->form([TextInput::make('batch_uuid')->label('Preview ID')->required()->uuid()])
-                ->action(function (array $data, SupplierOrderCsvService $csv): void {
-                    try {
-                        $batch = $csv->confirm((string) $data['batch_uuid'], Auth::id());
-                        Notification::make()->title('Supplier import confirmed')->body($batch->type === 'receipt' ? 'Receipt adjustments were queued on the procurement queue.' : 'Orders and procurement Sheets were updated.')->success()->send();
-                    } catch (Throwable $e) {
-                        Notification::make()->title('Confirmation failed')->body($e->getMessage())->danger()->send();
                     }
                 }),
             Actions\Action::make('checkShopifyInventory')
@@ -116,30 +94,6 @@ class ListInventories extends ListRecords
                         ->title('Shopify inventory check queued')
                         ->body('The read-only Shopify inventory refresh is running in the background.')
                         ->success()
-                        ->send();
-                }),
-            Actions\Action::make('exportStockCsv')
-                ->label('Export Stock CSV')
-                ->icon('heroicon-o-arrow-down-tray')
-                ->color('gray')
-                ->visible(fn (): bool => $this->activeTab === 'everyday'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->action(function (ProductInventoryCsvExporter $exporter): void {
-                    $timestamp = now()->format('Ymd_His');
-                    $path = "exports/inventory_stock_{$timestamp}.csv";
-
-                    Storage::disk('public')->put($path, $exporter->exportToString());
-                    $url = Storage::disk('public')->url($path);
-
-                    Notification::make()
-                        ->title('Stock export ready')
-                        ->body("Saved to public/{$path}. Edit the stock column, then import the CSV back here.")
-                        ->success()
-                        ->actions([
-                            NotificationAction::make('download')
-                                ->label('Download CSV')
-                                ->url($url, shouldOpenInNewTab: true),
-                        ])
                         ->send();
                 }),
             Actions\Action::make('importStockCsv')
@@ -224,7 +178,7 @@ class ListInventories extends ListRecords
         })->implode("\n");
         $next = $batch->invalid_count > 0
             ? 'Correct the CSV and upload the corrected file.'
-            : 'Use Confirm Supplier Import and paste the preview ID below.';
+            : 'All rows are ready.';
 
         return "Preview ID: {$batch->uuid}\n{$batch->valid_count} valid, {$batch->invalid_count} invalid.\n{$lines}\n{$next}";
     }
@@ -238,7 +192,10 @@ class ListInventories extends ListRecords
             'orders' => Tab::make('Supplier Orders')
                 ->icon('heroicon-o-truck')
                 ->badge((string) ProcurementIncomingStock::query()
-                    ->where('total_quantity_on_order', '>', 0)->count())
+                    ->where('total_quantity_on_order', '>', 0)
+                    ->whereHas('variant.product', fn ($query) => $query
+                        ->whereRaw('LOWER(COALESCE(status, "")) NOT IN (?, ?)', ['archived', 'unlisted']))
+                    ->count())
                 ->badgeColor('info'),
         ];
     }

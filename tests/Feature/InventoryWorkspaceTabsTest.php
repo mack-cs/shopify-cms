@@ -56,8 +56,10 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionHidden('addSupplierOrder', $variant)
         ->assertTableActionHidden('receiveSupplierStock', $variant)
         ->assertTableActionHidden('viewSupplierOrders', $variant)
+        ->assertTableBulkActionVisible('exportSelectedInventory')
+        ->assertTableBulkActionHidden('exportSelectedOrders')
+        ->assertTableBulkActionHidden('pushReceivedToShopify')
         ->assertSee('Check Shopify Inventory')
-        ->assertSee('Export Stock CSV')
         ->assertSee('Import Stock CSV')
         ->assertDontSee('Upload Supplier Orders')
         ->set('activeTab', 'orders')
@@ -72,11 +74,34 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionHidden('editInventory', $variant)
         ->assertTableActionHidden('updateStatus', $variant)
         ->assertTableActionHidden('pushToShopify', $variant)
-        ->assertSee('CSV Templates')
+        ->assertTableBulkActionHidden('exportSelectedInventory')
+        ->assertTableBulkActionVisible('exportSelectedOrders')
+        ->assertTableBulkActionVisible('exportSelectedReceipts')
+        ->assertTableBulkActionVisible('pushReceivedToShopify')
         ->assertSee('Upload Supplier Orders')
         ->assertSee('Upload Receipts')
-        ->assertSee('Confirm Supplier Import')
+        ->assertDontSee('Confirm Supplier Import')
         ->assertDontSee('Import Stock CSV');
+});
+
+it('filters the inventory table using a pasted SKU list', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'sku-filter.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'sku-filter', 'title' => 'SKU Filter', 'status' => 'active',
+    ]);
+    $wanted = Variant::query()->create(['product_id' => $product->id, 'sku' => 'WANTED-1']);
+    $other = Variant::query()->create(['product_id' => $product->id, 'sku' => 'OTHER-2']);
+    $this->actingAs($user);
+
+    Livewire::test(ListInventories::class)
+        ->filterTable('sku_list', ['skus' => "missing-0,\nWANTED-1"])
+        ->assertCanSeeTableRecords([$wanted])
+        ->assertCanNotSeeTableRecords([$other]);
 });
 
 it('filters products by any incomplete or complete on-order quantities', function (): void {

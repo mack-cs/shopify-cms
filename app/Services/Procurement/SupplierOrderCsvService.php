@@ -8,6 +8,7 @@ use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Variant;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -18,32 +19,60 @@ final class SupplierOrderCsvService
 
     public function preview(string $path, string $type, ?int $userId = null, ?string $filename = null): ProcurementSupplierImportBatch
     {
-        if (! in_array($type, ['order', 'receipt'], true)) throw new \InvalidArgumentException('Unsupported supplier CSV type.');
+        if (! in_array($type, ['order', 'receipt'], true)) {
+            throw new \InvalidArgumentException('Unsupported supplier CSV type.');
+        }
         $contents = file_get_contents($path);
-        if ($contents === false) throw new \RuntimeException('The CSV could not be read.');
+        if ($contents === false) {
+            throw new \RuntimeException('The CSV could not be read.');
+        }
         $hash = hash('sha256', $contents);
         $existing = ProcurementSupplierImportBatch::query()->where('type', $type)->where('file_hash', $hash)->first();
-        if ($existing) return $existing;
-        $handle = fopen('php://temp', 'r+'); fwrite($handle, $contents); rewind($handle);
+        if ($existing) {
+            return $existing;
+        }
+        $handle = fopen('php://temp', 'r+');
+        fwrite($handle, $contents);
+        rewind($handle);
         $headers = array_map([$this, 'header'], fgetcsv($handle) ?: []);
         $required = $type === 'order' ? ['sku', 'order_id', 'quantity_ordered', 'eta'] : ['order_id', 'sku', 'quantity_received'];
         $missing = array_values(array_diff($required, $headers));
-        if ($missing !== []) throw ValidationException::withMessages(['file' => 'Missing CSV header(s): '.implode(', ', $missing).'.']);
-        $rows = []; $errors = []; $number = 1; $seenOrderLines = [];
+        if ($missing !== []) {
+            throw ValidationException::withMessages(['file' => 'Missing CSV header(s): '.implode(', ', $missing).'.']);
+        }
+        $rows = [];
+        $errors = [];
+        $number = 1;
+        $seenOrderLines = [];
         while (($values = fgetcsv($handle)) !== false) {
-            $number++; if (count(array_filter($values, fn ($value) => trim((string) $value) !== '')) === 0) continue;
-            $row = []; foreach ($headers as $index => $header) $row[$header] = trim((string) ($values[$index] ?? ''));
+            $number++;
+            if (count(array_filter($values, fn ($value) => trim((string) $value) !== '')) === 0) {
+                continue;
+            }
+            $row = [];
+            foreach ($headers as $index => $header) {
+                $row[$header] = trim((string) ($values[$index] ?? ''));
+            }
             $rowErrors = $this->validateRow($row, $type);
             if ($type === 'order') {
                 $lineKey = mb_strtoupper(trim((string) ($row['order_id'] ?? ''))).'|'.mb_strtoupper(trim((string) ($row['sku'] ?? '')));
-                if (isset($seenOrderLines[$lineKey])) $rowErrors[] = 'Order ID and SKU are duplicated within this CSV';
+                if (isset($seenOrderLines[$lineKey])) {
+                    $rowErrors[] = 'Order ID and SKU are duplicated within this CSV';
+                }
                 $seenOrderLines[$lineKey] = true;
             }
-            $row['_row'] = $number; $row['_valid'] = $rowErrors === []; $rows[] = $row;
-            if ($rowErrors !== []) $errors[(string) $number] = $rowErrors;
+            $row['_row'] = $number;
+            $row['_valid'] = $rowErrors === [];
+            $rows[] = $row;
+            if ($rowErrors !== []) {
+                $errors[(string) $number] = $rowErrors;
+            }
         }
         fclose($handle);
-        if ($rows === []) throw ValidationException::withMessages(['file' => 'The CSV contains no data rows.']);
+        if ($rows === []) {
+            throw ValidationException::withMessages(['file' => 'The CSV contains no data rows.']);
+        }
+
         return ProcurementSupplierImportBatch::query()->create([
             'uuid' => (string) Str::uuid(), 'type' => $type, 'original_filename' => $filename,
             'file_hash' => $hash, 'status' => 'previewed', 'preview_rows' => $rows, 'errors' => $errors ?: null,
@@ -51,18 +80,25 @@ final class SupplierOrderCsvService
         ]);
     }
 
-    public function confirm(string $uuid, ?int $userId = null): ProcurementSupplierImportBatch
+    public function confirm(string $uuid, ?int $userId = null, bool $dispatchReceipts = true): ProcurementSupplierImportBatch
     {
         $batch = ProcurementSupplierImportBatch::query()->where('uuid', $uuid)->firstOrFail();
         if ($batch->status === 'completed') {
-            if ($batch->type === 'order') $this->publishOrderRows($batch);
+            if ($batch->type === 'order') {
+                $this->publishOrderRows($batch);
+            }
+
             return $batch;
         }
-        if ($batch->invalid_count > 0) throw ValidationException::withMessages(['batch_uuid' => 'Fix the invalid preview rows before confirming this import.']);
+        if ($batch->invalid_count > 0) {
+            throw ValidationException::withMessages(['batch_uuid' => 'Fix the invalid preview rows before confirming this import.']);
+        }
         $receiptIds = [];
         DB::transaction(function () use ($batch, $userId, &$receiptIds): void {
             $locked = ProcurementSupplierImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
-            if ($locked->status === 'completed') return;
+            if ($locked->status === 'completed') {
+                return;
+            }
             if ($locked->type === 'order') {
                 $orderIds = collect($locked->preview_rows)->pluck('order_id')->map(fn ($id) => trim((string) $id))->filter()->unique();
                 $existingIds = ProcurementSupplierOrder::query()->whereIn('order_number', $orderIds)->lockForUpdate()->pluck('order_number');
@@ -74,16 +110,24 @@ final class SupplierOrderCsvService
             }
             $locked->update(['status' => 'processing', 'confirmed_at' => now()]);
             foreach ($locked->preview_rows as $index => $row) {
-                if ($locked->type === 'order') $this->orders->createFromRow($row, $userId, 'csv');
-                else {
+                if ($locked->type === 'order') {
+                    $this->orders->createFromRow($row, $userId, 'csv');
+                } else {
                     $receipt = $this->receipts->createFromRow($row, "csv:{$locked->uuid}:".($index + 1), $userId, $locked->id, false);
                     $receiptIds[] = $receipt->id;
                 }
             }
             $locked->update(['status' => 'completed', 'completed_at' => now()]);
         });
-        foreach (array_unique($receiptIds) as $id) ProcessSupplierReceiptJob::dispatch($id)->onQueue('procurement');
-        if ($batch->type === 'order') $this->publishOrderRows($batch);
+        if ($dispatchReceipts) {
+            foreach (array_unique($receiptIds) as $id) {
+                ProcessSupplierReceiptJob::dispatch($id)->onQueue('procurement');
+            }
+        }
+        if ($batch->type === 'order') {
+            $this->publishOrderRows($batch);
+        }
+
         return $batch->fresh();
     }
 
@@ -98,21 +142,31 @@ final class SupplierOrderCsvService
     {
         $errors = [];
         foreach ($type === 'order' ? ['sku', 'order_id', 'quantity_ordered', 'eta'] : ['sku', 'order_id', 'quantity_received'] as $field) {
-            if (trim((string) ($row[$field] ?? '')) === '') $errors[] = "{$field} is required";
+            if (trim((string) ($row[$field] ?? '')) === '') {
+                $errors[] = "{$field} is required";
+            }
         }
         $quantity = $row[$type === 'order' ? 'quantity_ordered' : 'quantity_received'] ?? null;
-        if (! ctype_digit((string) $quantity) || (int) $quantity <= 0) $errors[] = 'quantity must be a positive whole number';
+        if (! ctype_digit((string) $quantity) || (int) $quantity <= 0) {
+            $errors[] = 'quantity must be a positive whole number';
+        }
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
-        if ($sku !== '' && Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->count() !== 1) $errors[] = 'SKU must match exactly one active variant';
+        if ($sku !== '' && Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->count() !== 1) {
+            $errors[] = 'SKU must match exactly one active variant';
+        }
         if ($type === 'order' && trim((string) ($row['eta'] ?? '')) !== '') {
             try {
                 $eta = trim((string) $row['eta']);
                 preg_match('/^\d{1,2}\/\d{1,2}\/\d{4}$/', $eta)
-                    ? \Illuminate\Support\Carbon::createFromFormat('!d/m/Y', $eta)
-                    : \Illuminate\Support\Carbon::parse($eta);
+                    ? Carbon::createFromFormat('!d/m/Y', $eta)
+                    : Carbon::parse($eta);
                 $dateErrors = \DateTimeImmutable::getLastErrors();
-                if (is_array($dateErrors) && (($dateErrors['warning_count'] ?? 0) > 0 || ($dateErrors['error_count'] ?? 0) > 0)) throw new \InvalidArgumentException;
-            } catch (\Throwable) { $errors[] = 'eta is not a valid date'; }
+                if (is_array($dateErrors) && (($dateErrors['warning_count'] ?? 0) > 0 || ($dateErrors['error_count'] ?? 0) > 0)) {
+                    throw new \InvalidArgumentException;
+                }
+            } catch (\Throwable) {
+                $errors[] = 'eta is not a valid date';
+            }
         }
         if ($type === 'order' && trim((string) ($row['order_id'] ?? '')) !== ''
             && ProcurementSupplierOrder::query()->where('order_number', trim((string) $row['order_id']))->exists()) {
@@ -122,18 +176,23 @@ final class SupplierOrderCsvService
             $lines = ProcurementSupplierOrderLine::query()->where('status', 'open')
                 ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
                 ->whereHas('order', fn ($query) => $query->where('order_number', trim((string) $row['order_id'])))->get();
-            if ($lines->count() !== 1) $errors[] = 'Order ID and SKU must match exactly one open order line';
-            elseif (ctype_digit((string) $quantity)) {
+            if ($lines->count() !== 1) {
+                $errors[] = 'Order ID and SKU must match exactly one open order line';
+            } elseif (ctype_digit((string) $quantity)) {
                 $reserved = (int) $lines->first()->receipts()->whereIn('status', ['pending', 'processing', 'succeeded'])->sum('quantity_received');
-                if ((int) $quantity > (int) $lines->first()->quantity_ordered - $reserved) $errors[] = 'quantity exceeds the outstanding order quantity';
+                if ((int) $quantity > (int) $lines->first()->quantity_ordered - $reserved) {
+                    $errors[] = 'quantity exceeds the outstanding order quantity';
+                }
             }
         }
+
         return $errors;
     }
 
     private function header(string $header): string
     {
         $header = strtolower(trim(preg_replace('/^\xEF\xBB\xBF/', '', $header)));
+
         return match (str_replace([' ', '-'], '_', $header)) {
             'order', 'order_number', 'orderid' => 'order_id',
             'quantity', 'qty', 'qty_ordered' => 'quantity_ordered',

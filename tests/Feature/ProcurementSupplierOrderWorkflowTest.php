@@ -1,18 +1,23 @@
 <?php
 
+use App\Contracts\ShopifyGraphqlGateway;
+use App\Jobs\ProcessSupplierReceiptJob;
 use App\Models\Import;
-use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierOrder;
+use App\Models\ProcurementSupplierOrderLine;
+use App\Models\ProcurementSupplierReceipt;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
+use App\Services\Procurement\ProcurementSelectionCsvExporter;
+use App\Services\Procurement\SupplierOrderCsvService;
+use App\Services\Procurement\SupplierOrderProjectionService;
 use App\Services\Procurement\SupplierOrderService;
 use App\Services\Procurement\SupplierReceiptService;
-use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
-use App\Contracts\ShopifyGraphqlGateway;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 uses(RefreshDatabase::class);
@@ -51,12 +56,12 @@ it('moves later orders forward when an earlier order is completed', function ():
     $first = $orders->createForVariant($variant, 'PO-A', 5, '2026-09-01');
     $orders->createForVariant($variant, 'PO-B', 7, '2026-10-01');
     $first->receipts()->create([
-        'uuid' => (string) \Illuminate\Support\Str::uuid(), 'quantity_received' => 5,
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 5,
         'idempotency_key' => 'done-a', 'source' => 'test', 'status' => 'succeeded',
         'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://done-a',
     ]);
     $first->update(['status' => 'completed']);
-    app(\App\Services\Procurement\SupplierOrderProjectionService::class)->projectVariant($variant->fresh(['procurementIncomingStock']));
+    app(SupplierOrderProjectionService::class)->projectVariant($variant->fresh(['procurementIncomingStock']));
 
     $stock = $variant->procurementIncomingStock()->firstOrFail();
     expect($stock->order_id_phase_1)->toBe('PO-B')
@@ -85,6 +90,38 @@ it('previews CSV without changing orders and confirms the same file only once', 
         ->and(ProcurementSupplierOrderLine::query()->count())->toBe(1)
         ->and(ProcurementSupplierOrderLine::query()->first()->quantity_ordered)->toBe(12)
         ->and(ProcurementSupplierOrderLine::query()->first()->eta_date->toDateString())->toBe('2026-11-01');
+});
+
+it('stages received-order uploads until selected rows are pushed', function (): void {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('STAGED-1');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-STAGED', 10, '01/11/2026');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-receipts-');
+    file_put_contents($path, "Order ID,SKU,Quantity Received\nPO-STAGED,STAGED-1,4\n");
+    $csv = app(SupplierOrderCsvService::class);
+    $preview = $csv->preview($path, 'receipt');
+    $csv->confirm($preview->uuid, dispatchReceipts: false);
+    @unlink($path);
+
+    expect(ProcurementSupplierReceipt::query()->value('status'))->toBe('pending')
+        ->and(ProcurementSupplierReceipt::query()->value('quantity_received'))->toBe(4);
+    Bus::assertNotDispatched(ProcessSupplierReceiptJob::class);
+});
+
+it('exports populated templates only for selected eligible products', function (): void {
+    $selected = supplierWorkflowVariant('EXPORT-SELECTED');
+    $excluded = supplierWorkflowVariant('EXPORT-UNLISTED');
+    $excluded->product()->update(['status' => 'unlisted']);
+    app(SupplierOrderService::class)->createForVariant($selected, 'PO-EXPORT', 8, '01/11/2026');
+    $exporter = app(ProcurementSelectionCsvExporter::class);
+
+    expect($exporter->pendingOrders(collect([$selected, $excluded])))
+        ->toContain('EXPORT-SELECTED')
+        ->not->toContain('EXPORT-UNLISTED')
+        ->and($exporter->receipts(collect([$selected, $excluded])))
+        ->toContain('PO-EXPORT,EXPORT-SELECTED')
+        ->not->toContain('EXPORT-UNLISTED');
 });
 
 it('receives Shopify inventory with a delta mutation and a unique reference', function (): void {
@@ -188,6 +225,7 @@ function supplierWorkflowVariant(string $sku): Variant
         'handle' => strtolower($sku), 'title' => 'Product '.$sku, 'vendor' => 'Leigh Avenue',
         'type' => 'Jewellery', 'status' => 'active', 'tags' => 'livi-road', 'approval_version' => 1,
     ]));
+
     return Variant::withoutEvents(fn (): Variant => Variant::query()->create([
         'product_id' => $product->id, 'shopify_id' => 'gid://shopify/ProductVariant/'.$sku,
         'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/'.$sku,

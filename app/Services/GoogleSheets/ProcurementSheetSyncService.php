@@ -113,7 +113,7 @@ final class ProcurementSheetSyncService
             }
         });
 
-        $this->publishChangeLog();
+        $this->publishChangeLogSafely();
 
         return $stats;
     }
@@ -162,7 +162,7 @@ final class ProcurementSheetSyncService
             $brandRows += $this->publishBrand($collection, $desired, $brandSheets[$collection->id]);
         }
 
-        $this->publishChangeLog();
+        $this->publishChangeLogSafely();
 
         return [
             'master_rows' => count($records), 'brand_rows' => $brandRows,
@@ -233,7 +233,7 @@ final class ProcurementSheetSyncService
             $this->sheets->batchUpdateValues($updates);
             $this->formatDateColumns($tab, $map);
         }
-        $this->publishChangeLog();
+        $this->publishChangeLogSafely();
 
         return ['rows' => $updated, 'tabs' => count($tabs)];
     }
@@ -269,6 +269,17 @@ final class ProcurementSheetSyncService
         ], ...$rows];
 
         $this->sheets->replaceAll($tab, $values, count($existing));
+    }
+
+    private function publishChangeLogSafely(): void
+    {
+        try {
+            $this->publishChangeLog();
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement Change Log Sheet could not be refreshed; CMS audit records remain available.', [
+                'error' => $exception->getMessage(),
+            ]);
+        }
     }
 
     /** @param array<string,int> $map */

@@ -4,7 +4,10 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\InventoryResource\Pages;
 use App\Jobs\InventorySyncJob;
+use App\Jobs\ProcessSupplierReceiptJob;
+use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\ProcurementSupplierReceipt;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
@@ -12,8 +15,10 @@ use App\Services\BulkInventoryTrackingService;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\InventoryAccessService;
 use App\Services\InventoryOperationContext;
+use App\Services\Procurement\ProcurementSelectionCsvExporter;
 use App\Services\Procurement\SupplierOrderService;
 use App\Services\Procurement\SupplierReceiptService;
+use App\Services\ProductInventoryCsvExporter;
 use App\Services\ProductInventoryHistoryRecorder;
 use App\Services\ProductSellabilityService;
 use Filament\Forms;
@@ -32,6 +37,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class InventoryResource extends Resource
@@ -57,7 +63,7 @@ class InventoryResource extends Resource
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
                 ->with(['product', 'procurementIncomingStock', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
                 ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery
-                    ->whereRaw('LOWER(COALESCE(status, "")) != ?', ['archived'])))
+                    ->whereRaw('LOWER(COALESCE(status, "")) NOT IN (?, ?)', ['archived', 'unlisted'])))
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('product.id')
@@ -223,6 +229,52 @@ class InventoryResource extends Resource
                             default => $query,
                         };
                     }),
+                SelectFilter::make('order_review')
+                    ->label('Review Upload')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                    ->options([
+                        'latest_orders' => 'Latest Orders Upload',
+                        'latest_receipts' => 'Latest Received Upload',
+                        'awaiting_shopify' => 'Awaiting Shopify Push',
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        $value = $data['value'] ?? null;
+                        if ($value === 'awaiting_shopify') {
+                            return $query->whereHas('supplierOrderLines.receipts', fn (Builder $receiptQuery): Builder => $receiptQuery
+                                ->where('status', 'pending'));
+                        }
+                        $type = match ($value) {
+                            'latest_orders' => 'order',
+                            'latest_receipts' => 'receipt',
+                            default => null,
+                        };
+                        if ($type === null) {
+                            return $query;
+                        }
+                        $batch = ProcurementSupplierImportBatch::query()
+                            ->where('type', $type)->where('status', 'completed')->latest('completed_at')->first();
+                        $skus = collect($batch?->preview_rows ?? [])->pluck('sku')
+                            ->map(fn ($sku): string => strtoupper(trim((string) $sku)))->filter()->unique();
+
+                        return $skus->isEmpty()
+                            ? $query->whereRaw('1 = 0')
+                            : $query->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus);
+                    }),
+                Filter::make('sku_list')
+                    ->label('SKU List')
+                    ->form([
+                        Forms\Components\Textarea::make('skus')
+                            ->label('SKUs')
+                            ->rows(5)
+                            ->helperText('Paste SKUs separated by commas, spaces, or new lines.'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        $skus = collect(preg_split('/[\s,;]+/', strtoupper((string) ($data['skus'] ?? ''))))
+                            ->map(fn ($sku): string => trim((string) $sku))->filter()->unique();
+
+                        return $skus->isEmpty() ? $query : $query->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus);
+                    })
+                    ->indicateUsing(fn (array $data): ?string => filled($data['skus'] ?? null) ? 'SKU list applied' : null),
                 Filter::make('pending_push')
                     ->label('Pending Push')
                     ->query(fn (Builder $query): Builder => $query->where('inventory_local_dirty', true)),
@@ -231,7 +283,6 @@ class InventoryResource extends Resource
                     ->options([
                         'active' => 'Active',
                         'draft' => 'Draft',
-                        'archived' => 'Archived',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
                         $value = strtolower(trim((string) ($data['value'] ?? '')));
@@ -280,8 +331,8 @@ class InventoryResource extends Resource
                     ])
                     ->action(function (Variant $record, array $data): void {
                         $line = ProcurementSupplierOrderLine::query()->where('variant_id', $record->id)->findOrFail($data['line_id']);
-                        app(SupplierReceiptService::class)->create($line, $data['quantity_received'], $data['idempotency_key'], Auth::id());
-                        Notification::make()->title('Receipt queued')->body('The Shopify delta adjustment will run on the procurement queue.')->success()->send();
+                        app(SupplierReceiptService::class)->create($line, $data['quantity_received'], $data['idempotency_key'], Auth::id(), dispatch: false);
+                        Notification::make()->title('Receipt staged')->body('Review it with the Awaiting Shopify Push filter, then push the selected row.')->success()->send();
                     }),
                 Action::make('viewSupplierOrders')
                     ->label('Order Details')->icon('heroicon-o-eye')->color('gray')
@@ -418,6 +469,52 @@ class InventoryResource extends Resource
             ])
             ->bulkActions([
                 BulkActionGroup::make([
+                    BulkAction::make('exportSelectedInventory')
+                        ->label('Export Selected Inventory CSV')
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday')
+                        ->action(fn (Collection $records) => response()->streamDownload(
+                            fn () => print app(ProductInventoryCsvExporter::class)->exportToString($records->pluck('id')->map(fn ($id): int => (int) $id)->all()),
+                            'selected-inventory-'.now()->format('Ymd_His').'.csv',
+                        )),
+                    BulkAction::make('exportSelectedOrders')
+                        ->label('Export Selected Order CSV')
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                        ->action(fn (Collection $records) => response()->streamDownload(
+                            fn () => print app(ProcurementSelectionCsvExporter::class)->pendingOrders($records),
+                            'selected-pending-orders-'.now()->format('Ymd_His').'.csv',
+                        )),
+                    BulkAction::make('exportSelectedReceipts')
+                        ->label('Export Selected Receipt CSV')
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                        ->action(fn (Collection $records) => response()->streamDownload(
+                            fn () => print app(ProcurementSelectionCsvExporter::class)->receipts($records),
+                            'selected-receipts-'.now()->format('Ymd_His').'.csv',
+                        )),
+                    BulkAction::make('pushReceivedToShopify')
+                        ->label('Push Received To Shopify')
+                        ->icon('heroicon-o-cloud-arrow-up')
+                        ->color('success')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'
+                            && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                        ->requiresConfirmation()
+                        ->modalDescription('Only staged receipts for the selected products will be pushed. Shopify inventory is increased by each received quantity, then remaining order quantities are recalculated.')
+                        ->action(function (Collection $records): void {
+                            $ids = ProcurementSupplierReceipt::query()
+                                ->where('status', 'pending')
+                                ->whereHas('line', fn (Builder $lineQuery): Builder => $lineQuery
+                                    ->whereIn('variant_id', $records->pluck('id')))
+                                ->pluck('id');
+                            foreach ($ids as $id) {
+                                ProcessSupplierReceiptJob::dispatch((int) $id)->onQueue('procurement');
+                            }
+                            Notification::make()->title('Received inventory queued')
+                                ->body("{$ids->count()} staged receipt(s) will be pushed to Shopify and recalculated.")
+                                ->success()->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('startTracking')
                         ->label('Start Tracking Inventory')
                         ->icon('heroicon-o-check-circle')

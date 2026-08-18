@@ -31,22 +31,26 @@ final class ProductInventoryCsvExporter
         ];
     }
 
-    public function exportToString(): string
+    public function exportToString(array $variantIds = []): string
     {
         $writer = Writer::createFromString();
         $writer->insertOne($this->headers());
 
-        $variants = Variant::query()
+        $query = Variant::query()
             ->active()
             ->with('product')
             ->whereHas('product', fn (Builder $query): Builder => $query
-                ->whereRaw('LOWER(COALESCE(status, "")) != ?', ['archived']))
+                ->whereRaw('LOWER(COALESCE(status, "")) NOT IN (?, ?)', ['archived', 'unlisted']));
+        if ($variantIds !== []) {
+            $query->whereKey($variantIds);
+        }
+        $variants = $query
             ->orderBy('product_id')
             ->orderBy('id')
             ->get();
 
         foreach ($variants as $variant) {
-            if (!$variant instanceof Variant || !$variant->product instanceof Product) {
+            if (! $variant instanceof Variant || ! $variant->product instanceof Product) {
                 continue;
             }
 
