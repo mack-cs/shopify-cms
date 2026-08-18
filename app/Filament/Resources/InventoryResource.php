@@ -4,25 +4,26 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\InventoryResource\Pages;
 use App\Jobs\InventorySyncJob;
+use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
-use App\Models\ProcurementSupplierOrderLine;
 use App\Services\BulkInventoryTrackingService;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\InventoryAccessService;
+use App\Services\InventoryOperationContext;
 use App\Services\Procurement\SupplierOrderService;
 use App\Services\Procurement\SupplierReceiptService;
 use App\Services\ProductInventoryHistoryRecorder;
-use App\Services\InventoryOperationContext;
+use App\Services\ProductSellabilityService;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
-use Filament\Tables;
+use Filament\Support\Enums\MaxWidth;
+use Filament\Tables\Actions\Action;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
-use Filament\Tables\Actions\Action;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
@@ -38,8 +39,11 @@ class InventoryResource extends Resource
     protected static ?string $model = Variant::class;
 
     protected static ?string $navigationIcon = 'heroicon-o-archive-box';
+
     protected static ?string $navigationGroup = 'Catalog';
+
     protected static ?string $navigationLabel = 'Inventory';
+
     protected static ?int $navigationSort = 3;
 
     public static function form(Form $form): Form
@@ -59,7 +63,8 @@ class InventoryResource extends Resource
                 TextColumn::make('product.id')
                     ->label('Product ID')
                     ->sortable()
-                    ->searchable(),
+                    ->searchable()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('product.title')
                     ->label('Title')
                     ->searchable()
@@ -67,7 +72,8 @@ class InventoryResource extends Resource
                 TextColumn::make('product.handle')
                     ->label('Handle')
                     ->searchable()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(isToggledHiddenByDefault: true)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('product.status')
                     ->label('Status')
                     ->badge()
@@ -76,7 +82,8 @@ class InventoryResource extends Resource
                         'draft' => 'warning',
                         'archived' => 'gray',
                         default => 'gray',
-                    }),
+                    })
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('sku')
                     ->label('SKU')
                     ->searchable(),
@@ -91,9 +98,10 @@ class InventoryResource extends Resource
                         true => 'success',
                         false => 'gray',
                         default => 'warning',
-                    }),
+                    })
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('inventory_qty')
-                    ->label('Inventory')
+                    ->label('Current Inventory')
                     ->state(fn (Variant $record): string => match ($record->inventory_tracked) {
                         false => 'Not tracked',
                         null => 'Unknown',
@@ -104,35 +112,40 @@ class InventoryResource extends Resource
                     ->label('Qty On Order')
                     ->state(fn (Variant $record): int => $record->supplierOrderLines
                         ->where('status', 'open')->sum(fn ($line): int => $line->quantity_outstanding))
-                    ->badge()->color('info'),
+                    ->badge()->color('info')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('next_eta')
                     ->label('Next ETA')
                     ->state(fn (Variant $record): ?string => $record->supplierOrderLines
                         ->where('status', 'open')->filter(fn ($line) => $line->quantity_outstanding > 0 && $line->eta_date)
-                        ->sortBy('eta_date')->first()?->eta_date?->format('d/m/Y')),
+                        ->sortBy('eta_date')->first()?->eta_date?->format('d/m/Y'))
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('sellable_state')
                     ->label('Sellable')
                     ->state(function (Variant $record): string {
                         $product = $record->product;
-                        if (!$product instanceof Product) {
+                        if (! $product instanceof Product) {
                             return 'Unknown';
                         }
 
-                        return app(\App\Services\ProductSellabilityService::class)->isLocallySellable($product)
+                        return app(ProductSellabilityService::class)->isLocallySellable($product)
                             ? 'Sellable'
                             : 'Not Sellable';
                     })
                     ->badge()
-                    ->color(fn (string $state): string => $state === 'Sellable' ? 'success' : 'danger'),
+                    ->color(fn (string $state): string => $state === 'Sellable' ? 'success' : 'danger')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 IconColumn::make('inventory_local_dirty')
                     ->label('Pending Push')
                     ->boolean()
                     ->trueColor('warning')
-                    ->falseColor('success'),
+                    ->falseColor('success')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('inventory_sync_error')
                     ->label('Sync Error')
                     ->wrap()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(isToggledHiddenByDefault: true)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('inventory_last_synced_at')
                     ->label('From Shopify')
                     ->dateTime()
@@ -142,33 +155,44 @@ class InventoryResource extends Resource
                     ->label('To Shopify')
                     ->dateTime()
                     ->sortable()
-                    ->toggleable(),
+                    ->toggleable()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('last_synced_at')
                     ->label('Last Synced')
                     ->dateTime()
                     ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(isToggledHiddenByDefault: true)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('updated_at')
                     ->label('Updated Date')
                     ->dateTime()
                     ->sortable()
-                    ->toggleable(),
+                    ->toggleable()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('created_at')
                     ->label('Created Date')
                     ->dateTime()
                     ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(isToggledHiddenByDefault: true)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
             ])
             ->filters([
-                Filter::make('tracked')
-                    ->label('Tracked Only')
-                    ->query(fn (Builder $query): Builder => $query->where('inventory_tracked', true)),
-                Filter::make('not_tracked')
-                    ->label('Not Tracked')
-                    ->query(fn (Builder $query): Builder => $query->where('inventory_tracked', false)),
-                Filter::make('unknown_tracking')
-                    ->label('Unknown Tracking')
-                    ->query(fn (Builder $query): Builder => $query->whereNull('inventory_tracked')),
+                SelectFilter::make('inventory_state')
+                    ->label('Inventory State')
+                    ->options([
+                        'in_stock' => 'In Stock',
+                        'out_of_stock' => 'Out Of Stock',
+                        'not_tracked' => 'Not Tracked / Unknown',
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return match ($data['value'] ?? null) {
+                            'in_stock' => $query->where('inventory_tracked', true)->where('inventory_qty', '>', 0),
+                            'out_of_stock' => $query->where('inventory_tracked', true)->where('inventory_qty', '<=', 0),
+                            'not_tracked' => $query->where(fn (Builder $builder) => $builder
+                                ->where('inventory_tracked', false)->orWhereNull('inventory_tracked')),
+                            default => $query,
+                        };
+                    }),
                 Filter::make('pending_push')
                     ->label('Pending Push')
                     ->query(fn (Builder $query): Builder => $query->where('inventory_local_dirty', true)),
@@ -191,7 +215,9 @@ class InventoryResource extends Resource
             ->actions([
                 Action::make('addSupplierOrder')
                     ->label('Add Stock On Order')->icon('heroicon-o-truck')
-                    ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                    ->modalWidth(MaxWidth::Medium)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'
+                        && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                     ->form([
                         Forms\Components\TextInput::make('order_number')->label('Order ID')->required()->maxLength(255),
                         Forms\Components\TextInput::make('quantity_ordered')->label('Quantity Ordered')->integer()->minValue(1)->required(),
@@ -199,16 +225,20 @@ class InventoryResource extends Resource
                     ])
                     ->action(function (Variant $record, array $data): void {
                         app(SupplierOrderService::class)->createForVariant($record, $data['order_number'], $data['quantity_ordered'], $data['eta_date'], Auth::id());
-                        try { app(ProcurementSheetSyncService::class)->publishOperational([$record->id]); }
-                        catch (\Throwable $e) {
+                        try {
+                            app(ProcurementSheetSyncService::class)->publishOperational([$record->id]);
+                        } catch (\Throwable $e) {
                             Notification::make()->title('Order saved; Sheet update failed')->body($e->getMessage())->warning()->send();
+
                             return;
                         }
                         Notification::make()->title('Supplier order added')->body('The CMS ledger and procurement Sheets were updated.')->success()->send();
                     }),
                 Action::make('receiveSupplierStock')
                     ->label('Receive Stock')->icon('heroicon-o-inbox-arrow-down')->color('success')
-                    ->visible(fn (Variant $record): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
+                    ->modalWidth(MaxWidth::Medium)
+                    ->visible(fn (Variant $record, $livewire): bool => $livewire->activeTab === 'orders'
+                        && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
                         && $record->supplierOrderLines->where('status', 'open')->contains(fn ($line) => $line->quantity_outstanding > 0))
                     ->form([
                         Forms\Components\Select::make('line_id')->label('Supplier Order')->required()
@@ -225,13 +255,16 @@ class InventoryResource extends Resource
                     }),
                 Action::make('viewSupplierOrders')
                     ->label('Order Details')->icon('heroicon-o-eye')->color('gray')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
                     ->modalHeading(fn (Variant $record): string => 'Supplier orders — '.($record->sku ?: "Variant {$record->id}"))
                     ->modalContent(fn (Variant $record) => view('filament.inventory.supplier-orders', ['variant' => $record->load(['supplierOrderLines.order', 'supplierOrderLines.receipts'])]))
                     ->modalSubmitAction(false)->modalCancelActionLabel('Close'),
                 Action::make('editInventory')
                     ->label('Update Inventory')
                     ->icon('heroicon-o-pencil-square')
-                    ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                    ->modalWidth(MaxWidth::Medium)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                        && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                     ->form([
                         Forms\Components\Toggle::make('inventory_tracked')
                             ->label('Inventory tracked')
@@ -273,7 +306,8 @@ class InventoryResource extends Resource
                 Action::make('updateStatus')
                     ->label('Update Status')
                     ->icon('heroicon-o-tag')
-                    ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateStatus(Auth::user()))
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                        && app(InventoryAccessService::class)->canUpdateStatus(Auth::user()))
                     ->form([
                         Forms\Components\Select::make('status')
                             ->label('Product status')
@@ -289,7 +323,7 @@ class InventoryResource extends Resource
                     ])
                     ->action(function (Variant $record, array $data): void {
                         $product = $record->product;
-                        if (!$product instanceof Product) {
+                        if (! $product instanceof Product) {
                             return;
                         }
 
@@ -331,7 +365,8 @@ class InventoryResource extends Resource
                 Action::make('pushToShopify')
                     ->label('Push To Shopify')
                     ->icon('heroicon-o-cloud-arrow-up')
-                    ->visible(fn (): bool => app(InventoryAccessService::class)->canAccess(Auth::user()))
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                        && app(InventoryAccessService::class)->canAccess(Auth::user()))
                     ->requiresConfirmation()
                     ->modalHeading('Push Inventory To Shopify')
                     ->modalDescription('This will push the current local inventory, tracking state, and product status to Shopify, then refresh complementary products if needed.')
@@ -341,7 +376,7 @@ class InventoryResource extends Resource
                             [$record->id],
                             'push',
                             Auth::id(),
-                            'inventory_' . now()->format('YmdHis')
+                            'inventory_'.now()->format('YmdHis')
                         );
 
                         Notification::make()
@@ -357,7 +392,8 @@ class InventoryResource extends Resource
                         ->label('Start Tracking Inventory')
                         ->icon('heroicon-o-check-circle')
                         ->color('warning')
-                        ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                            && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                         ->requiresConfirmation()
                         ->modalHeading('Start tracking selected inventory?')
                         ->modalDescription('Only selected variants currently marked Not Tracked will change. Already tracked variants and variants with an unknown tracking state are skipped.')
@@ -383,12 +419,12 @@ class InventoryResource extends Resource
                                 Auth::id(),
                             );
 
-                            if (($data['push_to_shopify'] ?? false) && !empty($result['changed_variant_ids'])) {
+                            if (($data['push_to_shopify'] ?? false) && ! empty($result['changed_variant_ids'])) {
                                 InventorySyncJob::dispatch(
                                     $result['changed_variant_ids'],
                                     'push',
                                     Auth::id(),
-                                    'inventory_' . now()->format('YmdHis'),
+                                    'inventory_'.now()->format('YmdHis'),
                                 );
                             }
 
@@ -435,7 +471,8 @@ class InventoryResource extends Resource
                         }),
                     BulkAction::make('pushToShopify')
                         ->label('Push To Shopify')
-                        ->visible(fn (): bool => app(InventoryAccessService::class)->canAccess(Auth::user()))
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                            && app(InventoryAccessService::class)->canAccess(Auth::user()))
                         ->requiresConfirmation()
                         ->modalHeading('Push Inventory To Shopify')
                         ->modalDescription('This will push the current local inventory, tracking state, and product status to Shopify for all selected variants, then refresh complementary products if needed.')
@@ -445,7 +482,7 @@ class InventoryResource extends Resource
                                 $records->pluck('id')->map(fn ($id): int => (int) $id)->all(),
                                 'push',
                                 Auth::id(),
-                                'inventory_' . now()->format('YmdHis')
+                                'inventory_'.now()->format('YmdHis')
                             );
 
                             Notification::make()
@@ -489,5 +526,4 @@ class InventoryResource extends Resource
     {
         return false;
     }
-
 }
