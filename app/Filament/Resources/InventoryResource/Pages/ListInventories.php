@@ -30,6 +30,20 @@ class ListInventories extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('downloadSupplierOrdersTemplate')
+                ->label('Order CSV Template')->icon('heroicon-o-arrow-down-tray')->color('gray')
+                ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->action(fn () => response()->download(
+                    resource_path('templates/procurement-supplier-orders.csv'),
+                    'procurement-supplier-orders.csv',
+                )),
+            Actions\Action::make('downloadSupplierReceiptsTemplate')
+                ->label('Receipt CSV Template')->icon('heroicon-o-arrow-down-tray')->color('gray')
+                ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->action(fn () => response()->download(
+                    resource_path('templates/procurement-supplier-receipts.csv'),
+                    'procurement-supplier-receipts.csv',
+                )),
             Actions\Action::make('previewSupplierOrdersCsv')
                 ->label('Upload Supplier Orders')->icon('heroicon-o-truck')->color('info')
                 ->visible(fn (): bool => app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))

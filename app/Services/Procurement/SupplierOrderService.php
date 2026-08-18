@@ -13,7 +13,7 @@ final class SupplierOrderService
 {
     public function __construct(private readonly SupplierOrderProjectionService $projection) {}
 
-    public function createForVariant(Variant $variant, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms'): ProcurementSupplierOrderLine
+    public function createForVariant(Variant $variant, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms', bool $allowExistingOrder = false): ProcurementSupplierOrderLine
     {
         $orderNumber = trim($orderNumber);
         if ($orderNumber === '') throw ValidationException::withMessages(['order_number' => 'Order ID is required.']);
@@ -23,10 +23,15 @@ final class SupplierOrderService
         try { $etaDate = $this->date((string) $eta)->toDateString(); }
         catch (\Throwable) { throw ValidationException::withMessages(['eta_date' => 'ETA must be a valid date.']); }
 
-        $line = DB::transaction(function () use ($variant, $orderNumber, $quantity, $etaDate, $userId, $source): ProcurementSupplierOrderLine {
+        $line = DB::transaction(function () use ($variant, $orderNumber, $quantity, $etaDate, $userId, $source, $allowExistingOrder): ProcurementSupplierOrderLine {
             $openCount = ProcurementSupplierOrderLine::query()->where('variant_id', $variant->id)->where('status', 'open')->lockForUpdate()->count();
-            $order = ProcurementSupplierOrder::query()->firstOrCreate(['order_number' => $orderNumber], [
-                'uuid' => (string) Str::uuid(), 'source' => $source, 'created_by' => $userId,
+            $order = ProcurementSupplierOrder::query()->where('order_number', $orderNumber)->lockForUpdate()->first();
+            if ($order && ! $allowExistingOrder) {
+                throw ValidationException::withMessages(['order_number' => "Order ID {$orderNumber} already exists and cannot be uploaded as a new pending order."]);
+            }
+            $order ??= ProcurementSupplierOrder::query()->create([
+                'uuid' => (string) Str::uuid(), 'order_number' => $orderNumber,
+                'source' => $source, 'created_by' => $userId,
             ]);
             $existing = ProcurementSupplierOrderLine::query()->where('supplier_order_id', $order->id)->where('variant_id', $variant->id)->first();
             if ($existing) throw ValidationException::withMessages(['order_number' => 'This order already contains this SKU.']);
@@ -47,7 +52,11 @@ final class SupplierOrderService
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->get();
         if ($matches->count() !== 1) throw ValidationException::withMessages(['sku' => $matches->isEmpty() ? "SKU {$sku} was not found." : "SKU {$sku} is ambiguous."]);
-        return $this->createForVariant($matches->first(), (string) ($row['order_id'] ?? ''), $row['quantity_ordered'] ?? null, $row['eta'] ?? null, $userId, $source);
+        return $this->createForVariant(
+            $matches->first(), (string) ($row['order_id'] ?? ''),
+            $row['quantity_ordered'] ?? null, $row['eta'] ?? null,
+            $userId, $source, allowExistingOrder: true,
+        );
     }
 
     private function date(string $value): \Illuminate\Support\Carbon

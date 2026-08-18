@@ -4,6 +4,7 @@ namespace App\Services\Procurement;
 
 use App\Jobs\ProcessSupplierReceiptJob;
 use App\Models\ProcurementSupplierImportBatch;
+use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Variant;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
@@ -28,11 +29,16 @@ final class SupplierOrderCsvService
         $required = $type === 'order' ? ['sku', 'order_id', 'quantity_ordered', 'eta'] : ['order_id', 'sku', 'quantity_received'];
         $missing = array_values(array_diff($required, $headers));
         if ($missing !== []) throw ValidationException::withMessages(['file' => 'Missing CSV header(s): '.implode(', ', $missing).'.']);
-        $rows = []; $errors = []; $number = 1;
+        $rows = []; $errors = []; $number = 1; $seenOrderLines = [];
         while (($values = fgetcsv($handle)) !== false) {
             $number++; if (count(array_filter($values, fn ($value) => trim((string) $value) !== '')) === 0) continue;
             $row = []; foreach ($headers as $index => $header) $row[$header] = trim((string) ($values[$index] ?? ''));
             $rowErrors = $this->validateRow($row, $type);
+            if ($type === 'order') {
+                $lineKey = mb_strtoupper(trim((string) ($row['order_id'] ?? ''))).'|'.mb_strtoupper(trim((string) ($row['sku'] ?? '')));
+                if (isset($seenOrderLines[$lineKey])) $rowErrors[] = 'Order ID and SKU are duplicated within this CSV';
+                $seenOrderLines[$lineKey] = true;
+            }
             $row['_row'] = $number; $row['_valid'] = $rowErrors === []; $rows[] = $row;
             if ($rowErrors !== []) $errors[(string) $number] = $rowErrors;
         }
@@ -57,6 +63,15 @@ final class SupplierOrderCsvService
         DB::transaction(function () use ($batch, $userId, &$receiptIds): void {
             $locked = ProcurementSupplierImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
             if ($locked->status === 'completed') return;
+            if ($locked->type === 'order') {
+                $orderIds = collect($locked->preview_rows)->pluck('order_id')->map(fn ($id) => trim((string) $id))->filter()->unique();
+                $existingIds = ProcurementSupplierOrder::query()->whereIn('order_number', $orderIds)->lockForUpdate()->pluck('order_number');
+                if ($existingIds->isNotEmpty()) {
+                    throw ValidationException::withMessages([
+                        'batch_uuid' => 'Order ID(s) already exist and this pending-order import was rejected: '.$existingIds->implode(', ').'.',
+                    ]);
+                }
+            }
             $locked->update(['status' => 'processing', 'confirmed_at' => now()]);
             foreach ($locked->preview_rows as $index => $row) {
                 if ($locked->type === 'order') $this->orders->createFromRow($row, $userId, 'csv');
@@ -98,6 +113,10 @@ final class SupplierOrderCsvService
                 $dateErrors = \DateTimeImmutable::getLastErrors();
                 if (is_array($dateErrors) && (($dateErrors['warning_count'] ?? 0) > 0 || ($dateErrors['error_count'] ?? 0) > 0)) throw new \InvalidArgumentException;
             } catch (\Throwable) { $errors[] = 'eta is not a valid date'; }
+        }
+        if ($type === 'order' && trim((string) ($row['order_id'] ?? '')) !== ''
+            && ProcurementSupplierOrder::query()->where('order_number', trim((string) $row['order_id']))->exists()) {
+            $errors[] = 'Order ID already exists; use the receipt template to fulfil an existing order';
         }
         if ($type === 'receipt' && $sku !== '' && trim((string) ($row['order_id'] ?? '')) !== '') {
             $lines = ProcurementSupplierOrderLine::query()->where('status', 'open')

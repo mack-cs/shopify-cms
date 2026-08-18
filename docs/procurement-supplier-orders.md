@@ -36,6 +36,8 @@ PO-1001,LRB0004,20
 
 Upload only validates and stores a preview. Copy the preview ID from the notification into **Confirm Supplier Import**. Exact duplicate files resolve to the same batch, and a completed batch cannot process twice. Receipt confirmation queues work on the `procurement` queue.
 
+An Order ID may contain several SKU lines in its first order CSV. After that new order is confirmed, any later pending-order upload containing the same Order ID is rejected during preview and checked again during confirmation. Use the receipt template—not the order template—to partially or fully fulfil an existing order.
+
 Run the worker with:
 
 ```powershell

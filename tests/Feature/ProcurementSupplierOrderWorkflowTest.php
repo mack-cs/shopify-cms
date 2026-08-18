@@ -2,6 +2,7 @@
 
 use App\Models\Import;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\ProcurementSupplierOrder;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
@@ -97,6 +98,85 @@ it('receives Shopify inventory with a delta mutation and a unique reference', fu
     })->andReturn(['inventoryAdjustQuantities' => ['inventoryAdjustmentGroup' => ['createdAt' => now()->toIso8601String()], 'userErrors' => []]]);
 
     (new ShopifyInventoryAdjustmentService($client))->increaseAvailable($variant, 3, 'logistics://receipt/unique-1');
+});
+
+it('allows several SKUs on one new order CSV', function (): void {
+    config(['google_sheets.enabled' => false]);
+    supplierWorkflowVariant('MULTI-1');
+    supplierWorkflowVariant('MULTI-2');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-multi-');
+    file_put_contents($path, implode("\n", [
+        'SKU,Order ID,Quantity Ordered,ETA',
+        'MULTI-1,PO-MULTI,10,01/11/2026',
+        'MULTI-2,PO-MULTI,20,01/11/2026',
+    ])."\n");
+    $csv = app(SupplierOrderCsvService::class);
+    $preview = $csv->preview($path, 'order');
+    expect($preview->valid_count)->toBe(2)->and($preview->invalid_count)->toBe(0);
+    $csv->confirm($preview->uuid);
+    @unlink($path);
+
+    expect(ProcurementSupplierOrder::query()->where('order_number', 'PO-MULTI')->count())->toBe(1)
+        ->and(ProcurementSupplierOrderLine::query()->whereHas('order', fn ($query) => $query->where('order_number', 'PO-MULTI'))->count())->toBe(2);
+});
+
+it('rejects duplicate Order ID and SKU lines within one pending-order CSV', function (): void {
+    config(['google_sheets.enabled' => false]);
+    supplierWorkflowVariant('DUP-LINE-1');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-duplicate-line-');
+    file_put_contents($path, implode("\n", [
+        'SKU,Order ID,Quantity Ordered,ETA',
+        'DUP-LINE-1,PO-DUP-LINE,10,01/11/2026',
+        'DUP-LINE-1,PO-DUP-LINE,10,01/11/2026',
+    ])."\n");
+
+    $preview = app(SupplierOrderCsvService::class)->preview($path, 'order');
+    @unlink($path);
+
+    expect($preview->valid_count)->toBe(1)
+        ->and($preview->invalid_count)->toBe(1)
+        ->and(data_get($preview->errors, '3.0'))->toContain('duplicated within this CSV');
+});
+
+it('rejects a later pending-order upload when its Order ID already exists', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $first = supplierWorkflowVariant('DUP-ORDER-1');
+    supplierWorkflowVariant('DUP-ORDER-2');
+    app(SupplierOrderService::class)->createForVariant($first, 'PO-EXISTS', 10, '01/11/2026');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-duplicate-order-');
+    file_put_contents($path, "SKU,Order ID,Quantity Ordered,ETA\nDUP-ORDER-2,PO-EXISTS,5,02/11/2026\n");
+
+    $preview = app(SupplierOrderCsvService::class)->preview($path, 'order');
+    @unlink($path);
+
+    expect($preview->valid_count)->toBe(0)
+        ->and($preview->invalid_count)->toBe(1)
+        ->and(data_get($preview->errors, '2.0'))->toContain('Order ID already exists');
+});
+
+it('rechecks Order IDs during confirmation to close the preview race window', function (): void {
+    config(['google_sheets.enabled' => false]);
+    supplierWorkflowVariant('RACE-UPLOAD');
+    $winner = supplierWorkflowVariant('RACE-WINNER');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-race-');
+    file_put_contents($path, "SKU,Order ID,Quantity Ordered,ETA\nRACE-UPLOAD,PO-RACE,5,02/11/2026\n");
+    $csv = app(SupplierOrderCsvService::class);
+    $preview = $csv->preview($path, 'order');
+    app(SupplierOrderService::class)->createForVariant($winner, 'PO-RACE', 8, '02/11/2026');
+
+    expect(fn () => $csv->confirm($preview->uuid))
+        ->toThrow(ValidationException::class, 'Order ID(s) already exist');
+    @unlink($path);
+
+    expect(ProcurementSupplierOrderLine::query()->where('sku', 'RACE-UPLOAD')->count())->toBe(0)
+        ->and($preview->fresh()->status)->toBe('previewed');
+});
+
+it('ships separate clean order and receipt CSV templates', function (): void {
+    expect(trim((string) file_get_contents(resource_path('templates/procurement-supplier-orders.csv'))))
+        ->toStartWith('SKU,Order ID,Quantity Ordered,ETA')
+        ->and(trim((string) file_get_contents(resource_path('templates/procurement-supplier-receipts.csv'))))
+        ->toStartWith('Order ID,SKU,Quantity Received');
 });
 
 function supplierWorkflowVariant(string $sku): Variant
