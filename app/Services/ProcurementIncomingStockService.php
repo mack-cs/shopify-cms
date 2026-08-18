@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ChangeLog;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementIncomingStockChange;
 use App\Models\ProcurementPredictionInput;
@@ -78,13 +79,14 @@ final class ProcurementIncomingStockService
     }
 
     /**
-     * @param array<string,mixed> $phases
+     * @param  array<string,mixed>  $phases
      */
     public function updateFromSheet(
         Variant $variant,
         array $phases,
         string $sourceSheet,
         ?int $sourceRow = null,
+        ?int $changedBy = null,
     ): ProcurementIncomingStock {
         $values = ['ignore' => $this->normalizeBoolean($phases['ignore'] ?? false)];
         foreach ([1, 2, 3] as $phase) {
@@ -111,7 +113,7 @@ final class ProcurementIncomingStockService
         ));
         $detectedAt = now();
 
-        return DB::transaction(function () use ($variant, $values, $sourceSheet, $sourceRow, $detectedAt): ProcurementIncomingStock {
+        return DB::transaction(function () use ($variant, $values, $sourceSheet, $sourceRow, $changedBy, $detectedAt): ProcurementIncomingStock {
             $stock = ProcurementIncomingStock::query()
                 ->where('variant_id', $variant->id)
                 ->lockForUpdate()
@@ -162,10 +164,46 @@ final class ProcurementIncomingStockService
                         'confirmed_total' => $values['total_confirmed_quantity_on_order'],
                     ],
                 ]);
+
+                foreach ($workflowFields as $field) {
+                    $oldValue = $this->comparableAuditValue($previousWorkflow[$field] ?? null);
+                    $newValue = $this->comparableAuditValue($nextWorkflow[$field] ?? null);
+                    if ($oldValue === $newValue) {
+                        continue;
+                    }
+                    ChangeLog::query()->create([
+                        'import_id' => $variant->product?->import_id,
+                        'product_id' => $variant->product_id,
+                        'changed_by' => $changedBy,
+                        'source' => $sourceSheet,
+                        'model_type' => ProcurementIncomingStock::class,
+                        'model_id' => $stock->id,
+                        'field' => $field,
+                        'old_value' => $oldValue,
+                        'new_value' => $newValue,
+                    ]);
+                }
             }
 
             return $stock;
         });
+    }
+
+    private function comparableAuditValue(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d');
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'TRUE' : 'FALSE';
+        }
+
+        return (string) $value;
     }
 
     public function snapshotForRun(ProcurementPredictionRun $run): void

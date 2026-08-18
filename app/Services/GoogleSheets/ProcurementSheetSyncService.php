@@ -2,6 +2,7 @@
 
 namespace App\Services\GoogleSheets;
 
+use App\Models\ChangeLog;
 use App\Models\ProcurementCollectionConfig;
 use App\Models\ProcurementIncomingStock;
 use App\Models\Variant;
@@ -103,7 +104,7 @@ final class ProcurementSheetSyncService
                 $before = $variant->procurementIncomingStock;
                 $previous = $before?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
                 $this->incomingStock->updateFromSheet(
-                    $variant, $item['workflow'], $item['tab'], $item['row']
+                    $variant, $item['workflow'], 'google_sheets:'.$item['tab'], $item['row']
                 );
                 $after = $variant->procurementIncomingStock()->first()?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
                 if ($before === null || json_encode($previous) !== json_encode($after)) {
@@ -111,6 +112,8 @@ final class ProcurementSheetSyncService
                 }
             }
         });
+
+        $this->publishChangeLog();
 
         return $stats;
     }
@@ -159,6 +162,8 @@ final class ProcurementSheetSyncService
             $brandRows += $this->publishBrand($collection, $desired, $brandSheets[$collection->id]);
         }
 
+        $this->publishChangeLog();
+
         return [
             'master_rows' => count($records), 'brand_rows' => $brandRows,
             'tabs' => $this->collections->configured()->count(),
@@ -168,7 +173,9 @@ final class ProcurementSheetSyncService
     /** Publish live inventory/order fields without requiring a fresh ML prediction. */
     public function publishOperational(array $variantIds = []): array
     {
-        if (! $this->enabled()) return ['rows' => 0, 'tabs' => 0];
+        if (! $this->enabled()) {
+            return ['rows' => 0, 'tabs' => 0];
+        }
         $allRecords = collect($this->dataset->records());
         $records = $allRecords;
         if ($variantIds !== []) {
@@ -199,25 +206,69 @@ final class ProcurementSheetSyncService
             $tabRecords = $tabConfig['collection_id'] === null
                 ? $records : $records->where('_collection_id', $tabConfig['collection_id']);
             $targetSkus = $tabRecords->pluck('sku')->flip();
-            $values = $this->currentLayoutValues($tab); $map = $this->mapForTab($tab, array_shift($values) ?? []); $rows = [];
+            $values = $this->currentLayoutValues($tab);
+            $map = $this->mapForTab($tab, array_shift($values) ?? []);
+            $rows = [];
             foreach ($values as $offset => $row) {
                 $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
-                if ($sku === '' || ! $targetSkus->has($sku)) continue;
-                if (isset($rows[$sku])) throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+                if ($sku === '' || ! $targetSkus->has($sku)) {
+                    continue;
+                }
+                if (isset($rows[$sku])) {
+                    throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+                }
                 $rows[$sku] = $offset + 2;
             }
             $updates = [];
             foreach ($tabRecords as $record) {
-                if (! isset($rows[$record['sku']])) continue;
+                if (! isset($rows[$record['sku']])) {
+                    continue;
+                }
                 foreach ($fields as $field) {
                     $column = $this->schema->columnName($map[$field]);
                     $updates[] = ['range' => $this->sheets->range($tab, $column.$rows[$record['sku']]), 'values' => [[$this->cell($record[$field] ?? null)]]];
                 }
                 $updated++;
             }
-            $this->sheets->batchUpdateValues($updates); $this->formatDateColumns($tab, $map);
+            $this->sheets->batchUpdateValues($updates);
+            $this->formatDateColumns($tab, $map);
         }
+        $this->publishChangeLog();
+
         return ['rows' => $updated, 'tabs' => count($tabs)];
+    }
+
+    private function publishChangeLog(): void
+    {
+        $tab = trim((string) config('google_sheets.change_log_tab', 'Change Log'));
+        $this->sheets->ensureTab($tab);
+        $existing = $this->sheets->values($tab);
+        $logs = ChangeLog::query()
+            ->where('model_type', ProcurementIncomingStock::class)
+            ->with(['changedBy:id,name', 'product:id,title'])
+            ->latest('id')
+            ->limit(5000)
+            ->get();
+        $skus = ProcurementIncomingStock::query()
+            ->whereIn('id', $logs->pluck('model_id')->filter())
+            ->pluck('sku', 'id');
+        $rows = $logs->map(fn (ChangeLog $log): array => [
+            $log->created_at?->format('d/m/Y H:i'),
+            $skus[$log->model_id] ?? '',
+            $log->product?->title ?? '',
+            $log->field,
+            $log->old_value,
+            $log->new_value,
+            $log->changedBy?->name ?? (str_starts_with((string) $log->source, 'google_sheets:') ? 'Google Sheets' : 'System'),
+            $log->source,
+            $log->id,
+        ])->all();
+        $values = [[
+            'Changed At', 'SKU', 'Product', 'Field', 'Old Value', 'New Value',
+            'Changed By', 'Source', 'CMS Log ID',
+        ], ...$rows];
+
+        $this->sheets->replaceAll($tab, $values, count($existing));
     }
 
     /** @param array<string,int> $map */

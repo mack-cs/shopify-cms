@@ -7,11 +7,12 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ChangeLog extends Model
 {
-      protected $fillable = [
+    protected $fillable = [
         'import_id',
         'product_id',
         'shopify_row_id',
         'changed_by',
+        'source',
         'model_type',
         'model_id',
         'field',
@@ -44,5 +45,4 @@ class ChangeLog extends Model
         static::updating(fn () => throw new \Exception('ChangeLog entries are immutable.'));
         static::deleting(fn () => throw new \Exception('ChangeLog entries are immutable.'));
     }
-
 }

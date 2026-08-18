@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\ChangeLog;
 use App\Models\Import;
 use App\Models\ProcurementCollectionConfig;
 use App\Models\ProcurementIncomingStock;
@@ -15,6 +16,7 @@ use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\ProcurementIncomingStockService;
 use App\Services\ProcurementPredictionIngestService;
+use App\Services\SalePercentageCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -43,6 +45,31 @@ it('normalizes blank phases calculates totals audits changes and snapshots them'
     expect($input->sku)->toBe('LRB0004')
         ->and($input->total_quantity_on_order)->toBe(60)
         ->and($run->fresh()?->incoming_stock_input_hash)->not->toBeNull();
+});
+
+it('attributes procurement field changes to the CMS user and source', function (): void {
+    [, $variant] = procurementSheetVariant('AUDIT-001', 'livi-road');
+    $user = User::factory()->create();
+
+    app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
+        'quantity_on_order_phase_1' => 12,
+        'order_id_phase_1' => 'PO-AUDIT',
+        'eta_date_phase_1' => '30/09/2026',
+    ], 'cms:supplier-orders', null, $user->id);
+
+    $logs = ChangeLog::query()
+        ->where('model_type', ProcurementIncomingStock::class)
+        ->where('product_id', $variant->product_id)
+        ->get();
+
+    expect($logs)->not->toBeEmpty()
+        ->and($logs->pluck('field'))->toContain(
+            'quantity_on_order_phase_1',
+            'order_id_phase_1',
+            'eta_date_phase_1',
+        )
+        ->and($logs->pluck('changed_by')->unique()->all())->toBe([$user->id])
+        ->and($logs->pluck('source')->unique()->all())->toBe(['cms:supplier-orders']);
 });
 
 it('counts only complete supplier order phases while preserving raw quantities', function (
@@ -297,7 +324,7 @@ it('preserves human Ignore but writes CMS-owned phase cells in brand rows and Ma
     $resolver = new OperationalProcurementCollectionResolver;
     $sync = new ProcurementSheetSyncService(
         $client, new ProcurementSheetSchema, app(ProcurementIncomingStockService::class),
-        $resolver, new ProcurementSheetDatasetBuilder($resolver, app(\App\Services\SalePercentageCalculator::class)),
+        $resolver, new ProcurementSheetDatasetBuilder($resolver, app(SalePercentageCalculator::class)),
     );
 
     $sync->publish();
@@ -327,13 +354,18 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
-            $row = array_fill(0, count($headers), ''); $row[0] = 'LRB0004';
+            $row = array_fill(0, count($headers), '');
+            $row[0] = 'LRB0004';
+
             return Http::response(['values' => [$headers, $row]]);
         }
-        if ($request->method() === 'GET') return Http::response(['sheets' => [
-            ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
-            ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
-        ]]);
+        if ($request->method() === 'GET') {
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
+        }
+
         return Http::response(['ok' => true]);
     });
 
@@ -573,6 +605,6 @@ function procurementTestSheetSync(): ProcurementSheetSyncService
     return new ProcurementSheetSyncService(
         new GoogleSheetsClient($tokens), new ProcurementSheetSchema,
         app(ProcurementIncomingStockService::class), $resolver,
-        new ProcurementSheetDatasetBuilder($resolver, app(\App\Services\SalePercentageCalculator::class)),
+        new ProcurementSheetDatasetBuilder($resolver, app(SalePercentageCalculator::class)),
     );
 }

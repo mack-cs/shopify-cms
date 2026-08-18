@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Http;
 final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
+
     private const DATA_COLUMNS = 'A:AF';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
@@ -42,6 +43,23 @@ final class GoogleSheetsClient
         $url = $this->valuesUrl($this->range($tab, self::DATA_COLUMNS)).':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS';
         $response = $this->request()->post($url, ['values' => $rows]);
         $this->ensureSuccess($response->successful(), $response->body(), 'append');
+    }
+
+    public function ensureTab(string $tab): void
+    {
+        $metadata = $this->request()->get($this->baseUrl(), ['fields' => 'sheets.properties.title']);
+        $this->ensureSuccess($metadata->successful(), $metadata->body(), 'metadata');
+        $exists = collect((array) $metadata->json('sheets', []))->contains(
+            fn (array $item): bool => data_get($item, 'properties.title') === $tab
+        );
+        if ($exists) {
+            return;
+        }
+
+        $response = $this->request()->post($this->baseUrl().':batchUpdate', [
+            'requests' => [['addSheet' => ['properties' => ['title' => $tab]]]],
+        ]);
+        $this->ensureSuccess($response->successful(), $response->body(), 'create Change Log tab');
     }
 
     /** @param array<int,array<int,mixed>> $rows */

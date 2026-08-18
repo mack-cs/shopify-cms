@@ -4,14 +4,14 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\ChangeLogResource\Pages;
 use App\Models\ChangeLog;
-use Filament\Infolists\Infolist;
 use Filament\Infolists\Components\Section;
 use Filament\Infolists\Components\TextEntry;
+use Filament\Infolists\Infolist;
 use Filament\Resources\Resource;
 use Filament\Tables;
-use Filament\Tables\Table;
-use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Table;
 use Illuminate\Support\Facades\Auth;
 
 class ChangeLogResource extends Resource
@@ -19,8 +19,11 @@ class ChangeLogResource extends Resource
     protected static ?string $model = ChangeLog::class;
 
     protected static ?string $navigationIcon = 'heroicon-o-clock';
+
     protected static ?string $navigationLabel = 'Change Log';
+
     protected static ?string $navigationGroup = 'Audit & History';
+
     protected static ?int $navigationSort = 10;
 
     public static function table(Table $table): Table
@@ -30,7 +33,7 @@ class ChangeLogResource extends Resource
             ->columns([
                 TextColumn::make('created_at')
                     ->label('When')
-                    ->dateTime()
+                    ->dateTime('d/m/Y H:i')
                     ->sortable(),
 
                 TextColumn::make('product.handle')
@@ -63,7 +66,18 @@ class ChangeLogResource extends Resource
 
                 TextColumn::make('changedBy.name')
                     ->label('Changed By')
+                    ->state(fn (ChangeLog $record): string => $record->changedBy?->name
+                        ?? match (true) {
+                            str_starts_with((string) $record->source, 'google_sheets:') => 'Google Sheets',
+                            filled($record->source) => (string) $record->source,
+                            default => 'System',
+                        })
                     ->sortable()
+                    ->toggleable(),
+
+                TextColumn::make('source')
+                    ->label('Source')
+                    ->searchable()
                     ->toggleable(),
 
                 TextColumn::make('import_id')
@@ -171,7 +185,7 @@ class ChangeLogResource extends Resource
     {
         return [
             'index' => Pages\ListChangeLogs::route('/'),
-            'view'  => Pages\ViewChangeLog::route('/{record}'),
+            'view' => Pages\ViewChangeLog::route('/{record}'),
         ];
     }
 }

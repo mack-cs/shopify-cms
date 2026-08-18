@@ -10,7 +10,7 @@ final class SupplierOrderProjectionService
 {
     public function __construct(private readonly ProcurementIncomingStockService $incomingStock) {}
 
-    public function projectVariant(Variant $variant): void
+    public function projectVariant(Variant $variant, ?int $changedBy = null, string $source = 'cms:supplier-orders'): void
     {
         $lines = ProcurementSupplierOrderLine::query()
             ->where('variant_id', $variant->id)->where('status', 'open')
@@ -32,6 +32,6 @@ final class SupplierOrderProjectionService
             $workflow["eta_date_phase_{$phase}"] = $line?->eta_date?->toDateString();
         }
 
-        $this->incomingStock->updateFromSheet($variant, $workflow, 'cms:supplier-orders');
+        $this->incomingStock->updateFromSheet($variant, $workflow, $source, null, $changedBy);
     }
 }
