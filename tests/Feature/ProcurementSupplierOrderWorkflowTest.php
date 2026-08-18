@@ -137,6 +137,26 @@ it('receives Shopify inventory with a delta mutation and a unique reference', fu
     (new ShopifyInventoryAdjustmentService($client))->increaseAvailable($variant, 3, 'logistics://receipt/unique-1');
 });
 
+it('resolves a Shopify location without requesting the protected location name', function (): void {
+    $variant = supplierWorkflowVariant('LOCATION-1');
+    config(['services.shopify.inventory_location_id' => null]);
+    $client = Mockery::mock(ShopifyGraphqlGateway::class);
+    $client->shouldReceive('graphql')->once()->withArgs(fn (string $query): bool => str_contains($query, 'ProcurementLocation')
+        && str_contains($query, 'nodes { id }')
+        && ! str_contains($query, 'name'))->andReturn([
+            'locations' => ['nodes' => [['id' => 'gid://shopify/Location/1']]],
+        ]);
+    $client->shouldReceive('graphql')->once()->withArgs(fn (string $query, array $variables): bool => str_contains($query, 'inventoryAdjustQuantities')
+        && data_get($variables, 'input.changes.0.locationId') === 'gid://shopify/Location/1')->andReturn([
+            'inventoryAdjustQuantities' => [
+                'inventoryAdjustmentGroup' => ['createdAt' => now()->toIso8601String()],
+                'userErrors' => [],
+            ],
+        ]);
+
+    (new ShopifyInventoryAdjustmentService($client))->increaseAvailable($variant, 2, 'logistics://receipt/location-1');
+});
+
 it('allows several SKUs on one new order CSV', function (): void {
     config(['google_sheets.enabled' => false]);
     supplierWorkflowVariant('MULTI-1');

@@ -30,9 +30,20 @@ class ProcessSupplierReceiptJob implements ShouldQueue
         $receipt = ProcurementSupplierReceipt::query()->with('line.variant')->findOrFail($this->receiptId);
         if ($receipt->status !== 'succeeded') {
             if ($receipt->shopify_adjustment_started_at !== null) {
-                $receipt->update(['status' => 'manual_review', 'error' => 'Shopify adjustment outcome is ambiguous; automatic retry was blocked to prevent double receiving.']);
+                if ($receipt->status !== 'manual_review') {
+                    $receipt->update([
+                        'status' => 'manual_review',
+                        'error' => $receipt->error ?: 'Shopify adjustment outcome is ambiguous; automatic retry was blocked to prevent double receiving.',
+                    ]);
+                }
 
                 return;
+            }
+            try {
+                $locationId = $shopify->resolveLocationId($receipt->line->variant);
+            } catch (\Throwable $exception) {
+                $receipt->update(['status' => 'pending', 'error' => $exception->getMessage()]);
+                throw $exception;
             }
             $claimed = ProcurementSupplierReceipt::query()->whereKey($receipt->id)->whereNull('shopify_adjustment_started_at')
                 ->update(['status' => 'processing', 'shopify_adjustment_started_at' => now(), 'error' => null]);
@@ -41,7 +52,12 @@ class ProcessSupplierReceiptJob implements ShouldQueue
             }
             $receipt->refresh()->load('line.variant');
             try {
-                $shopify->increaseAvailable($receipt->line->variant, $receipt->quantity_received, $receipt->shopify_reference_uri);
+                $shopify->increaseAvailable(
+                    $receipt->line->variant,
+                    $receipt->quantity_received,
+                    $receipt->shopify_reference_uri,
+                    $locationId,
+                );
                 $receipt->update(['status' => 'succeeded', 'shopify_adjusted_at' => now()]);
             } catch (\Throwable $e) {
                 $receipt->update(['status' => 'manual_review', 'error' => $e->getMessage()]);
