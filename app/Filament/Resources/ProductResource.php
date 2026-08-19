@@ -1343,6 +1343,18 @@ class ProductResource extends Resource
                 ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                     $deletionQuery->whereIn('status', ['pending', 'processing']);
                 })),
+            SelectFilter::make('batch')
+                ->label('Batch')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('batch')
+                    ->where('batch', '!=', '')
+                    ->distinct()
+                    ->orderByDesc('batch')
+                    ->pluck('batch', 'batch')
+                    ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Batch'))
+                ->searchable()
+                ->preload(),
             Filter::make('updated_at')
                 ->form([
                     DateTimePicker::make('updated_from'),

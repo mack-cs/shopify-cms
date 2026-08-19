@@ -3727,6 +3727,20 @@ class NewProductDraftResource extends Resource
                             $pendingApprovalPart .= '. Withdraw approval first if you still want to update those records.';
                         }
 
+                        $protectedConflictPart = '';
+                        if (($result['protected_conflict_count'] ?? 0) > 0) {
+                            $conflicts = array_slice($result['protected_conflicts'] ?? [], 0, 5);
+                            $protectedConflictPart = ", Protected field conflicts: {$result['protected_conflict_count']}";
+                            if ($conflicts !== []) {
+                                $protectedConflictPart .= ' (' . implode(' | ', $conflicts) . ')';
+                            }
+                            $protectedConflictPart .= '. Product names and handles were not changed.';
+                        }
+
+                        $pricingBatchPart = empty($result['pricing_batch'])
+                            ? ''
+                            : ", Pricing batch: {$result['pricing_batch']}";
+
                         self::sendNotification(Notification::make()
                             ->title('Import complete')
                             ->body(
@@ -3736,9 +3750,16 @@ class NewProductDraftResource extends Resource
                                 "Duplicate SKU: {$result['skipped_duplicate_sku']}, " .
                                 "Reference rule skips: " . ($result['skipped_reference_validation'] ?? 0) .
                                 ($referenceParts === [] ? '' : ', ' . implode(', ', $referenceParts)) .
-                                $pendingApprovalPart
+                                $pendingApprovalPart .
+                                $protectedConflictPart .
+                                $pricingBatchPart
                             )
-                            ->status(($result['skipped_pending_approval'] ?? 0) > 0 ? 'warning' : 'success')
+                            ->status(
+                                ($result['skipped_pending_approval'] ?? 0) > 0
+                                || ($result['protected_conflict_count'] ?? 0) > 0
+                                    ? 'warning'
+                                    : 'success'
+                            )
                         );
                     }),
                 Tables\Actions\Action::make('importSaleUpdates')
