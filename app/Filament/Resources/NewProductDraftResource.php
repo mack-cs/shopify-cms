@@ -138,6 +138,16 @@ class NewProductDraftResource extends Resource
             'variant_attribute' => 'inventory_qty',
             'type' => 'integer',
         ],
+        'variant_weight' => [
+            'label' => 'Weight',
+            'variant_attribute' => 'weight',
+            'type' => 'decimal3',
+        ],
+        'variant_weight_unit' => [
+            'label' => 'Weight unit',
+            'variant_attribute' => 'weight_unit',
+            'type' => 'string',
+        ],
     ];
 
     public static function getEloquentQuery(): Builder
@@ -546,6 +556,12 @@ class NewProductDraftResource extends Resource
                             TextInput::make('material_cost')
                                 ->label('Material Cost')
                                 ->numeric()
+                                ->default(NewProductDraft::DEFAULT_MATERIAL_COST)
+                                ->afterStateHydrated(function (TextInput $component, $state): void {
+                                    if ($state === null || trim((string) $state) === '') {
+                                        $component->state(NewProductDraft::DEFAULT_MATERIAL_COST);
+                                    }
+                                })
                                 ->afterStateUpdated(function ($state, callable $set): void {
                                     if (!is_string($state)) {
                                         return;
@@ -1080,7 +1096,7 @@ class NewProductDraftResource extends Resource
                                     ->content(fn (?NewProductDraft $record): ?HtmlString => self::draftVariantClashHtml($record))
                                     ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
                                     ->columnSpanFull(),
-                                Forms\Components\Grid::make(3)
+                                Forms\Components\Grid::make(5)
                                     ->schema([
                                         TextInput::make('variant_price')
                                             ->label('Price')
@@ -1159,8 +1175,10 @@ class NewProductDraftResource extends Resource
                                         TextInput::make('variant_inventory_qty')
                                             ->label('Inventory')
                                             ->numeric()
-                                            ->disabled()
-                                            ->helperText('Inventory is managed from the Inventory section.')
+                                            ->integer()
+                                            ->minValue(0)
+                                            ->default(NewProductDraft::DEFAULT_VARIANT_INVENTORY_QTY)
+                                            ->helperText('Defaults to 40; change it when needed.')
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -1168,6 +1186,38 @@ class NewProductDraftResource extends Resource
                                                 $defaults = self::resolvedVariantDefaultsForDraft($record);
                                                 if ($defaults['variant_inventory_qty'] !== null) {
                                                     $component->state($defaults['variant_inventory_qty']);
+                                                }
+                                            }),
+                                        TextInput::make('variant_weight')
+                                            ->label('Weight')
+                                            ->numeric()
+                                            ->minValue(0)
+                                            ->default(NewProductDraft::DEFAULT_VARIANT_WEIGHT)
+                                            ->helperText('Defaults to 46 g; change it when needed.')
+                                            ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
+                                                if ($record === null || $state !== null) {
+                                                    return;
+                                                }
+                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
+                                                if ($defaults['variant_weight'] !== null) {
+                                                    $component->state($defaults['variant_weight']);
+                                                }
+                                            }),
+                                        Select::make('variant_weight_unit')
+                                            ->label('Weight unit')
+                                            ->options([
+                                                'g' => 'g',
+                                                'kg' => 'kg',
+                                                'mg' => 'mg',
+                                            ])
+                                            ->default(NewProductDraft::DEFAULT_VARIANT_WEIGHT_UNIT)
+                                            ->afterStateHydrated(function (Select $component, $state, ?NewProductDraft $record): void {
+                                                if ($record === null || filled($state)) {
+                                                    return;
+                                                }
+                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
+                                                if ($defaults['variant_weight_unit'] !== null) {
+                                                    $component->state($defaults['variant_weight_unit']);
                                                 }
                                             }),
                                     ])
@@ -2520,7 +2570,7 @@ class NewProductDraftResource extends Resource
     }
 
     /**
-     * @return array{variant_price:?string,variant_compare_at_price:?string,variant_inventory_qty:?int}
+     * @return array{variant_price:?string,variant_compare_at_price:?string,variant_inventory_qty:?int,variant_weight:?string,variant_weight_unit:?string}
      */
     private static function resolvedVariantDefaultsForDraft(NewProductDraft $record): array
     {
@@ -2534,6 +2584,8 @@ class NewProductDraftResource extends Resource
             'variant_inventory_qty' => $variant?->inventory_tracked === false
                 ? null
                 : ($variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null),
+            'variant_weight' => $variant?->weight !== null ? (string) $variant->weight : null,
+            'variant_weight_unit' => filled($variant?->weight_unit) ? (string) $variant->weight_unit : null,
         ];
     }
 
@@ -5615,6 +5667,8 @@ class NewProductDraftResource extends Resource
             'variant_price',
             'variant_compare_at_price',
             'variant_inventory_qty',
+            'variant_weight',
+            'variant_weight_unit',
         ];
 
         if (NewProductDraft::supportsShopifySyncWarningsColumn()) {
@@ -7035,7 +7089,7 @@ class NewProductDraftResource extends Resource
             'status' => 'status',
             'published', 'seo_deindex' => 'published',
             'body_html', 'seo_description', 'uvp_short_paragraph' => 'textarea',
-            'variant_price', 'variant_compare_at_price', 'variant_inventory_qty', 'material_cost' => 'numeric',
+                'variant_price', 'variant_compare_at_price', 'variant_inventory_qty', 'variant_weight', 'material_cost' => 'numeric',
             default => 'text',
         };
     }
@@ -7056,6 +7110,8 @@ class NewProductDraftResource extends Resource
                 'price' => 'variant_price',
                 'compare_at_price' => 'variant_compare_at_price',
                 'inventory_qty' => 'variant_inventory_qty',
+                'weight' => 'variant_weight',
+                'weight_unit' => 'variant_weight_unit',
                 default => null,
             };
         }

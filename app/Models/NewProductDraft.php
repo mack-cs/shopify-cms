@@ -2,38 +2,53 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
-use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Storage;
 use App\Services\CategoryTypeMap;
 use App\Services\HeaderStore;
 use App\Services\SaleTagService;
 use App\Services\TagNormalizer;
-use App\Models\StyleProfile;
-use App\Models\Product;
-use App\Models\User;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class NewProductDraft extends Model
 {
+    public const DEFAULT_VARIANT_INVENTORY_QTY = 40;
+
+    public const DEFAULT_VARIANT_WEIGHT = '46.000';
+
+    public const DEFAULT_VARIANT_WEIGHT_UNIT = 'g';
+
+    public const DEFAULT_MATERIAL_COST = '63.00';
+
     protected static ?bool $supportsShopifySyncWarningsColumnCache = null;
 
     public const ORIGIN_DRAFT_TOOL = 'draft_tool';
+
     public const ORIGIN_SHOPIFY_SEED = 'shopify_seed';
+
     public const ORIGIN_PRODUCT_MIRROR = 'product_mirror';
+
     public const SHOPIFY_MISSING_PENDING_REVIEW = 'pending_review';
+
     public const SHOPIFY_MISSING_INVESTIGATING = 'investigating';
+
     public const SHOPIFY_MISSING_CLEANED = 'cleaned';
+
     public const SHOPIFY_MISSING_RECOVERY_ENABLED = 'recovery_enabled';
+
     private const SALE_TAG = 'sale';
+
     private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
+
     private const DEFAULT_NEW_PRODUCT_TAGS = [
         'all-products-collection',
         'all-products',
     ];
+
     private const PRODUCT_TYPE_TAGS = [
         'anklet',
         'bracelet',
@@ -68,6 +83,8 @@ class NewProductDraft extends Model
         'variant_price',
         'variant_compare_at_price',
         'variant_inventory_qty',
+        'variant_weight',
+        'variant_weight_unit',
         'material_cost',
         'jewelry_material',
         'product_materials',
@@ -110,6 +127,7 @@ class NewProductDraft extends Model
         'variant_price' => 'decimal:2',
         'variant_compare_at_price' => 'decimal:2',
         'variant_inventory_qty' => 'integer',
+        'variant_weight' => 'decimal:3',
         'material_cost' => 'decimal:2',
         'editing_started_at' => 'datetime',
         'editing_expires_at' => 'datetime',
@@ -117,6 +135,26 @@ class NewProductDraft extends Model
 
     protected static function booted(): void
     {
+        static::creating(function (NewProductDraft $draft): void {
+            if ($draft->material_cost === null) {
+                $draft->material_cost = self::DEFAULT_MATERIAL_COST;
+            }
+
+            if (in_array($draft->origin, [self::ORIGIN_SHOPIFY_SEED, self::ORIGIN_PRODUCT_MIRROR], true)) {
+                return;
+            }
+
+            if ($draft->variant_inventory_qty === null) {
+                $draft->variant_inventory_qty = self::DEFAULT_VARIANT_INVENTORY_QTY;
+            }
+            if ($draft->variant_weight === null) {
+                $draft->variant_weight = self::DEFAULT_VARIANT_WEIGHT;
+            }
+            if ($draft->variant_weight_unit === null) {
+                $draft->variant_weight_unit = self::DEFAULT_VARIANT_WEIGHT_UNIT;
+            }
+        });
+
         static::saving(function (NewProductDraft $draft): void {
             $current = is_string($draft->google_product_category)
                 ? trim($draft->google_product_category)
@@ -153,6 +191,7 @@ class NewProductDraft extends Model
         );
 
         $google = trim((string) ($resolved['google_product_category'] ?? ''));
+
         return $google === '' ? null : $google;
     }
 
@@ -208,7 +247,7 @@ class NewProductDraft extends Model
         if ($typeTag !== null) {
             $tags = array_values(array_filter(
                 $tags,
-                fn (string $tag): bool => !in_array($tag, self::PRODUCT_TYPE_TAGS, true) || $tag === $typeTag
+                fn (string $tag): bool => ! in_array($tag, self::PRODUCT_TYPE_TAGS, true) || $tag === $typeTag
             ));
             $tags[] = $typeTag;
         }
@@ -265,20 +304,20 @@ class NewProductDraft extends Model
     }
 
     /**
-     * @param array<int, string> $tags
+     * @param  array<int, string>  $tags
      * @return array<int, string>
      */
     private static function normalizeBundleCollectionTags(array $tags): array
     {
         $tags = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags));
-        if (!self::hasBundleOrStackTag($tags)) {
+        if (! self::hasBundleOrStackTag($tags)) {
             return $tags;
         }
 
         $remove = ['bundle', 'stack', 'stacks'];
         foreach ($tags as $tag) {
             foreach (['-bundles', '-bundle', '-stacks', '-stack'] as $suffix) {
-                if (!str_ends_with($tag, $suffix)) {
+                if (! str_ends_with($tag, $suffix)) {
                     continue;
                 }
 
@@ -291,7 +330,7 @@ class NewProductDraft extends Model
 
         $tags = array_values(array_filter(
             $tags,
-            fn (string $tag): bool => !in_array($tag, array_unique($remove), true)
+            fn (string $tag): bool => ! in_array($tag, array_unique($remove), true)
         ));
         $tags[] = 'bundles';
 
@@ -299,7 +338,7 @@ class NewProductDraft extends Model
     }
 
     /**
-     * @param array<int, string> $tags
+     * @param  array<int, string>  $tags
      */
     private static function hasBundleOrStackTag(array $tags): bool
     {
@@ -427,7 +466,7 @@ class NewProductDraft extends Model
                     ->first();
             }
 
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 $handle = trim((string) ($this->handle ?? ''));
                 if ($handle === '') {
                     return false;
@@ -438,7 +477,7 @@ class NewProductDraft extends Model
                     ->first();
             }
 
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 return false;
             }
 
@@ -460,7 +499,7 @@ class NewProductDraft extends Model
         }
 
         return self::$supportsShopifySyncWarningsColumnCache = Schema::hasColumn(
-            (new static())->getTable(),
+            (new static)->getTable(),
             'shopify_sync_warnings'
         );
     }
@@ -557,13 +596,13 @@ class NewProductDraft extends Model
      */
     public function shopifySyncWarnings(): array
     {
-        if (!static::supportsShopifySyncWarningsColumn()) {
+        if (! static::supportsShopifySyncWarningsColumn()) {
             return [];
         }
 
         $warnings = $this->shopify_sync_warnings;
 
-        if (!is_array($warnings)) {
+        if (! is_array($warnings)) {
             return [];
         }
 
@@ -571,12 +610,12 @@ class NewProductDraft extends Model
             $field = is_array($warning) ? trim((string) ($warning['field'] ?? '')) : '';
 
             return is_array($warning)
-                && !in_array($field, ['image_url', 'image_path','batch'], true)
+                && ! in_array($field, ['image_url', 'image_path', 'batch'], true)
                 && is_string($warning['field'] ?? null)
                 && is_string($warning['label'] ?? null)
                 && array_key_exists('draft_value', $warning)
                 && array_key_exists('shopify_value', $warning)
-                && !static::shopifySyncWarningValuesMatch(
+                && ! static::shopifySyncWarningValuesMatch(
                     $field,
                     $warning['draft_value'] ?? null,
                     $warning['shopify_value'] ?? null,

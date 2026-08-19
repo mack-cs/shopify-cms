@@ -43,7 +43,7 @@ final class NewProductDraftAssignmentService
     }
 
     /**
-     * @param iterable<int, NewProductDraft> $records
+     * @param  iterable<int, NewProductDraft>  $records
      */
     public function createAssignment(iterable $records, array $data, ?User $sender = null): NewProductDraftAssignment
     {
@@ -265,12 +265,13 @@ final class NewProductDraftAssignmentService
     public function labelForColumn(string $key): string
     {
         $columns = $this->allColumns();
+
         return $columns[$key]['label'] ?? $key;
     }
 
     /**
-     * @param array<int, string> $contextColumns
-     * @param array<int, string> $selectedColumns
+     * @param  array<int, string>  $contextColumns
+     * @param  array<int, string>  $selectedColumns
      */
     private function storeCsv(
         NewProductDraftAssignment $assignment,
@@ -301,7 +302,7 @@ final class NewProductDraftAssignmentService
             ->get()
             ->keyBy('handle');
 
-        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer = Writer::createFromFileObject(new SplTempFileObject);
         $writer->insertOne($headers);
 
         foreach ($drafts as $draft) {
@@ -365,6 +366,8 @@ final class NewProductDraftAssignmentService
             'variant_price' => trim((string) ($draft->variant_price ?? '')),
             'variant_compare_at_price' => trim((string) ($draft->variant_compare_at_price ?? '')),
             'variant_inventory_qty' => trim((string) ($draft->variant_inventory_qty ?? '')),
+            'variant_weight' => trim((string) ($draft->variant_weight ?? '')),
+            'variant_weight_unit' => trim((string) ($draft->variant_weight_unit ?? '')),
             'material_cost' => trim((string) ($draft->material_cost ?? '')),
             'jewelry_material' => trim((string) ($draft->jewelry_material ?? '')),
             'product_materials' => trim((string) ($draft->product_materials ?? '')),
@@ -391,7 +394,7 @@ final class NewProductDraftAssignmentService
     }
 
     /**
-     * @param array<int, mixed> $value
+     * @param  array<int, mixed>  $value
      * @return array<int, string>
      */
     private function normalizeContextColumns(array $value): array
@@ -404,10 +407,10 @@ final class NewProductDraftAssignmentService
 
         $selected = array_values(array_intersect($selected, $allowed));
 
-        if (!in_array('title', $selected, true)) {
+        if (! in_array('title', $selected, true)) {
             array_unshift($selected, 'title');
         }
-        if (!in_array('sku', $selected, true)) {
+        if (! in_array('sku', $selected, true)) {
             $selected[] = 'sku';
         }
 
@@ -415,7 +418,7 @@ final class NewProductDraftAssignmentService
     }
 
     /**
-     * @param array<int, mixed> $value
+     * @param  array<int, mixed>  $value
      * @return array<int, string>
      */
     private function normalizeSelectedColumns(array $value): array
@@ -434,7 +437,7 @@ final class NewProductDraftAssignmentService
      */
     private function parseEmails(mixed $value): array
     {
-        if (!is_string($value)) {
+        if (! is_string($value)) {
             return [];
         }
 
@@ -447,7 +450,7 @@ final class NewProductDraftAssignmentService
                 continue;
             }
 
-            if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 throw new \InvalidArgumentException("Invalid email address: {$email}");
             }
 
@@ -462,7 +465,7 @@ final class NewProductDraftAssignmentService
      */
     private function parseUserIds(mixed $value): array
     {
-        if (!is_array($value)) {
+        if (! is_array($value)) {
             return [];
         }
 
@@ -474,16 +477,17 @@ final class NewProductDraftAssignmentService
 
     private function nullIfEmpty(mixed $value): ?string
     {
-        if (!is_string($value)) {
+        if (! is_string($value)) {
             return null;
         }
 
         $trimmed = trim($value);
+
         return $trimmed === '' ? null : $trimmed;
     }
 
     /**
-     * @param array<string, mixed> $meta
+     * @param  array<string, mixed>  $meta
      */
     private function log(
         NewProductDraftAssignment $assignment,
@@ -538,6 +542,8 @@ final class NewProductDraftAssignmentService
             'variant_price' => ['label' => 'Price'],
             'variant_compare_at_price' => ['label' => 'Compare-at Price'],
             'variant_inventory_qty' => ['label' => 'Inventory'],
+            'variant_weight' => ['label' => 'Weight'],
+            'variant_weight_unit' => ['label' => 'Weight Unit'],
             'material_cost' => ['label' => 'Material Cost'],
             'jewelry_material' => ['label' => 'Jewelry Material'],
             'product_materials' => ['label' => 'Product Materials'],

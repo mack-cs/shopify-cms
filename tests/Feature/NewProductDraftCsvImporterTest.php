@@ -237,3 +237,76 @@ it('falls back from sku to shopify gid and then handle when matching drafts', fu
 
     @unlink($path);
 });
+
+it('applies the cms category selections when product type comes from the csv', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Mapped Bracelet',
+        'handle' => 'mapped-bracelet',
+        'shopify_id' => 'gid://shopify/Product/4004',
+        'type' => 'Necklaces',
+        'product_category' => 'gid://shopify/TaxonomyCategory/aa-6-8',
+        'google_product_category' => '189',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'MAP-001',
+    ]);
+    $draft = NewProductDraft::create([
+        'title' => $product->title,
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'sku' => 'MAP-001',
+        'type' => 'Necklaces',
+        'product_category' => 'gid://shopify/TaxonomyCategory/aa-6-8',
+        'google_product_category' => '189',
+        'status' => 'active',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-category-import-');
+    file_put_contents(
+        $path,
+        "SKU,Product Type,Product Category,Google Product Category\n"
+        ."MAP-001,bracelet,Incorrect Category,999\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft->refresh();
+    $product->refresh();
+
+    expect($result['updated'])->toBe(1)
+        ->and($draft->type)->toBe('Bracelets')
+        ->and($draft->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-3')
+        ->and($draft->google_product_category)->toBe('191')
+        ->and($product->type)->toBe('Bracelets')
+        ->and($product->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-3')
+        ->and($product->google_product_category)->toBe('191');
+
+    @unlink($path);
+});
+
+it('keeps an existing material cost when the csv material cost is blank', function (): void {
+    $draft = NewProductDraft::create([
+        'title' => 'Cost Protected Draft',
+        'handle' => 'cost-protected-draft',
+        'sku' => 'COST-001',
+        'material_cost' => '81.25',
+        'status' => 'draft',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-blank-cost-import-');
+    file_put_contents(
+        $path,
+        "SKU,Material Cost\n"
+        ."COST-001,\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    expect($result['updated'])->toBe(1)
+        ->and($draft->fresh()->material_cost)->toBe('81.25');
+
+    @unlink($path);
+});

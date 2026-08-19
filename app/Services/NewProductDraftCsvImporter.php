@@ -69,6 +69,11 @@ final class NewProductDraftCsvImporter
             'inventory' => 'variant_inventory_qty',
             'inventory available in stock' => 'variant_inventory_qty',
             'variant inventory qty' => 'variant_inventory_qty',
+            'weight' => 'variant_weight',
+            'variant weight' => 'variant_weight',
+            'variant grams' => 'variant_weight',
+            'weight unit' => 'variant_weight_unit',
+            'variant weight unit' => 'variant_weight_unit',
             'variant inventory policy' => 'variant_inventory_policy',
             'variant fulfillment service' => 'variant_fulfillment_service',
             'material cost' => 'material_cost',
@@ -177,7 +182,6 @@ final class NewProductDraftCsvImporter
                         $authoritativeNullable = in_array($field, [
                             'variant_price',
                             'variant_compare_at_price',
-                            'material_cost',
                         ], true);
 
                         if ($value === '' && ! $authoritativeNullable) {
@@ -200,6 +204,8 @@ final class NewProductDraftCsvImporter
                         $payload[$header] = $value;
                     }
                 }
+
+                $data = $this->applyImportedTypeCategoryMapping($data);
 
                 unset($data['draft_id']);
 
@@ -397,6 +403,33 @@ final class NewProductDraftCsvImporter
         return NewProductDraft::query()
             ->whereRaw('LOWER(TRIM(handle)) = ?', [strtolower($trimmedHandle)])
             ->first();
+    }
+
+    /**
+     * Apply the same dependent selections as the New Product Draft form. An
+     * imported type is treated as the user's selection and therefore drives
+     * the canonical Shopify and Google categories.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function applyImportedTypeCategoryMapping(array $data): array
+    {
+        $type = trim((string) ($data['type'] ?? ''));
+        if ($type === '') {
+            return $data;
+        }
+
+        $mapping = CategoryTypeMap::byType($type);
+        if ($mapping === null) {
+            return $data;
+        }
+
+        $data['type'] = $mapping['type'];
+        $data['product_category'] = $mapping['shopify_taxonomy_gid'] ?? $mapping['category'];
+        $data['google_product_category'] = $mapping['google_product_category'];
+
+        return $data;
     }
 
     /**
