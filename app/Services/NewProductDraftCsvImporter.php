@@ -31,6 +31,9 @@ final class NewProductDraftCsvImporter
      *   unresolved_product_references:int,
      *   protected_conflict_count:int,
      *   protected_conflicts:array<int,string>,
+     *   invalid_seo_count:int,
+     *   invalid_seo_rows:int,
+     *   seo_corrections:array<int,string>,
      *   pricing_batch:?string
      * }
      */
@@ -136,6 +139,9 @@ final class NewProductDraftCsvImporter
         $resolvedProductReferences = 0;
         $unresolvedProductReferences = 0;
         $protectedConflicts = [];
+        $invalidSeoCount = 0;
+        $invalidSeoRows = [];
+        $seoCorrections = [];
         $pricingFields = ['variant_price', 'variant_compare_at_price', 'material_cost'];
         $pricingImport = false;
 
@@ -165,6 +171,9 @@ final class NewProductDraftCsvImporter
             &$resolvedProductReferences,
             &$unresolvedProductReferences,
             &$protectedConflicts,
+            &$invalidSeoCount,
+            &$invalidSeoRows,
+            &$seoCorrections,
             $pricingBatch
         ): void {
             foreach ($csv->getRecords() as $row) {
@@ -287,6 +296,36 @@ final class NewProductDraftCsvImporter
                     }
                 }
 
+                $seoReference = trim((string) ($sku ?: $handle ?: 'unknown product'));
+                $seoRules = [
+                    'draft_seo_title' => [
+                        'label' => 'SEO title',
+                        'min' => StyleProfile::SEO_TITLE_RECOMMENDED_MIN,
+                        'max' => StyleProfile::SEO_TITLE_RECOMMENDED_MAX,
+                    ],
+                    'draft_seo_description' => [
+                        'label' => 'SEO description',
+                        'min' => StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN,
+                        'max' => StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX,
+                    ],
+                ];
+
+                foreach ($seoRules as $field => $rule) {
+                    if (! array_key_exists($field, $seoDraftData)) {
+                        continue;
+                    }
+
+                    $length = StyleProfile::trimmedLength($seoDraftData[$field]);
+                    if ($length >= $rule['min'] && $length <= $rule['max']) {
+                        continue;
+                    }
+
+                    unset($seoDraftData[$field]);
+                    $invalidSeoCount++;
+                    $invalidSeoRows[$total] = true;
+                    $seoCorrections[] = 'Row '.($total + 1)." ({$seoReference}): {$rule['label']} is {$length} characters; required {$rule['min']}-{$rule['max']}.";
+                }
+
                 if ($draft) {
                     $mergedPayload = array_merge($draft->payload ?? [], $payload);
                     $draft->fill($data);
@@ -368,6 +407,9 @@ final class NewProductDraftCsvImporter
             'unresolved_product_references' => $unresolvedProductReferences,
             'protected_conflict_count' => count($protectedConflicts),
             'protected_conflicts' => array_values(array_unique($protectedConflicts)),
+            'invalid_seo_count' => $invalidSeoCount,
+            'invalid_seo_rows' => count($invalidSeoRows),
+            'seo_corrections' => $seoCorrections,
             'pricing_batch' => $pricingBatch,
         ];
     }

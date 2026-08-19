@@ -74,6 +74,7 @@ use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductSeoTracker;
+use App\Services\SkuListFilterService;
 use App\Services\ComplementaryProductAuditService;
 use App\Models\Tag;
 use App\Models\Color;
@@ -1226,6 +1227,22 @@ class ProductResource extends Resource
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
+            Filter::make('sku_list')
+                ->label('SKUs')
+                ->form([
+                    Textarea::make('skus')
+                        ->label('SKUs')
+                        ->rows(4)
+                        ->placeholder("LAP001\nLAP002\nLAP003")
+                        ->helperText('Paste one or more SKUs separated by spaces, commas, semicolons, or new lines.'),
+                ])
+                ->indicateUsing(function (array $data): array {
+                    $count = count(app(SkuListFilterService::class)->parse($data['skus'] ?? null));
+
+                    return $count > 0 ? ["SKUs: {$count} selected"] : [];
+                })
+                ->query(fn (Builder $query, array $data): Builder => app(SkuListFilterService::class)
+                    ->applyToProducts($query, $data['skus'] ?? null)),
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
                 ->indicator('Recently Edited Today')

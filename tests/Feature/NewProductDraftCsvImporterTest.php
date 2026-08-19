@@ -46,10 +46,12 @@ it('allows a roundtrip update when the sku belongs to the linked product variant
     ]);
 
     $path = tempnam(sys_get_temp_dir(), 'draft-import-');
+    $seoTitle = str_repeat('T', StyleProfile::SEO_TITLE_RECOMMENDED_MIN);
+    $seoDescription = str_repeat('D', StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN);
     file_put_contents(
         $path,
         "Draft ID,Handle,Shopify ID,SKU,SEO Title,SEO Description\n"
-        ."{$draft->id},{$draft->handle},{$draft->shopify_id},LAP041,Bold Acrylic Bracelet,Updated SEO description\n"
+        ."{$draft->id},{$draft->handle},{$draft->shopify_id},LAP041,{$seoTitle},{$seoDescription}\n"
     );
 
     $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
@@ -60,8 +62,8 @@ it('allows a roundtrip update when the sku belongs to the linked product variant
     $profile = StyleProfile::query()->where('handle', $draft->handle)->first();
 
     expect($profile)->not->toBeNull()
-        ->and($profile->draft_seo_title)->toBe('Bold Acrylic Bracelet')
-        ->and($profile->draft_seo_description)->toBe('Updated SEO description');
+        ->and($profile->draft_seo_title)->toBe($seoTitle)
+        ->and($profile->draft_seo_description)->toBe($seoDescription);
 
     @unlink($path);
 });
@@ -307,6 +309,47 @@ it('keeps an existing material cost when the csv material cost is blank', functi
 
     expect($result['updated'])->toBe(1)
         ->and($draft->fresh()->material_cost)->toBe('81.25');
+
+    @unlink($path);
+});
+
+it('imports other fields while rejecting incorrectly sized seo values', function (): void {
+    $draft = NewProductDraft::create([
+        'title' => 'SEO Validation Draft',
+        'handle' => 'seo-validation-draft',
+        'sku' => 'SEO-001',
+        'variant_price' => '100.00',
+        'status' => 'draft',
+    ]);
+    $existingTitle = str_repeat('T', StyleProfile::SEO_TITLE_RECOMMENDED_MIN);
+    $existingDescription = str_repeat('D', StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN);
+    StyleProfile::create([
+        'handle' => $draft->handle,
+        'sku' => $draft->sku,
+        'draft_seo_title' => $existingTitle,
+        'draft_seo_description' => $existingDescription,
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-invalid-seo-import-');
+    file_put_contents(
+        $path,
+        "SKU,Price,SEO Title,SEO Description\n"
+        .'SEO-001,175.00,Too short,'.str_repeat('X', StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX + 1)."\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $profile = StyleProfile::query()->where('handle', $draft->handle)->firstOrFail();
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['invalid_seo_count'])->toBe(2)
+        ->and($result['invalid_seo_rows'])->toBe(1)
+        ->and($result['seo_corrections'])->toHaveCount(2)
+        ->and($result['seo_corrections'][0])->toContain('Row 2 (SEO-001)', 'SEO title is 9 characters', 'required 50-60')
+        ->and($result['seo_corrections'][1])->toContain('SEO description is 161 characters', 'required 150-160')
+        ->and($draft->fresh()->variant_price)->toBe('175.00')
+        ->and($profile->draft_seo_title)->toBe($existingTitle)
+        ->and($profile->draft_seo_description)->toBe($existingDescription);
 
     @unlink($path);
 });

@@ -35,12 +35,15 @@ use App\Services\AsyncJobStateService;
 use App\Services\CategoryTypeMap;
 use App\Services\DeletionRequestWorkflowService;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\NewInTagService;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftRoundtripCsvService;
 use App\Services\NewProductDraftStackAssociationImporter;
 use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
 use App\Services\ShopifyMissingDraftWorkflowService;
+use App\Services\ShopifyVariantConflictResolver;
+use App\Services\SkuListFilterService;
 use App\Services\TagNormalizer;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\ProductPartialApprovalService;
@@ -1094,6 +1097,31 @@ class NewProductDraftResource extends Resource
                                 Placeholder::make('variant_clash_notice')
                                     ->label('')
                                     ->content(fn (?NewProductDraft $record): ?HtmlString => self::draftVariantClashHtml($record))
+                                    ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
+                                    ->columnSpanFull(),
+                                Actions::make([
+                                    FormAction::make('useShopifyVariantValues')
+                                        ->label('Use Shopify Variant Values')
+                                        ->icon('heroicon-o-arrow-down-tray')
+                                        ->color('warning')
+                                        ->requiresConfirmation()
+                                        ->modalDescription('Uses the latest imported Shopify variant values and clears the clash only after the draft and linked variant agree.')
+                                        ->action(function (?NewProductDraft $record) {
+                                            if (! $record instanceof NewProductDraft) {
+                                                return null;
+                                            }
+
+                                            $result = self::resolveVariantClashUsingShopify($record->fresh() ?? $record);
+
+                                            self::sendNotification(Notification::make()
+                                                ->title($result['resolved'] ? 'Variant clash resolved' : 'Variant clash not resolved')
+                                                ->body($result['message'])
+                                                ->status($result['resolved'] ? 'success' : 'warning')
+                                            );
+
+                                            return redirect(self::getUrl('edit', ['record' => $record]));
+                                        }),
+                                ])
                                     ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
                                     ->columnSpanFull(),
                                 Forms\Components\Grid::make(5)
@@ -3793,6 +3821,16 @@ class NewProductDraftResource extends Resource
                             ? ''
                             : ", Pricing batch: {$result['pricing_batch']}";
 
+                        $seoCorrectionPart = '';
+                        if (($result['invalid_seo_count'] ?? 0) > 0) {
+                            $corrections = array_slice($result['seo_corrections'] ?? [], 0, 5);
+                            $seoCorrectionPart = ", SEO corrections required: {$result['invalid_seo_count']} field(s) across {$result['invalid_seo_rows']} row(s)";
+                            if ($corrections !== []) {
+                                $seoCorrectionPart .= ' (' . implode(' | ', $corrections) . ')';
+                            }
+                            $seoCorrectionPart .= '. Other fields were imported; invalid SEO values were not saved.';
+                        }
+
                         self::sendNotification(Notification::make()
                             ->title('Import complete')
                             ->body(
@@ -3804,11 +3842,13 @@ class NewProductDraftResource extends Resource
                                 ($referenceParts === [] ? '' : ', ' . implode(', ', $referenceParts)) .
                                 $pendingApprovalPart .
                                 $protectedConflictPart .
-                                $pricingBatchPart
+                                $pricingBatchPart .
+                                $seoCorrectionPart
                             )
                             ->status(
                                 ($result['skipped_pending_approval'] ?? 0) > 0
                                 || ($result['protected_conflict_count'] ?? 0) > 0
+                                || ($result['invalid_seo_count'] ?? 0) > 0
                                     ? 'warning'
                                     : 'success'
                             )
@@ -3930,6 +3970,27 @@ class NewProductDraftResource extends Resource
                         ->form(self::draftBulkEditFormSchema())
                         ->action(function ($records, array $data): void {
                             self::applyBulkEditsToDrafts($records, $data);
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('markAsNewIn')
+                        ->label('Mark As NewIn')
+                        ->icon('heroicon-o-sparkles')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->modalHeading('Mark selected products as New In?')
+                        ->modalDescription('Adds new-arrivals, new-in, and newbies while preserving all existing tags.')
+                        ->action(function ($records, NewInTagService $service): void {
+                            $result = $service->markDrafts($records);
+
+                            self::sendNotification(Notification::make()
+                                ->title('New In tags processed')
+                                ->body(
+                                    "Updated: {$result['updated']}. " .
+                                    "Already marked: {$result['already_marked']}. " .
+                                    "Failed: {$result['failed']}."
+                                )
+                                ->status($result['failed'] > 0 ? 'warning' : 'success')
+                            );
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('requestDeleteSelected')
@@ -4185,6 +4246,33 @@ class NewProductDraftResource extends Resource
                             );
                         })
                         ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('useShopifyVariantValues')
+                        ->label('Use Shopify Variant Values')
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->modalDescription('For each selected draft with a Variant Clash, use the latest imported Shopify variant values.')
+                        ->action(function ($records): void {
+                            $resolved = 0;
+                            $skipped = 0;
+
+                            foreach ($records as $record) {
+                                if (! $record instanceof NewProductDraft || ! self::draftHasVariantClash($record)) {
+                                    $skipped++;
+                                    continue;
+                                }
+
+                                $result = self::resolveVariantClashUsingShopify($record->fresh() ?? $record);
+                                $result['resolved'] ? $resolved++ : $skipped++;
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Variant clashes processed')
+                                ->body("Resolved: {$resolved}. Skipped: {$skipped}.")
+                                ->status($resolved > 0 ? 'success' : 'warning')
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('keepDraftValues')
                         ->label('Keep Draft Values')
                         ->icon('heroicon-o-arrow-up-tray')
@@ -4393,6 +4481,22 @@ class NewProductDraftResource extends Resource
                 ]),
             ])
             ->filters([
+                Filter::make('sku_list')
+                    ->label('SKUs')
+                    ->form([
+                        Textarea::make('skus')
+                            ->label('SKUs')
+                            ->rows(4)
+                            ->placeholder("LAP001\nLAP002\nLAP003")
+                            ->helperText('Paste one or more SKUs separated by spaces, commas, semicolons, or new lines.'),
+                    ])
+                    ->indicateUsing(function (array $data): array {
+                        $count = count(app(SkuListFilterService::class)->parse($data['skus'] ?? null));
+
+                        return $count > 0 ? ["SKUs: {$count} selected"] : [];
+                    })
+                    ->query(fn (Builder $query, array $data): Builder => app(SkuListFilterService::class)
+                        ->applyToDrafts($query, $data['skus'] ?? null)),
                 Filter::make('recently_edited_today')
                     ->label('Recently Edited Today')
                     ->indicator('Recently Edited Today')
@@ -5700,6 +5804,67 @@ class NewProductDraftResource extends Resource
     private static function draftHasVariantClash(?NewProductDraft $record): bool
     {
         return $record instanceof NewProductDraft && self::draftVariantClashes($record) !== [];
+    }
+
+    /**
+     * @return array{resolved:bool,message:string}
+     */
+    public static function resolveVariantClashUsingShopify(NewProductDraft $record): array
+    {
+        $variant = self::linkedVariantForDraft($record);
+        if (! $variant instanceof Variant) {
+            return [
+                'resolved' => false,
+                'message' => 'No linked product variant could be found for this draft.',
+            ];
+        }
+
+        if ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+            $applied = app(ShopifyVariantConflictResolver::class)->applyLatestShopifyValues($variant);
+            if (! $applied) {
+                return [
+                    'resolved' => false,
+                    'message' => 'The latest imported Shopify row could not be matched to this variant. Refresh the Shopify import before trying again.',
+                ];
+            }
+
+            $variant->refresh();
+        }
+
+        $warnings = array_values(array_filter(
+            $record->shopifySyncWarnings(),
+            static fn (array $warning): bool => ! isset(self::DRAFT_VARIANT_CLASH_FIELDS[trim((string) ($warning['field'] ?? ''))])
+        ));
+
+        $updates = [
+            'sku' => $variant->sku,
+            'variant_price' => $variant->price,
+            'variant_compare_at_price' => $variant->compare_at_price,
+            'variant_inventory_qty' => $variant->inventory_tracked === false ? null : $variant->inventory_qty,
+            'variant_weight' => $variant->weight,
+            'variant_weight_unit' => $variant->weight_unit,
+        ];
+
+        if (NewProductDraft::supportsShopifySyncWarningsColumn()) {
+            $updates['shopify_sync_warnings'] = $warnings === [] ? null : $warnings;
+        }
+
+        NewProductDraft::withoutEvents(function () use ($record, $updates): void {
+            $record->forceFill($updates)->save();
+        });
+
+        $remaining = self::draftVariantClashes($record->fresh() ?? $record);
+        if ($remaining !== []) {
+            return [
+                'resolved' => false,
+                'message' => 'Shopify values were applied, but at least one variant clash remains. Refresh the product import and review the remaining field.',
+            ];
+        }
+
+        return [
+            'resolved' => true,
+            'message' => 'The draft and linked variant now use the latest Shopify values.',
+        ];
     }
 
     /**
