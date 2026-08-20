@@ -60,6 +60,44 @@ final class DropdownCollectionCatalog
         return array_values($contexts);
     }
 
+    /**
+     * @return array<string, string>
+     */
+    public function collectionOptions(): array
+    {
+        $options = [];
+
+        foreach ($this->contexts() as $context) {
+            $collectionStyle = $this->normalizeValue($context['collection_style'] ?? null);
+            if ($collectionStyle !== null) {
+                $options[$collectionStyle] = $collectionStyle;
+            }
+        }
+
+        natcasesort($options);
+
+        return $options;
+    }
+
+    /**
+     * @return array{collection_style:string,tag_primary:string,tag_secondary:?string}|null
+     */
+    public function contextForCollection(?string $collectionStyle): ?array
+    {
+        $collectionStyle = $this->normalizeValue($collectionStyle);
+        if ($collectionStyle === null) {
+            return null;
+        }
+
+        foreach ($this->contexts() as $context) {
+            if (strcasecmp($context['collection_style'], $collectionStyle) === 0) {
+                return $context;
+            }
+        }
+
+        return null;
+    }
+
     public function vendorForCollection(?string $collectionStyle): ?string
     {
         if (!is_string($collectionStyle) || trim($collectionStyle) === '') {

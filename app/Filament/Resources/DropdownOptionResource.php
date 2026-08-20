@@ -6,6 +6,7 @@ use App\Enums\RolesEnum;
 use App\Filament\Exports\DropdownOptionExporter;
 use App\Filament\Resources\DropdownOptionResource\Pages;
 use App\Models\DropdownOption;
+use App\Services\DropdownCollectionCatalog;
 use App\Services\HeaderStore;
 use Filament\Actions\Exports\Enums\ExportFormat;
 use Filament\Forms;
@@ -46,14 +47,29 @@ class DropdownOptionResource extends Resource
             Forms\Components\TextInput::make('product_type')
                 ->label('Product type')
                 ->maxLength(255),
-            Forms\Components\TextInput::make('collection_style')
+            Forms\Components\Select::make('collection_style')
                 ->label('Collection')
-                ->maxLength(255),
+                ->options(fn (): array => app(DropdownCollectionCatalog::class)->collectionOptions())
+                ->searchable()
+                ->preload()
+                ->live()
+                ->required()
+                ->afterStateUpdated(function ($state, callable $set): void {
+                    $context = app(DropdownCollectionCatalog::class)->contextForCollection(
+                        is_string($state) ? $state : null
+                    );
+
+                    $set('collection_tag_primary', $context['tag_primary'] ?? null);
+                    $set('collection_tag_secondary', $context['tag_secondary'] ?? null);
+                })
+                ->helperText('Select a collection; its configured tags are filled automatically.'),
             Forms\Components\TextInput::make('collection_tag_primary')
                 ->label('Collection tag 1')
+                ->readOnly()
                 ->maxLength(255),
             Forms\Components\TextInput::make('collection_tag_secondary')
                 ->label('Collection tag 2')
+                ->readOnly()
                 ->maxLength(255),
             Forms\Components\Toggle::make('active')
                 ->default(true),
