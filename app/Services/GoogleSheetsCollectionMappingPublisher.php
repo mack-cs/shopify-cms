@@ -26,6 +26,7 @@ final class GoogleSheetsCollectionMappingPublisher
         'Product Type',
         'Total Inventory',
         'Product Created At',
+        'Data Fetched From Shopify',
     ];
 
     public function isEnabled(): bool
@@ -83,11 +84,7 @@ final class GoogleSheetsCollectionMappingPublisher
                 $fetchedAt = ($run->completed_at ?? now())
                     ->timezone((string) config('google_sheets.timezone'))
                     ->format('Y-m-d H:i:s T');
-                $values = [
-                    ['Data fetched from Shopify', $fetchedAt],
-                    [],
-                    self::HEADERS,
-                ];
+                $values = [self::HEADERS];
 
                 foreach ($rows as $row) {
                     $values[] = [
@@ -102,6 +99,7 @@ final class GoogleSheetsCollectionMappingPublisher
                         $row->product_type,
                         $row->total_inventory,
                         $row->product_created_at?->timezone((string) config('google_sheets.timezone'))->format('Y-m-d H:i:s T'),
+                        $fetchedAt,
                     ];
                 }
 
@@ -135,7 +133,7 @@ final class GoogleSheetsCollectionMappingPublisher
             'addSheet' => ['properties' => [
                 'title' => $title,
                 'index' => 0,
-                'gridProperties' => ['frozenRowCount' => 3],
+                'gridProperties' => ['frozenRowCount' => 1],
             ]],
         ]]);
 
@@ -146,7 +144,7 @@ final class GoogleSheetsCollectionMappingPublisher
     {
         $this->batchUpdate($spreadsheetId, [[
             'updateSheetProperties' => [
-                'properties' => ['sheetId' => $sheetId, 'index' => 0, 'gridProperties' => ['frozenRowCount' => 3]],
+                'properties' => ['sheetId' => $sheetId, 'index' => 0, 'gridProperties' => ['frozenRowCount' => 1]],
                 'fields' => 'index,gridProperties.frozenRowCount',
             ],
         ]]);
@@ -155,11 +153,10 @@ final class GoogleSheetsCollectionMappingPublisher
     /** @param array<int, array<int, mixed>> $values */
     private function replaceValues(string $spreadsheetId, string $title, array $values): void
     {
-        $range = "'".str_replace("'", "''", $title)."'!A:K";
-        $clear = $this->request()->post(
-            self::API_BASE_URL.'/'.rawurlencode($spreadsheetId).'/values/'.rawurlencode($range).':clear',
-            [],
-        );
+        $range = "'".str_replace("'", "''", $title)."'!A:L";
+        $clear = $this->request()
+            ->withBody('{}', 'application/json')
+            ->post(self::API_BASE_URL.'/'.rawurlencode($spreadsheetId).'/values/'.rawurlencode($range).':clear');
         $this->ensureSuccessful($clear, "clear {$title}");
 
         $write = $this->request()->put(

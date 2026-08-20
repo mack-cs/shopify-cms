@@ -25,6 +25,7 @@ final class ShopifyCollectionProductReportRowExporter extends Exporter
             'product_type' => 'Product Type',
             'total_inventory' => 'Total Inventory',
             'product_created_at' => 'Product Created At',
+            'run.completed_at' => 'Data Fetched From Shopify',
         ];
 
         return collect($columns)

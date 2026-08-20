@@ -2,7 +2,7 @@
 
 namespace App\Filament\Resources;
 
-use App\Enums\RolesEnum;
+use App\Enums\PermissionEnum;
 use App\Filament\Exports\ShopifyCollectionProductReportRowExporter;
 use App\Filament\Resources\ShopifyCollectionProductReportRowResource\Pages;
 use App\Models\ShopifyCollectionProductReportRow;
@@ -54,6 +54,7 @@ final class ShopifyCollectionProductReportRowResource extends Resource
                 TextColumn::make('product_type')->label('Product Type')->searchable()->sortable(),
                 TextColumn::make('total_inventory')->label('Total Inventory')->numeric()->sortable(),
                 TextColumn::make('product_created_at')->label('Product Created At')->dateTime()->sortable(),
+                TextColumn::make('run.completed_at')->label('Data Fetched From Shopify')->dateTime(),
             ])
             ->filters([
                 SelectFilter::make('shopify_collection_product_report_run_id')
@@ -108,7 +109,7 @@ final class ShopifyCollectionProductReportRowResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+        return Auth::user()?->can(PermissionEnum::CollectionMappingAccess->value) ?? false;
     }
 
     public static function canCreate(): bool

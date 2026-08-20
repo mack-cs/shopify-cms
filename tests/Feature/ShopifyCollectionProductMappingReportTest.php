@@ -1,11 +1,16 @@
 <?php
 
+use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
 use App\Filament\Exports\ShopifyCollectionProductReportRowExporter;
+use App\Filament\Resources\ShopifyCollectionProductReportRowResource;
 use App\Models\ShopifyCollectionProductReportRow;
+use App\Models\User;
 use App\Services\ShopifyCollectionProductReportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -24,7 +29,21 @@ it('exports only the requested collection mapping columns', function (): void {
             'product_type',
             'total_inventory',
             'product_created_at',
+            'run.completed_at',
         ]);
+});
+
+it('allows access only when the collection mapping permission is assigned', function (): void {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $user = User::factory()->create();
+    $user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($user);
+
+    expect(ShopifyCollectionProductReportRowResource::canViewAny())->toBeFalse();
+
+    $user->givePermissionTo(PermissionEnum::CollectionMappingAccess->value);
+
+    expect(ShopifyCollectionProductReportRowResource::canViewAny())->toBeTrue();
 });
 
 it('stores a normalized unique set of selected collection handles on a report run', function (): void {
