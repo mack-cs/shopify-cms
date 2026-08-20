@@ -3,13 +3,16 @@
 namespace App\Filament\Resources;
 
 use App\Enums\RolesEnum;
+use App\Filament\Exports\DropdownOptionExporter;
 use App\Filament\Resources\DropdownOptionResource\Pages;
 use App\Models\DropdownOption;
 use App\Services\HeaderStore;
+use Filament\Actions\Exports\Enums\ExportFormat;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables;
+use Filament\Tables\Actions\ExportAction;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
@@ -67,7 +70,7 @@ class DropdownOptionResource extends Resource
                 TextColumn::make('value')->searchable()->wrap(),
                 TextColumn::make('vendor')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_type')->label('Product type')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('collection_style')->label('Collection')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('collection_style')->label('Collection')->searchable()->sortable(),
                 TextColumn::make('collection_tag_primary')->label('Collection tag 1')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('collection_tag_secondary')->label('Collection tag 2')->toggleable(isToggledHiddenByDefault: true),
                 ToggleColumn::make('active'),
@@ -82,6 +85,21 @@ class DropdownOptionResource extends Resource
                         ->orderBy('header')
                         ->pluck('header', 'header')
                         ->all()),
+                SelectFilter::make('collection_style')
+                    ->label('Collection')
+                    ->searchable()
+                    ->options(fn () => DropdownOption::query()
+                        ->whereNotNull('collection_style')
+                        ->where('collection_style', '!=', '')
+                        ->distinct()
+                        ->orderBy('collection_style')
+                        ->pluck('collection_style', 'collection_style')
+                        ->all()),
+                Tables\Filters\TernaryFilter::make('active')
+                    ->label('Status')
+                    ->placeholder('All values')
+                    ->trueLabel('Active values')
+                    ->falseLabel('Inactive values'),
                 SelectFilter::make('vendor')
                     ->label('Vendor')
                     ->options(fn () => DropdownOption::query()
@@ -100,6 +118,15 @@ class DropdownOptionResource extends Resource
                         ->orderBy('product_type')
                         ->pluck('product_type', 'product_type')
                         ->all()),
+            ])
+            ->headerActions([
+                ExportAction::make()
+                    ->label('Export dropdown values')
+                    ->icon('heroicon-o-document-arrow-down')
+                    ->authorize(fn (): bool => self::canViewAny())
+                    ->columnMapping(false)
+                    ->formats([ExportFormat::Csv, ExportFormat::Xlsx])
+                    ->exporter(DropdownOptionExporter::class),
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
