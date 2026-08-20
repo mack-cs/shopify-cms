@@ -39,6 +39,18 @@ class DropdownOption extends Model
         $normalizedTags = self::normalizeTags($tags);
         if (!empty($normalizedTags)) {
             $query->where(function ($tagQuery) use ($normalizedTags): void {
+                $bundleTags = array_values(array_filter(
+                    $normalizedTags,
+                    static fn (string $tag): bool => TagNormalizer::containsBundleOrStackTag($tag)
+                        && !in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)
+                ));
+
+                if ($bundleTags !== []) {
+                    $tagQuery->whereIn('collection_tag_secondary', $bundleTags);
+
+                    return;
+                }
+
                 $tagQuery->where(function ($match) use ($normalizedTags): void {
                     $match->whereIn('collection_tag_primary', $normalizedTags)
                         ->whereIn('collection_tag_secondary', $normalizedTags);

@@ -4781,8 +4781,14 @@ class ProductResource extends Resource
         }
 
         $tags = self::collectionTags($collectionName);
-        if (!$isBundle || TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+        if (!$isBundle && !TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
             return $tags;
+        }
+
+        if (TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            $secondary = TagNormalizer::normalizeToken((string) ($tags[1] ?? ''));
+
+            return array_values(array_filter(['bundles', $secondary]));
         }
 
         $primary = TagNormalizer::normalizeToken((string) ($tags[0] ?? ''));
@@ -4799,7 +4805,7 @@ class ProductResource extends Resource
                 && $candidateSecondary !== null
                 && TagNormalizer::containsBundleOrStackTag($candidateSecondary)
             ) {
-                return array_values(array_filter([$candidatePrimary, $candidateSecondary]));
+                return array_values(array_filter(['bundles', $candidateSecondary]));
             }
         }
 

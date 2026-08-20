@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Product;
 use App\Services\Normalizer;
+use App\Services\TagNormalizer;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -24,7 +25,13 @@ final class RecalculateDropdownOptionProductsJob implements ShouldQueue
     public function handle(Normalizer $normalizer): void
     {
         $query = Product::query();
-        foreach (array_filter([$this->tagPrimary, $this->tagSecondary]) as $tag) {
+        $tags = array_filter([$this->tagPrimary, $this->tagSecondary]);
+        if (TagNormalizer::containsBundleOrStackTag($this->tagSecondary)) {
+            // Bundle products may intentionally omit the parent collection tag.
+            $tags = array_filter([$this->tagSecondary]);
+        }
+
+        foreach ($tags as $tag) {
             $query->whereRaw("FIND_IN_SET(?, REPLACE(tags, ', ', ','))", [$tag]);
         }
 

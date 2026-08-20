@@ -1191,7 +1191,7 @@ final class Normalizer
 
         $errors = [];
         $collectionContext = $this->resolveCollectionContext($product->tags);
-        $headers = $this->controlledDropdownHeaders();
+        $headers = $this->requiredControlledDropdownHeaders();
 
         foreach ($headers as $header) {
             $raw = $primary->get($header, null);
@@ -1203,10 +1203,13 @@ final class Normalizer
             // No configured options for this header/context means there is no rule
             // to validate against yet, so don't mark inactive.
             $contextQuery = DropdownOption::query()->where('header', $header);
-            if ($collectionContext['tag_primary'] !== null) {
-                $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
-            } else {
-                $contextQuery->whereNull('collection_tag_primary');
+            $isBundleContext = TagNormalizer::containsBundleOrStackTag($collectionContext['tag_secondary']);
+            if (!$isBundleContext) {
+                if ($collectionContext['tag_primary'] !== null) {
+                    $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
+                } else {
+                    $contextQuery->whereNull('collection_tag_primary');
+                }
             }
             if ($collectionContext['tag_secondary'] !== null) {
                 $contextQuery->where('collection_tag_secondary', $collectionContext['tag_secondary']);
@@ -1246,6 +1249,33 @@ final class Normalizer
             'Pattern Category (product.metafields.custom.pattern_category)',
             'Product Metals (product.metafields.custom.product_metals)',
         ];
+    }
+
+    private function requiredControlledDropdownHeaders(): array
+    {
+        $headers = $this->controlledDropdownHeaders();
+
+        if (!RequiredField::query()->exists()) {
+            return $headers;
+        }
+
+        $required = RequiredField::query()
+            ->where('required', true)
+            ->get(['source', 'attribute']);
+
+        return array_values(array_filter($headers, function (string $header) use ($required): bool {
+            if ($header === HeaderStore::COLOR_METAFIELD) {
+                return $required->contains(
+                    fn (RequiredField $field): bool => $field->source === 'product'
+                        && in_array($field->attribute, ['color', 'color_string', $header], true)
+                );
+            }
+
+            return $required->contains(
+                fn (RequiredField $field): bool => $field->source === 'row'
+                    && $field->attribute === $header
+            );
+        }));
     }
 
     /**
@@ -1298,15 +1328,35 @@ final class Normalizer
         }
 
         $knownContexts = app(DropdownCollectionCatalog::class)->contexts();
+        $tokenSet = array_map('strtolower', $tokens);
         foreach ($knownContexts as $ctx) {
             $primary = strtolower((string) ($ctx['tag_primary'] ?? ''));
             $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
-            $tokenSet = array_map('strtolower', $tokens);
 
             if ($primary === '' || !in_array($primary, $tokenSet, true)) {
                 continue;
             }
             if ($secondary !== '' && !in_array($secondary, $tokenSet, true)) {
+                continue;
+            }
+
+            return [
+                'collection_style' => $ctx['collection_style'],
+                'tag_primary' => $ctx['tag_primary'],
+                'tag_secondary' => $ctx['tag_secondary'],
+            ];
+        }
+
+        // Bundle product tags deliberately keep the bundle marker and the specific
+        // bundle collection tag, but may omit the parent collection tag. A unique
+        // bundle/stack secondary tag is sufficient to recover the approved context.
+        foreach ($knownContexts as $ctx) {
+            $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
+            if (
+                $secondary === ''
+                || !in_array($secondary, $tokenSet, true)
+                || !TagNormalizer::containsBundleOrStackTag($secondary)
+            ) {
                 continue;
             }
 
@@ -1329,7 +1379,7 @@ final class Normalizer
     private function requiredDefinitions(): array
     {
         $required = RequiredField::query()->where('required', true)->get();
-        if ($required->isEmpty()) {
+        if ($required->isEmpty() && !RequiredField::query()->exists()) {
             $fallbackProduct = [];
             foreach (config('product_error_rules.product_fields', []) as $attribute) {
                 $fallbackProduct[] = ['attribute' => $attribute, 'label' => $attribute];
