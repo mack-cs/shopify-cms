@@ -1,5 +1,6 @@
 <?php
 
+use App\Filament\Exports\ShopifyCollectionProductReportRowExporter;
 use App\Models\ShopifyCollectionProductReportRow;
 use App\Services\ShopifyCollectionProductReportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -7,6 +8,31 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
+
+it('exports only the requested collection mapping columns', function (): void {
+    expect(collect(ShopifyCollectionProductReportRowExporter::getColumns())
+        ->map(fn ($column): string => $column->getName())
+        ->all())->toBe([
+            'collection_title',
+            'collection_handle',
+            'collection_url',
+            'collection_sort_order',
+            'product_title',
+            'product_url',
+            'product_status',
+            'main_collection',
+            'product_type',
+            'total_inventory',
+            'product_created_at',
+        ]);
+});
+
+it('stores a normalized unique set of selected collection handles on a report run', function (): void {
+    $run = app(ShopifyCollectionProductReportService::class)
+        ->createRun(null, [' Bracelets ', 'bracelets', 'sale']);
+
+    expect($run->selected_collection_handles)->toBe(['bracelets', 'sale']);
+});
 
 it('maps fully paginated collections and products while auditing online store visibility', function () {
     config()->set([

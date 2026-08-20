@@ -25,4 +25,10 @@ final class ShopifyCollectionProductReportRow extends Model
     {
         return $this->belongsTo(ShopifyCollectionProductReportRun::class, 'shopify_collection_product_report_run_id');
     }
+
+    public function getMainCollectionAttribute(): ?string
+    {
+        return app(\App\Services\DropdownCollectionCatalog::class)
+            ->collectionForTags((array) ($this->tags ?? []));
+    }
 }

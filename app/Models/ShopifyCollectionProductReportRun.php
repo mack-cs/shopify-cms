@@ -19,6 +19,7 @@ final class ShopifyCollectionProductReportRun extends Model
     protected $guarded = [];
 
     protected $casts = [
+        'selected_collection_handles' => 'array',
         'errors' => 'array',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',

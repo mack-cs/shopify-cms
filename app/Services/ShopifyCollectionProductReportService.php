@@ -22,12 +22,21 @@ final class ShopifyCollectionProductReportService
 
     public function __construct(private readonly ShopifyApiClient $client) {}
 
-    public function createRun(?int $userId = null): ShopifyCollectionProductReportRun
+    /** @param array<int, string> $collectionHandles */
+    public function createRun(?int $userId = null, array $collectionHandles = []): ShopifyCollectionProductReportRun
     {
+        $collectionHandles = collect($collectionHandles)
+            ->map(fn ($handle): string => strtolower(trim((string) $handle)))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
         return ShopifyCollectionProductReportRun::query()->create([
             'requested_by' => $userId,
             'status' => ShopifyCollectionProductReportRun::STATUS_QUEUED,
             'api_version' => (string) config('services.shopify.api_version', '2026-01'),
+            'selected_collection_handles' => $collectionHandles === [] ? null : $collectionHandles,
         ]);
     }
 
@@ -52,6 +61,10 @@ final class ShopifyCollectionProductReportService
         $collectionCount = 0;
         $relationshipCount = 0;
         $errors = [];
+        $selectedHandles = collect($run->selected_collection_handles ?? [])
+            ->map(fn ($handle): string => strtolower(trim((string) $handle)))
+            ->filter()
+            ->flip();
 
         do {
             $data = $this->client->graphql($this->collectionsQuery(), [
@@ -62,6 +75,11 @@ final class ShopifyCollectionProductReportService
             ]);
 
             foreach ((array) data_get($data, 'collections.nodes', []) as $collection) {
+                $handle = strtolower(trim((string) data_get($collection, 'handle')));
+                if ($selectedHandles->isNotEmpty() && ! $selectedHandles->has($handle)) {
+                    continue;
+                }
+
                 $collectionCount++;
                 try {
                     [$collection, $publicationErrors] = $this->completeCollectionPublications($collection);

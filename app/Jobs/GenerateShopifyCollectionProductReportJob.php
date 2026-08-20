@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\ShopifyCollectionProductReportRun;
 use App\Services\AdminNotification;
+use App\Services\GoogleSheetsCollectionMappingPublisher;
 use App\Services\ShopifyCollectionProductReportService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -23,7 +24,10 @@ final class GenerateShopifyCollectionProductReportJob implements ShouldQueue
 
     public function __construct(public readonly int $runId) {}
 
-    public function handle(ShopifyCollectionProductReportService $reports): void
+    public function handle(
+        ShopifyCollectionProductReportService $reports,
+        GoogleSheetsCollectionMappingPublisher $sheets,
+    ): void
     {
         $run = ShopifyCollectionProductReportRun::query()->find($this->runId);
         if (! $run instanceof ShopifyCollectionProductReportRun) {
@@ -32,10 +36,14 @@ final class GenerateShopifyCollectionProductReportJob implements ShouldQueue
 
         try {
             $run = $reports->generate($run);
+            $publishedSheetCount = $sheets->publish($run);
+            $sheetMessage = $sheets->isEnabled()
+                ? " Published {$publishedSheetCount} Google Sheets tab(s)."
+                : '';
             AdminNotification::sendToUserId(
                 Notification::make()
                     ->title('Collection product mapping ready')
-                    ->body("Mapped {$run->relationship_count} collection/product relationships across {$run->collection_count} collections.")
+                    ->body("Mapped {$run->relationship_count} collection/product relationships across {$run->collection_count} collections.{$sheetMessage}")
                     ->success(),
                 $run->requested_by,
             );

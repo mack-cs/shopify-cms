@@ -98,6 +98,32 @@ final class DropdownCollectionCatalog
         return null;
     }
 
+    /** @param array<int, string> $tags */
+    public function collectionForTags(array $tags): ?string
+    {
+        $normalizedTags = collect($tags)
+            ->map(fn ($tag): ?string => TagNormalizer::normalizeToken((string) $tag))
+            ->filter()
+            ->map(fn (string $tag): string => strtolower($tag))
+            ->unique()
+            ->all();
+
+        foreach ($this->contexts() as $context) {
+            $primary = strtolower((string) ($context['tag_primary'] ?? ''));
+            $secondary = strtolower((string) ($context['tag_secondary'] ?? ''));
+            if ($primary === '' || ! in_array($primary, $normalizedTags, true)) {
+                continue;
+            }
+            if ($secondary !== '' && ! in_array($secondary, $normalizedTags, true)) {
+                continue;
+            }
+
+            return $context['collection_style'];
+        }
+
+        return null;
+    }
+
     public function vendorForCollection(?string $collectionStyle): ?string
     {
         if (!is_string($collectionStyle) || trim($collectionStyle) === '') {

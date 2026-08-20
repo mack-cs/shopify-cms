@@ -11,7 +11,6 @@ use Filament\Actions\Exports\Enums\ExportFormat;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables\Actions\ExportAction;
-use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -42,24 +41,19 @@ final class ShopifyCollectionProductReportRowResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->defaultSort('collection_title')
+            ->defaultSort('product_created_at', 'desc')
             ->columns([
-                TextColumn::make('collection_title')->label('Collection')->searchable()->sortable()->wrap(),
-                IconColumn::make('collection_published_online')->label('Published Online')->boolean()->sortable(),
+                TextColumn::make('collection_title')->label('Collection Title')->searchable()->sortable()->wrap(),
                 TextColumn::make('collection_handle')->label('Collection Handle')->searchable()->toggleable(),
                 TextColumn::make('collection_url')->label('Collection URL')->url(fn ($state) => $state)->openUrlInNewTab()->searchable()->copyable()->toggleable(),
-                TextColumn::make('product_title')->label('Product')->searchable()->sortable()->placeholder('Empty collection')->wrap(),
-                TextColumn::make('product_handle')->label('Product Handle')->searchable()->toggleable(),
+                TextColumn::make('collection_sort_order')->label('Collection Sort Order')->sortable(),
+                TextColumn::make('product_title')->label('Product Title')->searchable()->sortable()->placeholder('Empty collection')->wrap(),
                 TextColumn::make('product_url')->label('Product URL')->url(fn ($state) => $state)->openUrlInNewTab()->searchable()->copyable()->toggleable(),
-                TextColumn::make('product_status')->label('Status')->badge()->sortable(),
-                TextColumn::make('vendor')->searchable()->sortable()->toggleable(),
-                TextColumn::make('product_type')->label('Product Type')->searchable()->sortable()->toggleable(),
-                TextColumn::make('sku_summary')->label('SKUs')->searchable()->wrap()->toggleable(),
-                TextColumn::make('total_inventory')->label('Inventory')->numeric()->sortable(),
-                TextColumn::make('variant_count')->label('Variants')->numeric()->sortable()->toggleable(),
-                TextColumn::make('collection_online_publish_date')->label('Collection Published')->dateTime()->sortable()->toggleable(),
-                TextColumn::make('collection_updated_at')->label('Collection Updated')->dateTime()->sortable()->toggleable(),
-                TextColumn::make('product_updated_at')->label('Product Updated')->dateTime()->sortable()->toggleable(),
+                TextColumn::make('product_status')->label('Product Status')->badge()->sortable(),
+                TextColumn::make('main_collection')->label('Main Collection')->wrap(),
+                TextColumn::make('product_type')->label('Product Type')->searchable()->sortable(),
+                TextColumn::make('total_inventory')->label('Total Inventory')->numeric()->sortable(),
+                TextColumn::make('product_created_at')->label('Product Created At')->dateTime()->sortable(),
             ])
             ->filters([
                 SelectFilter::make('shopify_collection_product_report_run_id')
@@ -104,6 +98,7 @@ final class ShopifyCollectionProductReportRowResource extends Resource
                     ->label('Export filtered mapping')
                     ->icon('heroicon-o-document-arrow-down')
                     ->authorize(fn (): bool => self::canViewAny())
+                    ->columnMapping(false)
                     ->formats([ExportFormat::Csv, ExportFormat::Xlsx])
                     ->exporter(ShopifyCollectionProductReportRowExporter::class),
             ])

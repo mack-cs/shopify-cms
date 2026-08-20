@@ -21,3 +21,10 @@ it('provides selectable collections with their configured tags', function (): vo
         ])
         ->and($catalog->contextForCollection('Unknown Collection'))->toBeNull();
 });
+
+it('resolves a main collection from Shopify product tags', function (): void {
+    $catalog = app(DropdownCollectionCatalog::class);
+
+    expect($catalog->collectionForTags(['elevated-basics', 'bracelets', 'gold']))
+        ->toBe('Elevated Basics Bracelets');
+});
