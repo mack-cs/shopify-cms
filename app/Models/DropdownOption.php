@@ -95,6 +95,19 @@ class DropdownOption extends Model
     public static function canonicalValue(string $header, mixed $value): string
     {
         $value = html_entity_decode((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        if ($header === HeaderStore::MATERIALS_AND_DIMENSIONS) {
+            $value = preg_replace('/<\s*br\s*\/?>/iu', "\n", $value) ?? $value;
+            $value = preg_replace('/<\s*\/\s*li\s*>/iu', "\n", $value) ?? $value;
+            $value = strip_tags($value);
+            $lines = preg_split('/\R/u', $value) ?: [$value];
+            $lines = array_map(
+                static fn (string $line): string => preg_replace('/^\s*[\x{2022}\x{00B7}\-*]+\s*/u', '', $line) ?? $line,
+                $lines
+            );
+            $value = implode("\n", $lines);
+        }
+
         $value = str_replace(["\u{00A0}", "\r\n", "\r"], [' ', "\n", "\n"], $value);
         $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
 

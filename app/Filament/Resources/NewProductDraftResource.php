@@ -2969,7 +2969,7 @@ class NewProductDraftResource extends Resource
 
         $allowed = [];
         foreach (array_keys($options) as $key) {
-            $normalized = strtolower(trim((string) $key));
+            $normalized = DropdownOption::canonicalValue('', $key);
             if ($normalized !== '') {
                 $allowed[$normalized] = true;
             }
@@ -2977,7 +2977,7 @@ class NewProductDraftResource extends Resource
 
         $invalid = [];
         foreach ($selected as $token) {
-            $normalized = strtolower(trim($token));
+            $normalized = DropdownOption::canonicalValue('', $token);
             if ($normalized === '') {
                 continue;
             }

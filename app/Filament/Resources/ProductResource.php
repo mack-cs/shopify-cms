@@ -567,7 +567,10 @@ class ProductResource extends Resource
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                                    $collectionTags = self::collectionTags($state);
+                                    $collectionTags = self::collectionTagsForBundleState(
+                                        $state,
+                                        filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+                                    );
                                     if ($collectionTags === []) {
                                         return;
                                     }
@@ -865,6 +868,26 @@ class ProductResource extends Resource
                             ->helperText('Internal use only.'),
                              Toggle::make('is_bundle')
                                     ->label('Bundle')
+                                    ->reactive()
+                                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                        $collection = self::stateFromGet($get, 'collection_filter');
+                                        $collectionTags = self::collectionTagsForBundleState(
+                                            $collection,
+                                            filter_var($state, FILTER_VALIDATE_BOOLEAN)
+                                        );
+                                        if ($collectionTags === []) {
+                                            return;
+                                        }
+
+                                        $currentTags = self::normalizeTagList(self::stateFromGet($get, 'tags'));
+                                        $collectionPool = self::allCollectionTags();
+                                        $keptTags = array_values(array_filter(
+                                            $currentTags,
+                                            fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                                        ));
+
+                                        $set('tags', array_values(array_unique(array_merge($keptTags, $collectionTags))));
+                                    })
                                     ->helperText('Internal use only'),
                         ])->columnSpanFull(),
 
@@ -4269,13 +4292,13 @@ class ProductResource extends Resource
         $tags = self::filterTags($get, $vendor, $type);
         $options = self::dropdownOptionsForHeader($header, $vendor, $type, $tags);
         $known = array_fill_keys(array_map(
-            static fn (string $value): string => strtolower(trim($value)),
+            static fn (string $value): string => DropdownOption::canonicalValue($header, $value),
             array_keys($options)
         ), true);
 
         $invalid = [];
         foreach ($values as $value) {
-            $key = strtolower(trim($value));
+            $key = DropdownOption::canonicalValue($header, $value);
             if ($key === '' || isset($known[$key])) {
                 continue;
             }
@@ -4723,7 +4746,10 @@ class ProductResource extends Resource
     {
         $collection = self::stateFromGet($get, 'collection_filter');
         if ($collection) {
-            $tags = self::collectionTags($collection);
+            $tags = self::collectionTagsForBundleState(
+                $collection,
+                filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+            );
             if (!empty($tags)) {
                 return $tags;
             }
@@ -4742,6 +4768,42 @@ class ProductResource extends Resource
         }
 
         return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function collectionTagsForBundleState(mixed $collection, bool $isBundle): array
+    {
+        $collectionName = is_string($collection) ? trim($collection) : '';
+        if ($collectionName === '') {
+            return [];
+        }
+
+        $tags = self::collectionTags($collectionName);
+        if (!$isBundle || TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            return $tags;
+        }
+
+        $primary = TagNormalizer::normalizeToken((string) ($tags[0] ?? ''));
+        if ($primary === null) {
+            return $tags;
+        }
+
+        foreach (self::collectionContexts() as $context) {
+            $candidatePrimary = TagNormalizer::normalizeToken((string) ($context['tag_primary'] ?? ''));
+            $candidateSecondary = TagNormalizer::normalizeToken((string) ($context['tag_secondary'] ?? ''));
+
+            if (
+                $candidatePrimary === $primary
+                && $candidateSecondary !== null
+                && TagNormalizer::containsBundleOrStackTag($candidateSecondary)
+            ) {
+                return array_values(array_filter([$candidatePrimary, $candidateSecondary]));
+            }
+        }
+
+        return $tags;
     }
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder
