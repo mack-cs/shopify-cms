@@ -1147,8 +1147,7 @@ final class Normalizer
             foreach ($values as $value) {
                 foreach ($targetContexts as $ctx) {
                     $query = DropdownOption::query()
-                        ->where('header', $header)
-                        ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+                        ->where('header', $header);
 
                     if ($ctx['tag_primary'] !== null) {
                         $query->where('collection_tag_primary', $ctx['tag_primary']);
@@ -1162,7 +1161,11 @@ final class Normalizer
                         $query->whereNull('collection_tag_secondary');
                     }
 
-                    if ($query->exists()) {
+                    $canonical = DropdownOption::canonicalValue($header, $value);
+                    $alreadyExists = $query->get(['value'])->contains(
+                        fn (DropdownOption $option): bool => DropdownOption::canonicalValue($header, $option->value) === $canonical
+                    );
+                    if ($alreadyExists) {
                         continue;
                     }
 
@@ -1210,29 +1213,19 @@ final class Normalizer
             } else {
                 $contextQuery->whereNull('collection_tag_secondary');
             }
-            if (!$contextQuery->exists()) {
+            $contextOptions = $contextQuery->get(['value', 'active']);
+            if ($contextOptions->isEmpty()) {
                 continue;
             }
 
             foreach ($values as $value) {
-                $query = DropdownOption::query()
-                    ->where('header', $header)
-                    ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+                $canonical = DropdownOption::canonicalValue($header, $value);
+                $isActive = $contextOptions->contains(
+                    fn (DropdownOption $option): bool => $option->active
+                        && DropdownOption::canonicalValue($header, $option->value) === $canonical
+                );
 
-                if ($collectionContext['tag_primary'] !== null) {
-                    $query->where('collection_tag_primary', $collectionContext['tag_primary']);
-                } else {
-                    $query->whereNull('collection_tag_primary');
-                }
-
-                if ($collectionContext['tag_secondary'] !== null) {
-                    $query->where('collection_tag_secondary', $collectionContext['tag_secondary']);
-                } else {
-                    $query->whereNull('collection_tag_secondary');
-                }
-
-                $option = $query->first();
-                if (!$option || !$option->active) {
+                if (! $isActive) {
                     $errors[] = "inactive:dropdown:{$header}:{$value}";
                 }
             }
@@ -1280,6 +1273,12 @@ final class Normalizer
 
         if ($header === HeaderStore::COLOR_METAFIELD) {
             return $this->parseColorTokens($value);
+        }
+
+        // This is a single descriptive dropdown value. Commas, semicolons and
+        // line breaks may be part of the text and must not create false values.
+        if ($header === HeaderStore::MATERIALS_AND_DIMENSIONS) {
+            return [$value];
         }
 
         $normalized = str_replace(',', ';', $value);

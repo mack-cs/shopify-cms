@@ -92,6 +92,15 @@ class DropdownOption extends Model
             ->pluck('header');
     }
 
+    public static function canonicalValue(string $header, mixed $value): string
+    {
+        $value = html_entity_decode((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $value = str_replace(["\u{00A0}", "\r\n", "\r"], [' ', "\n", "\n"], $value);
+        $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
+
+        return mb_strtolower($value, 'UTF-8');
+    }
+
     private static function normalizeFilter(?string $value): ?string
     {
         if ($value === null) {
