@@ -9,6 +9,7 @@ use App\Filament\Resources\NewProductDraftResource\Widgets\ShopifyMissingDraftBa
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
 use App\Models\NewProductDraft;
 use App\Models\Status;
+use App\Jobs\RecalculateDropdownOptionProductsJob;
 use App\Services\LocalCatalogResetService;
 use App\Services\StackComponentCsvExporter;
 use Filament\Actions;
@@ -76,6 +77,19 @@ class ListNewProductDrafts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('refreshProductValidation')
+                ->label('Refresh Validation')
+                ->icon('heroicon-o-arrow-path')
+                ->color('gray')
+                ->action(function (): void {
+                    RecalculateDropdownOptionProductsJob::dispatchSync(null, null);
+                    $this->resetTable();
+
+                    Notification::make()
+                        ->title('Product validation refreshed')
+                        ->success()
+                        ->send();
+                }),
             Actions\Action::make('exportStackComponents')
                 ->label('Export Stacks & Components')
                 ->icon('heroicon-o-link')

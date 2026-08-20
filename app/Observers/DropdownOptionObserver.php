@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Jobs\RecalculateDropdownOptionProductsJob;
 use App\Models\DropdownOption;
+use Illuminate\Support\Facades\DB;
 
 final class DropdownOptionObserver
 {
@@ -33,9 +34,11 @@ final class DropdownOptionObserver
 
     private function dispatch(DropdownOption $option): void
     {
-        RecalculateDropdownOptionProductsJob::dispatch(
-            $option->collection_tag_primary,
-            $option->collection_tag_secondary,
-        )->afterCommit();
+        $primary = $option->collection_tag_primary;
+        $secondary = $option->collection_tag_secondary;
+
+        DB::afterCommit(static function () use ($primary, $secondary): void {
+            RecalculateDropdownOptionProductsJob::dispatchSync($primary, $secondary);
+        });
     }
 }

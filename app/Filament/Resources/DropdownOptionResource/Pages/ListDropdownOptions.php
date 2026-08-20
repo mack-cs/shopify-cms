@@ -23,10 +23,10 @@ class ListDropdownOptions extends ListRecords
                 ->requiresConfirmation()
                 ->modalDescription('Queues a fresh dropdown validation for existing products, including products with stale Materials and Dimensions errors.')
                 ->action(function (): void {
-                    RecalculateDropdownOptionProductsJob::dispatch(null, null);
+                    RecalculateDropdownOptionProductsJob::dispatchSync(null, null);
 
                     Notification::make()
-                        ->title('Product dropdown revalidation queued')
+                        ->title('Product dropdown revalidation complete')
                         ->success()
                         ->send();
                 }),
