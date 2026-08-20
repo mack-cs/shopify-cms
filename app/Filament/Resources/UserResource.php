@@ -70,6 +70,7 @@ class UserResource extends Resource
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
                             PermissionEnum::ManagerReportAccess->value,
+                            PermissionEnum::ShopifyImageImportAccess->value,
                         ])
                         ->get(['id', 'name'])
                         ->mapWithKeys(fn (Permission $permission): array => [
@@ -77,6 +78,7 @@ class UserResource extends Resource
                                 PermissionEnum::InventoryUpdate->value => 'Inventory Update',
                                 PermissionEnum::InventoryStatusUpdate->value => 'Inventory Status Update',
                                 PermissionEnum::ManagerReportAccess->value => 'Is Manager',
+                                PermissionEnum::ShopifyImageImportAccess->value => 'Shopify Image Imports',
                                 default => $permission->name,
                             },
                         ])
@@ -86,6 +88,7 @@ class UserResource extends Resource
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
                             PermissionEnum::ManagerReportAccess->value,
+                            PermissionEnum::ShopifyImageImportAccess->value,
                         ])
                         ->get(['id', 'name'])
                         ->mapWithKeys(fn (Permission $permission): array => [
@@ -93,6 +96,7 @@ class UserResource extends Resource
                                 PermissionEnum::InventoryUpdate->value => 'Allows updating tracked inventory and quantity.',
                                 PermissionEnum::InventoryStatusUpdate->value => 'Allows updating product status from inventory.',
                                 PermissionEnum::ManagerReportAccess->value => 'Allows access to the manager movement report, on-demand generation and exports.',
+                                PermissionEnum::ShopifyImageImportAccess->value => 'Allows uploading Shopify product images and viewing successful or failed import results.',
                                 default => '',
                             },
                         ])

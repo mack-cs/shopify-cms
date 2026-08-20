@@ -2,7 +2,7 @@
 
 namespace App\Filament\Pages;
 
-use App\Enums\RolesEnum;
+use App\Enums\PermissionEnum;
 use App\Jobs\ImportShopifyProductImagesJob;
 use App\Jobs\RebuildShopifyStackImagesJob;
 use App\Models\ShopifyImageImportBatch;
@@ -35,7 +35,7 @@ class ImportShopifyProductImages extends Page implements HasForms
 
     public static function canAccess(): bool
     {
-        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+        return Auth::user()?->can(PermissionEnum::ShopifyImageImportAccess->value) ?? false;
     }
 
     public function mount(): void
@@ -98,7 +98,7 @@ class ImportShopifyProductImages extends Page implements HasForms
         if (!static::canAccess()) {
             AdminNotification::send(
                 Notification::make()
-                    ->title('Super Admin required')
+                    ->title('Image import permission required')
                     ->danger()
             );
             return;
@@ -132,7 +132,7 @@ class ImportShopifyProductImages extends Page implements HasForms
         if (!static::canAccess()) {
             AdminNotification::send(
                 Notification::make()
-                    ->title('Super Admin required')
+                    ->title('Image import permission required')
                     ->danger()
             );
             return;

@@ -39,4 +39,5 @@ enum PermissionEnum: string
     case InventoryUpdate = 'inventory.update';
     case InventoryStatusUpdate = 'inventory_status.update';
     case ManagerReportAccess = 'manager_report.access';
+    case ShopifyImageImportAccess = 'shopify_image_import.access';
 }

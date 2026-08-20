@@ -35,9 +35,11 @@ class DropdownOptionResource extends Resource
             Forms\Components\TextInput::make('header')
                 ->required()
                 ->datalist(fn (): array => HeaderStore::knownHeaders()),
-            Forms\Components\TextInput::make('value')
+            Forms\Components\Textarea::make('value')
                 ->required()
-                ->maxLength(255),
+                ->rows(4)
+                ->maxLength(255)
+                ->helperText('Use real line breaks for multi-line values. Do not enter HTML entities such as &#x20;.'),
             Forms\Components\TextInput::make('vendor')
                 ->label('Vendor')
                 ->maxLength(255),
