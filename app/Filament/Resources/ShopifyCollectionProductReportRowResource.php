@@ -95,7 +95,7 @@ final class ShopifyCollectionProductReportRowResource extends Resource
             ])
             ->headerActions([
                 ExportAction::make()
-                    ->label('Export filtered mapping')
+                    ->label('Download filtered mapping')
                     ->icon('heroicon-o-document-arrow-down')
                     ->authorize(fn (): bool => self::canViewAny())
                     ->columnMapping(false)

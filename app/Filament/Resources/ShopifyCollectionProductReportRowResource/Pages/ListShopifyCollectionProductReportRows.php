@@ -4,7 +4,7 @@ namespace App\Filament\Resources\ShopifyCollectionProductReportRowResource\Pages
 
 use App\Filament\Resources\ShopifyCollectionProductReportRowResource;
 use App\Jobs\GenerateShopifyCollectionProductReportJob;
-use App\Models\ShopifyCollection;
+use App\Jobs\PublishCollectionMappingToGoogleSheetsJob;
 use App\Models\ShopifyCollectionProductReportRun;
 use App\Services\ShopifyCollectionProductReportService;
 use Filament\Actions\Action;
@@ -38,36 +38,80 @@ final class ListShopifyCollectionProductReportRows extends ListRecords
                 ->label('Refresh from Shopify')
                 ->icon('heroicon-o-arrow-path')
                 ->authorize(fn (): bool => ShopifyCollectionProductReportRowResource::canViewAny())
-                ->form([
-                    Select::make('collection_handles')
-                        ->label('Collection handles')
-                        ->options(fn (): array => ShopifyCollection::query()
-                            ->whereNotNull('handle')
-                            ->where('handle', '!=', '')
-                            ->orderBy('title')
-                            ->get(['handle', 'title'])
-                            ->mapWithKeys(fn (ShopifyCollection $collection): array => [
-                                $collection->handle => ($collection->title ?: $collection->handle).' ('.$collection->handle.')',
-                            ])
-                            ->all())
-                        ->multiple()
-                        ->searchable()
-                        ->preload()
-                        ->required()
-                        ->helperText('Only the selected collection handles will be fetched and pushed to their spreadsheet tabs.'),
-                ])
                 ->requiresConfirmation()
-                ->modalDescription('This queues a fresh Shopify snapshot for the selected handles. Each collection replaces its own Google Sheets tab with the newest products first.')
-                ->action(function (array $data, ShopifyCollectionProductReportService $reports): void {
-                    $handles = array_values((array) ($data['collection_handles'] ?? []));
-                    $run = $reports->createRun(Auth::id(), $handles);
+                ->modalDescription('This queues a complete Shopify snapshot for every collection. Existing report data remains available until the refresh finishes.')
+                ->action(function (ShopifyCollectionProductReportService $reports): void {
+                    $run = $reports->createRun(Auth::id());
                     GenerateShopifyCollectionProductReportJob::dispatch($run->id);
 
                     Notification::make()
                         ->title('Collection product mapping queued')
-                        ->body('Report run #'.$run->id.' will fetch '.count($handles).' selected collection(s).')
+                        ->body('Report run #'.$run->id.' will refresh all Shopify collections.')
+                        ->success()->send();
+                }),
+            Action::make('exportToGoogleSheets')
+                ->label('Export to Google Sheets')
+                ->icon('heroicon-o-table-cells')
+                ->color('success')
+                ->authorize(fn (): bool => ShopifyCollectionProductReportRowResource::canViewAny())
+                ->disabled(fn (): bool => ! config('google_sheets.enabled') || self::latestCompletedRun() === null)
+                ->form([
+                    Select::make('collection_handles')
+                        ->label('Collections to export')
+                        ->options(fn (): array => self::googleSheetCollectionOptions())
+                        ->multiple()
+                        ->searchable()
+                        ->preload()
+                        ->required()
+                        ->helperText('Each selected handle updates its own tab using the latest completed full refresh.'),
+                ])
+                ->requiresConfirmation()
+                ->modalDescription('Selected collection tabs will be replaced with the latest Shopify mapping, newest products first.')
+                ->action(function (array $data): void {
+                    $run = self::latestCompletedRun();
+                    if (! $run instanceof ShopifyCollectionProductReportRun) {
+                        Notification::make()->title('Run a Shopify refresh first')->warning()->send();
+
+                        return;
+                    }
+
+                    $handles = array_values((array) ($data['collection_handles'] ?? []));
+                    PublishCollectionMappingToGoogleSheetsJob::dispatch($run->id, $handles, Auth::id());
+
+                    Notification::make()
+                        ->title('Google Sheets export queued')
+                        ->body('Exporting '.count($handles).' selected collection(s) from report run #'.$run->id.'.')
                         ->success()->send();
                 }),
         ];
+    }
+
+    private static function latestCompletedRun(): ?ShopifyCollectionProductReportRun
+    {
+        return ShopifyCollectionProductReportRun::query()
+            ->where('status', ShopifyCollectionProductReportRun::STATUS_COMPLETED)
+            ->latest('id')
+            ->first();
+    }
+
+    /** @return array<string, string> */
+    private static function googleSheetCollectionOptions(): array
+    {
+        $run = self::latestCompletedRun();
+        if (! $run instanceof ShopifyCollectionProductReportRun) {
+            return [];
+        }
+
+        return $run->rows()
+            ->whereNotNull('collection_handle')
+            ->where('collection_handle', '!=', '')
+            ->select(['collection_handle', 'collection_title'])
+            ->distinct()
+            ->orderBy('collection_title')
+            ->get()
+            ->mapWithKeys(fn ($row): array => [
+                $row->collection_handle => ($row->collection_title ?: $row->collection_handle).' ('.$row->collection_handle.')',
+            ])
+            ->all();
     }
 }

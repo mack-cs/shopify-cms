@@ -33,7 +33,8 @@ final class GoogleSheetsCollectionMappingPublisher
         return (bool) config('google_sheets.enabled');
     }
 
-    public function publish(ShopifyCollectionProductReportRun $run): int
+    /** @param array<int, string> $collectionHandles */
+    public function publish(ShopifyCollectionProductReportRun $run, array $collectionHandles): int
     {
         if (! $this->isEnabled()) {
             return 0;
@@ -44,12 +45,23 @@ final class GoogleSheetsCollectionMappingPublisher
             throw new \RuntimeException('GOOGLE_SHEETS_COLLECTION_MAPPING_SPREADSHEET_ID is not configured.');
         }
 
+        $collectionHandles = collect($collectionHandles)
+            ->map(fn ($handle): string => strtolower(trim((string) $handle)))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        if ($collectionHandles === []) {
+            throw new \InvalidArgumentException('Select at least one collection to export to Google Sheets.');
+        }
+
         return Cache::lock(
             'google-sheets-collection-mapping-'.md5($spreadsheetId),
             max(30, (int) config('google_sheets.lock_seconds', 300)),
-        )->block(10, function () use ($run, $spreadsheetId): int {
+        )->block(10, function () use ($run, $spreadsheetId, $collectionHandles): int {
             $sheets = $this->sheetMetadata($spreadsheetId);
             $groups = $run->rows()
+                ->whereIn('collection_handle', $collectionHandles)
                 ->whereNotNull('collection_handle')
                 ->orderByDesc('product_created_at')
                 ->get()
