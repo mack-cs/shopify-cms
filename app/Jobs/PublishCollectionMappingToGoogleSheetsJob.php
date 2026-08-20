@@ -48,13 +48,15 @@ final class PublishCollectionMappingToGoogleSheetsJob implements ShouldQueue
                 $this->requestedBy,
             );
         } catch (Throwable $exception) {
-            AdminNotification::sendToUserId(
-                Notification::make()
-                    ->title('Google Sheets export failed')
-                    ->body($exception->getMessage())
-                    ->danger(),
-                $this->requestedBy,
-            );
+            if ($this->attempts() >= $this->tries) {
+                AdminNotification::sendToUserId(
+                    Notification::make()
+                        ->title('Google Sheets export failed')
+                        ->body($exception->getMessage())
+                        ->danger(),
+                    $this->requestedBy,
+                );
+            }
 
             throw $exception;
         }

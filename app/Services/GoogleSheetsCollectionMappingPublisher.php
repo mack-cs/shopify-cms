@@ -273,7 +273,8 @@ final class GoogleSheetsCollectionMappingPublisher
 
     private function tabTitle(string $handle): string
     {
-        $title = preg_replace('/[\\\/\?\*\[\]:]+/', '-', trim($handle)) ?: 'collection';
+        $title = str_replace(['\\', '/', '?', '*', '[', ']', ':'], '-', trim($handle));
+        $title = preg_replace('/-+/', '-', $title) ?: 'collection';
 
         return Str::limit($title, 100, '');
     }
