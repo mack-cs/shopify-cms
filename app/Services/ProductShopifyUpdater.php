@@ -89,6 +89,7 @@ final class ProductShopifyUpdater
         private readonly ProductHandleService $handleService,
         private readonly ProductPartialApprovalService $partialApprovalService,
         private readonly SaleTagService $saleTags,
+        private readonly ComplementaryProductAuditService $complementaryProducts,
     ) {}
 
     /**
@@ -242,6 +243,17 @@ final class ProductShopifyUpdater
                 logger()->warning('Shopify product sync skipped: blocked by Shopify missing draft', [
                     'product_id' => $product->id,
                     'handle' => $product->handle,
+                ]);
+                continue;
+            }
+
+            if ($product->isApprovedByTwo()
+                && !$this->complementaryProducts->hasRequiredMinimumForProduct($product)) {
+                $skippedBlocked++;
+                logger()->warning('Shopify product sync skipped: missing required complementary products', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'minimum' => ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT,
                 ]);
                 continue;
             }
@@ -1630,6 +1642,8 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
         $locationId = null;
         $variantInputs = [];
+        $inventoryTrackingUpdated = [];
+        $trackInventory = $this->productShouldTrackInventory($product);
 
         foreach ($variantSources as $rowIndex => $variantSource) {
             $rowData = $variantSource['row'];
@@ -1667,6 +1681,20 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
             $variantId = $variantNode['id'] ?? null;
             $inventoryItemId = data_get($variantNode, 'inventoryItem.id');
+
+            if ($variantId && !$inventoryItemId) {
+                throw new \RuntimeException("Shopify variant {$variantId} has no inventory item, so inventory tracking could not be configured.");
+            }
+
+            if ($inventoryItemId && !isset($inventoryTrackingUpdated[$inventoryItemId])) {
+                $this->updateInventoryTrackingForItem(
+                    $product,
+                    $localVariant,
+                    (string) $inventoryItemId,
+                    $trackInventory
+                );
+                $inventoryTrackingUpdated[$inventoryItemId] = true;
+            }
 
             if ($variantId) {
                 $input = ['id' => $variantId];
@@ -1799,7 +1827,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             $inventoryQty = $this->normalizeNumeric(
                 $this->valueFromRow($rowData, HeaderStore::VARIANT_INVENTORY_QTY, $localVariant?->inventory_qty)
             );
-            if ($inventoryItemId && $inventoryQty !== null) {
+            if ($trackInventory && $inventoryItemId && $inventoryQty !== null) {
                 $locationId = $locationId ?? $this->firstLocationId();
                 if ($locationId) {
                     $data = $this->client->graphql($this->inventorySetMutation(), [
@@ -1877,6 +1905,93 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     {
         $data = $this->client->graphql($this->locationsQuery(), []);
         return data_get($data, 'locations.nodes.0.id');
+    }
+
+    private function updateInventoryTrackingForItem(
+        Product $product,
+        ?Variant $localVariant,
+        string $inventoryItemId,
+        bool $tracked
+    ): void {
+        $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
+            'id' => $inventoryItemId,
+            'input' => ['tracked' => $tracked],
+        ]);
+        $payload = $data['inventoryItemUpdate'] ?? null;
+        if (!is_array($payload)) {
+            throw new \RuntimeException('Shopify did not return an inventory tracking update result.');
+        }
+
+        $errors = $payload['userErrors'] ?? [];
+        if (is_array($errors) && $errors !== []) {
+            $messages = $this->formatUserErrors($errors, 'inventoryItemUpdate');
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the inventory tracking update.');
+        }
+
+        $confirmed = data_get($payload, 'inventoryItem.tracked');
+        if (!is_bool($confirmed) || $confirmed !== $tracked) {
+            throw new \RuntimeException('Shopify did not confirm the required inventory tracking state.');
+        }
+
+        if ($localVariant instanceof Variant && $localVariant->inventory_tracked !== $tracked) {
+            Variant::withoutEvents(function () use ($localVariant, $tracked): void {
+                $localVariant->forceFill([
+                    'inventory_tracked' => $tracked,
+                    'inventory_sync_error' => null,
+                    'inventory_last_synced_at' => now(),
+                ])->save();
+            });
+        }
+
+        logger()->info('Shopify inventory tracking state confirmed', [
+            'product_id' => $product->id,
+            'handle' => $product->handle,
+            'inventory_item_id' => $inventoryItemId,
+            'tracked' => $tracked,
+        ]);
+    }
+
+    private function productShouldTrackInventory(Product $product): bool
+    {
+        foreach ([$product->tags, $product->type, $product->title] as $value) {
+            if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
+                return false;
+            }
+        }
+
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($shopifyId === '' && $handle === '') {
+            return true;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where(function ($query) use ($product): void {
+                $shopifyId = trim((string) ($product->shopify_id ?? ''));
+                $handle = trim((string) ($product->handle ?? ''));
+
+                if ($shopifyId !== '') {
+                    $query->where('shopify_id', $shopifyId);
+                }
+                if ($handle !== '') {
+                    $shopifyId !== '' ? $query->orWhere('handle', $handle) : $query->where('handle', $handle);
+                }
+            })
+            ->first(['bundle_product_ids', 'tags', 'type', 'title']);
+
+        if ($draft instanceof NewProductDraft) {
+            if (is_array($draft->bundle_product_ids) && $draft->bundle_product_ids !== []) {
+                return false;
+            }
+
+            foreach ([$draft->tags, $draft->type, $draft->title] as $value) {
+                if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private function shopifyVariantIdForSaleUpdate(SaleProductUpdate $saleUpdate, array $details): ?string
@@ -2217,19 +2332,11 @@ GQL;
     private function inventoryItemUpdateMutation(): string
     {
         return <<<'GQL'
-mutation InventoryItemUpdate($inventoryItemId: ID!, $cost: Decimal!) {
-  inventoryItemUpdate(
-    id: $inventoryItemId,
-    input: {
-      cost: $cost
-    }
-  ) {
+mutation InventoryTrackingUpdate($id: ID!, $input: InventoryItemInput!) {
+  inventoryItemUpdate(id: $id, input: $input) {
     inventoryItem {
       id
-      unitCost {
-        amount
-        currencyCode
-      }
+      tracked
     }
     userErrors {
       field

@@ -6,6 +6,7 @@ use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
 use App\Models\Product;
 use App\Models\Approval;
+use App\Models\RequiredField;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\StyleProfile;
@@ -15,6 +16,7 @@ use App\Services\HeaderStore;
 use App\Services\NewProductDraftSeeder;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftShopifyCreator;
+use App\Services\Normalizer;
 use App\Services\ProductShopifyUpdater;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -1614,7 +1616,103 @@ it('enables inventory tracking when creating an ordinary product in Shopify', fu
         ]);
 });
 
+it('forces existing ordinary products to tracked and stacks to untracked during approved sync', function (): void {
+    $ordinary = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1451',
+        'handle' => 'tracked-existing-bracelet',
+        'title' => 'Tracked Existing Bracelet',
+        'tags' => 'bracelets, livi-road',
+    ]);
+    $ordinaryVariant = createWorkflowTestVariant($ordinary, [
+        'shopify_id' => 'gid://shopify/ProductVariant/1451',
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/1451',
+        'inventory_tracked' => false,
+        'inventory_qty' => null,
+    ]);
+
+    $stack = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1452',
+        'handle' => 'untracked-existing-stack',
+        'title' => 'Untracked Existing Stack',
+        'tags' => 'bundles, livi-road-bundles',
+    ]);
+    $stackVariant = createWorkflowTestVariant($stack, [
+        'shopify_id' => 'gid://shopify/ProductVariant/1452',
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/1452',
+        'inventory_tracked' => true,
+        'inventory_qty' => 0,
+    ]);
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    $trackingInputs = [];
+    Http::fake(function ($request) use (&$trackingInputs) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (!str_contains($query, 'mutation InventoryTrackingUpdate')) {
+            throw new RuntimeException('Unexpected Shopify GraphQL call in existing inventory tracking test.');
+        }
+
+        $trackingInputs[] = $variables;
+
+        return Http::response([
+            'data' => [
+                'inventoryItemUpdate' => [
+                    'inventoryItem' => [
+                        'id' => $variables['id'],
+                        'tracked' => $variables['input']['tracked'],
+                    ],
+                    'userErrors' => [],
+                ],
+            ],
+        ]);
+    });
+
+    $updater = app(ProductShopifyUpdater::class);
+    $trackingMethod = new ReflectionMethod($updater, 'updateInventoryTrackingForItem');
+    $shouldTrackMethod = new ReflectionMethod($updater, 'productShouldTrackInventory');
+
+    $trackingMethod->invoke(
+        $updater,
+        $ordinary,
+        $ordinaryVariant,
+        'gid://shopify/InventoryItem/1451',
+        $shouldTrackMethod->invoke($updater, $ordinary)
+    );
+    $trackingMethod->invoke(
+        $updater,
+        $stack,
+        $stackVariant,
+        'gid://shopify/InventoryItem/1452',
+        $shouldTrackMethod->invoke($updater, $stack)
+    );
+
+    expect($trackingInputs)->toBe([
+        [
+            'id' => 'gid://shopify/InventoryItem/1451',
+            'input' => ['tracked' => true],
+        ],
+        [
+            'id' => 'gid://shopify/InventoryItem/1452',
+            'input' => ['tracked' => false],
+        ],
+    ])->and($ordinaryVariant->fresh()->inventory_tracked)->toBeTrue()
+        ->and($stackVariant->fresh()->inventory_tracked)->toBeFalse();
+});
+
 it('does not create a fully approved product in shopify without three complementary products', function (): void {
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::COMPLEMENTARY_PRODUCTS,
+        'label' => 'Complementary products',
+        'required' => true,
+    ]);
+
     $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
         'title' => 'Incomplete Complementary Bracelet',
         'type' => 'Bracelets',
@@ -1638,6 +1736,41 @@ it('does not create a fully approved product in shopify without three complement
         ->and($result['skipped_missing_complementary'])->toBe(1)
         ->and($result['failed'])->toBe(0)
         ->and($draft->fresh()->handle)->toBeNull();
+});
+
+it('marks fewer than three complementary products as a required field error and blocks approved sync', function (): void {
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::COMPLEMENTARY_PRODUCTS,
+        'label' => 'Complementary products',
+        'required' => true,
+    ]);
+
+    $product = createWorkflowTestProduct([
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => 'gid://shopify/Product/501; gid://shopify/Product/502',
+        ],
+    ]);
+    approveWorkflowTestProduct($product);
+
+    app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
+    $product->refresh();
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product]));
+
+    expect($product->has_errors)->toBeTrue()
+        ->and($product->error_fields)->toContain('missing:Complementary products (minimum 3)')
+        ->and($result['updated'])->toBe(0)
+        ->and($result['skipped_blocked'])->toBe(1);
 });
 
 it('moves videos behind the approved image order during Shopify image sync', function (): void {

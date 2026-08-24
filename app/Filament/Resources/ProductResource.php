@@ -2070,10 +2070,17 @@ class ProductResource extends Resource
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $errorCount = $records->filter(fn (Product $record) => $record->has_errors)->count();
+                        $complementaryProducts = app(ComplementaryProductAuditService::class);
+                        $complementaryCount = 0;
                         $approvedCount = 0;
                         $skippedCount = 0;
 
                         foreach ($records as $record) {
+                            if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+                                $complementaryCount++;
+                                continue;
+                            }
+
                             if ($record->has_errors) {
                                 continue;
                             }
@@ -2116,6 +2123,10 @@ class ProductResource extends Resource
                         }
                         if ($errorCount > 0) {
                             $parts[] = "Errors on {$errorCount}; fix before approval.";
+                        }
+                        if ($complementaryCount > 0) {
+                            $minimum = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+                            $parts[] = "Missing at least {$minimum} complementary products on {$complementaryCount}.";
                         }
 
                         self::sendNotification(Notification::make()
@@ -2660,6 +2671,16 @@ class ProductResource extends Resource
 
     public static function approveRecord(Product $record): void
     {
+        $complementaryProducts = app(ComplementaryProductAuditService::class);
+        if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+            self::sendNotification(Notification::make()
+                ->title('Approval blocked')
+                ->body('Select at least ' . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ' complementary products before approval.')
+                ->warning()
+            );
+            return;
+        }
+
         if ($record->has_errors) {
             self::sendNotification(Notification::make()
                 ->title('Approval blocked')

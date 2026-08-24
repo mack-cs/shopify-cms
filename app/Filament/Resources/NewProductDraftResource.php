@@ -4273,7 +4273,7 @@ class NewProductDraftResource extends Resource
                                 }
 
                                 if ($record->approvalsForCurrentVersionCount() >= 1
-                                    && !self::draftHasRequiredComplementaryProducts($record)) {
+                                    && !app(ComplementaryProductAuditService::class)->hasRequiredMinimumForDraft($record)) {
                                     $skippedComplementaryCount++;
                                     continue;
                                 }
@@ -6261,15 +6261,6 @@ class NewProductDraftResource extends Resource
         $configured = (int) Setting::getValue('new_product_drafts.complementary_minimum.count', 3);
 
         return max(1, $configured);
-    }
-
-    private static function draftHasRequiredComplementaryProducts(NewProductDraft $record): bool
-    {
-        $selected = array_values(array_unique(self::parseProductReferenceState(
-            $record->complementary_products
-        )));
-
-        return count($selected) >= ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
     }
 
     private static function sortDraftsByApprovalCount(Builder $query, string $direction): Builder

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\RequiredField;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
@@ -18,6 +19,40 @@ class ComplementaryProductAuditService
     public const APP_KEY = 'complementary_products';
     public const STANDARD_NAMESPACE = 'shopify--discovery--product_recommendation';
     public const STANDARD_KEY = 'complementary_products';
+
+    public function isRequiredForApproval(): bool
+    {
+        return RequiredField::query()
+            ->where('source', 'row')
+            ->where('attribute', HeaderStore::COMPLEMENTARY_PRODUCTS)
+            ->where('required', true)
+            ->exists();
+    }
+
+    public function hasRequiredMinimumForDraft(NewProductDraft $draft): bool
+    {
+        if (!$this->isRequiredForApproval()) {
+            return true;
+        }
+
+        return $this->referenceCount($draft->complementary_products)
+            >= self::SHOPIFY_TARGET_COUNT;
+    }
+
+    public function hasRequiredMinimumForProduct(Product $product): bool
+    {
+        if (!$this->isRequiredForApproval()) {
+            return true;
+        }
+
+        return $this->referenceCount($this->localComplementaryValueForProduct($product))
+            >= self::SHOPIFY_TARGET_COUNT;
+    }
+
+    public function referenceCount(?string $value): int
+    {
+        return count(array_values(array_unique($this->parseReferenceTokens($value))));
+    }
 
     /** @var array<string, int>|null */
     private ?array $productReferenceMap = null;
@@ -379,9 +414,8 @@ class ComplementaryProductAuditService
         $draft = $this->linkedDraftForProduct($product);
         if ($draft instanceof NewProductDraft) {
             $draftValue = trim((string) ($draft->complementary_products ?? ''));
-            if ($draftValue !== '') {
-                return $draftValue;
-            }
+
+            return $draftValue !== '' ? $draftValue : null;
         }
 
         $handle = trim((string) ($product->handle ?? ''));

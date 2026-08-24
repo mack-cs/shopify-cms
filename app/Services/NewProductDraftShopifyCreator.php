@@ -65,10 +65,7 @@ final class NewProductDraftShopifyCreator
                 continue;
             }
 
-            $complementaryProducts = array_values(array_unique(
-                $this->complementaryProducts->parseReferenceTokens($draft->complementary_products)
-            ));
-            if (count($complementaryProducts) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) {
+            if (!$this->complementaryProducts->hasRequiredMinimumForDraft($draft)) {
                 $skippedMissingComplementary++;
                 continue;
             }

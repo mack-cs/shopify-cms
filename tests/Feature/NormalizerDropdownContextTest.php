@@ -4,9 +4,23 @@ use App\Models\RequiredField;
 use App\Models\DropdownOption;
 use App\Services\HeaderStore;
 use App\Services\Normalizer;
+use Database\Seeders\RequiredFieldSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+
+it('lists complementary products as a required field by default', function (): void {
+    app(RequiredFieldSeeder::class)->run();
+
+    $field = RequiredField::query()
+        ->where('source', 'row')
+        ->where('attribute', HeaderStore::COMPLEMENTARY_PRODUCTS)
+        ->first();
+
+    expect($field)->not->toBeNull()
+        ->and($field->label)->toBe('Complementary products')
+        ->and($field->required)->toBeTrue();
+});
 
 it('resolves a bundle dropdown context when the parent collection tag is omitted', function (): void {
     $normalizer = app(Normalizer::class);

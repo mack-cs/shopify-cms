@@ -1035,6 +1035,17 @@ final class Normalizer
         foreach ($requiredRowFields as $field) {
             $attribute = $field['attribute'];
             $label = $field['label'] ?? $attribute;
+
+            if ($attribute === HeaderStore::COMPLEMENTARY_PRODUCTS) {
+                $complementaryProducts = app(ComplementaryProductAuditService::class);
+                $value = $complementaryProducts->localComplementaryValueForProduct($product);
+                if ($complementaryProducts->referenceCount($value) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) {
+                    $errors[] = "missing:{$label} (minimum " . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ')';
+                }
+
+                continue;
+            }
+
             $rowValue = $primary?->get($attribute, null);
             if ($rowValue === null && $primary) {
                 $rowValue = $this->rowValueInsensitive($primary->data ?? [], $attribute);
