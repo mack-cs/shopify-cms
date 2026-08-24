@@ -1773,6 +1773,62 @@ it('marks fewer than three complementary products as a required field error and 
         ->and($result['skipped_blocked'])->toBe(1);
 });
 
+it('uses variant sku as the barcode when the stored barcode is blank', function (): void {
+    RequiredField::create([
+        'scope' => 'variant',
+        'source' => 'variant',
+        'attribute' => 'barcode',
+        'label' => HeaderStore::VARIANT_BARCODE,
+        'required' => true,
+    ]);
+
+    $product = createWorkflowTestProduct();
+    createWorkflowTestVariant($product, [
+        'sku' => 'LRB0152',
+        'barcode' => null,
+    ]);
+
+    app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
+
+    expect($product->fresh()->error_fields)
+        ->not->toContain('missing:' . HeaderStore::VARIANT_BARCODE)
+        ->not->toContain('mismatch:variant_barcode');
+});
+
+it('copies a draft sku to the local variant barcode and Shopify row', function (): void {
+    $product = createWorkflowTestProduct();
+    $variant = createWorkflowTestVariant($product, [
+        'sku' => 'OLD-SKU',
+        'barcode' => null,
+    ]);
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [],
+    ]);
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'sku' => 'LRB0152',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        ensureApprovalReset: false,
+        attributes: ['sku']
+    );
+
+    expect($variant->fresh()->sku)->toBe('LRB0152')
+        ->and($variant->fresh()->barcode)->toBe('LRB0152')
+        ->and($row->fresh()->get(HeaderStore::VARIANT_SKU))->toBe('LRB0152')
+        ->and($row->fresh()->get(HeaderStore::VARIANT_BARCODE))->toBe('LRB0152');
+});
+
 it('moves videos behind the approved image order during Shopify image sync', function (): void {
     Storage::fake('public');
     Storage::disk('public')->put('product-images/test/media-order-01.png', 'first-image');

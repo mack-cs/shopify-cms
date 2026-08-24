@@ -1473,7 +1473,11 @@ final class Normalizer
     {
         return match ($this->normalizeKey($attribute)) {
             'sku', 'variant_sku' => $variant->sku,
-            'barcode', 'variant_barcode' => $variant->barcode,
+            // Barcode is intentionally the same identifier as SKU. Older Shopify
+            // imports may have a blank barcode even though the SKU is present, so
+            // treat the SKU as the canonical fallback instead of reporting a
+            // false required-field error.
+            'barcode', 'variant_barcode' => $this->normalizeValue($variant->barcode) ?? $variant->sku,
             'price', 'variant_price' => $variant->price,
             'compare_at_price', 'variant_compare_at_price' => $variant->compare_at_price,
             'option1_name' => $variant->option1_name,

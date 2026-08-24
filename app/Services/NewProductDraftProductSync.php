@@ -222,6 +222,7 @@ final class NewProductDraftProductSync
         $updates = [];
         if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
             $updates['sku'] = $draft->sku;
+            $updates['barcode'] = $draft->sku;
         }
         if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)) {
             $updates['price'] = $draft->variant_price;
@@ -294,6 +295,11 @@ final class NewProductDraftProductSync
         }
 
         $updates = [];
+
+        if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
+            $updates[HeaderStore::VARIANT_SKU] = trim((string) ($draft->sku ?? ''));
+            $updates[HeaderStore::VARIANT_BARCODE] = trim((string) ($draft->sku ?? ''));
+        }
 
         $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes);
         $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes);
