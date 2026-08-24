@@ -191,11 +191,6 @@ class NewProductDraftResource extends Resource
         return self::applyMissingDraftStringColumnReportFilter($query, 'uvp_short_paragraph');
     }
 
-    public static function applyMissingSiblingsReportFilter(Builder $query): Builder
-    {
-        return self::applyMissingDraftStringColumnReportFilter($query, 'siblings');
-    }
-
     public static function applyMissingComplementaryProductsReportFilter(Builder $query): Builder
     {
         return self::applyMissingDraftStringColumnReportFilter($query, 'complementary_products');
@@ -203,9 +198,7 @@ class NewProductDraftResource extends Resource
 
     public static function applyMissingRelatedProductsReportFilter(Builder $query): Builder
     {
-        return self::applyMissingComplementaryProductsReportFilter(
-            self::applyMissingSiblingsReportFilter($query)
-        );
+        return self::applyMissingComplementaryProductsReportFilter($query);
     }
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder
@@ -501,19 +494,11 @@ class NewProductDraftResource extends Resource
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                                    $current = $get('tags');
-                                    $normalized = self::normalizeTagList($current);
-                                    $isBundleContext = self::isBundleOrStackState(
-                                        $get('type'),
-                                        $normalized,
-                                        $get('title')
-                                    );
-
-                                    $collectionTags = $isBundleContext
-                                        ? self::bundleContextCollectionTags(is_string($state) ? $state : null)
-                                        : self::collectionTags(is_string($state) ? $state : null);
-                                    if ($collectionTags === []) {
-                                        return;
+                                    if (!self::siblingCollectionMatchesSelection(
+                                        $get('sibling_collection'),
+                                        $state
+                                    )) {
+                                        $set('sibling_collection', null);
                                     }
 
                                     $expectedVendor = self::expectedVendorForCollection(
@@ -523,19 +508,27 @@ class NewProductDraftResource extends Resource
                                         $set('vendor', $expectedVendor);
                                     }
 
-                                    $collectionPool = self::allCollectionTags();
-
-                                    $kept = array_values(array_filter(
-                                        $normalized,
-                                        fn (string $tag): bool => !in_array($tag, $collectionPool, true)
-                                    ));
-
-                                    $merged = self::defaultedDraftTags(
-                                        array_values(array_unique(array_merge($kept, $collectionTags))),
-                                        $get('type'),
-                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                    $classification = self::categoryMappingForCollection(
+                                        is_string($state) ? $state : null
                                     );
-                                    $set('tags', $merged);
+                                    $resolvedType = $get('type');
+                                    if ($classification !== null) {
+                                        $resolvedType = $classification['type'];
+                                        $set('type', $classification['type']);
+                                        $set(
+                                            'product_category',
+                                            $classification['shopify_taxonomy_gid'] ?? $classification['category']
+                                        );
+                                        $set('google_product_category', $classification['google_product_category']);
+                                    }
+
+                                    $set('tags', self::tagsForCollectionSelection(
+                                        $get('tags'),
+                                        is_string($state) ? $state : null,
+                                        $resolvedType,
+                                        $get('title'),
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                    ));
                                 }),
                             Select::make('vendor')
                                 ->label('Vendor')
@@ -556,47 +549,33 @@ class NewProductDraftResource extends Resource
                                         $get('collection_filter')
                                     ),
                                 ]),
-                            TextInput::make('material_cost')
-                                ->label('Material Cost')
-                                ->numeric()
-                                ->default(NewProductDraft::DEFAULT_MATERIAL_COST)
-                                ->afterStateHydrated(function (TextInput $component, $state): void {
-                                    if ($state === null || trim((string) $state) === '') {
-                                        $component->state(NewProductDraft::DEFAULT_MATERIAL_COST);
-                                    }
-                                })
-                                ->afterStateUpdated(function ($state, callable $set): void {
-                                    if (!is_string($state)) {
-                                        return;
-                                    }
-                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
-                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
-                                    if ($normalized === null) {
-                                        return;
-                                    }
-                                    $parts = explode('.', $normalized);
-                                    if (count($parts) > 2) {
-                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
-                                    }
+                            Select::make('sibling_collection')
+                                ->label('Sibling Collection')
+                                ->placeholder('Select sibling collection')
+                                ->helperText('Required. Choose the matching Shopify collection or explicitly select No sibling collection.')
+                                ->options(fn (Get $get): array => self::siblingCollectionOptions(
+                                    $get('collection_filter'),
+                                    $get('sibling_collection')
+                                ))
+                                ->searchable()
+                                ->getSearchResultsUsing(fn (string $search, Get $get): array => self::siblingCollectionSearchResults(
+                                    $search,
+                                    $get('collection_filter')
+                                ))
+                                ->preload()
+                                ->reactive()
+                                ->required()
+                                ->getOptionLabelUsing(fn ($value): ?string => self::siblingCollectionDisplayLabel(
+                                    is_string($value) ? $value : null
+                                ))
+                                ->afterStateHydrated(function (Select $component, $state): void {
+                                    $normalized = self::normalizeSiblingCollectionValue($state);
+
                                     if ($normalized !== $state) {
-                                        $set('material_cost', $normalized);
+                                        $component->state($normalized);
                                     }
                                 })
-                                ->dehydrateStateUsing(function ($state) {
-                                    if (!is_string($state)) {
-                                        return $state;
-                                    }
-                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
-                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
-                                    if ($normalized === null) {
-                                        return $state;
-                                    }
-                                    $parts = explode('.', $normalized);
-                                    if (count($parts) > 2) {
-                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
-                                    }
-                                    return $normalized;
-                                }),
+                                ->dehydrateStateUsing(fn ($state): ?string => self::normalizeSiblingCollectionValue($state)),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(3)
@@ -874,31 +853,6 @@ class NewProductDraftResource extends Resource
                     Forms\Components\Grid::make(2)
                         ->schema([
 
-                            Select::make('siblings')
-                                ->label('Siblings')
-                                ->helperText(fn (Get $get): ?HtmlString => self::productReferenceStatusHint(
-                                    $get,
-                                    'siblings'
-                                ))
-                                ->placeholder('Select products')
-                                ->multiple()
-                                ->searchable()
-                                ->preload()
-                                ->options(fn (Get $get): array => self::productReferenceOptions(
-                                    $get('siblings')
-                                ))
-                                ->rules([
-                                    fn (Get $get): \Closure => function (string $attribute, $value, $fail): void {
-                                        $invalid = self::invalidProductReferenceStatusLabels($value);
-                                        if (!empty($invalid)) {
-                                            $fail('Inactive products selected: ' . implode('; ', $invalid));
-                                        }
-                                    },
-                                ])
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    $component->state(self::parseProductReferenceState($state));
-                                })
-                                ->dehydrateStateUsing(fn ($state): ?string => self::dehydrateProductReferenceState($state)),
                             Select::make('complementary_products')
                                 ->label('Complementary products')
                                 ->helperText(fn (Get $get): ?HtmlString => self::productReferenceStatusHint(
@@ -917,16 +871,6 @@ class NewProductDraftResource extends Resource
                                         $invalid = self::invalidProductReferenceStatusLabels($value);
                                         if (!empty($invalid)) {
                                             $fail('Inactive products selected: ' . implode('; ', $invalid));
-                                        }
-
-                                        if (!self::complementaryMinimumEnabled()) {
-                                            return;
-                                        }
-
-                                        $selected = self::parseProductReferenceState($value);
-                                        $minimum = self::complementaryMinimumCount();
-                                        if (count($selected) < $minimum) {
-                                            $fail("Select at least {$minimum} complementary products.");
                                         }
                                     },
                                 ])
@@ -967,8 +911,7 @@ class NewProductDraftResource extends Resource
                                         $set('image_url', $selected[0]);
                                     }
                                 })
-                                ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state)))
-                                ->columnSpanFull(),
+                                ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -1061,25 +1004,6 @@ class NewProductDraftResource extends Resource
                     Forms\Components\Grid::make(2)
                         ->schema([
 
-                            Select::make('sibling_collection')
-                                ->label('Sibling Collection')
-                                ->placeholder('Select sibling collection')
-                                ->helperText('Select the actual Shopify collection title here. "Sibling Collection" is the metafield name.')
-                                ->options(fn (): array => self::siblingCollectionOptions())
-                                ->searchable()
-                                ->getSearchResultsUsing(fn (string $search): array => self::siblingCollectionSearchResults($search))
-                                ->preload()
-                                ->getOptionLabelUsing(fn ($value): ?string => self::siblingCollectionDisplayLabel(
-                                    is_string($value) ? $value : null
-                                ))
-                                ->afterStateHydrated(function (Select $component, $state): void {
-                                    $normalized = self::normalizeSiblingCollectionValue($state);
-
-                                    if ($normalized !== $state) {
-                                        $component->state($normalized);
-                                    }
-                                })
-                                ->dehydrateStateUsing(fn ($state): ?string => self::normalizeSiblingCollectionValue($state)),
                             TextInput::make('siblings_collection_name')
                                 ->label('Siblings Option Name')
                                 ->disabled()
@@ -1089,6 +1013,47 @@ class NewProductDraftResource extends Resource
                                     $component->state($title !== '' ? $title : $state);
                                 })
                                 ->helperText('Always matches the product title.'),
+                            TextInput::make('material_cost')
+                                ->label('Material Cost')
+                                ->numeric()
+                                ->default(NewProductDraft::DEFAULT_MATERIAL_COST)
+                                ->afterStateHydrated(function (TextInput $component, $state): void {
+                                    if ($state === null || trim((string) $state) === '') {
+                                        $component->state(NewProductDraft::DEFAULT_MATERIAL_COST);
+                                    }
+                                })
+                                ->afterStateUpdated(function ($state, callable $set): void {
+                                    if (!is_string($state)) {
+                                        return;
+                                    }
+                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
+                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+                                    if ($normalized === null) {
+                                        return;
+                                    }
+                                    $parts = explode('.', $normalized);
+                                    if (count($parts) > 2) {
+                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
+                                    }
+                                    if ($normalized !== $state) {
+                                        $set('material_cost', $normalized);
+                                    }
+                                })
+                                ->dehydrateStateUsing(function ($state) {
+                                    if (!is_string($state)) {
+                                        return $state;
+                                    }
+                                    $normalized = str_replace([' ', ','], ['', '.'], $state);
+                                    $normalized = preg_replace('/[^0-9.]/', '', $normalized ?? '');
+                                    if ($normalized === null) {
+                                        return $state;
+                                    }
+                                    $parts = explode('.', $normalized);
+                                    if (count($parts) > 2) {
+                                        $normalized = array_shift($parts) . '.' . implode('', $parts);
+                                    }
+                                    return $normalized;
+                                }),
                         ])
                         ->columnSpanFull(),
                             ])->columns(2),
@@ -1611,21 +1576,33 @@ class NewProductDraftResource extends Resource
     /**
      * @return array<string, string>
      */
-    private static function siblingCollectionOptions(mixed $currentValue = null): array
+    private static function siblingCollectionOptions(mixed $selectedCollection = null, mixed $currentValue = null): array
     {
-        $options = self::siblingCollectionQuery()
+        $filterByCollection = func_num_args() >= 2;
+        $options = [
+            NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection',
+        ] + self::siblingCollectionQuery(
+            $filterByCollection ? $selectedCollection : null,
+            $filterByCollection
+        )
             ->limit(100)
             ->get()
             ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
             ->all();
 
-        $current = self::normalizeSiblingCollectionValue($currentValue);
+        $current = self::normalizeSiblingCollectionValue(
+            $filterByCollection ? $currentValue : $selectedCollection
+        );
         if ($current === null) {
             return $options;
         }
 
         $label = self::siblingCollectionDisplayLabel($current);
-        if ($label !== null && !array_key_exists($current, $options)) {
+        if (
+            $label !== null
+            && !array_key_exists($current, $options)
+            && (!$filterByCollection || self::siblingCollectionMatchesSelection($current, $selectedCollection))
+        ) {
             $options[$current] = $label;
             asort($options);
         }
@@ -1636,11 +1613,14 @@ class NewProductDraftResource extends Resource
     /**
      * @return array<string, string>
      */
-    private static function siblingCollectionSearchResults(string $search): array
+    private static function siblingCollectionSearchResults(string $search, mixed $selectedCollection = null): array
     {
         $term = trim($search);
 
-        $query = self::siblingCollectionQuery();
+        $query = self::siblingCollectionQuery(
+            $selectedCollection,
+            func_num_args() >= 2
+        );
 
         if ($term !== '') {
             $query->where(function (Builder $query) use ($term): void {
@@ -1650,11 +1630,17 @@ class NewProductDraftResource extends Resource
             });
         }
 
-        return $query
+        $options = $query
             ->limit(50)
             ->get()
             ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
             ->all();
+
+        if ($term === '' || str_contains('no sibling collection', strtolower($term))) {
+            $options = [NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection'] + $options;
+        }
+
+        return $options;
     }
 
     /**
@@ -1850,6 +1836,57 @@ class NewProductDraftResource extends Resource
         return self::uniqueNormalizedTags(array_merge($primary, $secondary, ['bundles', 'bundle', 'stack', 'stacks']));
     }
 
+    private static function tagsForCollectionSelection(
+        mixed $currentTags,
+        ?string $collection,
+        mixed $type,
+        mixed $title,
+        bool $isOnSale
+    ): array {
+        $normalized = self::normalizeTagList($currentTags);
+        $selectionTags = self::collectionTags($collection, forProductTags: false);
+        $isBundleContext = self::isBundleOrStackState($type, $selectionTags, $title);
+        $collectionTags = $isBundleContext
+            ? self::bundleContextCollectionTags($collection)
+            : self::collectionTags($collection);
+        $collectionPool = self::allCollectionTags();
+        $kept = array_values(array_filter(
+            $normalized,
+            fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                && ($isBundleContext || !self::hasBundleOrStackTag([$tag]))
+        ));
+
+        return self::defaultedDraftTags(
+            self::uniqueNormalizedTags(array_merge($kept, $collectionTags)),
+            $type,
+            $isOnSale
+        );
+    }
+
+    private static function categoryMappingForCollection(?string $collection): ?array
+    {
+        if ($collection === null || trim($collection) === '') {
+            return null;
+        }
+
+        $tokens = self::uniqueNormalizedTags(array_merge(
+            [$collection],
+            self::collectionTags($collection, forProductTags: false)
+        ));
+        $haystack = implode(' ', $tokens);
+        $type = match (true) {
+            str_contains($haystack, 'bracelet') => 'Bracelets',
+            str_contains($haystack, 'necklace') => 'Necklaces',
+            str_contains($haystack, 'earring') => 'Earrings',
+            str_contains($haystack, 'charm'), str_contains($haystack, 'pendant') => 'Charms',
+            str_contains($haystack, 'gift-card'), str_contains($haystack, 'gift card') => 'Gift Cards',
+            self::hasBundleOrStackTag($tokens) => 'Bracelets',
+            default => null,
+        };
+
+        return $type === null ? null : CategoryTypeMap::byType($type);
+    }
+
     private static function expectedVendorForCollection(?string $collection): ?string
     {
         return app(DropdownCollectionCatalog::class)->vendorForCollection($collection);
@@ -1860,6 +1897,13 @@ class NewProductDraftResource extends Resource
         $current = trim((string) ($value ?? ''));
         if ($current === '') {
             return null;
+        }
+
+        if (
+            $current === NewProductDraft::NO_SIBLING_COLLECTION
+            || strcasecmp($current, 'No sibling collection') === 0
+        ) {
+            return NewProductDraft::NO_SIBLING_COLLECTION;
         }
 
         if (str_starts_with($current, 'gid://shopify/Collection/')) {
@@ -1878,6 +1922,10 @@ class NewProductDraftResource extends Resource
         $normalized = self::normalizeSiblingCollectionValue($value);
         if ($normalized === null) {
             return null;
+        }
+
+        if ($normalized === NewProductDraft::NO_SIBLING_COLLECTION) {
+            return 'No sibling collection';
         }
 
         $label = self::siblingCollectionLookup()['options'][$normalized] ?? null;
@@ -1984,16 +2032,79 @@ class NewProductDraftResource extends Resource
         ];
     }
 
-    private static function siblingCollectionQuery(): Builder
+    private static function siblingCollectionQuery(mixed $selectedCollection = null, bool $filterByCollection = false): Builder
     {
-        return ShopifyCollection::query()
+        $query = ShopifyCollection::query()
             ->select(['shopify_id', 'title', 'handle'])
             ->whereNotNull('shopify_id')
             ->where('shopify_id', '!=', '')
-            ->distinct()
+            ->distinct();
+
+        if ($filterByCollection) {
+            $selection = trim((string) ($selectedCollection ?? ''));
+            if ($selection === '') {
+                $query->whereRaw('1 = 0');
+            } else {
+                $familyHandles = self::siblingCollectionFamilyHandles($selection);
+                $query->where(function (Builder $query) use ($familyHandles): void {
+                    foreach ($familyHandles as $familyHandle) {
+                        $query->orWhereRaw('LOWER(TRIM(handle)) = ?', [$familyHandle])
+                            ->orWhereRaw('LOWER(TRIM(handle)) LIKE ?', ["{$familyHandle}-%"]);
+                    }
+                });
+            }
+        }
+
+        return $query
             ->orderByRaw("CASE WHEN title IS NULL OR title = '' THEN 1 ELSE 0 END")
             ->orderBy('title')
             ->orderBy('handle');
+    }
+
+    /** @return array<int, string> */
+    private static function siblingCollectionFamilyHandles(string $selectedCollection): array
+    {
+        $handles = DropdownOption::query()
+            ->where('collection_style', $selectedCollection)
+            ->whereNotNull('collection_tag_primary')
+            ->where('collection_tag_primary', '!=', '')
+            ->pluck('collection_tag_primary')
+            ->all();
+        $handles = self::uniqueNormalizedTags($handles);
+
+        if ($handles !== []) {
+            return $handles;
+        }
+
+        $fallback = \Illuminate\Support\Str::slug($selectedCollection);
+        $fallback = preg_replace(
+            '/-(?:bracelets?|necklaces?|earrings?|charms?|anklets?|rings?|bundles?|stacks?)$/',
+            '',
+            $fallback
+        ) ?: $fallback;
+
+        return [$fallback];
+    }
+
+    private static function siblingCollectionMatchesSelection(mixed $value, mixed $selectedCollection): bool
+    {
+        $normalized = self::normalizeSiblingCollectionValue($value);
+        if ($normalized === null) {
+            return true;
+        }
+
+        if ($normalized === NewProductDraft::NO_SIBLING_COLLECTION) {
+            return true;
+        }
+
+        $selection = trim((string) ($selectedCollection ?? ''));
+        if ($selection === '') {
+            return false;
+        }
+
+        return self::siblingCollectionQuery($selection, true)
+            ->where('shopify_id', $normalized)
+            ->exists();
     }
 
     private static function vendorSelectionHint(mixed $collection, mixed $vendor): ?HtmlString
@@ -2185,7 +2296,9 @@ class NewProductDraftResource extends Resource
             $tags[] = $typeTag;
         }
 
-        return self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
+        $tags = self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
+
+        return app(NewInTagService::class)->tagsForNewProduct($tags, $type);
     }
 
     /**
@@ -3076,10 +3189,6 @@ class NewProductDraftResource extends Resource
                 . '. Remove them before saving.';
         }
 
-        if ($field === 'complementary_products' && self::complementaryMinimumEnabled()) {
-            $messages[] = 'Minimum required: ' . self::complementaryMinimumCount() . ' complementary products.';
-        }
-
         if (empty($messages)) {
             return null;
         }
@@ -3558,12 +3667,6 @@ class NewProductDraftResource extends Resource
                     ->label('Size')
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('siblings')
-                    ->label('Siblings')
-                    ->formatStateUsing(fn (?string $state): string => self::productReferencesAsLabels($state))
-                    ->wrap()
-                    ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('siblings_collection_name')
                     ->label('Siblings Option Name')
                     ->sortable()
@@ -3978,7 +4081,7 @@ class NewProductDraftResource extends Resource
                         ->color('success')
                         ->requiresConfirmation()
                         ->modalHeading('Mark selected products as New In?')
-                        ->modalDescription('Adds new-arrivals, new-in, and newbies while preserving all existing tags.')
+                        ->modalDescription('Adds new-arrivals, new-in, newbies, and the matching collection or stack new-in tag while preserving all existing tags.')
                         ->action(function ($records, NewInTagService $service): void {
                             $result = $service->markDrafts($records);
 
@@ -4136,6 +4239,7 @@ class NewProductDraftResource extends Resource
                             $skippedFullyApprovedCount = 0;
                             $skippedAlreadyApprovedCount = 0;
                             $skippedErrorCount = 0;
+                            $skippedComplementaryCount = 0;
 
                             foreach ($records as $record) {
                                 if (!$record instanceof NewProductDraft) {
@@ -4168,6 +4272,12 @@ class NewProductDraftResource extends Resource
                                     continue;
                                 }
 
+                                if ($record->approvalsForCurrentVersionCount() >= 1
+                                    && !self::draftHasRequiredComplementaryProducts($record)) {
+                                    $skippedComplementaryCount++;
+                                    continue;
+                                }
+
                                 NewProductDraftApproval::create([
                                     'new_product_draft_id' => $record->id,
                                     'user_id' => Auth::id(),
@@ -4191,6 +4301,10 @@ class NewProductDraftResource extends Resource
                             }
                             if ($skippedErrorCount > 0) {
                                 $parts[] = "Skipped {$skippedErrorCount} with unresolved product errors.";
+                            }
+                            if ($skippedComplementaryCount > 0) {
+                                $minimum = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+                                $parts[] = "Skipped {$skippedComplementaryCount} needing at least {$minimum} complementary products for final approval.";
                             }
 
                             self::sendNotification(Notification::make()
@@ -4305,7 +4419,7 @@ class NewProductDraftResource extends Resource
                                 ->default(fn (): array => app(NewProductDraftRoundtripCsvService::class)->defaultExportColumns())
                                 ->columns(2)
                                 ->required()
-                                ->helperText('Draft ID, Handle, and Shopify ID are always included so the file can be imported back safely. Only drafts that already have handles are exported. Siblings and Complementary Products export as handles.'),
+                                ->helperText('Draft ID, Handle, and Shopify ID are always included so the file can be imported back safely. Only drafts that already have handles are exported. Complementary Products export as handles.'),
                         ])
                         ->action(function ($records, array $data, NewProductDraftRoundtripCsvService $service): void {
                             try {
@@ -5881,6 +5995,14 @@ class NewProductDraftResource extends Resource
                 continue;
             }
 
+            if (self::isImportedNewProductVariantPlaceholder(
+                $record,
+                $field,
+                $warning['shopify_value'] ?? null
+            )) {
+                continue;
+            }
+
             $seen[$field] = true;
             $definition = self::DRAFT_VARIANT_CLASH_FIELDS[$field];
             $clashes[] = [
@@ -5913,6 +6035,10 @@ class NewProductDraftResource extends Resource
                 : $variant->getAttribute($variantAttribute);
             $type = (string) $definition['type'];
 
+            if (self::isImportedNewProductVariantPlaceholder($record, $field, $variantValue)) {
+                continue;
+            }
+
             if (self::normalizeDraftVariantComparableValue($type, $draftValue) === self::normalizeDraftVariantComparableValue($type, $variantValue)) {
                 continue;
             }
@@ -5937,6 +6063,37 @@ class NewProductDraftResource extends Resource
         }
 
         return $clashes;
+    }
+
+    private static function isImportedNewProductVariantPlaceholder(
+        NewProductDraft $record,
+        string $field,
+        mixed $value
+    ): bool {
+        if ($record->origin !== NewProductDraft::ORIGIN_DRAFT_TOOL) {
+            return false;
+        }
+
+        $normalized = trim((string) ($value ?? ''));
+        if ($normalized === '') {
+            return in_array($field, [
+                'sku',
+                'variant_price',
+                'variant_compare_at_price',
+                'variant_inventory_qty',
+                'variant_weight',
+                'variant_weight_unit',
+            ], true);
+        }
+
+        return in_array($field, [
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+            'variant_weight',
+        ], true)
+            && is_numeric($normalized)
+            && (float) $normalized <= 0;
     }
 
     private static function draftVariantClashHtml(?NewProductDraft $record): ?HtmlString
@@ -6104,6 +6261,15 @@ class NewProductDraftResource extends Resource
         $configured = (int) Setting::getValue('new_product_drafts.complementary_minimum.count', 3);
 
         return max(1, $configured);
+    }
+
+    private static function draftHasRequiredComplementaryProducts(NewProductDraft $record): bool
+    {
+        $selected = array_values(array_unique(self::parseProductReferenceState(
+            $record->complementary_products
+        )));
+
+        return count($selected) >= ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
     }
 
     private static function sortDraftsByApprovalCount(Builder $query, string $direction): Builder
@@ -6527,7 +6693,6 @@ class NewProductDraftResource extends Resource
 
         $fallback = [
             ['source' => 'product', 'attribute' => 'title', 'label' => 'Title', 'type' => 'text'],
-            ['source' => 'row', 'attribute' => HeaderStore::SIBLINGS, 'label' => 'Siblings', 'type' => 'product_references'],
             ['source' => 'row', 'attribute' => HeaderStore::COMPLEMENTARY_PRODUCTS, 'label' => 'Complementary products', 'type' => 'product_references'],
         ];
 
@@ -6644,11 +6809,8 @@ class NewProductDraftResource extends Resource
     {
         $name = $field['safe_key'];
 
-        if (($field['source'] ?? 'product') === 'row' && in_array($field['attribute'], [
-            HeaderStore::SIBLINGS,
-            HeaderStore::COMPLEMENTARY_PRODUCTS,
-        ], true)) {
-            $isComplementary = $field['attribute'] === HeaderStore::COMPLEMENTARY_PRODUCTS;
+        if (($field['source'] ?? 'product') === 'row' && $field['attribute'] === HeaderStore::COMPLEMENTARY_PRODUCTS) {
+            $isComplementary = true;
 
             return Select::make($name)
                 ->multiple()
@@ -6657,25 +6819,12 @@ class NewProductDraftResource extends Resource
                 ->options(fn (Get $get): array => self::productReferenceOptions(
                     $get("values.{$name}")
                 ))
-                ->helperText($isComplementary
-                    ? fn (): ?HtmlString => self::complementaryMinimumEnabled()
-                        ? new HtmlString('<span class="text-gray-600">Minimum required: ' . e((string) self::complementaryMinimumCount()) . ' complementary products.</span>')
-                        : null
-                    : null)
                 ->rules([
                     function () use ($isComplementary): \Closure {
                         return function (string $attribute, $value, $fail) use ($isComplementary): void {
                             $invalid = self::invalidProductReferenceStatusLabels($value);
                             if (!empty($invalid)) {
                                 $fail('Inactive products selected: ' . implode('; ', $invalid));
-                            }
-
-                            if ($isComplementary && self::complementaryMinimumEnabled()) {
-                                $selected = self::parseProductReferenceState($value);
-                                $minimum = self::complementaryMinimumCount();
-                                if (count($selected) < $minimum) {
-                                    $fail("Select at least {$minimum} complementary products.");
-                                }
                             }
                         };
                     },
@@ -6839,7 +6988,8 @@ class NewProductDraftResource extends Resource
         }
 
         if ($source === 'row') {
-            return $attribute !== HeaderStore::SIBLINGS_COLLECTION_NAME
+            return $attribute !== HeaderStore::SIBLINGS
+                && $attribute !== HeaderStore::SIBLINGS_COLLECTION_NAME
                 && self::draftAttributeForBulkRowHeader($attribute) !== null;
         }
 
@@ -6860,7 +7010,6 @@ class NewProductDraftResource extends Resource
             HeaderStore::PRODUCT_METALS => 'metal',
             HeaderStore::PATTERN_CATEGORY => 'colour_style',
             HeaderStore::SIZE => 'size',
-            HeaderStore::SIBLINGS => 'siblings',
             HeaderStore::SIBLINGS_COLLECTION_NAME => 'siblings_collection_name',
             HeaderStore::SIBLING_COLLECTION => 'sibling_collection',
             HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
@@ -6912,7 +7061,7 @@ class NewProductDraftResource extends Resource
                 $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
             } elseif ($attribute === 'seo_deindex') {
                 $value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
-            } elseif (in_array($attribute, ['siblings', 'complementary_products'], true)) {
+            } elseif ($attribute === 'complementary_products') {
                 $value = self::parseProductReferenceState($value);
             }
 
@@ -7075,7 +7224,7 @@ class NewProductDraftResource extends Resource
                         continue;
                     }
 
-                    if (in_array($draftAttribute, ['siblings', 'complementary_products'], true)) {
+                    if ($draftAttribute === 'complementary_products') {
                         $updates[$draftAttribute] = self::dehydrateProductReferenceState($value);
                         continue;
                     }
@@ -7227,6 +7376,7 @@ class NewProductDraftResource extends Resource
 
         if ($source === 'row') {
             return trim($attribute) !== ''
+                && $attribute !== HeaderStore::SIBLINGS
                 && $attribute !== HeaderStore::SIBLINGS_COLLECTION_NAME;
         }
 
@@ -7240,7 +7390,6 @@ class NewProductDraftResource extends Resource
     private static function draftQuickFieldType(string $source, string $attribute): string
     {
         if ($source === 'row' && in_array($attribute, [
-            HeaderStore::SIBLINGS,
             HeaderStore::COMPLEMENTARY_PRODUCTS,
         ], true)) {
             return 'product_references';
@@ -8188,7 +8337,14 @@ class NewProductDraftResource extends Resource
         if ($templatePath && is_file($templatePath)) {
             $csv = Reader::createFromPath($templatePath);
             $csv->setHeaderOffset(0);
-            $headers = $csv->getHeader();
+            $headers = array_values(array_filter(
+                $csv->getHeader(),
+                function (string $header): bool {
+                    $lines = preg_split('/\R/u', str_replace("\r", '', $header)) ?: [$header];
+
+                    return strcasecmp(trim((string) ($lines[0] ?? '')), 'Siblings') !== 0;
+                }
+            ));
             if (!empty($headers)) {
                 $withHandle = array_merge(['Handle', 'SKU'], $headers);
                 return array_values(array_unique($withHandle));
@@ -8216,7 +8372,6 @@ class NewProductDraftResource extends Resource
             'Collection (Livi Road, Pata Pata,...)',
             'Product Category (Bracelets, Charms,...)',
             'Size',
-            'Siblings (Add product siblings here)',
             'Siblings Option Name',
             'Sibling Collection',
             'UVP Short Paragraph',

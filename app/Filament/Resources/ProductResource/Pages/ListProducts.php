@@ -4,9 +4,7 @@ namespace App\Filament\Resources\ProductResource\Pages;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
-use App\Filament\Resources\ProductResource\Widgets\ComplementaryShortageBanner;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
-use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
 use App\Models\Product;
 use App\Services\DuplicateSkuCsvExporter;
@@ -68,8 +66,6 @@ class ListProducts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
-            ComplementaryShortageBanner::class,
-            PendingProductSyncBanner::class,
             ProductStatusStats::class,
         ];
     }

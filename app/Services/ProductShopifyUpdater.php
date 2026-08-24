@@ -422,6 +422,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_BRACELET_DESIGN,
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
+            self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -1342,6 +1343,10 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         $indexMap = [];
 
         foreach ($rowData as $header => $value) {
+            if ($header === HeaderStore::SIBLINGS) {
+                continue;
+            }
+
             $identifier = $this->metafieldIdentifierFromHeader((string) $header);
             if (!$identifier) {
                 continue;

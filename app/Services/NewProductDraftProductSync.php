@@ -318,14 +318,16 @@ final class NewProductDraftProductSync
             $updates[HeaderStore::PATTERN_CATEGORY] = trim((string) ($draft->colour_style ?? ''));
         }
         $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings, 'siblings', $attributes);
         if (
             $this->shouldSyncDraftAttribute('siblings_collection_name', $attributes, $draft->title)
             || $this->shouldSyncDraftAttribute('title', $attributes, $draft->title)
         ) {
             $updates[HeaderStore::SIBLINGS_COLLECTION_NAME] = trim((string) ($draft->title ?? ''));
         }
-        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $draft->sibling_collection, 'sibling_collection', $attributes);
+        $siblingCollection = $draft->sibling_collection === NewProductDraft::NO_SIBLING_COLLECTION
+            ? ''
+            : $draft->sibling_collection;
+        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $siblingCollection, 'sibling_collection', $attributes);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
         if ($this->shouldSyncDraftAttribute('seo_deindex', $attributes, $draft->seo_deindex)) {
@@ -379,15 +381,6 @@ final class NewProductDraftProductSync
             $attributes
         );
 
-        $this->syncDraftMetafieldSnapshot(
-            $product,
-            'siblings',
-            'shopify--discovery--product_recommendation',
-            'related_products',
-            'list.product_reference',
-            $draft->siblings,
-            $attributes
-        );
     }
 
     private function syncDraftMetafieldSnapshot(

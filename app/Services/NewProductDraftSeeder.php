@@ -184,6 +184,10 @@ final class NewProductDraftSeeder
                 continue;
             }
 
+            if ($this->isImportedNewProductPlaceholder($draft, $key, $incomingValue)) {
+                continue;
+            }
+
             if ($supportsWarnings) {
                 $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
             }
@@ -195,6 +199,37 @@ final class NewProductDraftSeeder
         }
 
         return $changes;
+    }
+
+    private function isImportedNewProductPlaceholder(
+        NewProductDraft $draft,
+        string $field,
+        mixed $incomingValue
+    ): bool {
+        if ($draft->origin !== NewProductDraft::ORIGIN_DRAFT_TOOL) {
+            return false;
+        }
+
+        $normalized = trim((string) ($incomingValue ?? ''));
+        if ($normalized === '') {
+            return in_array($field, [
+                'sku',
+                'variant_price',
+                'variant_compare_at_price',
+                'variant_inventory_qty',
+                'variant_weight',
+                'variant_weight_unit',
+            ], true);
+        }
+
+        return in_array($field, [
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+            'variant_weight',
+        ], true)
+            && is_numeric($normalized)
+            && (float) $normalized <= 0;
     }
 
     /**
@@ -286,9 +321,6 @@ final class NewProductDraftSeeder
         ]);
         $data['size'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIZE, [
             ['custom', 'size'],
-        ]);
-        $data['siblings'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS, [
-            ['shopify--discovery--product_recommendation', 'related_products'],
         ]);
         $data['siblings_collection_name'] = trim((string) ($product->title ?? '')) !== ''
             ? trim((string) $product->title)

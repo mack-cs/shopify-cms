@@ -381,11 +381,12 @@ final class Normalizer
                     'last_shopify_seen_at' => $syncedAt,
                 ];
 
-                if (
-                    $variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED
-                    && $this->variantPayloadDiffers($variant, $payload)
-                ) {
-                    $updates['sync_state'] = Variant::SYNC_STATE_CONFLICT;
+                if ($variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED) {
+                    if ($this->variantPayloadDiffers($variant, $payload)) {
+                        $updates['sync_state'] = Variant::SYNC_STATE_CONFLICT;
+                    } elseif ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+                        $updates['sync_state'] = Variant::SYNC_STATE_LOCAL_UPDATED;
+                    }
                 }
 
                 $variant->fill($updates)->save();
@@ -527,6 +528,17 @@ final class Normalizer
     {
         foreach ($payload as $key => $value) {
             if ($key === 'product_id') {
+                continue;
+            }
+
+            // Shopify permits a blank barcode, while outbound sync intentionally
+            // aligns a populated barcode with the SKU. Do not turn that default
+            // into a conflict when the local variant has no barcode of its own.
+            if (
+                $key === 'barcode'
+                && $this->normalizeComparableValue($variant->barcode) === null
+                && $this->normalizeComparableValue($value) === $this->normalizeComparableValue($payload['sku'] ?? null)
+            ) {
                 continue;
             }
 

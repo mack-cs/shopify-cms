@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Services\CategoryTypeMap;
 use App\Services\HeaderStore;
+use App\Services\NewInTagService;
 use App\Services\SaleTagService;
 use App\Services\TagNormalizer;
 use Illuminate\Database\Eloquent\Model;
@@ -16,13 +17,15 @@ use Illuminate\Support\Facades\Storage;
 
 class NewProductDraft extends Model
 {
-    public const DEFAULT_VARIANT_INVENTORY_QTY = 40;
+    public const DEFAULT_VARIANT_INVENTORY_QTY = 15;
 
     public const DEFAULT_VARIANT_WEIGHT = '46.000';
 
     public const DEFAULT_VARIANT_WEIGHT_UNIT = 'g';
 
     public const DEFAULT_MATERIAL_COST = '63.00';
+
+    public const NO_SIBLING_COLLECTION = '__no_sibling_collection__';
 
     protected static ?bool $supportsShopifySyncWarningsColumnCache = null;
 
@@ -153,6 +156,14 @@ class NewProductDraft extends Model
             if ($draft->variant_weight_unit === null) {
                 $draft->variant_weight_unit = self::DEFAULT_VARIANT_WEIGHT_UNIT;
             }
+
+            $draft->tags = TagNormalizer::normalizeFromArray(
+                app(NewInTagService::class)->tagsForNewProduct(
+                    TagNormalizer::parseTokens($draft->tags),
+                    $draft->type,
+                    $draft->title
+                )
+            );
         });
 
         static::saving(function (NewProductDraft $draft): void {
@@ -377,6 +388,17 @@ class NewProductDraft extends Model
             $this->attributes['title'] ?? null,
             $value
         );
+    }
+
+    public function setSiblingCollectionAttribute(mixed $value): void
+    {
+        $normalized = trim((string) ($value ?? ''));
+
+        $this->attributes['sibling_collection'] = match (strtolower($normalized)) {
+            '' => null,
+            'no sibling collection', strtolower(self::NO_SIBLING_COLLECTION) => self::NO_SIBLING_COLLECTION,
+            default => $normalized,
+        };
     }
 
     public function getSeoDeindexAttribute(): bool
@@ -615,12 +637,44 @@ class NewProductDraft extends Model
                 && is_string($warning['label'] ?? null)
                 && array_key_exists('draft_value', $warning)
                 && array_key_exists('shopify_value', $warning)
+                && ! $this->isImportedNewProductVariantPlaceholderWarning(
+                    $field,
+                    $warning['shopify_value'] ?? null,
+                )
                 && ! static::shopifySyncWarningValuesMatch(
                     $field,
                     $warning['draft_value'] ?? null,
                     $warning['shopify_value'] ?? null,
                 );
         }));
+    }
+
+    private function isImportedNewProductVariantPlaceholderWarning(string $field, mixed $shopifyValue): bool
+    {
+        if ($this->origin !== static::ORIGIN_DRAFT_TOOL) {
+            return false;
+        }
+
+        $normalized = trim((string) ($shopifyValue ?? ''));
+        if ($normalized === '') {
+            return in_array($field, [
+                'sku',
+                'variant_price',
+                'variant_compare_at_price',
+                'variant_inventory_qty',
+                'variant_weight',
+                'variant_weight_unit',
+            ], true);
+        }
+
+        return in_array($field, [
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+            'variant_weight',
+        ], true)
+            && is_numeric($normalized)
+            && (float) $normalized <= 0;
     }
 
     private static function shopifySyncWarningValuesMatch(string $field, mixed $draftValue, mixed $shopifyValue): bool

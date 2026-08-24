@@ -98,3 +98,90 @@ it('uses the latest shopify variant values to clear a draft variant clash', func
         ->and($draft->variant_weight)->toBe('46.000')
         ->and($draft->variant_weight_unit)->toBe('g');
 });
+
+it('does not show a clash when a new product import has only blank or zero variant placeholders', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'new-product-placeholders.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+    $product = Product::create([
+        'import_id' => $import->id,
+        'title' => 'New Bracelet',
+        'handle' => 'new-bracelet',
+        'status' => 'draft',
+    ]);
+    Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/502',
+        'sku' => null,
+        'price' => '0.00',
+        'inventory_tracked' => true,
+        'inventory_qty' => null,
+        'weight' => null,
+        'weight_unit' => null,
+    ]));
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => $product->title,
+        'handle' => $product->handle,
+        'sku' => 'NEW-502',
+        'variant_price' => '600.00',
+        'variant_inventory_qty' => 15,
+        'variant_weight' => '46.000',
+        'variant_weight_unit' => 'g',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $method = new ReflectionMethod(NewProductDraftResource::class, 'draftVariantClashes');
+
+    expect($method->invoke(null, $draft->fresh()))->toBe([]);
+});
+
+it('does not expose stored blank or zero new product placeholders as shopify warnings', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Stored Placeholder Bracelet',
+        'handle' => 'stored-placeholder-bracelet',
+        'sku' => 'NEW-503',
+        'variant_price' => '600.00',
+        'variant_inventory_qty' => 15,
+        'variant_weight' => '46.000',
+        'variant_weight_unit' => 'g',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'shopify_sync_warnings' => [
+            [
+                'field' => 'variant_price',
+                'label' => 'Price',
+                'draft_value' => '600.00',
+                'shopify_value' => '0.00',
+            ],
+            [
+                'field' => 'sku',
+                'label' => 'SKU',
+                'draft_value' => 'NEW-503',
+                'shopify_value' => '',
+            ],
+            [
+                'field' => 'vendor',
+                'label' => 'Vendor',
+                'draft_value' => 'Draft Vendor',
+                'shopify_value' => 'Shopify Vendor',
+            ],
+        ],
+    ]));
+
+    expect(collect($draft->shopifySyncWarnings())->pluck('field')->all())
+        ->toBe(['vendor'])
+        ->and($draft->shopifySyncWarningCount())->toBe(1);
+
+    $draft->forceFill(['origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED]);
+
+    expect(collect($draft->shopifySyncWarnings())->pluck('field')->all())
+        ->toContain('variant_price', 'sku', 'vendor')
+        ->and($draft->shopifySyncWarningCount())->toBe(3);
+});

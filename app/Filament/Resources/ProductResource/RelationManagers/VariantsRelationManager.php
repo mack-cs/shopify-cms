@@ -320,7 +320,7 @@ class VariantsRelationManager extends RelationManager
 
         $fields = [
             ['label' => 'SKU', 'type' => 'string', 'local' => $variant->sku, 'shopify' => $sku],
-            ['label' => 'Barcode', 'type' => 'string', 'local' => $variant->barcode, 'shopify' => $this->trimToNull($row->get(HeaderStore::VARIANT_BARCODE, null)) ?? $sku],
+            ['label' => 'Barcode', 'type' => 'string', 'local' => $variant->barcode, 'shopify' => $this->trimToNull($row->get(HeaderStore::VARIANT_BARCODE, null))],
             ['label' => 'Price', 'type' => 'decimal2', 'local' => $variant->price, 'shopify' => $row->get(HeaderStore::VARIANT_PRICE, null)],
             ['label' => 'Compare-at price', 'type' => 'decimal2', 'local' => $variant->compare_at_price, 'shopify' => $row->get(HeaderStore::VARIANT_COMPARE_AT, null)],
             ['label' => 'Inventory tracked', 'type' => 'boolean', 'local' => $variant->inventory_tracked, 'shopify' => $tracked],

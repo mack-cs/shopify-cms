@@ -94,6 +94,9 @@ class NewProductDraftShopifyCreateJob implements ShouldQueue
             if (($result['skipped_has_errors'] ?? 0) > 0) {
                 $parts[] = "Blocked by errors: {$result['skipped_has_errors']}.";
             }
+            if (($result['skipped_missing_complementary'] ?? 0) > 0) {
+                $parts[] = "Missing complementary products: {$result['skipped_missing_complementary']}.";
+            }
             if ($result['failed'] > 0) {
                 $parts[] = "Failed: {$result['failed']}.";
             }

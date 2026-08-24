@@ -94,10 +94,6 @@ final class NewProductDraftCsvImporter
             'colour style' => 'colour_style',
             'colour style solid multicolor' => 'colour_style',
             'size' => 'size',
-            'siblings' => 'siblings',
-            'siblings add product siblings here' => 'siblings',
-            'siblings handles' => 'siblings',
-            'siblings product handles' => 'siblings',
             'siblings collection name' => 'siblings_collection_name',
             'sibling collection' => 'sibling_collection',
             'uvp short paragraph' => 'uvp_short_paragraph',
@@ -252,12 +248,6 @@ final class NewProductDraftCsvImporter
                     $pendingApprovalHandles[] = trim((string) ($draft->handle ?: $draft->title ?: $draft->shopify_id ?: 'Draft #'.$draft->id));
 
                     continue;
-                }
-
-                if (array_key_exists('siblings', $data)) {
-                    [$data['siblings'], $resolvedCount, $unresolvedCount] = $this->normalizeProductReferenceField($data['siblings']);
-                    $resolvedProductReferences += $resolvedCount;
-                    $unresolvedProductReferences += $unresolvedCount;
                 }
 
                 if (array_key_exists('complementary_products', $data)) {
@@ -687,7 +677,7 @@ final class NewProductDraftCsvImporter
      */
     private function failsProductReferenceRules(array $data): bool
     {
-        foreach (['siblings', 'complementary_products'] as $field) {
+        foreach (['complementary_products'] as $field) {
             if (! empty($this->invalidProductReferenceStatuses($data[$field] ?? null))) {
                 return true;
             }

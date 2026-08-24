@@ -236,6 +236,42 @@ it('does not record variant default warnings when only decimal formatting differ
     expect($warningFields)->not->toContain('variant_inventory_qty');
 });
 
+it('does not treat blank or zero imported variant placeholders as new product draft conflicts', function (): void {
+    $product = createWorkflowTestProduct();
+    createWorkflowTestVariant($product, [
+        'sku' => null,
+        'price' => '0.00',
+        'compare_at_price' => null,
+        'inventory_tracked' => true,
+        'inventory_qty' => null,
+        'weight' => null,
+        'weight_unit' => null,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'sku' => 'NEW-PRODUCT-SKU',
+        'title' => $product->title,
+        'variant_price' => '600.00',
+        'variant_inventory_qty' => 15,
+        'variant_weight' => '46.000',
+        'variant_weight_unit' => 'g',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warningFields = collect($seeded->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($warningFields)
+        ->not->toContain('sku')
+        ->not->toContain('variant_price')
+        ->not->toContain('variant_inventory_qty')
+        ->not->toContain('variant_weight')
+        ->not->toContain('variant_weight_unit');
+});
+
 it('treats non-draft shopify status as authoritative for the draft without a warning', function (): void {
     $product = createWorkflowTestProduct([
         'status' => 'active',
@@ -823,6 +859,37 @@ it('syncs sibling option name to the title when pushing a draft into the linked 
     expect($row->get(HeaderStore::SIBLINGS_COLLECTION_NAME))->toBe('Synced Draft Title');
 });
 
+it('writes a blank sibling collection value for an explicit no sibling collection choice', function (): void {
+    $product = createWorkflowTestProduct();
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::SIBLING_COLLECTION => 'gid://shopify/Collection/9999',
+        ],
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'sibling_collection' => NewProductDraft::NO_SIBLING_COLLECTION,
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        ensureApprovalReset: false,
+        attributes: ['sibling_collection']
+    );
+
+    expect($row->fresh()->get(HeaderStore::SIBLING_COLLECTION))->toBe('');
+});
+
 it('syncs only the first three complementary products to Shopify while keeping extra local selections', function (): void {
     $product = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1001',
@@ -926,6 +993,100 @@ it('syncs only the first three complementary products to Shopify while keeping e
         ->firstOrFail();
 
     expect($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS))->toBe(implode('; ', $selectedComplementary));
+});
+
+it('includes the uvp metafield in an automatic full sync for a fully approved product', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1051',
+        'uvp_short_paragraph' => '<p>A clear product promise.</p>',
+        'approval_version' => 1,
+    ]);
+
+    approveWorkflowTestProduct($product);
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::UVP_SHORT_PARAGRAPH => '<p>Stale UVP.</p>',
+            HeaderStore::SIBLINGS => 'gid://shopify/Product/9999',
+        ],
+    ]);
+
+    $capturedMetafields = [];
+
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$capturedMetafields): array {
+        if (str_contains($query, 'mutation ProductUpdate')) {
+            return [
+                'productUpdate' => [
+                    'product' => ['id' => 'gid://shopify/Product/1051', 'handle' => 'workflow-test-product'],
+                    'userErrors' => [],
+                ],
+            ];
+        }
+
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1051',
+                    'options' => [],
+                    'category' => null,
+                    'productCategory' => null,
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                    'images' => ['nodes' => []],
+                ],
+            ];
+        }
+
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return [
+                'productByHandle' => [
+                    'id' => 'gid://shopify/Product/1051',
+                    'options' => [],
+                    'category' => null,
+                    'productCategory' => null,
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                    'images' => ['nodes' => []],
+                ],
+            ];
+        }
+
+        if (str_contains($query, 'query ProductByIdMetafields')) {
+            return ['product' => ['metafields' => ['nodes' => []]]];
+        }
+
+        if (str_contains($query, 'mutation MetafieldsSet')) {
+            $capturedMetafields = $variables['metafields'] ?? [];
+
+            return [
+                'metafieldsSet' => [
+                    'metafields' => [['id' => 'gid://shopify/Metafield/1051']],
+                    'userErrors' => [],
+                ],
+            ];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in full UVP sync test.');
+    });
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product]));
+
+    $uvp = collect($capturedMetafields)->firstWhere('key', 'uvp_short_paragraph');
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and(ProductShopifyUpdater::defaultCoreFields())->toContain(ProductShopifyUpdater::CORE_FIELD_UVP_SHORT_PARAGRAPH)
+        ->and($uvp)->not->toBeNull()
+        ->and($uvp['namespace'])->toBe('custom')
+        ->and(collect($capturedMetafields)->pluck('key')->all())->not->toContain('related_products')
+        ->and($uvp['value'])->toBe(json_encode(['type' => 'root', 'children' => [[
+            'type' => 'paragraph',
+            'children' => [['type' => 'text', 'value' => 'A clear product promise.']],
+        ]]], JSON_UNESCAPED_SLASHES));
 });
 
 it('prefers linked draft complementary products over stale row data during approved shopify sync', function (): void {
@@ -1232,6 +1393,7 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
         'status' => 'draft',
         'image_url' => $firstImage,
         'bundle_image_urls' => [$firstImage, $secondImage],
+        'complementary_products' => 'gid://shopify/Product/201; gid://shopify/Product/202; gid://shopify/Product/203',
         'approval_version' => 1,
         'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
     ]));
@@ -1248,12 +1410,13 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
     ]);
 
     $mediaInput = null;
+    $inventoryTrackingInput = null;
 
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
 
-    Http::fake(function ($request) use (&$mediaInput) {
+    Http::fake(function ($request) use (&$mediaInput, &$inventoryTrackingInput) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
         $variables = (array) ($payload['variables'] ?? []);
@@ -1274,6 +1437,22 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
             ]);
         }
 
+        if (str_contains($query, 'mutation InventoryItemUpdate')) {
+            $inventoryTrackingInput = $variables;
+
+            return Http::response([
+                'data' => [
+                    'inventoryItemUpdate' => [
+                        'inventoryItem' => [
+                            'id' => 'gid://shopify/InventoryItem/1401',
+                            'tracked' => false,
+                        ],
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
         if (str_contains($query, 'mutation ProductCreate')) {
             return Http::response([
                 'data' => [
@@ -1281,6 +1460,13 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
                         'product' => [
                             'id' => 'gid://shopify/Product/1401',
                             'handle' => 'test-bracelet-stack',
+                            'variants' => [
+                                'nodes' => [[
+                                    'inventoryItem' => [
+                                        'id' => 'gid://shopify/InventoryItem/1401',
+                                    ],
+                                ]],
+                            ],
                         ],
                         'userErrors' => [],
                     ],
@@ -1295,6 +1481,10 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
 
     expect($result['created'])->toBe(1);
     expect($result['failed'])->toBe(0);
+    expect($inventoryTrackingInput)->toBe([
+        'id' => 'gid://shopify/InventoryItem/1401',
+        'input' => ['tracked' => false],
+    ]);
     expect($mediaInput)->toBe([
         [
             'originalSource' => $firstImage,
@@ -1306,6 +1496,148 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
         ],
     ]);
     expect($draft->fresh()->handle)->toBe('test-bracelet-stack');
+});
+
+it('enables inventory tracking when creating an ordinary product in Shopify', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Test Bracelet',
+        'type' => 'Bracelets',
+        'tags' => 'bracelet, livi-road',
+        'status' => 'draft',
+        'complementary_products' => 'gid://shopify/Product/301; gid://shopify/Product/302; gid://shopify/Product/303',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    foreach ([User::factory()->create(), User::factory()->create()] as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    $inventoryTrackingInput = null;
+    $inventoryQuantityInput = null;
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use (&$inventoryTrackingInput, &$inventoryQuantityInput) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (str_contains($query, 'mutation InventoryItemUpdate')) {
+            $inventoryTrackingInput = $variables;
+
+            return Http::response([
+                'data' => [
+                    'inventoryItemUpdate' => [
+                        'inventoryItem' => [
+                            'id' => 'gid://shopify/InventoryItem/1402',
+                            'tracked' => true,
+                        ],
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+
+        if (str_contains($query, 'query LocationsForNewProductInventory')) {
+            return Http::response([
+                'data' => [
+                    'locations' => [
+                        'nodes' => [[
+                            'id' => 'gid://shopify/Location/1',
+                        ]],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'mutation InventorySetNewProductQuantity')) {
+            $inventoryQuantityInput = $variables['input'] ?? null;
+
+            return Http::response([
+                'data' => [
+                    'inventorySetQuantities' => [
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        if (str_contains($query, 'mutation ProductCreate')) {
+            return Http::response([
+                'data' => [
+                    'productCreate' => [
+                        'product' => [
+                            'id' => 'gid://shopify/Product/1402',
+                            'handle' => 'test-bracelet',
+                            'variants' => [
+                                'nodes' => [[
+                                    'inventoryItem' => [
+                                        'id' => 'gid://shopify/InventoryItem/1402',
+                                    ],
+                                ]],
+                            ],
+                        ],
+                        'userErrors' => [],
+                    ],
+                ],
+            ]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in inventory tracking create test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($inventoryTrackingInput)->toBe([
+            'id' => 'gid://shopify/InventoryItem/1402',
+            'input' => ['tracked' => true],
+        ])
+        ->and($inventoryQuantityInput)->toMatchArray([
+            'name' => 'available',
+            'reason' => 'correction',
+            'ignoreCompareQuantity' => true,
+            'quantities' => [[
+                'inventoryItemId' => 'gid://shopify/InventoryItem/1402',
+                'locationId' => 'gid://shopify/Location/1',
+                'quantity' => 15,
+            ]],
+        ]);
+});
+
+it('does not create a fully approved product in shopify without three complementary products', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Incomplete Complementary Bracelet',
+        'type' => 'Bracelets',
+        'status' => 'draft',
+        'complementary_products' => 'gid://shopify/Product/401; gid://shopify/Product/402',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    foreach ([User::factory()->create(), User::factory()->create()] as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(0)
+        ->and($result['skipped_missing_complementary'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($draft->fresh()->handle)->toBeNull();
 });
 
 it('moves videos behind the approved image order during Shopify image sync', function (): void {
