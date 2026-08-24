@@ -66,6 +66,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableColumnHidden('product.id')
         ->assertTableColumnVisible('inventory_qty')
         ->assertTableColumnVisible('quantity_on_order')
+        ->assertTableColumnVisible('wip_orders')
         ->assertTableColumnVisible('next_eta')
         ->assertTableFilterVisible('order_state')
         ->assertTableActionVisible('addSupplierOrder', $variant)
@@ -80,6 +81,8 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableBulkActionVisible('pushReceivedToShopify')
         ->assertSee('Upload Supplier Orders')
         ->assertSee('Upload Receipts')
+        ->assertSee('Paste Purchase Order')
+        ->assertSee('Confirm Paste')
         ->assertDontSee('Confirm Supplier Import')
         ->assertDontSee('Import Stock CSV');
 });
@@ -104,7 +107,7 @@ it('filters the inventory table using a pasted SKU list', function (): void {
         ->assertCanNotSeeTableRecords([$other]);
 });
 
-it('filters products by any incomplete or complete on-order quantities', function (): void {
+it('filters products by placed, planned, and multiple WIP order summaries', function (): void {
     $user = User::factory()->create();
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
@@ -123,25 +126,21 @@ it('filters products by any incomplete or complete on-order quantities', functio
     ]);
 
     $none = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-NONE']);
-    $incomplete = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-INCOMPLETE']);
-    $complete = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-COMPLETE']);
+    $planned = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-PLANNED']);
+    $placed = Variant::query()->create(['product_id' => $product->id, 'sku' => 'ORDER-PLACED']);
 
     ProcurementIncomingStock::query()->create([
-        'variant_id' => $incomplete->id,
-        'sku' => $incomplete->sku,
-        'quantity_on_order_phase_1' => 20,
-        'total_quantity_on_order' => 20,
-        'total_confirmed_quantity_on_order' => 0,
+        'variant_id' => $planned->id,
+        'sku' => $planned->sku,
+        'quantity_to_order' => 20,
+        'total_quantity_on_order' => 0,
     ]);
     ProcurementIncomingStock::query()->create([
-        'variant_id' => $complete->id,
-        'sku' => $complete->sku,
-        'quantity_on_order_phase_1' => 15,
-        'order_id_phase_1' => 'PO-COMPLETE',
-        'eta_date_phase_1' => '2026-09-30',
-        'confirmed_quantity_on_order_phase_1' => 15,
+        'variant_id' => $placed->id,
+        'sku' => $placed->sku,
         'total_quantity_on_order' => 15,
         'total_confirmed_quantity_on_order' => 15,
+        'number_of_wip_orders' => 2,
     ]);
 
     $this->actingAs($user);
@@ -149,12 +148,12 @@ it('filters products by any incomplete or complete on-order quantities', functio
     Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
         ->filterTable('order_state', 'any_on_order')
-        ->assertCanSeeTableRecords([$incomplete, $complete])
-        ->assertCanNotSeeTableRecords([$none])
-        ->filterTable('order_state', 'incomplete_details')
-        ->assertCanSeeTableRecords([$incomplete])
-        ->assertCanNotSeeTableRecords([$none, $complete])
-        ->filterTable('order_state', 'complete_details')
-        ->assertCanSeeTableRecords([$complete])
-        ->assertCanNotSeeTableRecords([$none, $incomplete]);
+        ->assertCanSeeTableRecords([$placed])
+        ->assertCanNotSeeTableRecords([$none, $planned])
+        ->filterTable('order_state', 'planned_only')
+        ->assertCanSeeTableRecords([$planned])
+        ->assertCanNotSeeTableRecords([$none, $placed])
+        ->filterTable('order_state', 'multiple_wip')
+        ->assertCanSeeTableRecords([$placed])
+        ->assertCanNotSeeTableRecords([$none, $planned]);
 });

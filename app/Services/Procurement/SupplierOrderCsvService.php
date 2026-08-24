@@ -80,6 +80,68 @@ final class SupplierOrderCsvService
         ]);
     }
 
+    public function previewPastedOrder(string $contents, ?int $userId = null): ProcurementSupplierImportBatch
+    {
+        $contents = trim(str_replace("\r\n", "\n", $contents));
+        if ($contents === '') {
+            throw ValidationException::withMessages(['pasted_rows' => 'Paste at least one purchase-order row.']);
+        }
+        $lines = array_values(array_filter(explode("\n", $contents), fn (string $line): bool => trim($line) !== ''));
+        $first = array_map([$this, 'header'], str_getcsv($lines[0], "\t"));
+        $required = ['sku', 'order_id', 'quantity_ordered', 'eta'];
+        $hasHeader = array_diff($required, $first) === [];
+        $headers = $hasHeader
+            ? $first
+            : ['item', 'sku', 'product', 'vendor', 'quantity_ordered', 'order_id', 'eta'];
+        $dataLines = $hasHeader ? array_slice($lines, 1) : $lines;
+        if ($dataLines === []) {
+            throw ValidationException::withMessages(['pasted_rows' => 'The pasted purchase order has no data rows.']);
+        }
+
+        $rows = [];
+        $errors = [];
+        $seen = [];
+        foreach ($dataLines as $offset => $line) {
+            $values = str_getcsv($line, "\t");
+            $row = [];
+            foreach ($headers as $index => $header) {
+                $row[$header] = trim((string) ($values[$index] ?? ''));
+            }
+            $rowErrors = $this->validateRow($row, 'order');
+            $key = mb_strtoupper((string) ($row['order_id'] ?? '')).'|'.mb_strtoupper((string) ($row['sku'] ?? ''));
+            if (isset($seen[$key])) {
+                $rowErrors[] = 'Order ID and SKU are duplicated within the pasted rows';
+            }
+            $seen[$key] = true;
+            $rowNumber = $offset + ($hasHeader ? 2 : 1);
+            $row['_row'] = $rowNumber;
+            $row['_valid'] = $rowErrors === [];
+            $rows[] = $row;
+            if ($rowErrors !== []) {
+                $errors[(string) $rowNumber] = $rowErrors;
+            }
+        }
+
+        $hash = hash('sha256', $contents);
+        $existing = ProcurementSupplierImportBatch::query()->where('type', 'order')->where('file_hash', $hash)->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        return ProcurementSupplierImportBatch::query()->create([
+            'uuid' => (string) Str::uuid(),
+            'type' => 'order',
+            'original_filename' => 'pasted-purchase-order.tsv',
+            'file_hash' => $hash,
+            'status' => 'previewed',
+            'preview_rows' => $rows,
+            'errors' => $errors ?: null,
+            'valid_count' => collect($rows)->where('_valid', true)->count(),
+            'invalid_count' => count($errors),
+            'created_by' => $userId,
+        ]);
+    }
+
     public function confirm(string $uuid, ?int $userId = null, bool $dispatchReceipts = true): ProcurementSupplierImportBatch
     {
         $batch = ProcurementSupplierImportBatch::query()->where('uuid', $uuid)->firstOrFail();
@@ -135,7 +197,7 @@ final class SupplierOrderCsvService
     {
         $skus = collect($batch->preview_rows)->pluck('sku')->map(fn ($sku) => strtoupper(trim((string) $sku)))->unique();
         $ids = Variant::query()->active()->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus)->pluck('id')->all();
-        $this->sheets->publishOperational($ids);
+        $this->sheets->publishOperational($ids, includeHumanInputs: true);
     }
 
     private function validateRow(array $row, string $type): array

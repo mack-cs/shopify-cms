@@ -11,16 +11,9 @@ final class ProcurementSheetSchema
         'current_inventory' => 'Current Inventory',
         'cms_movement_classification' => 'cms_movement_classification',
         'ignore' => 'Ignore',
-        'quantity_on_order_phase_1' => 'Quantity On Order - Phase 1',
-        'order_id_phase_1' => 'Order ID - Phase 1',
-        'eta_date_phase_1' => 'ETA Date - Phase 1',
-        'quantity_on_order_phase_2' => 'Quantity On Order - Phase 2',
-        'order_id_phase_2' => 'Order ID - Phase 2',
-        'eta_date_phase_2' => 'ETA Date - Phase 2',
-        'quantity_on_order_phase_3' => 'Quantity On Order - Phase 3',
-        'order_id_phase_3' => 'Order ID - Phase 3',
-        'eta_date_phase_3' => 'ETA Date - Phase 3',
+        'quantity_to_order' => 'Quantity To Order',
         'total_quantity_on_order' => 'Total Quantity On Order',
+        'number_of_wip_orders' => 'Number of WIP Orders',
         'projected_inventory_position' => 'Projected Inventory Position',
         'predicted_weekly_demand' => 'Predicted Weekly Demand',
         'estimated_days_of_stock_remaining' => 'Estimated Days of Stock Remaining',
@@ -37,7 +30,7 @@ final class ProcurementSheetSchema
     ];
 
     public const HUMAN_OWNED_FIELDS = [
-        'ignore',
+        'ignore', 'quantity_to_order',
     ];
 
     /** @param array<int,mixed> $headers @return array<string,int> */

@@ -12,6 +12,7 @@ final class ProcurementIncomingStock extends Model
 
     protected $casts = [
         'ignore' => 'boolean',
+        'quantity_to_order' => 'integer',
         'quantity_on_order_phase_1' => 'integer',
         'quantity_on_order_phase_2' => 'integer',
         'quantity_on_order_phase_3' => 'integer',
@@ -20,6 +21,7 @@ final class ProcurementIncomingStock extends Model
         'confirmed_quantity_on_order_phase_3' => 'integer',
         'total_quantity_on_order' => 'integer',
         'total_confirmed_quantity_on_order' => 'integer',
+        'number_of_wip_orders' => 'integer',
         'eta_date_phase_1' => 'date:Y-m-d',
         'eta_date_phase_2' => 'date:Y-m-d',
         'eta_date_phase_3' => 'date:Y-m-d',

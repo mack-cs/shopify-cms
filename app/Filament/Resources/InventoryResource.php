@@ -119,20 +119,17 @@ class InventoryResource extends Resource
                     ->state(fn (Variant $record): int => (int) ($record->procurementIncomingStock?->total_quantity_on_order ?? 0))
                     ->badge()->color('info')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
+                TextColumn::make('wip_orders')
+                    ->label('WIP Orders')
+                    ->state(fn (Variant $record): int => (int) ($record->procurementIncomingStock?->number_of_wip_orders ?? 0))
+                    ->badge()->color('warning')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('next_eta')
                     ->label('Next ETA')
                     ->state(function (Variant $record): ?string {
-                        $stock = $record->procurementIncomingStock;
-                        $etas = collect(range(1, 3))->map(function (int $phase) use ($stock) {
-                            $hasQuantity = (int) ($stock?->{"quantity_on_order_phase_{$phase}"} ?? 0) > 0;
-                            $hasOrderId = filled($stock?->{"order_id_phase_{$phase}"});
-
-                            return $hasQuantity && $hasOrderId
-                                ? $stock?->{"eta_date_phase_{$phase}"}
-                                : null;
-                        })->filter()->sort();
-
-                        return $etas->first()?->format('d/m/Y');
+                        return $record->supplierOrderLines
+                            ->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->status === 'open' && $line->quantity_outstanding > 0)
+                            ->pluck('eta_date')->filter()->sort()->first()?->format('d/m/Y');
                     })
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
                 TextColumn::make('sellable_state')
@@ -213,19 +210,17 @@ class InventoryResource extends Resource
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
                     ->options([
                         'any_on_order' => 'Any Quantity On Order',
-                        'incomplete_details' => 'Missing Order ID or ETA',
-                        'complete_details' => 'Complete Order ID and ETA',
+                        'planned_only' => 'Quantity To Order (Not Placed)',
+                        'multiple_wip' => 'Multiple WIP Orders',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
                         return match ($data['value'] ?? null) {
                             'any_on_order' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
                                 ->where('total_quantity_on_order', '>', 0)),
-                            'incomplete_details' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
-                                ->where('total_quantity_on_order', '>', 0)
-                                ->whereColumn('total_confirmed_quantity_on_order', '<', 'total_quantity_on_order')),
-                            'complete_details' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
-                                ->where('total_quantity_on_order', '>', 0)
-                                ->whereColumn('total_confirmed_quantity_on_order', 'total_quantity_on_order')),
+                            'planned_only' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
+                                ->where('quantity_to_order', '>', 0)->where('total_quantity_on_order', 0)),
+                            'multiple_wip' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
+                                ->where('number_of_wip_orders', '>', 1)),
                             default => $query,
                         };
                     }),
@@ -307,7 +302,7 @@ class InventoryResource extends Resource
                     ->action(function (Variant $record, array $data): void {
                         app(SupplierOrderService::class)->createForVariant($record, $data['order_number'], $data['quantity_ordered'], $data['eta_date'], Auth::id());
                         try {
-                            app(ProcurementSheetSyncService::class)->publishOperational([$record->id]);
+                            app(ProcurementSheetSyncService::class)->publishOperational([$record->id], includeHumanInputs: true);
                         } catch (\Throwable $e) {
                             Notification::make()->title('Order saved; Sheet update failed')->body($e->getMessage())->warning()->send();
 
@@ -492,6 +487,14 @@ class InventoryResource extends Resource
                         ->action(fn (Collection $records) => response()->streamDownload(
                             fn () => print app(ProcurementSelectionCsvExporter::class)->receipts($records),
                             'selected-receipts-'.now()->format('Ymd_His').'.csv',
+                        )),
+                    BulkAction::make('exportSelectedOrderHistory')
+                        ->label('Export Selected Order History')
+                        ->icon('heroicon-o-document-arrow-down')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                        ->action(fn (Collection $records) => response()->streamDownload(
+                            fn () => print app(ProcurementSelectionCsvExporter::class)->orderHistory($records),
+                            'selected-order-history-'.now()->format('Ymd_His').'.csv',
                         )),
                     BulkAction::make('pushReceivedToShopify')
                         ->label('Push Received To Shopify')

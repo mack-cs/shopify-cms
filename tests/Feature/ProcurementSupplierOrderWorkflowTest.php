@@ -22,16 +22,14 @@ use Illuminate\Validation\ValidationException;
 
 uses(RefreshDatabase::class);
 
-it('creates an order and projects its outstanding quantity into the procurement phases', function (): void {
+it('creates an order and updates the CMS-owned outstanding summary', function (): void {
     $variant = supplierWorkflowVariant('ORDER-1');
     $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-100', 25, '2026-09-15');
     $stock = $variant->procurementIncomingStock()->firstOrFail();
 
     expect($line->quantity_ordered)->toBe(25)
-        ->and($stock->quantity_on_order_phase_1)->toBe(25)
-        ->and($stock->order_id_phase_1)->toBe('PO-100')
-        ->and($stock->eta_date_phase_1->toDateString())->toBe('2026-09-15')
-        ->and($stock->total_confirmed_quantity_on_order)->toBe(25);
+        ->and($stock->total_quantity_on_order)->toBe(25)
+        ->and($stock->number_of_wip_orders)->toBe(1);
 });
 
 it('supports partial receipts and prevents duplicate or excessive receipt requests', function (): void {
@@ -50,7 +48,7 @@ it('supports partial receipts and prevents duplicate or excessive receipt reques
         ->toThrow(ValidationException::class, 'Only 6 unit(s) remain outstanding.');
 });
 
-it('moves later orders forward when an earlier order is completed', function (): void {
+it('recalculates totals and WIP count when an order is completed', function (): void {
     $variant = supplierWorkflowVariant('PHASES-1');
     $orders = app(SupplierOrderService::class);
     $first = $orders->createForVariant($variant, 'PO-A', 5, '2026-09-01');
@@ -64,9 +62,39 @@ it('moves later orders forward when an earlier order is completed', function ():
     app(SupplierOrderProjectionService::class)->projectVariant($variant->fresh(['procurementIncomingStock']));
 
     $stock = $variant->procurementIncomingStock()->firstOrFail();
-    expect($stock->order_id_phase_1)->toBe('PO-B')
-        ->and($stock->quantity_on_order_phase_1)->toBe(7)
-        ->and($stock->quantity_on_order_phase_2)->toBe(0);
+    expect($stock->total_quantity_on_order)->toBe(7)
+        ->and($stock->number_of_wip_orders)->toBe(1);
+});
+
+it('supports more than three WIP orders for one SKU', function (): void {
+    $variant = supplierWorkflowVariant('UNLIMITED-1');
+    $orders = app(SupplierOrderService::class);
+    foreach (range(1, 5) as $number) {
+        $orders->createForVariant($variant, "PO-UNLIMITED-{$number}", 10, '2026-10-01');
+    }
+
+    $stock = $variant->procurementIncomingStock()->firstOrFail();
+    expect($stock->total_quantity_on_order)->toBe(50)
+        ->and($stock->number_of_wip_orders)->toBe(5);
+});
+
+it('previews pasted tab-separated orders and clears quantity to order after confirmation', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('PASTE-1');
+    $variant->procurementIncomingStock()->create([
+        'sku' => 'PASTE-1', 'quantity_to_order' => 30,
+        'quantity_on_order_phase_1' => 0, 'quantity_on_order_phase_2' => 0,
+        'quantity_on_order_phase_3' => 0,
+    ]);
+    $csv = app(SupplierOrderCsvService::class);
+    $batch = $csv->previewPastedOrder("Item\tSKU\tProduct\tVendor\tQty\tOrder ID\tETA Date\n1\tPASTE-1\tWrong text\tWrong vendor\t30\tPO-PASTE\t07/09/2026");
+
+    expect($batch->valid_count)->toBe(1)->and($batch->invalid_count)->toBe(0);
+    $csv->confirm($batch->uuid);
+
+    expect($variant->procurementIncomingStock()->value('quantity_to_order'))->toBe(0)
+        ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(30)
+        ->and(ProcurementSupplierOrderLine::query()->where('sku', 'PASTE-1')->count())->toBe(1);
 });
 
 it('previews CSV without changing orders and confirms the same file only once', function (): void {
@@ -231,7 +259,7 @@ it('rechecks Order IDs during confirmation to close the preview race window', fu
 
 it('ships separate clean order and receipt CSV templates', function (): void {
     expect(trim((string) file_get_contents(resource_path('templates/procurement-supplier-orders.csv'))))
-        ->toStartWith('SKU,Order ID,Quantity Ordered,ETA')
+        ->toStartWith('Item,SKU,Product,Vendor,Quantity Ordered,Order ID,ETA')
         ->and(trim((string) file_get_contents(resource_path('templates/procurement-supplier-receipts.csv'))))
         ->toStartWith('Order ID,SKU,Quantity Received');
 });

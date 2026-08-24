@@ -9,7 +9,10 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class ProcurementSupplierOrderLine extends Model
 {
     protected $guarded = [];
-    protected $casts = ['eta_date' => 'date', 'quantity_ordered' => 'integer'];
+    protected $casts = [
+        'eta_date' => 'date', 'quantity_ordered' => 'integer',
+        'completed_at' => 'datetime', 'cancelled_at' => 'datetime',
+    ];
 
     public function order(): BelongsTo { return $this->belongsTo(ProcurementSupplierOrder::class, 'supplier_order_id'); }
     public function variant(): BelongsTo { return $this->belongsTo(Variant::class); }

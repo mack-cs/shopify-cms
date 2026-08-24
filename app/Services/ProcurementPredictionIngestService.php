@@ -51,20 +51,7 @@ final class ProcurementPredictionIngestService
             'predictions.*.current_inventory' => ['nullable', 'numeric'],
             'predictions.*.ignore' => ['required', 'boolean'],
             'predictions.*.sale_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'predictions.*.quantity_on_order_phase_1' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.order_id_phase_1' => ['nullable', 'string', 'max:255'],
-            'predictions.*.eta_date_phase_1' => ['nullable', 'date'],
-            'predictions.*.confirmed_quantity_on_order_phase_1' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.quantity_on_order_phase_2' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.order_id_phase_2' => ['nullable', 'string', 'max:255'],
-            'predictions.*.eta_date_phase_2' => ['nullable', 'date'],
-            'predictions.*.confirmed_quantity_on_order_phase_2' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.quantity_on_order_phase_3' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.order_id_phase_3' => ['nullable', 'string', 'max:255'],
-            'predictions.*.eta_date_phase_3' => ['nullable', 'date'],
-            'predictions.*.confirmed_quantity_on_order_phase_3' => ['nullable', 'integer', 'min:0'],
             'predictions.*.total_quantity_on_order' => ['nullable', 'integer', 'min:0'],
-            'predictions.*.total_confirmed_quantity_on_order' => ['nullable', 'integer', 'min:0'],
             'predictions.*.procurement_actioned' => ['nullable', 'boolean'],
             'predictions.*.quantity_on_order' => ['nullable', 'integer', 'min:0'],
             'predictions.*.projected_inventory_position' => ['nullable', 'numeric'],
@@ -194,50 +181,17 @@ final class ProcurementPredictionIngestService
         }
 
         $result = array_intersect_key($row, array_flip($columns));
-        $hasPhases = array_key_exists('quantity_on_order_phase_1', $row)
-            || array_key_exists('quantity_on_order_phase_2', $row)
-            || array_key_exists('quantity_on_order_phase_3', $row);
-        $legacyTotal = (int) ($row['total_quantity_on_order'] ?? $row['quantity_on_order'] ?? 0);
-        $phase1 = (int) ($row['quantity_on_order_phase_1'] ?? ($hasPhases ? 0 : $legacyTotal));
-        $phase2 = (int) ($row['quantity_on_order_phase_2'] ?? 0);
-        $phase3 = (int) ($row['quantity_on_order_phase_3'] ?? 0);
-        $phaseTotal = $phase1 + $phase2 + $phase3;
-        if (array_key_exists('total_quantity_on_order', $row) && $phaseTotal !== $legacyTotal) {
-            throw ValidationException::withMessages([
-                'predictions' => "Incoming-stock phase total does not match total_quantity_on_order for SKU [{$row['sku']}].",
-            ]);
-        }
-        $result['quantity_on_order_phase_1'] = $phase1;
-        $result['quantity_on_order_phase_2'] = $phase2;
-        $result['quantity_on_order_phase_3'] = $phase3;
-        $result['total_quantity_on_order'] = $phaseTotal;
-        $confirmed = [];
+        $outstanding = (int) ($row['total_quantity_on_order'] ?? $row['quantity_on_order'] ?? 0);
+        $result['total_quantity_on_order'] = $outstanding;
         foreach ([1, 2, 3] as $phase) {
-            $quantity = (int) $result["quantity_on_order_phase_{$phase}"];
-            $orderId = trim((string) ($row["order_id_phase_{$phase}"] ?? ''));
-            $eta = $row["eta_date_phase_{$phase}"] ?? null;
-            $derived = $quantity > 0 && $orderId !== '' && $eta !== null ? $quantity : 0;
-            $provided = (int) ($row["confirmed_quantity_on_order_phase_{$phase}"] ?? $derived);
-            if ($provided !== $derived) {
-                throw ValidationException::withMessages([
-                    'predictions' => "Confirmed Phase {$phase} quantity is invalid for SKU [{$row['sku']}].",
-                ]);
-            }
-            $result["order_id_phase_{$phase}"] = $orderId === '' ? null : $orderId;
-            $result["eta_date_phase_{$phase}"] = $eta;
-            $result["confirmed_quantity_on_order_phase_{$phase}"] = $provided;
-            $confirmed[] = $provided;
-        }
-        $confirmedTotal = array_sum($confirmed);
-        if (array_key_exists('total_confirmed_quantity_on_order', $row)
-            && (int) $row['total_confirmed_quantity_on_order'] !== $confirmedTotal) {
-            throw ValidationException::withMessages([
-                'predictions' => "Confirmed incoming-stock total is invalid for SKU [{$row['sku']}].",
-            ]);
+            $result["quantity_on_order_phase_{$phase}"] = 0;
+            $result["order_id_phase_{$phase}"] = null;
+            $result["eta_date_phase_{$phase}"] = null;
+            $result["confirmed_quantity_on_order_phase_{$phase}"] = 0;
         }
         $result['ignore'] = (bool) $row['ignore'];
-        $result['total_confirmed_quantity_on_order'] = $confirmedTotal;
-        $result['procurement_actioned'] = $confirmedTotal > 0;
+        $result['total_confirmed_quantity_on_order'] = $outstanding;
+        $result['procurement_actioned'] = $outstanding > 0;
         $result['recommended_order_before_incoming_stock'] = $row['recommended_order_before_incoming_stock']
             ?? $row['recommended_order_qty_before_incoming_stock'] ?? null;
         $result['additional_order_required'] = $row['additional_order_required']

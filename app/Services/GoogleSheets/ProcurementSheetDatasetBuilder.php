@@ -48,10 +48,7 @@ final class ProcurementSheetDatasetBuilder
                     $movementRow = $movement->get(trim((string) $variant->shopify_id));
                     $stock = $variant->procurementIncomingStock;
                     $predictionStale = (bool) $stock?->isStaleFor($predictionRun);
-                    $phase1 = (int) ($stock?->quantity_on_order_phase_1 ?? 0);
-                    $phase2 = (int) ($stock?->quantity_on_order_phase_2 ?? 0);
-                    $phase3 = (int) ($stock?->quantity_on_order_phase_3 ?? 0);
-                    $confirmedTotal = (int) ($stock?->total_confirmed_quantity_on_order ?? 0);
+                    $outstandingTotal = (int) ($stock?->total_quantity_on_order ?? 0);
                     $current = $variant->inventory_tracked === true
                         ? ($variant->current_inventory_quantity ?? $variant->inventory_qty)
                         : null;
@@ -69,7 +66,7 @@ final class ProcurementSheetDatasetBuilder
                         '_variant_id' => $variant->id,
                         '_collection_id' => $collectionId,
                         '_prediction_stale' => $predictionStale,
-                        '_procurement_actioned' => $confirmedTotal > 0,
+                        '_procurement_actioned' => $outstandingTotal > 0,
                         'sku' => $sku,
                         'product' => $variant->product?->title,
                         'vendor' => $variant->product?->vendor,
@@ -82,22 +79,12 @@ final class ProcurementSheetDatasetBuilder
                         'current_inventory' => $current,
                         'action_required' => $prediction?->action_status,
                         'ignore' => (bool) ($stock?->ignore ?? false),
-                        'quantity_on_order_phase_1' => $phase1,
-                        'order_id_phase_1' => $stock?->order_id_phase_1,
-                        'eta_date_phase_1' => $stock?->eta_date_phase_1?->format('d/m/Y'),
-                        'quantity_on_order_phase_2' => $phase2,
-                        'order_id_phase_2' => $stock?->order_id_phase_2,
-                        'eta_date_phase_2' => $stock?->eta_date_phase_2?->format('d/m/Y'),
-                        'quantity_on_order_phase_3' => $phase3,
-                        'order_id_phase_3' => $stock?->order_id_phase_3,
-                        'eta_date_phase_3' => $stock?->eta_date_phase_3?->format('d/m/Y'),
-                        // The report total is actionable incoming stock only. Raw phase
-                        // quantities remain visible, but require both Order ID and ETA
-                        // before they count toward this total or any prediction.
-                        'total_quantity_on_order' => $confirmedTotal,
+                        'quantity_to_order' => (int) ($stock?->quantity_to_order ?? 0),
+                        'total_quantity_on_order' => $outstandingTotal,
+                        'number_of_wip_orders' => (int) ($stock?->number_of_wip_orders ?? 0),
                         // This operational column must move with live inventory even
                         // between prediction runs; the ML value is a point-in-time snapshot.
-                        'projected_inventory_position' => ($current ?? 0) + $confirmedTotal,
+                        'projected_inventory_position' => ($current ?? 0) + $outstandingTotal,
                         'predicted_weekly_demand' => $prediction?->predicted_weekly_demand,
                         'estimated_days_of_stock_remaining' => $prediction?->estimated_days_of_stock_remaining,
                         'predicted_runout_date' => $prediction?->predicted_runout_date?->format('d/m/Y'),

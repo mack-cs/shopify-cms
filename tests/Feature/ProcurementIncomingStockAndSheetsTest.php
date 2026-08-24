@@ -24,26 +24,23 @@ use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
-it('normalizes blank phases calculates totals audits changes and snapshots them', function (): void {
+it('normalizes working quantities without treating them as incoming stock', function (): void {
     [$import, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
 
     $stock = $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => '60',
-        'quantity_on_order_phase_2' => '',
-        'quantity_on_order_phase_3' => null,
+        'quantity_to_order' => '60',
     ], 'livi-road', 7);
 
-    expect($stock->quantity_on_order_phase_1)->toBe(60)
-        ->and($stock->quantity_on_order_phase_2)->toBe(0)
-        ->and($stock->total_quantity_on_order)->toBe(60)
+    expect($stock->quantity_to_order)->toBe(60)
+        ->and($stock->total_quantity_on_order)->toBe(0)
         ->and($stock->changes()->count())->toBe(1);
 
     $run = procurementSheetRun();
     $service->snapshotForRun($run);
     $input = $run->incomingStockInputs()->firstOrFail();
     expect($input->sku)->toBe('LRB0004')
-        ->and($input->total_quantity_on_order)->toBe(60)
+        ->and($input->total_quantity_on_order)->toBe(0)
         ->and($run->fresh()?->incoming_stock_input_hash)->not->toBeNull();
 });
 
@@ -52,9 +49,8 @@ it('attributes procurement field changes to the CMS user and source', function (
     $user = User::factory()->create();
 
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 12,
-        'order_id_phase_1' => 'PO-AUDIT',
-        'eta_date_phase_1' => '30/09/2026',
+        'ignore' => true,
+        'quantity_to_order' => 12,
     ], 'cms:supplier-orders', null, $user->id);
 
     $logs = ChangeLog::query()
@@ -63,62 +59,38 @@ it('attributes procurement field changes to the CMS user and source', function (
         ->get();
 
     expect($logs)->not->toBeEmpty()
-        ->and($logs->pluck('field'))->toContain(
-            'quantity_on_order_phase_1',
-            'order_id_phase_1',
-            'eta_date_phase_1',
-        )
+        ->and($logs->pluck('field'))->toContain('ignore', 'quantity_to_order')
         ->and($logs->pluck('changed_by')->unique()->all())->toBe([$user->id])
         ->and($logs->pluck('source')->unique()->all())->toBe(['cms:supplier-orders']);
 });
 
-it('counts only complete supplier order phases while preserving raw quantities', function (
-    ?string $orderId,
-    mixed $eta,
-    int $expectedConfirmed,
-): void {
+it('does not count a planned quantity as a WIP supplier order', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $stock = app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
         'ignore' => false,
-        'quantity_on_order_phase_1' => 100,
-        'order_id_phase_1' => $orderId,
-        'eta_date_phase_1' => $eta,
-        'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 100,
     ], 'livi-road');
 
-    expect($stock->quantity_on_order_phase_1)->toBe(100)
-        ->and($stock->order_id_phase_1)->toBe($orderId)
-        ->and($stock->confirmed_quantity_on_order_phase_1)->toBe($expectedConfirmed)
-        ->and($stock->total_confirmed_quantity_on_order)->toBe($expectedConfirmed)
+    expect($stock->quantity_to_order)->toBe(100)
+        ->and($stock->total_quantity_on_order)->toBe(0)
+        ->and($stock->number_of_wip_orders)->toBe(0)
         ->and(collect(app(ProcurementSheetDatasetBuilder::class)->records())
-            ->firstWhere('sku', 'LRB0004')['total_quantity_on_order'])->toBe($expectedConfirmed);
-})->with([
-    'complete order' => ['PO-123', '2026-10-01', 100],
-    'missing order ID' => [null, '2026-10-01', 0],
-    'missing ETA' => ['PO-123', null, 0],
-    'quantity only' => [null, null, 0],
-]);
+            ->firstWhere('sku', 'LRB0004')['total_quantity_on_order'])->toBe(0);
+});
 
-it('normalizes Google serial dates and snapshots ignore plus complete phase details', function (): void {
+it('snapshots ignore and CMS-owned order totals without phase details', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
         'ignore' => 'TRUE',
-        'quantity_on_order_phase_1' => 100,
-        'order_id_phase_1' => 'PO-123-A',
-        'eta_date_phase_1' => 46301,
-        'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 100,
     ], 'livi-road');
     $run = procurementSheetRun();
     app(ProcurementIncomingStockService::class)->snapshotForRun($run);
     $input = $run->incomingStockInputs()->where('variant_id', $variant->id)->firstOrFail();
 
     expect($input->ignore)->toBeTrue()
-        ->and($input->order_id_phase_1)->toBe('PO-123-A')
-        ->and($input->eta_date_phase_1->toDateString())->toBe('2026-10-06')
-        ->and($input->confirmed_quantity_on_order_phase_1)->toBe(100)
-        ->and($input->procurement_actioned)->toBeTrue();
+        ->and($input->total_quantity_on_order)->toBe(0)
+        ->and($input->procurement_actioned)->toBeFalse();
 });
 
 it('normalizes day month year ETA values returned by formatted Google Sheets', function (): void {
@@ -132,9 +104,7 @@ it('serves the immutable incoming-stock snapshot through the protected analytics
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
     $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 60,
-        'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 60,
     ], 'livi-road');
     $run = procurementSheetRun();
     $service->snapshotForRun($run);
@@ -146,11 +116,9 @@ it('serves the immutable incoming-stock snapshot through the protected analytics
 
     $response->assertOk();
     expect($response->streamedContent())
-        ->toContain('quantity_on_order_phase_1')
-        ->toContain('total_confirmed_quantity_on_order')
         ->toContain('total_quantity_on_order')
         ->toContain('LRB0004')
-        ->toContain(',FALSE,60,,,0,');
+        ->not->toContain('quantity_on_order_phase_1');
 });
 
 it('matches headers independent of case whitespace and column position', function (): void {
@@ -167,15 +135,13 @@ it('keeps the required procurement column groups in the exact report order', fun
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect(array_slice($headers, 4, 5))->toBe([
         'Currently on Sale', 'Sale Percentage', 'Current Inventory', 'cms_movement_classification', 'Ignore',
-    ])->and(array_slice($headers, 9, 9))->toBe([
-        'Quantity On Order - Phase 1', 'Order ID - Phase 1', 'ETA Date - Phase 1',
-        'Quantity On Order - Phase 2', 'Order ID - Phase 2', 'ETA Date - Phase 2',
-        'Quantity On Order - Phase 3', 'Order ID - Phase 3', 'ETA Date - Phase 3',
-    ])->and($headers[27])->toBe('Action Required')
+    ])->and(array_slice($headers, 9, 3))->toBe([
+        'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
+    ])->and($headers[20])->toBe('Action Required')
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
-it('pulls Ignore but does not import CMS-owned order phases from brand Sheets', function (): void {
+it('pulls Ignore and Quantity To Order but does not import CMS order totals from brand Sheets', function (): void {
     [$import, $first] = procurementSheetVariant('LRB0004', 'livi-road');
     [, $second] = procurementSheetVariant('LRB0005', 'livi-road');
     ProcurementCollectionConfig::query()->create([
@@ -187,10 +153,10 @@ it('pulls Ignore but does not import CMS-owned order phases from brand Sheets', 
     $schema = new ProcurementSheetSchema;
     $headers = array_reverse(array_values(ProcurementSheetSchema::FIELDS));
     $map = $schema->map($headers);
-    $row = function (string $sku, int $phase) use ($headers, $map): array {
+    $row = function (string $sku, int $quantity) use ($headers, $map): array {
         $values = array_fill(0, count($headers), '');
         $values[$map['sku']] = $sku;
-        $values[$map['quantity_on_order_phase_1']] = $phase;
+        $values[$map['quantity_to_order']] = $quantity;
         $values[$map['ignore']] = 'TRUE';
 
         return $values;
@@ -202,17 +168,18 @@ it('pulls Ignore but does not import CMS-owned order phases from brand Sheets', 
     procurementTestSheetSync()->pullHumanInputs();
 
     expect(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('total_quantity_on_order'))->toBe(0)
+        ->and(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('quantity_to_order'))->toBe(60)
         ->and(ProcurementIncomingStock::query()->where('variant_id', $first->id)->value('ignore'))->toBeTrue()
         ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('total_quantity_on_order'))->toBe(0)
+        ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('quantity_to_order'))->toBe(30)
         ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('ignore'))->toBeTrue();
 });
 
-it('marks predictions stale after a human phase changes', function (): void {
+it('does not mark predictions stale for a working Quantity To Order change', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
     $stock = $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 60, 'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 60,
     ], 'livi-road');
     $run = procurementSheetRun();
     $service->snapshotForRun($run);
@@ -221,11 +188,10 @@ it('marks predictions stale after a human phase changes', function (): void {
 
     $this->travel(1)->second();
     $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 0, 'quantity_on_order_phase_2' => 30,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 30,
     ], 'livi-road');
 
-    expect($stock->fresh()?->isStaleFor($run->fresh()))->toBeTrue();
+    expect($stock->fresh()?->isStaleFor($run->fresh()))->toBeFalse();
 });
 
 it('does not partially persist phases when a later Google tab read fails', function (): void {
@@ -270,7 +236,7 @@ it('fails operational collection resolution for zero or multiple brand mappings'
     expect(fn () => $resolver->resolve($variant->product))->toThrow(DomainException::class, 'multiple configured');
 });
 
-it('preserves human Ignore but writes CMS-owned phase cells in brand rows and Master', function (): void {
+it('preserves human inputs but writes CMS-owned summary cells in brand rows and Master', function (): void {
     [$import, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     ProcurementCollectionConfig::query()->create([
         'shopify_collection_id' => 'gid://shopify/Collection/1',
@@ -332,12 +298,11 @@ it('preserves human Ignore but writes CMS-owned phase cells in brand rows and Ma
     $ranges = collect(Http::recorded())
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
-    expect($ranges)->toContain("'master-file'!A2:AF2")
+    expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
         ->and($ranges)->not->toContain("'livi-road'!I2")
-        ->and($ranges)->toContain("'livi-road'!J2")
         ->and($ranges)->toContain("'livi-road'!K2")
         ->and($ranges)->toContain("'livi-road'!L2")
-        ->and($ranges)->toContain("'livi-road'!R2");
+        ->and($ranges)->toContain("'livi-road'!M2");
 });
 
 it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
@@ -347,9 +312,13 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
     ]);
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
-        'ignore' => true, 'quantity_on_order_phase_1' => 9, 'order_id_phase_1' => 'PO-OPS',
-        'eta_date_phase_1' => '2026-09-20', 'quantity_on_order_phase_2' => 0, 'quantity_on_order_phase_3' => 0,
-    ], 'cms:supplier-orders');
+        'ignore' => true, 'quantity_to_order' => 9,
+    ], 'google_sheets:livi-road');
+    $variant->procurementIncomingStock()->update([
+        'total_quantity_on_order' => 9,
+        'total_confirmed_quantity_on_order' => 9,
+        'number_of_wip_orders' => 1,
+    ]);
     config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
@@ -375,11 +344,12 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     )->filter()->values();
 
     expect($ranges)->toContain("'master-file'!G2")
-        ->and($ranges)->toContain("'master-file'!J2")
-        ->and($ranges)->toContain("'livi-road'!AF2")
+        ->and($ranges)->toContain("'master-file'!K2")
+        ->and($ranges)->toContain("'master-file'!L2")
+        ->and($ranges)->toContain("'livi-road'!Y2")
         ->and($ranges)->not->toContain("'master-file'!I2")
-        ->and($ranges)->not->toContain("'master-file'!U2")
-        ->and($ranges)->not->toContain("'livi-road'!AB2");
+        ->and($ranges)->not->toContain("'master-file'!J2")
+        ->and($ranges)->not->toContain("'master-file'!N2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -391,8 +361,7 @@ it('refuses to publish stale incoming-stock inputs before making a Google write'
     ]);
     config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1']);
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 60, 'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
+        'quantity_to_order' => 60,
     ], 'livi-road');
     Http::fake();
 
@@ -409,10 +378,13 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
         'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
     ]);
     app(ProcurementIncomingStockService::class)->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 4, 'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
-        'order_id_phase_1' => 'PO-123', 'eta_date_phase_1' => '2026-10-01',
+        'quantity_to_order' => 0,
     ], 'livi-road');
+    $variant->procurementIncomingStock()->update([
+        'total_quantity_on_order' => 4,
+        'total_confirmed_quantity_on_order' => 4,
+        'number_of_wip_orders' => 1,
+    ]);
     $run = procurementSheetRun();
     app(ProcurementIncomingStockService::class)->snapshotForRun($run);
     app(ProcurementPredictionIngestService::class)->persist(procurementSheetPredictionPayload($run));
@@ -431,7 +403,7 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
 
     expect($record['current_inventory'])->toBe(15)
         ->and($record['projected_inventory_position'])->toBe(19)
-        ->and($record['eta_date_phase_1'])->toBe('01/10/2026')
+        ->and($record['number_of_wip_orders'])->toBe(1)
         ->and($record['predicted_runout_date'])->toBe('16/08/2026')
         ->and($record['last_updated'])->toStartWith('02/10/2026 ');
 });
@@ -461,14 +433,7 @@ it('persists the complete ML incoming-stock prediction contract', function (): v
     $run = procurementSheetRun();
     $payload = procurementSheetPredictionPayload($run);
     $payload['predictions'][0] = array_merge($payload['predictions'][0], [
-        'quantity_on_order_phase_1' => 60,
-        'order_id_phase_1' => 'PO-123',
-        'eta_date_phase_1' => '2026-10-01',
-        'confirmed_quantity_on_order_phase_1' => 60,
-        'quantity_on_order_phase_2' => 30,
-        'quantity_on_order_phase_3' => 0,
         'total_quantity_on_order' => 90,
-        'total_confirmed_quantity_on_order' => 60,
         'projected_inventory_position' => 90,
         'recommended_order_before_incoming_stock' => 124,
         'additional_order_required' => 34,
@@ -479,7 +444,7 @@ it('persists the complete ML incoming-stock prediction contract', function (): v
     $saved = app(ProcurementPredictionIngestService::class)->persist($payload);
     $prediction = $saved->predictions()->firstOrFail();
     expect($prediction->total_quantity_on_order)->toBe(90)
-        ->and($prediction->total_confirmed_quantity_on_order)->toBe(60)
+        ->and($prediction->total_confirmed_quantity_on_order)->toBe(90)
         ->and($prediction->procurement_actioned)->toBeTrue()
         ->and($prediction->projected_inventory_position)->toBe(90)
         ->and($prediction->recommended_order_before_incoming_stock)->toBe(124)
@@ -503,22 +468,25 @@ it('enforces zero procurement recommendations for ignored prediction rows', func
         ->and($prediction->recommended_order_before_incoming_stock)->toBe(0);
 });
 
-it('does not double count an order phase after stock is received into Shopify inventory', function (): void {
+it('does not double count CMS incoming stock after it is received into Shopify inventory', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
-    $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 60, 'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
-    ], 'livi-road');
+    $service->updateFromSheet($variant, ['quantity_to_order' => 0], 'livi-road');
+    $variant->procurementIncomingStock()->update([
+        'total_quantity_on_order' => 60,
+        'total_confirmed_quantity_on_order' => 60,
+        'number_of_wip_orders' => 1,
+    ]);
     $beforeReceipt = procurementSheetRun();
     $service->snapshotForRun($beforeReceipt);
     expect($beforeReceipt->incomingStockInputs()->value('total_quantity_on_order'))->toBe(60)
         ->and(($variant->fresh()?->current_inventory_quantity ?? 0) + 60)->toBe(60);
 
-    $service->updateFromSheet($variant, [
-        'quantity_on_order_phase_1' => 0, 'quantity_on_order_phase_2' => 0,
-        'quantity_on_order_phase_3' => 0,
-    ], 'livi-road');
+    $variant->procurementIncomingStock()->update([
+        'total_quantity_on_order' => 0,
+        'total_confirmed_quantity_on_order' => 0,
+        'number_of_wip_orders' => 0,
+    ]);
     Variant::withoutEvents(fn () => $variant->forceFill([
         'inventory_qty' => 60, 'current_inventory_quantity' => 60,
     ])->save());

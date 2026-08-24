@@ -83,11 +83,10 @@ final class ProcurementSheetSyncService
                     'variant' => $variant,
                     'workflow' => [
                         'ignore' => $this->incomingStock->normalizeBoolean($row[$map['ignore']] ?? null),
-                        ...collect([1, 2, 3])->flatMap(fn (int $phase): array => [
-                            "quantity_on_order_phase_{$phase}" => (int) ($variant->procurementIncomingStock?->{"quantity_on_order_phase_{$phase}"} ?? 0),
-                            "order_id_phase_{$phase}" => $variant->procurementIncomingStock?->{"order_id_phase_{$phase}"},
-                            "eta_date_phase_{$phase}" => $variant->procurementIncomingStock?->{"eta_date_phase_{$phase}"}?->toDateString(),
-                        ])->all(),
+                        'quantity_to_order' => $this->incomingStock->normalizeQuantity(
+                            $row[$map['quantity_to_order']] ?? null,
+                            'quantity_to_order'
+                        ),
                     ],
                     'tab' => $tab,
                     'row' => $offset + 2,
@@ -171,7 +170,7 @@ final class ProcurementSheetSyncService
     }
 
     /** Publish live inventory/order fields without requiring a fresh ML prediction. */
-    public function publishOperational(array $variantIds = []): array
+    public function publishOperational(array $variantIds = [], bool $includeHumanInputs = false): array
     {
         if (! $this->enabled()) {
             return ['rows' => 0, 'tabs' => 0];
@@ -190,9 +189,11 @@ final class ProcurementSheetSyncService
             Log::warning('Skipping duplicate catalog SKUs during operational procurement Sheet publish', ['skus' => $ambiguous->all()]);
             $records = $records->reject(fn (array $record): bool => $ambiguous->contains($record['sku']));
         }
-        $fields = ['current_inventory', 'quantity_on_order_phase_1', 'order_id_phase_1', 'eta_date_phase_1',
-            'quantity_on_order_phase_2', 'order_id_phase_2', 'eta_date_phase_2', 'quantity_on_order_phase_3',
-            'order_id_phase_3', 'eta_date_phase_3', 'total_quantity_on_order', 'projected_inventory_position', 'last_updated'];
+        $fields = ['current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
+            'projected_inventory_position', 'last_updated'];
+        if ($includeHumanInputs) {
+            $fields[] = 'quantity_to_order';
+        }
         $tabs = [[
             'name' => trim((string) config('google_sheets.master_tab', 'master-file')),
             'collection_id' => null,
@@ -286,7 +287,6 @@ final class ProcurementSheetSyncService
     private function formatDateColumns(string $tab, array $map): void
     {
         $this->sheets->formatDateColumns($tab, [
-            $map['eta_date_phase_1'], $map['eta_date_phase_2'], $map['eta_date_phase_3'],
             $map['predicted_runout_date'],
         ], [$map['last_updated']]);
     }

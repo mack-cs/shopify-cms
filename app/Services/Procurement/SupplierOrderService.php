@@ -4,6 +4,8 @@ namespace App\Services\Procurement;
 
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\ChangeLog;
+use App\Models\ProcurementIncomingStock;
 use App\Models\Variant;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -12,7 +14,7 @@ use Illuminate\Validation\ValidationException;
 
 final class SupplierOrderService
 {
-    public function __construct(private readonly SupplierOrderProjectionService $projection) {}
+    public function __construct(private readonly SupplierOrderSummaryService $summary) {}
 
     public function createForVariant(Variant $variant, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms', bool $allowExistingOrder = false): ProcurementSupplierOrderLine
     {
@@ -30,7 +32,6 @@ final class SupplierOrderService
         }
 
         $line = DB::transaction(function () use ($variant, $orderNumber, $quantity, $etaDate, $userId, $source, $allowExistingOrder): ProcurementSupplierOrderLine {
-            $openCount = ProcurementSupplierOrderLine::query()->where('variant_id', $variant->id)->where('status', 'open')->lockForUpdate()->count();
             $order = ProcurementSupplierOrder::query()->where('order_number', $orderNumber)->lockForUpdate()->first();
             if ($order && ! $allowExistingOrder) {
                 throw ValidationException::withMessages(['order_number' => "Order ID {$orderNumber} already exists and cannot be uploaded as a new pending order."]);
@@ -43,17 +44,31 @@ final class SupplierOrderService
             if ($existing) {
                 throw ValidationException::withMessages(['order_number' => 'This order already contains this SKU.']);
             }
-            if ($openCount >= 3) {
-                throw ValidationException::withMessages(['order_number' => 'This SKU already has three outstanding orders. Receive or complete one first.']);
-            }
-
-            return ProcurementSupplierOrderLine::query()->create([
+            $line = ProcurementSupplierOrderLine::query()->create([
                 'supplier_order_id' => $order->id, 'variant_id' => $variant->id,
                 'sku' => strtoupper(trim((string) $variant->sku)), 'quantity_ordered' => (int) $quantity,
                 'eta_date' => $etaDate, 'status' => 'open', 'source' => $source,
             ]);
+            $stock = $variant->procurementIncomingStock()->lockForUpdate()->first();
+            if ($stock && (int) $stock->quantity_to_order > 0) {
+                $previous = (int) $stock->quantity_to_order;
+                $stock->update(['quantity_to_order' => 0]);
+                ChangeLog::query()->create([
+                    'import_id' => $variant->product?->import_id,
+                    'product_id' => $variant->product_id,
+                    'changed_by' => $userId,
+                    'source' => $source.':order-created',
+                    'model_type' => ProcurementIncomingStock::class,
+                    'model_id' => $stock->id,
+                    'field' => 'quantity_to_order',
+                    'old_value' => (string) $previous,
+                    'new_value' => '0',
+                ]);
+            }
+
+            return $line;
         });
-        $this->projection->projectVariant($variant->fresh(['procurementIncomingStock']), $userId, $source);
+        $this->summary->refreshVariant($variant->fresh(['product', 'procurementIncomingStock']), $userId, $source);
 
         return $line;
     }

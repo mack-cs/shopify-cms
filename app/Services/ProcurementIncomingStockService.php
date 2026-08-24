@@ -78,39 +78,18 @@ final class ProcurementIncomingStockService
         }
     }
 
-    /**
-     * @param  array<string,mixed>  $phases
-     */
+    /** @param array<string,mixed> $inputs */
     public function updateFromSheet(
         Variant $variant,
-        array $phases,
+        array $inputs,
         string $sourceSheet,
         ?int $sourceRow = null,
         ?int $changedBy = null,
     ): ProcurementIncomingStock {
-        $values = ['ignore' => $this->normalizeBoolean($phases['ignore'] ?? false)];
-        foreach ([1, 2, 3] as $phase) {
-            $quantity = $this->normalizeQuantity(
-                $phases["quantity_on_order_phase_{$phase}"] ?? null,
-                "quantity_on_order_phase_{$phase}"
-            );
-            $orderId = $this->normalizeOrderId($phases["order_id_phase_{$phase}"] ?? null);
-            $eta = $this->normalizeEtaDate(
-                $phases["eta_date_phase_{$phase}"] ?? null,
-                "eta_date_phase_{$phase}"
-            );
-            $values["quantity_on_order_phase_{$phase}"] = $quantity;
-            $values["order_id_phase_{$phase}"] = $orderId;
-            $values["eta_date_phase_{$phase}"] = $eta;
-            $values["confirmed_quantity_on_order_phase_{$phase}"] =
-                $quantity > 0 && $orderId !== null && $eta !== null ? $quantity : 0;
-        }
-        $values['total_quantity_on_order'] = array_sum(array_map(
-            fn (int $phase): int => $values["quantity_on_order_phase_{$phase}"], [1, 2, 3]
-        ));
-        $values['total_confirmed_quantity_on_order'] = array_sum(array_map(
-            fn (int $phase): int => $values["confirmed_quantity_on_order_phase_{$phase}"], [1, 2, 3]
-        ));
+        $values = [
+            'ignore' => $this->normalizeBoolean($inputs['ignore'] ?? false),
+            'quantity_to_order' => $this->normalizeQuantity($inputs['quantity_to_order'] ?? null, 'quantity_to_order'),
+        ];
         $detectedAt = now();
 
         return DB::transaction(function () use ($variant, $values, $sourceSheet, $sourceRow, $changedBy, $detectedAt): ProcurementIncomingStock {
@@ -124,25 +103,24 @@ final class ProcurementIncomingStockService
                 'quantity_on_order_phase_2' => 0,
                 'quantity_on_order_phase_3' => 0,
                 'total_quantity_on_order' => 0,
+                'total_confirmed_quantity_on_order' => 0,
+                'number_of_wip_orders' => 0,
             ]);
 
-            $workflowFields = array_merge(['ignore'], collect([1, 2, 3])->flatMap(fn (int $phase): array => [
-                "quantity_on_order_phase_{$phase}", "order_id_phase_{$phase}", "eta_date_phase_{$phase}",
-            ])->all());
+            $workflowFields = ['ignore', 'quantity_to_order'];
             $previousWorkflow = collect($workflowFields)->mapWithKeys(
                 fn (string $field): array => [$field => $stock->getAttribute($field)]
             )->all();
             $nextWorkflow = array_intersect_key($values, array_flip($workflowFields));
-            $previous = [1, 2, 3];
-            $previous = array_map(fn (int $phase): int => (int) $stock->getAttribute("quantity_on_order_phase_{$phase}"), $previous);
-            $next = array_map(fn (int $phase): int => $values["quantity_on_order_phase_{$phase}"], [1, 2, 3]);
-            $changed = ! $stock->exists || $this->workflowComparable($previousWorkflow) !== $this->workflowComparable($nextWorkflow);
+            $changed = ! $stock->exists || $this->humanInputComparable($previousWorkflow) !== $this->humanInputComparable($nextWorkflow);
+            $predictionChanged = ! $stock->exists
+                || (bool) ($previousWorkflow['ignore'] ?? false) !== (bool) $nextWorkflow['ignore'];
 
             $stock->forceFill(array_merge($values, [
                 'sku' => strtoupper(trim((string) $variant->sku)),
                 'source_sheet' => $sourceSheet,
                 'detected_at' => $detectedAt,
-                'input_changed_at' => $changed ? $detectedAt : $stock->input_changed_at,
+                'input_changed_at' => $predictionChanged ? $detectedAt : $stock->input_changed_at,
             ]))->save();
 
             if ($changed) {
@@ -150,18 +128,18 @@ final class ProcurementIncomingStockService
                     'procurement_incoming_stock_id' => $stock->id,
                     'sku' => $stock->sku,
                     'source_sheet' => $sourceSheet,
-                    'previous_phase_1' => $previous[0],
-                    'previous_phase_2' => $previous[1],
-                    'previous_phase_3' => $previous[2],
-                    'new_phase_1' => $next[0],
-                    'new_phase_2' => $next[1],
-                    'new_phase_3' => $next[2],
+                    'previous_phase_1' => 0,
+                    'previous_phase_2' => 0,
+                    'previous_phase_3' => 0,
+                    'new_phase_1' => 0,
+                    'new_phase_2' => 0,
+                    'new_phase_3' => 0,
                     'detected_at' => $detectedAt,
                     'metadata' => [
                         'sheet_row' => $sourceRow,
                         'previous_workflow' => $previousWorkflow,
                         'new_workflow' => $nextWorkflow,
-                        'confirmed_total' => $values['total_confirmed_quantity_on_order'],
+                        'order_summary_is_cms_owned' => true,
                     ],
                 ]);
 
@@ -223,12 +201,7 @@ final class ProcurementIncomingStockService
                 ->chunkById(500, function ($variants) use (&$rows, $lockedRun, $now): void {
                     foreach ($variants as $variant) {
                         $stock = $variant->procurementIncomingStock;
-                        $phase1 = (int) ($stock?->quantity_on_order_phase_1 ?? 0);
-                        $phase2 = (int) ($stock?->quantity_on_order_phase_2 ?? 0);
-                        $phase3 = (int) ($stock?->quantity_on_order_phase_3 ?? 0);
-                        $confirmed1 = (int) ($stock?->confirmed_quantity_on_order_phase_1 ?? 0);
-                        $confirmed2 = (int) ($stock?->confirmed_quantity_on_order_phase_2 ?? 0);
-                        $confirmed3 = (int) ($stock?->confirmed_quantity_on_order_phase_3 ?? 0);
+                        $total = (int) ($stock?->total_quantity_on_order ?? 0);
                         $rows[] = [
                             'procurement_prediction_run_id' => $lockedRun->id,
                             'variant_id' => $variant->id,
@@ -236,21 +209,23 @@ final class ProcurementIncomingStockService
                             'shopify_variant_id' => $variant->shopify_id,
                             'sku' => strtoupper(trim((string) $variant->sku)),
                             'ignore' => (bool) ($stock?->ignore ?? false),
-                            'quantity_on_order_phase_1' => $phase1,
-                            'order_id_phase_1' => $stock?->order_id_phase_1,
-                            'eta_date_phase_1' => $stock?->eta_date_phase_1?->toDateString(),
-                            'confirmed_quantity_on_order_phase_1' => $confirmed1,
-                            'quantity_on_order_phase_2' => $phase2,
-                            'order_id_phase_2' => $stock?->order_id_phase_2,
-                            'eta_date_phase_2' => $stock?->eta_date_phase_2?->toDateString(),
-                            'confirmed_quantity_on_order_phase_2' => $confirmed2,
-                            'quantity_on_order_phase_3' => $phase3,
-                            'order_id_phase_3' => $stock?->order_id_phase_3,
-                            'eta_date_phase_3' => $stock?->eta_date_phase_3?->toDateString(),
-                            'confirmed_quantity_on_order_phase_3' => $confirmed3,
-                            'total_quantity_on_order' => $phase1 + $phase2 + $phase3,
-                            'total_confirmed_quantity_on_order' => $confirmed1 + $confirmed2 + $confirmed3,
-                            'procurement_actioned' => ($confirmed1 + $confirmed2 + $confirmed3) > 0,
+                            // Legacy phase fields remain zero during the transition. The
+                            // canonical incoming quantity is derived from CMS order lines.
+                            'quantity_on_order_phase_1' => 0,
+                            'order_id_phase_1' => null,
+                            'eta_date_phase_1' => null,
+                            'confirmed_quantity_on_order_phase_1' => 0,
+                            'quantity_on_order_phase_2' => 0,
+                            'order_id_phase_2' => null,
+                            'eta_date_phase_2' => null,
+                            'confirmed_quantity_on_order_phase_2' => 0,
+                            'quantity_on_order_phase_3' => 0,
+                            'order_id_phase_3' => null,
+                            'eta_date_phase_3' => null,
+                            'confirmed_quantity_on_order_phase_3' => 0,
+                            'total_quantity_on_order' => $total,
+                            'total_confirmed_quantity_on_order' => $total,
+                            'procurement_actioned' => $total > 0,
                             'source_sheet' => $stock?->source_sheet,
                             'source_changed_at' => $stock?->input_changed_at,
                             'created_at' => $now,
@@ -268,10 +243,7 @@ final class ProcurementIncomingStockService
 
             $hashRows = collect($rows)->map(fn (array $row): array => [
                 $row['shopify_variant_id'], $row['sku'], $row['ignore'],
-                $row['quantity_on_order_phase_1'], $row['order_id_phase_1'], $row['eta_date_phase_1'],
-                $row['quantity_on_order_phase_2'], $row['order_id_phase_2'], $row['eta_date_phase_2'],
-                $row['quantity_on_order_phase_3'], $row['order_id_phase_3'], $row['eta_date_phase_3'],
-                $row['total_quantity_on_order'], $row['total_confirmed_quantity_on_order'],
+                $row['total_quantity_on_order'],
             ])->all();
             $lockedRun->forceFill([
                 'incoming_stock_snapshot_at' => $now,
@@ -288,17 +260,10 @@ final class ProcurementIncomingStockService
     }
 
     /** @param array<string,mixed> $values @return array<string,mixed> */
-    private function workflowComparable(array $values): array
+    private function humanInputComparable(array $values): array
     {
-        foreach ([1, 2, 3] as $phase) {
-            $value = $values["eta_date_phase_{$phase}"] ?? null;
-            $values["eta_date_phase_{$phase}"] = $value instanceof \DateTimeInterface
-                ? $value->format('Y-m-d')
-                : ($value === null ? null : substr((string) $value, 0, 10));
-            $values["quantity_on_order_phase_{$phase}"] = (int) ($values["quantity_on_order_phase_{$phase}"] ?? 0);
-            $values["order_id_phase_{$phase}"] = $this->normalizeOrderId($values["order_id_phase_{$phase}"] ?? null);
-        }
         $values['ignore'] = (bool) ($values['ignore'] ?? false);
+        $values['quantity_to_order'] = (int) ($values['quantity_to_order'] ?? 0);
         ksort($values);
 
         return $values;

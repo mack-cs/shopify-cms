@@ -14,6 +14,8 @@ use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\ProductInventoryCsvImporter;
 use Filament\Actions;
 use Filament\Forms\Components\FileUpload;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
@@ -75,6 +77,47 @@ class ListInventories extends ListRecords
                             ->success()->persistent()->send();
                     } catch (Throwable $e) {
                         Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
+                    }
+                }),
+            Actions\Action::make('pasteSupplierOrder')
+                ->label('Paste Purchase Order')->icon('heroicon-o-clipboard-document-list')->color('warning')
+                ->modalWidth(MaxWidth::FiveExtraLarge)
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->modalDescription('Paste tab-separated rows copied from Google Sheets or Excel. Include Item, SKU, Product, Vendor, Qty, Order ID and ETA columns. SKU is authoritative; CMS product and vendor details are used.')
+                ->form([
+                    Textarea::make('pasted_rows')->label('Purchase-order rows')->rows(12)->required(),
+                ])
+                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                    try {
+                        $batch = $csv->previewPastedOrder((string) $data['pasted_rows'], Auth::id());
+                        $notification = Notification::make()
+                            ->title($batch->invalid_count > 0 ? 'Purchase order needs corrections' : 'Purchase order preview ready')
+                            ->body($this->supplierPreviewBody($batch)."\n\nConfirm using Preview ID: {$batch->uuid}")
+                            ->persistent();
+                        $batch->invalid_count > 0 ? $notification->warning() : $notification->success();
+                        $notification->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('Paste preview failed')->body($e->getMessage())->danger()->send();
+                    }
+                }),
+            Actions\Action::make('confirmPastedSupplierOrder')
+                ->label('Confirm Paste')->icon('heroicon-o-check-circle')->color('success')
+                ->modalWidth(MaxWidth::Medium)
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->form([
+                    TextInput::make('batch_uuid')->label('Preview ID')->uuid()->required(),
+                ])
+                ->requiresConfirmation()
+                ->modalDescription('This atomically creates all validated order lines, clears Quantity To Order for their SKUs, and refreshes the Google Sheet summaries.')
+                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                    try {
+                        $batch = $csv->confirm((string) $data['batch_uuid'], Auth::id());
+                        Notification::make()->title('Purchase order created')
+                            ->body("{$batch->valid_count} order line(s) saved successfully.")->success()->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('Purchase order was not created')->body($e->getMessage())->danger()->send();
                     }
                 }),
             Actions\Action::make('checkShopifyInventory')

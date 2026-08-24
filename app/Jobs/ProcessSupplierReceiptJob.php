@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierReceipt;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
-use App\Services\Procurement\SupplierOrderProjectionService;
+use App\Services\Procurement\SupplierOrderSummaryService;
 use App\Services\ProductInventorySyncService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Bus\Queueable;
@@ -25,7 +25,7 @@ class ProcessSupplierReceiptJob implements ShouldQueue
 
     public function __construct(public readonly int $receiptId) {}
 
-    public function handle(ShopifyInventoryAdjustmentService $shopify, ProductInventorySyncService $inventory, SupplierOrderProjectionService $projection, ProcurementSheetSyncService $sheets): void
+    public function handle(ShopifyInventoryAdjustmentService $shopify, ProductInventorySyncService $inventory, SupplierOrderSummaryService $summary, ProcurementSheetSyncService $sheets): void
     {
         $receipt = ProcurementSupplierReceipt::query()->with('line.variant')->findOrFail($this->receiptId);
         if ($receipt->status !== 'succeeded') {
@@ -67,14 +67,18 @@ class ProcessSupplierReceiptJob implements ShouldQueue
 
         try {
             $line = $receipt->line()->with('variant')->firstOrFail();
-            DB::transaction(function () use ($line): void {
+            DB::transaction(function () use ($line, $receipt): void {
                 $locked = ProcurementSupplierOrderLine::query()->lockForUpdate()->findOrFail($line->id);
                 $received = (int) $locked->receipts()->where('status', 'succeeded')->sum('quantity_received');
                 if ($received >= (int) $locked->quantity_ordered) {
-                    $locked->update(['status' => 'completed']);
+                    $locked->update([
+                        'status' => 'completed',
+                        'completed_at' => now(),
+                        'updated_by' => $receipt->created_by,
+                    ]);
                 }
             });
-            $projection->projectVariant(
+            $summary->refreshVariant(
                 $line->variant->fresh(['procurementIncomingStock']),
                 $receipt->created_by,
                 $receipt->source.':receipt',
