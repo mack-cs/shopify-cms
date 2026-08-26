@@ -12,14 +12,12 @@ final class ProcurementSelectionCsvExporter
     public function pendingOrders(Collection $selected): string
     {
         $writer = Writer::createFromString();
-        $writer->insertOne(['Item', 'SKU', 'Product', 'Vendor', 'Quantity Ordered', 'Order ID', 'ETA']);
+        $writer->insertOne(['Item', 'SKU', 'Quantity Ordered', 'Order ID', 'ETA Date']);
         $item = 0;
         foreach ($this->variants($selected) as $variant) {
             $writer->insertOne([
                 ++$item,
                 $variant->sku,
-                $variant->product?->title,
-                $variant->product?->vendor,
                 (int) ($variant->procurementIncomingStock?->quantity_to_order ?? 0) ?: '',
                 '',
                 '',

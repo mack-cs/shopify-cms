@@ -131,6 +131,22 @@ it('matches headers independent of case whitespace and column position', functio
         ->and($headers[$map['sku']])->toBe('SKU');
 });
 
+it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', function (): void {
+    $schema = new ProcurementSheetSchema;
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $values = [$headers, array_fill(0, count($headers), '')];
+    $values[0][] = 'Recommended Order Before Incoming Stock';
+    $values[1][] = 999;
+
+    $upgraded = $schema->upgradeLayout($values);
+    expect($upgraded[0])->toBe($headers)
+        ->and($upgraded[1])->toHaveCount(count($headers));
+
+    $values[0][] = 'Quantity To Order';
+    expect(fn () => $schema->upgradeLayout($values))
+        ->toThrow(RuntimeException::class, 'Duplicate Google Sheet header [Quantity To Order]');
+});
+
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect(array_slice($headers, 4, 5))->toBe([

@@ -82,20 +82,41 @@ final class SupplierOrderCsvService
 
     public function previewPastedOrder(string $contents, ?int $userId = null): ProcurementSupplierImportBatch
     {
+        return $this->previewPasted($contents, 'order', $userId);
+    }
+
+    public function previewPastedReceipt(string $contents, ?int $userId = null): ProcurementSupplierImportBatch
+    {
+        return $this->previewPasted($contents, 'receipt', $userId);
+    }
+
+    private function previewPasted(string $contents, string $type, ?int $userId = null): ProcurementSupplierImportBatch
+    {
         $contents = trim(str_replace("\r\n", "\n", $contents));
         if ($contents === '') {
-            throw ValidationException::withMessages(['pasted_rows' => 'Paste at least one purchase-order row.']);
+            $label = $type === 'order' ? 'purchase-order' : 'received-order';
+            throw ValidationException::withMessages(['pasted_rows' => "Paste at least one {$label} row."]);
         }
         $lines = array_values(array_filter(explode("\n", $contents), fn (string $line): bool => trim($line) !== ''));
         $first = array_map([$this, 'header'], str_getcsv($lines[0], "\t"));
-        $required = ['sku', 'order_id', 'quantity_ordered', 'eta'];
+        $required = $type === 'order'
+            ? ['sku', 'order_id', 'quantity_ordered', 'eta']
+            : ['order_id', 'sku', 'quantity_received'];
         $hasHeader = array_diff($required, $first) === [];
+        $columnCount = count(str_getcsv($lines[0], "\t"));
         $headers = $hasHeader
             ? $first
-            : ['item', 'sku', 'product', 'vendor', 'quantity_ordered', 'order_id', 'eta'];
+            : ($type === 'order'
+                ? match ($columnCount) {
+                    4 => ['sku', 'quantity_ordered', 'order_id', 'eta'],
+                    5 => ['item', 'sku', 'quantity_ordered', 'order_id', 'eta'],
+                    default => ['item', 'sku', 'product', 'vendor', 'quantity_ordered', 'order_id', 'eta'],
+                }
+                : ['order_id', 'sku', 'quantity_received']);
         $dataLines = $hasHeader ? array_slice($lines, 1) : $lines;
         if ($dataLines === []) {
-            throw ValidationException::withMessages(['pasted_rows' => 'The pasted purchase order has no data rows.']);
+            $label = $type === 'order' ? 'purchase order' : 'received order';
+            throw ValidationException::withMessages(['pasted_rows' => "The pasted {$label} has no data rows."]);
         }
 
         $rows = [];
@@ -107,10 +128,12 @@ final class SupplierOrderCsvService
             foreach ($headers as $index => $header) {
                 $row[$header] = trim((string) ($values[$index] ?? ''));
             }
-            $rowErrors = $this->validateRow($row, 'order');
+            $rowErrors = $this->validateRow($row, $type);
             $key = mb_strtoupper((string) ($row['order_id'] ?? '')).'|'.mb_strtoupper((string) ($row['sku'] ?? ''));
             if (isset($seen[$key])) {
-                $rowErrors[] = 'Order ID and SKU are duplicated within the pasted rows';
+                $rowErrors[] = $type === 'order'
+                    ? 'Order ID and SKU are duplicated within the pasted rows'
+                    : 'Order ID and SKU have more than one received row; combine them into one quantity';
             }
             $seen[$key] = true;
             $rowNumber = $offset + ($hasHeader ? 2 : 1);
@@ -123,15 +146,15 @@ final class SupplierOrderCsvService
         }
 
         $hash = hash('sha256', $contents);
-        $existing = ProcurementSupplierImportBatch::query()->where('type', 'order')->where('file_hash', $hash)->first();
+        $existing = ProcurementSupplierImportBatch::query()->where('type', $type)->where('file_hash', $hash)->first();
         if ($existing) {
             return $existing;
         }
 
         return ProcurementSupplierImportBatch::query()->create([
             'uuid' => (string) Str::uuid(),
-            'type' => 'order',
-            'original_filename' => 'pasted-purchase-order.tsv',
+            'type' => $type,
+            'original_filename' => $type === 'order' ? 'pasted-purchase-order.tsv' : 'pasted-received-orders.tsv',
             'file_hash' => $hash,
             'status' => 'previewed',
             'preview_rows' => $rows,

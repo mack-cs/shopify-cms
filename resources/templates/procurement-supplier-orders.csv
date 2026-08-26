@@ -1,2 +1,2 @@
-Item,SKU,Product,Vendor,Quantity Ordered,Order ID,ETA
-1,LRB0004,Example Product,Livi Road,60,PO-1001,25/09/2026
+Item,SKU,Quantity Ordered,Order ID,ETA Date
+1,LRB0004,60,PO-1001,25/09/2026

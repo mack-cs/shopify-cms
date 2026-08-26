@@ -82,7 +82,8 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertSee('Upload Supplier Orders')
         ->assertSee('Upload Receipts')
         ->assertSee('Paste Purchase Order')
-        ->assertSee('Confirm Paste')
+        ->assertSee('Paste Received Orders')
+        ->assertDontSee('Confirm Paste')
         ->assertDontSee('Confirm Supplier Import')
         ->assertDontSee('Import Stock CSV');
 });
@@ -105,6 +106,44 @@ it('filters the inventory table using a pasted SKU list', function (): void {
         ->filterTable('sku_list', ['skus' => "missing-0,\nWANTED-1"])
         ->assertCanSeeTableRecords([$wanted])
         ->assertCanNotSeeTableRecords([$other]);
+});
+
+it('shows active products and initialized drafts but excludes archived and unlisted products', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'inventory-eligibility.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $variant = function (string $status, string $sku, ?int $inventory = null) use ($import): Variant {
+        $product = Product::query()->create([
+            'import_id' => $import->id,
+            'handle' => strtolower($sku),
+            'title' => $sku,
+            'status' => $status,
+        ]);
+
+        return Variant::query()->create([
+            'product_id' => $product->id,
+            'sku' => $sku,
+            'inventory_qty' => $inventory,
+        ]);
+    };
+
+    $active = $variant('active', 'ACTIVE-NO-STOCK');
+    $draftWithoutInventory = $variant('draft', 'DRAFT-NO-STOCK');
+    $draftWithInventory = $variant('draft', 'DRAFT-WITH-STOCK', 0);
+    $archived = $variant('archived', 'ARCHIVED-STOCK', 10);
+    $unlisted = $variant('unlisted', 'UNLISTED-STOCK', 10);
+
+    expect(Variant::query()->inventoryWorkspaceEligible()->pluck('id')->all())
+        ->toContain($active->id, $draftWithInventory->id)
+        ->not->toContain($draftWithoutInventory->id, $archived->id, $unlisted->id);
+
+    $this->actingAs($user);
+    Livewire::test(ListInventories::class)
+        ->assertCanSeeTableRecords([$active, $draftWithInventory])
+        ->assertCanNotSeeTableRecords([$draftWithoutInventory, $archived, $unlisted]);
 });
 
 it('filters products by placed, planned, and multiple WIP order summaries', function (): void {

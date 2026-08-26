@@ -83,18 +83,17 @@ final class GoogleSheetsClient
     /** @param array<int,array<int,mixed>> $rows */
     public function replaceAll(string $tab, array $rows, int $existingRowCount): void
     {
+        $rowsToClear = max(1, $existingRowCount, count($rows));
+        $clear = $this->request()->withBody('{}', 'application/json')->post(
+            $this->valuesUrl($this->range($tab, "A1:AF{$rowsToClear}")).':clear'
+        );
+        $this->ensureSuccess($clear->successful(), $clear->body(), 'clear existing Sheet layout');
+
         if ($rows !== []) {
             $this->batchUpdateValues([[
                 'range' => $this->range($tab, 'A1:AF'.count($rows)),
                 'values' => $rows,
             ]]);
-        }
-        if ($existingRowCount > count($rows)) {
-            $firstStaleRow = count($rows) + 1;
-            $clear = $this->request()->withBody('{}', 'application/json')->post(
-                $this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AF{$existingRowCount}")).':clear'
-            );
-            $this->ensureSuccess($clear->successful(), $clear->body(), 'clear stale schema-upgrade rows');
         }
     }
 

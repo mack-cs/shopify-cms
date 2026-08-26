@@ -76,13 +76,23 @@ final class ProcurementSheetSchema
     {
         $headers = array_shift($values) ?? [];
         $seen = [];
+        $protectedDuplicates = collect(['sku', ...self::HUMAN_OWNED_FIELDS])
+            ->map(fn (string $field): string => $this->normalize(self::FIELDS[$field]))
+            ->flip();
+        $managedHeaders = array_map([$this, 'normalize'], array_values(self::FIELDS));
         foreach ($headers as $index => $header) {
             $key = $this->normalize((string) $header);
             if ($key === '') {
                 continue;
             }
             if (isset($seen[$key])) {
-                throw new \RuntimeException("Duplicate Google Sheet header [{$header}].");
+                if ($protectedDuplicates->has($key) || ! in_array($key, $managedHeaders, true)) {
+                    throw new \RuntimeException("Duplicate Google Sheet header [{$header}].");
+                }
+
+                // Keep the first CMS-owned column. A previous upgrade may have
+                // left a stale managed block beyond the new layout width.
+                continue;
             }
             $seen[$key] = $index;
         }

@@ -61,9 +61,9 @@ class InventoryResource extends Resource
     {
         return $table
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
+                ->inventoryWorkspaceEligible()
                 ->with(['product', 'procurementIncomingStock', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
-                ->whereHas('product', fn (Builder $productQuery): Builder => $productQuery
-                    ->whereRaw('LOWER(COALESCE(status, "")) NOT IN (?, ?)', ['archived', 'unlisted'])))
+            )
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('product.id')

@@ -87,14 +87,53 @@ it('previews pasted tab-separated orders and clears quantity to order after conf
         'quantity_on_order_phase_3' => 0,
     ]);
     $csv = app(SupplierOrderCsvService::class);
-    $batch = $csv->previewPastedOrder("Item\tSKU\tProduct\tVendor\tQty\tOrder ID\tETA Date\n1\tPASTE-1\tWrong text\tWrong vendor\t30\tPO-PASTE\t07/09/2026");
+    $originalTitle = $variant->product->title;
+    $originalVendor = $variant->product->vendor;
+    $batch = $csv->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tPASTE-1\t30\tPO-PASTE\t07/09/2026");
 
     expect($batch->valid_count)->toBe(1)->and($batch->invalid_count)->toBe(0);
     $csv->confirm($batch->uuid);
 
     expect($variant->procurementIncomingStock()->value('quantity_to_order'))->toBe(0)
         ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(30)
-        ->and(ProcurementSupplierOrderLine::query()->where('sku', 'PASTE-1')->count())->toBe(1);
+        ->and(ProcurementSupplierOrderLine::query()->where('sku', 'PASTE-1')->count())->toBe(1)
+        ->and($variant->product->fresh()->title)->toBe($originalTitle)
+        ->and($variant->product->fresh()->vendor)->toBe($originalVendor);
+});
+
+it('previews pasted received orders and stages them for Shopify review', function (): void {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('PASTE-RECEIPT-1');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-PASTE-RECEIPT', 10, '07/09/2026');
+    $csv = app(SupplierOrderCsvService::class);
+
+    $batch = $csv->previewPastedReceipt("Order ID\tSKU\tQuantity Received\nPO-PASTE-RECEIPT\tPASTE-RECEIPT-1\t4");
+
+    expect($batch->type)->toBe('receipt')
+        ->and($batch->valid_count)->toBe(1)
+        ->and($batch->invalid_count)->toBe(0);
+
+    $csv->confirm($batch->uuid, dispatchReceipts: false);
+
+    expect(ProcurementSupplierReceipt::query()->value('status'))->toBe('pending')
+        ->and(ProcurementSupplierReceipt::query()->value('quantity_received'))->toBe(4);
+    Bus::assertNotDispatched(ProcessSupplierReceiptJob::class);
+});
+
+it('rejects invalid pasted received orders without staging any receipts', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('PASTE-RECEIPT-BAD');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-PASTE-BAD', 5, '07/09/2026');
+
+    $batch = app(SupplierOrderCsvService::class)->previewPastedReceipt(
+        "Order ID\tSKU\tQuantity Received\nPO-PASTE-BAD\tPASTE-RECEIPT-BAD\t6"
+    );
+
+    expect($batch->valid_count)->toBe(0)
+        ->and($batch->invalid_count)->toBe(1)
+        ->and($batch->errors['2'])->toContain('quantity exceeds the outstanding order quantity')
+        ->and(ProcurementSupplierReceipt::query()->count())->toBe(0);
 });
 
 it('previews CSV without changing orders and confirms the same file only once', function (): void {
@@ -259,7 +298,7 @@ it('rechecks Order IDs during confirmation to close the preview race window', fu
 
 it('ships separate clean order and receipt CSV templates', function (): void {
     expect(trim((string) file_get_contents(resource_path('templates/procurement-supplier-orders.csv'))))
-        ->toStartWith('Item,SKU,Product,Vendor,Quantity Ordered,Order ID,ETA')
+        ->toStartWith('Item,SKU,Quantity Ordered,Order ID,ETA Date')
         ->and(trim((string) file_get_contents(resource_path('templates/procurement-supplier-receipts.csv'))))
         ->toStartWith('Order ID,SKU,Quantity Received');
 });
