@@ -171,13 +171,80 @@ it('backfills empty draft fields from shopify sync and records warnings for conf
     ]));
 
     $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warnings = collect($seeded->shopifySyncWarnings())->keyBy('field');
 
     expect($seeded->vendor)->toBe('Draft Vendor');
     expect($seeded->type)->toBe('Bracelets');
-    expect($seeded->shopifySyncWarningCount())->toBe(1);
-    expect($seeded->shopifySyncWarnings()[0]['field'])->toBe('vendor');
-    expect($seeded->shopifySyncWarnings()[0]['draft_value'])->toBe('Draft Vendor');
-    expect($seeded->shopifySyncWarnings()[0]['shopify_value'])->toBe('Shopify Vendor');
+    expect($warnings->keys()->all())->toContain('title', 'vendor', 'siblings_collection_name');
+    expect($warnings->get('vendor')['draft_value'])->toBe('Draft Vendor');
+    expect($warnings->get('vendor')['shopify_value'])->toBe('Shopify Vendor');
+});
+
+it('copies populated draft fields into blank product sources without creating conflicts', function (): void {
+    $draftUvp = '<p>A clear promise from the draft.</p>';
+
+    $product = createWorkflowTestProduct([
+        'vendor' => null,
+        'uvp_short_paragraph' => null,
+        'approval_version' => 1,
+    ]);
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            // The row fallback is populated while the Product model column is blank.
+            HeaderStore::UVP_SHORT_PARAGRAPH => $draftUvp,
+            HeaderStore::PRODUCT_MATERIALS => '',
+        ],
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'vendor' => 'Draft Vendor',
+        'uvp_short_paragraph' => $draftUvp,
+        'product_materials' => 'Sterling silver; glass beads',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($product->fresh()->vendor)->toBe('Draft Vendor')
+        ->and($product->fresh()->uvp_short_paragraph)->toBe($draftUvp)
+        ->and($row->fresh()->get(HeaderStore::UVP_SHORT_PARAGRAPH))->toBe($draftUvp)
+        ->and($row->fresh()->get(HeaderStore::PRODUCT_MATERIALS))->toBe('Sterling silver; glass beads')
+        ->and($seeded->shopifySyncWarnings())->toBe([]);
+});
+
+it('does not overwrite populated product sources with differing draft values', function (): void {
+    $product = createWorkflowTestProduct([
+        'vendor' => 'Shopify Vendor',
+        'uvp_short_paragraph' => '<p>Shopify promise.</p>',
+        'approval_version' => 1,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'vendor' => 'Draft Vendor',
+        'uvp_short_paragraph' => '<p>Draft promise.</p>',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+    $warningFields = collect($seeded->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($product->fresh()->vendor)->toBe('Shopify Vendor')
+        ->and($product->fresh()->uvp_short_paragraph)->toBe('<p>Shopify promise.</p>')
+        ->and($warningFields)->toContain('vendor')
+        ->and($warningFields)->toContain('uvp_short_paragraph');
 });
 
 it('records warnings for conflicting draft variant defaults when seeding from the linked product', function (): void {

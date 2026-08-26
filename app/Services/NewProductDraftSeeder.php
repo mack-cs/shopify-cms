@@ -10,8 +10,69 @@ use App\Models\ShopifyRow;
 
 final class NewProductDraftSeeder
 {
+    /**
+     * Draft attributes that can be safely copied into an existing blank product,
+     * variant, Shopify row, or mirrored metafield during reconciliation.
+     *
+     * @var array<int, string>
+     */
+    private const PRODUCT_BACKFILL_ATTRIBUTES = [
+        'title',
+        'body_html',
+        'vendor',
+        'tags',
+        'type',
+        'product_category',
+        'google_product_category',
+        'status',
+        'published',
+        'color_string',
+        'uvp_short_paragraph',
+        'batch',
+        'sku',
+        'variant_price',
+        'variant_compare_at_price',
+        'variant_inventory_qty',
+        'variant_weight',
+        'variant_weight_unit',
+        'material_cost',
+        'jewelry_material',
+        'product_materials',
+        'materials_and_dimensions',
+        'product_design',
+        'metal',
+        'colour_style',
+        'size',
+        'siblings_collection_name',
+        'sibling_collection',
+        'complementary_products',
+        'seo_deindex',
+        'payload',
+    ];
+
+    /** @var array<int, string> */
+    private const PRODUCT_MODEL_BACKFILL_ATTRIBUTES = [
+        'title',
+        'body_html',
+        'vendor',
+        'tags',
+        'type',
+        'product_category',
+        'google_product_category',
+        'status',
+        'published',
+        'color_string',
+        'uvp_short_paragraph',
+        'seo_deindex',
+        'batch',
+    ];
+
     /** @var array<string, int>|null */
     private ?array $productReferenceMap = null;
+
+    public function __construct(
+        private readonly NewProductDraftProductSync $productSync
+    ) {}
 
     /**
      * @return array{created:int, updated:int, skipped:int}
@@ -40,10 +101,25 @@ final class NewProductDraftSeeder
                         continue;
                     }
 
+                    $productBackfills = $this->productBackfillsFromDraft($draft, $data);
                     $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
                     if (! empty($changes)) {
                         $draft->fill($changes)->save();
+                    }
+
+                    $draft = $draft->fresh() ?? $draft;
+                    $productModelBackfilled = $this->backfillBlankProductModelFields($product, $draft);
+
+                    if (! empty($productBackfills)) {
+                        $this->productSync->syncToExistingProduct(
+                            $draft,
+                            ensureApprovalReset: false,
+                            attributes: $productBackfills
+                        );
+                    }
+
+                    if (! empty($changes) || $productModelBackfilled || ! empty($productBackfills)) {
                         $updated++;
                     } else {
                         $skipped++;
@@ -68,10 +144,22 @@ final class NewProductDraftSeeder
             return NewProductDraft::create($data);
         }
 
+        $productBackfills = $this->productBackfillsFromDraft($draft, $data);
         $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
         if (! empty($changes)) {
             $draft->fill($changes)->save();
+        }
+
+        $draft = $draft->fresh() ?? $draft;
+        $this->backfillBlankProductModelFields($product, $draft);
+
+        if (! empty($productBackfills)) {
+            $this->productSync->syncToExistingProduct(
+                $draft,
+                ensureApprovalReset: false,
+                attributes: $productBackfills
+            );
         }
 
         return $draft->fresh() ?? $draft;
@@ -117,6 +205,69 @@ final class NewProductDraftSeeder
         }
 
         return false;
+    }
+
+    /**
+     * Return draft fields whose corresponding imported Shopify value is blank.
+     * Populated Shopify values remain in the normal comparison/warning flow.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, string>
+     */
+    private function productBackfillsFromDraft(NewProductDraft $draft, array $data): array
+    {
+        $backfills = [];
+
+        foreach (self::PRODUCT_BACKFILL_ATTRIBUTES as $attribute) {
+            if (! array_key_exists($attribute, $data)) {
+                continue;
+            }
+
+            $incomingValue = $this->normalizeStoredIncomingValue($attribute, $data[$attribute]);
+            $draftValue = $draft->getAttribute($attribute);
+
+            if ($this->isEmptyValue($draftValue)) {
+                continue;
+            }
+
+            if (! $this->isEmptyValue($incomingValue)
+                && ! $this->isImportedNewProductPlaceholder($draft, $attribute, $incomingValue)) {
+                continue;
+            }
+
+            $backfills[] = $attribute;
+        }
+
+        return $backfills;
+    }
+
+    /**
+     * Fill the actual Product columns independently from row/metafield fallbacks.
+     * This is important for fields such as UVP, whose imported row value may be
+     * available even while the Product column shown in the CMS is still blank.
+     */
+    private function backfillBlankProductModelFields(Product $product, NewProductDraft $draft): bool
+    {
+        $updates = [];
+
+        foreach (self::PRODUCT_MODEL_BACKFILL_ATTRIBUTES as $attribute) {
+            $productValue = $product->getAttribute($attribute);
+            $draftValue = $draft->getAttribute($attribute);
+
+            if (! $this->isEmptyValue($productValue) || $this->isEmptyValue($draftValue)) {
+                continue;
+            }
+
+            $updates[$attribute] = $draftValue;
+        }
+
+        if ($updates === []) {
+            return false;
+        }
+
+        $product->fill($updates)->save();
+
+        return true;
     }
 
     /**
