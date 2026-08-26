@@ -74,6 +74,7 @@ use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductSeoTracker;
+use App\Services\SkuListFilterService;
 use App\Services\ComplementaryProductAuditService;
 use App\Models\Tag;
 use App\Models\Color;
@@ -566,7 +567,10 @@ class ProductResource extends Resource
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                                    $collectionTags = self::collectionTags($state);
+                                    $collectionTags = self::collectionTagsForBundleState(
+                                        $state,
+                                        filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+                                    );
                                     if ($collectionTags === []) {
                                         return;
                                     }
@@ -864,6 +868,26 @@ class ProductResource extends Resource
                             ->helperText('Internal use only.'),
                              Toggle::make('is_bundle')
                                     ->label('Bundle')
+                                    ->reactive()
+                                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                        $collection = self::stateFromGet($get, 'collection_filter');
+                                        $collectionTags = self::collectionTagsForBundleState(
+                                            $collection,
+                                            filter_var($state, FILTER_VALIDATE_BOOLEAN)
+                                        );
+                                        if ($collectionTags === []) {
+                                            return;
+                                        }
+
+                                        $currentTags = self::normalizeTagList(self::stateFromGet($get, 'tags'));
+                                        $collectionPool = self::allCollectionTags();
+                                        $keptTags = array_values(array_filter(
+                                            $currentTags,
+                                            fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                                        ));
+
+                                        $set('tags', array_values(array_unique(array_merge($keptTags, $collectionTags))));
+                                    })
                                     ->helperText('Internal use only'),
                         ])->columnSpanFull(),
 
@@ -1226,6 +1250,22 @@ class ProductResource extends Resource
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
+            Filter::make('sku_list')
+                ->label('SKUs')
+                ->form([
+                    Textarea::make('skus')
+                        ->label('SKUs')
+                        ->rows(4)
+                        ->placeholder("LAP001\nLAP002\nLAP003")
+                        ->helperText('Paste one or more SKUs separated by spaces, commas, semicolons, or new lines.'),
+                ])
+                ->indicateUsing(function (array $data): array {
+                    $count = count(app(SkuListFilterService::class)->parse($data['skus'] ?? null));
+
+                    return $count > 0 ? ["SKUs: {$count} selected"] : [];
+                })
+                ->query(fn (Builder $query, array $data): Builder => app(SkuListFilterService::class)
+                    ->applyToProducts($query, $data['skus'] ?? null)),
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
                 ->indicator('Recently Edited Today')
@@ -1343,6 +1383,18 @@ class ProductResource extends Resource
                 ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                     $deletionQuery->whereIn('status', ['pending', 'processing']);
                 })),
+            SelectFilter::make('batch')
+                ->label('Batch')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('batch')
+                    ->where('batch', '!=', '')
+                    ->distinct()
+                    ->orderByDesc('batch')
+                    ->pluck('batch', 'batch')
+                    ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Batch'))
+                ->searchable()
+                ->preload(),
             Filter::make('updated_at')
                 ->form([
                     DateTimePicker::make('updated_from'),
@@ -2018,10 +2070,17 @@ class ProductResource extends Resource
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $errorCount = $records->filter(fn (Product $record) => $record->has_errors)->count();
+                        $complementaryProducts = app(ComplementaryProductAuditService::class);
+                        $complementaryCount = 0;
                         $approvedCount = 0;
                         $skippedCount = 0;
 
                         foreach ($records as $record) {
+                            if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+                                $complementaryCount++;
+                                continue;
+                            }
+
                             if ($record->has_errors) {
                                 continue;
                             }
@@ -2064,6 +2123,10 @@ class ProductResource extends Resource
                         }
                         if ($errorCount > 0) {
                             $parts[] = "Errors on {$errorCount}; fix before approval.";
+                        }
+                        if ($complementaryCount > 0) {
+                            $minimum = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+                            $parts[] = "Missing at least {$minimum} complementary products on {$complementaryCount}.";
                         }
 
                         self::sendNotification(Notification::make()
@@ -2608,6 +2671,16 @@ class ProductResource extends Resource
 
     public static function approveRecord(Product $record): void
     {
+        $complementaryProducts = app(ComplementaryProductAuditService::class);
+        if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+            self::sendNotification(Notification::make()
+                ->title('Approval blocked')
+                ->body('Select at least ' . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ' complementary products before approval.')
+                ->warning()
+            );
+            return;
+        }
+
         if ($record->has_errors) {
             self::sendNotification(Notification::make()
                 ->title('Approval blocked')
@@ -4240,13 +4313,13 @@ class ProductResource extends Resource
         $tags = self::filterTags($get, $vendor, $type);
         $options = self::dropdownOptionsForHeader($header, $vendor, $type, $tags);
         $known = array_fill_keys(array_map(
-            static fn (string $value): string => strtolower(trim($value)),
+            static fn (string $value): string => DropdownOption::canonicalValue($header, $value),
             array_keys($options)
         ), true);
 
         $invalid = [];
         foreach ($values as $value) {
-            $key = strtolower(trim($value));
+            $key = DropdownOption::canonicalValue($header, $value);
             if ($key === '' || isset($known[$key])) {
                 continue;
             }
@@ -4694,7 +4767,10 @@ class ProductResource extends Resource
     {
         $collection = self::stateFromGet($get, 'collection_filter');
         if ($collection) {
-            $tags = self::collectionTags($collection);
+            $tags = self::collectionTagsForBundleState(
+                $collection,
+                filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+            );
             if (!empty($tags)) {
                 return $tags;
             }
@@ -4713,6 +4789,48 @@ class ProductResource extends Resource
         }
 
         return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function collectionTagsForBundleState(mixed $collection, bool $isBundle): array
+    {
+        $collectionName = is_string($collection) ? trim($collection) : '';
+        if ($collectionName === '') {
+            return [];
+        }
+
+        $tags = self::collectionTags($collectionName);
+        if (!$isBundle && !TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            return $tags;
+        }
+
+        if (TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            $secondary = TagNormalizer::normalizeToken((string) ($tags[1] ?? ''));
+
+            return array_values(array_filter(['bundles', $secondary]));
+        }
+
+        $primary = TagNormalizer::normalizeToken((string) ($tags[0] ?? ''));
+        if ($primary === null) {
+            return $tags;
+        }
+
+        foreach (self::collectionContexts() as $context) {
+            $candidatePrimary = TagNormalizer::normalizeToken((string) ($context['tag_primary'] ?? ''));
+            $candidateSecondary = TagNormalizer::normalizeToken((string) ($context['tag_secondary'] ?? ''));
+
+            if (
+                $candidatePrimary === $primary
+                && $candidateSecondary !== null
+                && TagNormalizer::containsBundleOrStackTag($candidateSecondary)
+            ) {
+                return array_values(array_filter(['bundles', $candidateSecondary]));
+            }
+        }
+
+        return $tags;
     }
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder

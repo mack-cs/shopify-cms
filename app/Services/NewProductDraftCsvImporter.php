@@ -7,7 +7,6 @@ use App\Models\Product;
 use App\Models\Setting;
 use App\Models\StyleProfile;
 use App\Models\Variant;
-use App\Services\NewProductDraftProductSync;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Reader;
@@ -29,7 +28,13 @@ final class NewProductDraftCsvImporter
      *   skipped_duplicate_sku:int,
      *   skipped_reference_validation:int,
      *   resolved_product_references:int,
-     *   unresolved_product_references:int
+     *   unresolved_product_references:int,
+     *   protected_conflict_count:int,
+     *   protected_conflicts:array<int,string>,
+     *   invalid_seo_count:int,
+     *   invalid_seo_rows:int,
+     *   seo_corrections:array<int,string>,
+     *   pricing_batch:?string
      * }
      */
     public function importFromPath(string $absolutePath): array
@@ -41,10 +46,12 @@ final class NewProductDraftCsvImporter
             'draft id' => 'draft_id',
             'new product draft id' => 'draft_id',
             'handle' => 'handle',
+            'batch' => 'batch',
             'shopify id' => 'shopify_id',
             'product shopify id' => 'shopify_id',
             'sku' => 'sku',
             'title' => 'title',
+            'product name' => 'title',
             'description' => 'body_html',
             'description html' => 'body_html',
             'body html' => 'body_html',
@@ -65,6 +72,11 @@ final class NewProductDraftCsvImporter
             'inventory' => 'variant_inventory_qty',
             'inventory available in stock' => 'variant_inventory_qty',
             'variant inventory qty' => 'variant_inventory_qty',
+            'weight' => 'variant_weight',
+            'variant weight' => 'variant_weight',
+            'variant grams' => 'variant_weight',
+            'weight unit' => 'variant_weight_unit',
+            'variant weight unit' => 'variant_weight_unit',
             'variant inventory policy' => 'variant_inventory_policy',
             'variant fulfillment service' => 'variant_fulfillment_service',
             'material cost' => 'material_cost',
@@ -82,10 +94,6 @@ final class NewProductDraftCsvImporter
             'colour style' => 'colour_style',
             'colour style solid multicolor' => 'colour_style',
             'size' => 'size',
-            'siblings' => 'siblings',
-            'siblings add product siblings here' => 'siblings',
-            'siblings handles' => 'siblings',
-            'siblings product handles' => 'siblings',
             'siblings collection name' => 'siblings_collection_name',
             'sibling collection' => 'sibling_collection',
             'uvp short paragraph' => 'uvp_short_paragraph',
@@ -126,6 +134,22 @@ final class NewProductDraftCsvImporter
         $skippedReferenceValidation = 0;
         $resolvedProductReferences = 0;
         $unresolvedProductReferences = 0;
+        $protectedConflicts = [];
+        $invalidSeoCount = 0;
+        $invalidSeoRows = [];
+        $seoCorrections = [];
+        $pricingFields = ['variant_price', 'variant_compare_at_price', 'material_cost'];
+        $pricingImport = false;
+
+        foreach ($csv->getHeader() as $header) {
+            $field = $draftMap[$this->normalizeHeader((string) $header)] ?? null;
+            if (in_array($field, $pricingFields, true)) {
+                $pricingImport = true;
+                break;
+            }
+        }
+
+        $pricingBatch = $pricingImport ? 'pricing_'.now()->format('Y_m_d_His') : null;
 
         DB::transaction(function () use (
             $csv,
@@ -141,7 +165,12 @@ final class NewProductDraftCsvImporter
             &$skippedDuplicateSku,
             &$skippedReferenceValidation,
             &$resolvedProductReferences,
-            &$unresolvedProductReferences
+            &$unresolvedProductReferences,
+            &$protectedConflicts,
+            &$invalidSeoCount,
+            &$invalidSeoRows,
+            &$seoCorrections,
+            $pricingBatch
         ): void {
             foreach ($csv->getRecords() as $row) {
                 $total++;
@@ -153,50 +182,72 @@ final class NewProductDraftCsvImporter
                 foreach ($row as $header => $value) {
                     $normalized = $this->normalizeHeader((string) $header);
                     $value = trim((string) $value);
-                    if ($value === '') {
-                        continue;
-                    }
-
                     $field = $draftMap[$normalized] ?? null;
                     if ($field) {
-                        if ($field === 'material_cost') {
+                        $authoritativeNullable = in_array($field, [
+                            'variant_price',
+                            'variant_compare_at_price',
+                        ], true);
+
+                        if ($value === '' && ! $authoritativeNullable) {
+                            continue;
+                        }
+
+                        if ($field === 'material_cost' && $value !== '') {
                             $value = $this->normalizeNumeric($value);
                         }
-                        $data[$field] = $value;
+                        $data[$field] = $value === '' ? null : $value;
                     } elseif (isset($seoDraftMap[$normalized])) {
+                        if ($value === '') {
+                            continue;
+                        }
                         $seoDraftData[$seoDraftMap[$normalized]] = $value;
                     } else {
+                        if ($value === '') {
+                            continue;
+                        }
                         $payload[$header] = $value;
                     }
                 }
 
-                $draftId = isset($data['draft_id']) ? (int) $data['draft_id'] : null;
+                $data = $this->applyImportedTypeCategoryMapping($data);
+
                 unset($data['draft_id']);
 
                 $handle = $data['handle'] ?? null;
                 $shopifyId = $data['shopify_id'] ?? null;
+                $sku = $data['sku'] ?? null;
 
-                $draft = $this->findDraftForImport($draftId, $handle, $shopifyId);
+                $draft = $this->findDraftForImport($sku, $shopifyId, $handle);
+
+                if ($draft) {
+                    foreach ($this->protectedFieldConflicts($draft, $data) as $conflict) {
+                        $protectedConflicts[] = $conflict;
+                    }
+
+                    unset($data['title'], $data['handle']);
+                    $handle = trim((string) ($draft->handle ?? '')) ?: null;
+
+                    if ($pricingBatch !== null) {
+                        $data['batch'] = $pricingBatch;
+                    }
+                }
 
                 if ($draft && empty($handle)) {
                     $handle = trim((string) ($draft->handle ?? '')) ?: null;
                 }
 
-                if (!$handle && !$draft) {
+                if (! $handle && ! $draft) {
                     $skippedMissingHandle++;
+
                     continue;
                 }
 
                 if ($draft instanceof NewProductDraft && $draft->isPendingApproval()) {
                     $skippedPendingApproval++;
-                    $pendingApprovalHandles[] = trim((string) ($draft->handle ?: $draft->title ?: $draft->shopify_id ?: 'Draft #' . $draft->id));
-                    continue;
-                }
+                    $pendingApprovalHandles[] = trim((string) ($draft->handle ?: $draft->title ?: $draft->shopify_id ?: 'Draft #'.$draft->id));
 
-                if (array_key_exists('siblings', $data)) {
-                    [$data['siblings'], $resolvedCount, $unresolvedCount] = $this->normalizeProductReferenceField($data['siblings']);
-                    $resolvedProductReferences += $resolvedCount;
-                    $unresolvedProductReferences += $unresolvedCount;
+                    continue;
                 }
 
                 if (array_key_exists('complementary_products', $data)) {
@@ -207,20 +258,22 @@ final class NewProductDraftCsvImporter
 
                 if ($this->failsProductReferenceRules($data)) {
                     $skippedReferenceValidation++;
+
                     continue;
                 }
 
-                $sku = $data['sku'] ?? null;
-
                 if ($sku) {
-                    $draftQuery = NewProductDraft::query()->where('sku', $sku);
+                    $normalizedSku = strtolower(trim((string) $sku));
+                    $draftQuery = NewProductDraft::query()
+                        ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalizedSku]);
                     if ($draft) {
                         $draftQuery->whereKeyNot($draft->getKey());
                     } elseif ($handle) {
                         $draftQuery->where('handle', '!=', $handle);
                     }
 
-                    $variantQuery = Variant::query()->where('sku', $sku);
+                    $variantQuery = Variant::query()
+                        ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalizedSku]);
                     $linkedProductId = $draft ? $this->linkedProductId($draft) : null;
                     if ($linkedProductId !== null) {
                         $variantQuery->where('product_id', '!=', $linkedProductId);
@@ -228,8 +281,39 @@ final class NewProductDraftCsvImporter
 
                     if ($draftQuery->exists() || $variantQuery->exists()) {
                         $skippedDuplicateSku++;
+
                         continue;
                     }
+                }
+
+                $seoReference = trim((string) ($sku ?: $handle ?: 'unknown product'));
+                $seoRules = [
+                    'draft_seo_title' => [
+                        'label' => 'SEO title',
+                        'min' => StyleProfile::SEO_TITLE_RECOMMENDED_MIN,
+                        'max' => StyleProfile::SEO_TITLE_RECOMMENDED_MAX,
+                    ],
+                    'draft_seo_description' => [
+                        'label' => 'SEO description',
+                        'min' => StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MIN,
+                        'max' => StyleProfile::SEO_DESCRIPTION_RECOMMENDED_MAX,
+                    ],
+                ];
+
+                foreach ($seoRules as $field => $rule) {
+                    if (! array_key_exists($field, $seoDraftData)) {
+                        continue;
+                    }
+
+                    $length = StyleProfile::trimmedLength($seoDraftData[$field]);
+                    if ($length >= $rule['min'] && $length <= $rule['max']) {
+                        continue;
+                    }
+
+                    unset($seoDraftData[$field]);
+                    $invalidSeoCount++;
+                    $invalidSeoRows[$total] = true;
+                    $seoCorrections[] = 'Row '.($total + 1)." ({$seoReference}): {$rule['label']} is {$length} characters; required {$rule['min']}-{$rule['max']}.";
                 }
 
                 if ($draft) {
@@ -242,7 +326,7 @@ final class NewProductDraftCsvImporter
                         $draft->variant_fulfillment_service = 'manual';
                     }
                     if (empty($data['batch'])) {
-                        $draft->batch = $draft->batch ?? ('batch' . now()->format('Ymd'));
+                        $draft->batch = $draft->batch ?? ('batch'.now()->format('Ymd'));
                     }
                     $draft->payload = $mergedPayload;
                     $draft->save();
@@ -255,7 +339,7 @@ final class NewProductDraftCsvImporter
                     $data['title'] = $data['title'] ?? $handle;
                     $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
                     $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
-                    $data['batch'] = $data['batch'] ?? ('batch' . now()->format('Ymd'));
+                    $data['batch'] = $data['batch'] ?? ('batch'.now()->format('Ymd'));
                     $data['origin'] = $data['origin'] ?? NewProductDraft::ORIGIN_DRAFT_TOOL;
 
                     $draft = NewProductDraft::create($data);
@@ -263,7 +347,7 @@ final class NewProductDraftCsvImporter
                     $created++;
                 }
 
-                if (!empty($seoDraftData) && $handle) {
+                if (! empty($seoDraftData) && $handle) {
                     $product = Product::query()
                         ->where('handle', $handle)
                         ->with('variants')
@@ -311,22 +395,22 @@ final class NewProductDraftCsvImporter
             'skipped_reference_validation' => $skippedReferenceValidation,
             'resolved_product_references' => $resolvedProductReferences,
             'unresolved_product_references' => $unresolvedProductReferences,
+            'protected_conflict_count' => count($protectedConflicts),
+            'protected_conflicts' => array_values(array_unique($protectedConflicts)),
+            'invalid_seo_count' => $invalidSeoCount,
+            'invalid_seo_rows' => count($invalidSeoRows),
+            'seo_corrections' => $seoCorrections,
+            'pricing_batch' => $pricingBatch,
         ];
     }
 
-    private function findDraftForImport(?int $draftId, ?string $handle, ?string $shopifyId): ?NewProductDraft
+    private function findDraftForImport(?string $sku, ?string $shopifyId, ?string $handle): ?NewProductDraft
     {
-        if ($draftId !== null && $draftId > 0) {
-            $draft = NewProductDraft::query()->find($draftId);
-            if ($draft) {
-                return $draft;
-            }
-        }
-
-        $trimmedHandle = trim((string) ($handle ?? ''));
-        if ($trimmedHandle !== '') {
+        $trimmedSku = trim((string) ($sku ?? ''));
+        if ($trimmedSku !== '') {
             $draft = NewProductDraft::query()
-                ->where('handle', $trimmedHandle)
+                ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($trimmedSku)])
+                ->orderBy('id')
                 ->first();
             if ($draft) {
                 return $draft;
@@ -334,13 +418,74 @@ final class NewProductDraftCsvImporter
         }
 
         $trimmedShopifyId = trim((string) ($shopifyId ?? ''));
-        if ($trimmedShopifyId === '') {
+        if ($trimmedShopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $trimmedShopifyId)
+                ->first();
+            if ($draft) {
+                return $draft;
+            }
+        }
+
+        $trimmedHandle = trim((string) ($handle ?? ''));
+        if ($trimmedHandle === '') {
             return null;
         }
 
         return NewProductDraft::query()
-            ->where('shopify_id', $trimmedShopifyId)
+            ->whereRaw('LOWER(TRIM(handle)) = ?', [strtolower($trimmedHandle)])
             ->first();
+    }
+
+    /**
+     * Apply the same dependent selections as the New Product Draft form. An
+     * imported type is treated as the user's selection and therefore drives
+     * the canonical Shopify and Google categories.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function applyImportedTypeCategoryMapping(array $data): array
+    {
+        $type = trim((string) ($data['type'] ?? ''));
+        if ($type === '') {
+            return $data;
+        }
+
+        $mapping = CategoryTypeMap::byType($type);
+        if ($mapping === null) {
+            return $data;
+        }
+
+        $data['type'] = $mapping['type'];
+        $data['product_category'] = $mapping['shopify_taxonomy_gid'] ?? $mapping['category'];
+        $data['google_product_category'] = $mapping['google_product_category'];
+
+        return $data;
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<int, string>
+     */
+    private function protectedFieldConflicts(NewProductDraft $draft, array $data): array
+    {
+        $conflicts = [];
+        $identity = trim((string) ($draft->sku ?: $draft->shopify_id ?: $draft->handle ?: "Draft #{$draft->id}"));
+
+        $incomingTitle = trim((string) ($data['title'] ?? ''));
+        $existingTitle = trim((string) ($draft->title ?? ''));
+        if ($incomingTitle !== '' && $incomingTitle !== $existingTitle) {
+            $conflicts[] = "{$identity}: Product name protected (file: {$incomingTitle}; existing: {$existingTitle})";
+        }
+
+        $incomingHandle = trim((string) ($data['handle'] ?? ''));
+        $existingHandle = trim((string) ($draft->handle ?? ''));
+        if ($incomingHandle !== '' && strcasecmp($incomingHandle, $existingHandle) !== 0) {
+            $conflicts[] = "{$identity}: Handle protected (file: {$incomingHandle}; existing: {$existingHandle})";
+        }
+
+        return $conflicts;
     }
 
     private function linkedProductId(NewProductDraft $draft): ?int
@@ -389,6 +534,7 @@ final class NewProductDraftCsvImporter
                     $resolvedCount++;
                 }
                 $normalizedTokens[] = $resolved;
+
                 continue;
             }
 
@@ -410,6 +556,7 @@ final class NewProductDraftCsvImporter
         $lower = strtolower(trim($header));
         $lower = preg_replace('/[^\\x20-\\x7E]/', '', $lower);
         $lower = preg_replace('/[^a-z0-9]+/', ' ', $lower);
+
         return trim($lower);
     }
 
@@ -422,8 +569,9 @@ final class NewProductDraftCsvImporter
         }
         $parts = explode('.', $normalized);
         if (count($parts) > 2) {
-            $normalized = array_shift($parts) . '.' . implode('', $parts);
+            $normalized = array_shift($parts).'.'.implode('', $parts);
         }
+
         return $normalized;
     }
 
@@ -502,7 +650,7 @@ final class NewProductDraftCsvImporter
                         trim((string) ($product->handle ?? '')),
                     ] as $token) {
                         $normalized = $this->normalizeReferenceToken($token);
-                        if ($normalized !== '' && !isset($lookup[$normalized])) {
+                        if ($normalized !== '' && ! isset($lookup[$normalized])) {
                             $lookup[$normalized] = $shopifyId;
                         }
                     }
@@ -525,17 +673,17 @@ final class NewProductDraftCsvImporter
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     private function failsProductReferenceRules(array $data): bool
     {
-        foreach (['siblings', 'complementary_products'] as $field) {
-            if (!empty($this->invalidProductReferenceStatuses($data[$field] ?? null))) {
+        foreach (['complementary_products'] as $field) {
+            if (! empty($this->invalidProductReferenceStatuses($data[$field] ?? null))) {
                 return true;
             }
         }
 
-        if (!$this->complementaryMinimumEnabled()) {
+        if (! $this->complementaryMinimumEnabled()) {
             return false;
         }
 
@@ -560,7 +708,7 @@ final class NewProductDraftCsvImporter
         $invalid = [];
         foreach ($selected as $shopifyId) {
             $product = $products->get($shopifyId);
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 continue;
             }
 
@@ -586,14 +734,14 @@ final class NewProductDraftCsvImporter
     }
 
     /**
-     * @param array<string, mixed> $data
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $payload
      */
     private function syncImportedDraftToProduct(NewProductDraft $draft, array $data, array $payload): void
     {
         $attributes = array_keys($data);
 
-        if (!empty($payload)) {
+        if (! empty($payload)) {
             $attributes[] = 'payload';
         }
 
@@ -604,9 +752,20 @@ final class NewProductDraftCsvImporter
         }
 
         app(NewProductDraftProductSync::class)->syncToExistingProduct(
-            $draft->fresh(),
+            $draft,
             ensureApprovalReset: true,
             attributes: $attributes
         );
+
+        $attributeLookup = array_flip($attributes);
+        $authoritativeAttributes = array_intersect_key($draft->getAttributes(), $attributeLookup);
+        unset($authoritativeAttributes['payload']);
+
+        if ($authoritativeAttributes !== []) {
+            NewProductDraft::query()
+                ->whereKey($draft->getKey())
+                ->update($authoritativeAttributes);
+            $draft->refresh();
+        }
     }
 }

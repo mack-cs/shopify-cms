@@ -1,6 +1,10 @@
 <?php
 
+use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
+use App\Filament\Pages\ImportShopifyProductImages;
 use App\Filament\Resources\ProductResource;
+use App\Filament\Resources\ShopifyImageImportBatchResource;
 use App\Models\Image;
 use App\Models\ImageAsset;
 use App\Models\Import;
@@ -14,6 +18,7 @@ use App\Services\ShopifyImageImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -203,6 +208,22 @@ it('filters products updated in the latest completed image import batch', functi
     expect($ids)->toContain($latestProduct->id)
         ->not->toContain($olderProduct->id)
         ->not->toContain($failedLatestProduct->id);
+});
+
+it('allows the image import workflow and results only with the assigned permission', function (): void {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $user = User::factory()->create();
+    $user->assignRole(RolesEnum::Admin->value);
+
+    $this->actingAs($user);
+
+    expect(ImportShopifyProductImages::canAccess())->toBeFalse()
+        ->and(ShopifyImageImportBatchResource::canViewAny())->toBeFalse();
+
+    $user->givePermissionTo(PermissionEnum::ShopifyImageImportAccess->value);
+
+    expect(ImportShopifyProductImages::canAccess())->toBeTrue()
+        ->and(ShopifyImageImportBatchResource::canViewAny())->toBeTrue();
 });
 
 function createImageImportProduct(string $sku, array $productOverrides = []): Product

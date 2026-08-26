@@ -2,7 +2,7 @@
 
 namespace App\Filament\Resources;
 
-use App\Enums\RolesEnum;
+use App\Enums\PermissionEnum;
 use App\Filament\Resources\ShopifyImageImportBatchResource\Pages;
 use App\Filament\Resources\ShopifyImageImportBatchResource\RelationManagers\ItemsRelationManager;
 use App\Models\ShopifyImageImportBatch;
@@ -106,12 +106,12 @@ class ShopifyImageImportBatchResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+        return Auth::user()?->can(PermissionEnum::ShopifyImageImportAccess->value) ?? false;
     }
 
     public static function canView($record): bool
     {
-        return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+        return Auth::user()?->can(PermissionEnum::ShopifyImageImportAccess->value) ?? false;
     }
 
     public static function canCreate(): bool

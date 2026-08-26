@@ -10,4 +10,12 @@ return [
     'service_account_json_path' => env('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON_PATH', ''),
     'timeout_seconds' => (int) env('GOOGLE_SHEETS_TIMEOUT_SECONDS', 60),
     'lock_seconds' => (int) env('GOOGLE_SHEETS_LOCK_SECONDS', 14400),
+    'collection_mapping_enabled' => filter_var(
+        env('GOOGLE_SHEETS_COLLECTION_MAPPING_ENABLED', env('GOOGLE_SHEETS_ENABLED', false)),
+        FILTER_VALIDATE_BOOLEAN,
+    ),
+    'collection_mapping_spreadsheet_id' => env('GOOGLE_SHEETS_COLLECTION_MAPPING_SPREADSHEET_ID', ''),
+    'collection_mapping_timeout_seconds' => (int) env('GOOGLE_SHEETS_COLLECTION_MAPPING_TIMEOUT_SECONDS', 30),
+    'collection_mapping_lock_seconds' => (int) env('GOOGLE_SHEETS_COLLECTION_MAPPING_LOCK_SECONDS', 300),
+    'timezone' => env('GOOGLE_SHEETS_TIMEZONE', env('APP_TIMEZONE', 'Africa/Johannesburg')),
 ];

@@ -70,6 +70,8 @@ class UserResource extends Resource
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
                             PermissionEnum::ManagerReportAccess->value,
+                            PermissionEnum::ShopifyImageImportAccess->value,
+                            PermissionEnum::CollectionMappingAccess->value,
                         ])
                         ->get(['id', 'name'])
                         ->mapWithKeys(fn (Permission $permission): array => [
@@ -77,6 +79,8 @@ class UserResource extends Resource
                                 PermissionEnum::InventoryUpdate->value => 'Inventory Update',
                                 PermissionEnum::InventoryStatusUpdate->value => 'Inventory Status Update',
                                 PermissionEnum::ManagerReportAccess->value => 'Is Manager',
+                                PermissionEnum::ShopifyImageImportAccess->value => 'Shopify Image Imports',
+                                PermissionEnum::CollectionMappingAccess->value => 'Collection Mapping Report',
                                 default => $permission->name,
                             },
                         ])
@@ -86,6 +90,8 @@ class UserResource extends Resource
                             PermissionEnum::InventoryUpdate->value,
                             PermissionEnum::InventoryStatusUpdate->value,
                             PermissionEnum::ManagerReportAccess->value,
+                            PermissionEnum::ShopifyImageImportAccess->value,
+                            PermissionEnum::CollectionMappingAccess->value,
                         ])
                         ->get(['id', 'name'])
                         ->mapWithKeys(fn (Permission $permission): array => [
@@ -93,6 +99,8 @@ class UserResource extends Resource
                                 PermissionEnum::InventoryUpdate->value => 'Allows updating tracked inventory and quantity.',
                                 PermissionEnum::InventoryStatusUpdate->value => 'Allows updating product status from inventory.',
                                 PermissionEnum::ManagerReportAccess->value => 'Allows access to the manager movement report, on-demand generation and exports.',
+                                PermissionEnum::ShopifyImageImportAccess->value => 'Allows uploading Shopify product images and viewing successful or failed import results.',
+                                PermissionEnum::CollectionMappingAccess->value => 'Allows access to the collection mapping report, full Shopify refresh, downloads, and Google Sheets exports.',
                                 default => '',
                             },
                         ])

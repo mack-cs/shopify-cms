@@ -200,7 +200,6 @@ class ProductObserver
             $payload['metal'] = $row->get(HeaderStore::PRODUCT_METALS, null);
             $payload['colour_style'] = $row->get(HeaderStore::PATTERN_CATEGORY, null);
             $payload['size'] = $row->get(HeaderStore::SIZE, null);
-            $payload['siblings'] = $row->get(HeaderStore::SIBLINGS, null);
             $payload['sibling_collection'] = $row->get(HeaderStore::SIBLING_COLLECTION, null);
             $payload['uvp_short_paragraph'] = $row->get(HeaderStore::UVP_SHORT_PARAGRAPH, null);
             $payload['complementary_products'] = $row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, null);
@@ -444,7 +443,6 @@ class ProductObserver
             'metal',
             'colour_style',
             'size',
-            'siblings',
             'siblings_collection_name',
             'sibling_collection',
             'uvp_short_paragraph',

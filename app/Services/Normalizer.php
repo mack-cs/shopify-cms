@@ -381,11 +381,12 @@ final class Normalizer
                     'last_shopify_seen_at' => $syncedAt,
                 ];
 
-                if (
-                    $variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED
-                    && $this->variantPayloadDiffers($variant, $payload)
-                ) {
-                    $updates['sync_state'] = Variant::SYNC_STATE_CONFLICT;
+                if ($variant->sync_state !== Variant::SYNC_STATE_LOCAL_DELETED) {
+                    if ($this->variantPayloadDiffers($variant, $payload)) {
+                        $updates['sync_state'] = Variant::SYNC_STATE_CONFLICT;
+                    } elseif ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+                        $updates['sync_state'] = Variant::SYNC_STATE_LOCAL_UPDATED;
+                    }
                 }
 
                 $variant->fill($updates)->save();
@@ -527,6 +528,17 @@ final class Normalizer
     {
         foreach ($payload as $key => $value) {
             if ($key === 'product_id') {
+                continue;
+            }
+
+            // Shopify permits a blank barcode, while outbound sync intentionally
+            // aligns a populated barcode with the SKU. Do not turn that default
+            // into a conflict when the local variant has no barcode of its own.
+            if (
+                $key === 'barcode'
+                && $this->normalizeComparableValue($variant->barcode) === null
+                && $this->normalizeComparableValue($value) === $this->normalizeComparableValue($payload['sku'] ?? null)
+            ) {
                 continue;
             }
 
@@ -1023,6 +1035,17 @@ final class Normalizer
         foreach ($requiredRowFields as $field) {
             $attribute = $field['attribute'];
             $label = $field['label'] ?? $attribute;
+
+            if ($attribute === HeaderStore::COMPLEMENTARY_PRODUCTS) {
+                $complementaryProducts = app(ComplementaryProductAuditService::class);
+                $value = $complementaryProducts->localComplementaryValueForProduct($product);
+                if ($complementaryProducts->referenceCount($value) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) {
+                    $errors[] = "missing:{$label} (minimum " . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ')';
+                }
+
+                continue;
+            }
+
             $rowValue = $primary?->get($attribute, null);
             if ($rowValue === null && $primary) {
                 $rowValue = $this->rowValueInsensitive($primary->data ?? [], $attribute);
@@ -1147,8 +1170,7 @@ final class Normalizer
             foreach ($values as $value) {
                 foreach ($targetContexts as $ctx) {
                     $query = DropdownOption::query()
-                        ->where('header', $header)
-                        ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+                        ->where('header', $header);
 
                     if ($ctx['tag_primary'] !== null) {
                         $query->where('collection_tag_primary', $ctx['tag_primary']);
@@ -1162,7 +1184,11 @@ final class Normalizer
                         $query->whereNull('collection_tag_secondary');
                     }
 
-                    if ($query->exists()) {
+                    $canonical = DropdownOption::canonicalValue($header, $value);
+                    $alreadyExists = $query->get(['value'])->contains(
+                        fn (DropdownOption $option): bool => DropdownOption::canonicalValue($header, $option->value) === $canonical
+                    );
+                    if ($alreadyExists) {
                         continue;
                     }
 
@@ -1188,7 +1214,7 @@ final class Normalizer
 
         $errors = [];
         $collectionContext = $this->resolveCollectionContext($product->tags);
-        $headers = $this->controlledDropdownHeaders();
+        $headers = $this->requiredControlledDropdownHeaders();
 
         foreach ($headers as $header) {
             $raw = $primary->get($header, null);
@@ -1200,39 +1226,32 @@ final class Normalizer
             // No configured options for this header/context means there is no rule
             // to validate against yet, so don't mark inactive.
             $contextQuery = DropdownOption::query()->where('header', $header);
-            if ($collectionContext['tag_primary'] !== null) {
-                $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
-            } else {
-                $contextQuery->whereNull('collection_tag_primary');
+            $isBundleContext = TagNormalizer::containsBundleOrStackTag($collectionContext['tag_secondary']);
+            if (!$isBundleContext) {
+                if ($collectionContext['tag_primary'] !== null) {
+                    $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
+                } else {
+                    $contextQuery->whereNull('collection_tag_primary');
+                }
             }
             if ($collectionContext['tag_secondary'] !== null) {
                 $contextQuery->where('collection_tag_secondary', $collectionContext['tag_secondary']);
             } else {
                 $contextQuery->whereNull('collection_tag_secondary');
             }
-            if (!$contextQuery->exists()) {
+            $contextOptions = $contextQuery->get(['value', 'active']);
+            if ($contextOptions->isEmpty()) {
                 continue;
             }
 
             foreach ($values as $value) {
-                $query = DropdownOption::query()
-                    ->where('header', $header)
-                    ->whereRaw('LOWER(value) = ?', [strtolower($value)]);
+                $canonical = DropdownOption::canonicalValue($header, $value);
+                $isActive = $contextOptions->contains(
+                    fn (DropdownOption $option): bool => $option->active
+                        && DropdownOption::canonicalValue($header, $option->value) === $canonical
+                );
 
-                if ($collectionContext['tag_primary'] !== null) {
-                    $query->where('collection_tag_primary', $collectionContext['tag_primary']);
-                } else {
-                    $query->whereNull('collection_tag_primary');
-                }
-
-                if ($collectionContext['tag_secondary'] !== null) {
-                    $query->where('collection_tag_secondary', $collectionContext['tag_secondary']);
-                } else {
-                    $query->whereNull('collection_tag_secondary');
-                }
-
-                $option = $query->first();
-                if (!$option || !$option->active) {
+                if (! $isActive) {
                     $errors[] = "inactive:dropdown:{$header}:{$value}";
                 }
             }
@@ -1253,6 +1272,33 @@ final class Normalizer
             'Pattern Category (product.metafields.custom.pattern_category)',
             'Product Metals (product.metafields.custom.product_metals)',
         ];
+    }
+
+    private function requiredControlledDropdownHeaders(): array
+    {
+        $headers = $this->controlledDropdownHeaders();
+
+        if (!RequiredField::query()->exists()) {
+            return $headers;
+        }
+
+        $required = RequiredField::query()
+            ->where('required', true)
+            ->get(['source', 'attribute']);
+
+        return array_values(array_filter($headers, function (string $header) use ($required): bool {
+            if ($header === HeaderStore::COLOR_METAFIELD) {
+                return $required->contains(
+                    fn (RequiredField $field): bool => $field->source === 'product'
+                        && in_array($field->attribute, ['color', 'color_string', $header], true)
+                );
+            }
+
+            return $required->contains(
+                fn (RequiredField $field): bool => $field->source === 'row'
+                    && $field->attribute === $header
+            );
+        }));
     }
 
     /**
@@ -1282,6 +1328,12 @@ final class Normalizer
             return $this->parseColorTokens($value);
         }
 
+        // This is a single descriptive dropdown value. Commas, semicolons and
+        // line breaks may be part of the text and must not create false values.
+        if ($header === HeaderStore::MATERIALS_AND_DIMENSIONS) {
+            return [$value];
+        }
+
         $normalized = str_replace(',', ';', $value);
         $parts = array_map('trim', explode(';', $normalized));
         return array_values(array_filter($parts, fn (string $part) => $part !== ''));
@@ -1299,15 +1351,35 @@ final class Normalizer
         }
 
         $knownContexts = app(DropdownCollectionCatalog::class)->contexts();
+        $tokenSet = array_map('strtolower', $tokens);
         foreach ($knownContexts as $ctx) {
             $primary = strtolower((string) ($ctx['tag_primary'] ?? ''));
             $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
-            $tokenSet = array_map('strtolower', $tokens);
 
             if ($primary === '' || !in_array($primary, $tokenSet, true)) {
                 continue;
             }
             if ($secondary !== '' && !in_array($secondary, $tokenSet, true)) {
+                continue;
+            }
+
+            return [
+                'collection_style' => $ctx['collection_style'],
+                'tag_primary' => $ctx['tag_primary'],
+                'tag_secondary' => $ctx['tag_secondary'],
+            ];
+        }
+
+        // Bundle product tags deliberately keep the bundle marker and the specific
+        // bundle collection tag, but may omit the parent collection tag. A unique
+        // bundle/stack secondary tag is sufficient to recover the approved context.
+        foreach ($knownContexts as $ctx) {
+            $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
+            if (
+                $secondary === ''
+                || !in_array($secondary, $tokenSet, true)
+                || !TagNormalizer::containsBundleOrStackTag($secondary)
+            ) {
                 continue;
             }
 
@@ -1330,7 +1402,7 @@ final class Normalizer
     private function requiredDefinitions(): array
     {
         $required = RequiredField::query()->where('required', true)->get();
-        if ($required->isEmpty()) {
+        if ($required->isEmpty() && !RequiredField::query()->exists()) {
             $fallbackProduct = [];
             foreach (config('product_error_rules.product_fields', []) as $attribute) {
                 $fallbackProduct[] = ['attribute' => $attribute, 'label' => $attribute];
@@ -1401,7 +1473,11 @@ final class Normalizer
     {
         return match ($this->normalizeKey($attribute)) {
             'sku', 'variant_sku' => $variant->sku,
-            'barcode', 'variant_barcode' => $variant->barcode,
+            // Barcode is intentionally the same identifier as SKU. Older Shopify
+            // imports may have a blank barcode even though the SKU is present, so
+            // treat the SKU as the canonical fallback instead of reporting a
+            // false required-field error.
+            'barcode', 'variant_barcode' => $this->normalizeValue($variant->barcode) ?? $variant->sku,
             'price', 'variant_price' => $variant->price,
             'compare_at_price', 'variant_compare_at_price' => $variant->compare_at_price,
             'option1_name' => $variant->option1_name,
