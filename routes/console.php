@@ -24,6 +24,7 @@ use App\Services\GoogleSearchConsoleClient;
 use App\Services\SearchConsoleCsvImporter;
 use App\Services\SearchConsoleMetricImportService;
 use App\Services\DuplicateSkuReminderService;
+use App\Services\MaintenanceTaskNotificationService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -339,13 +340,57 @@ Artisan::command('slack:assignment-complete {assignment_id}', function (string $
     return self::SUCCESS;
 })->purpose('Mark a Slack assignment completed so reminders stop including it.');
 
-foreach (config('services.slack.reminder_times', []) as $time) {
-    Schedule::command('slack:pending-work-reminder')
-        ->dailyAt($time)
-        ->timezone(config('services.slack.reminder_timezone', 'Africa/Johannesburg'))
-        ->withoutOverlapping()
-        ->name('slack-pending-work-reminder-' . str_replace(':', '', (string) $time));
-}
+Artisan::command('notifications:send-daily-task-reminders', function (MaintenanceTaskNotificationService $notifications): int {
+    $result = $notifications->sendDailySlackReminders();
+
+    $this->info(
+        "Daily task reminders complete: {$result['missing_alt']} missing-alt products; "
+        . "{$result['url_404']} URLs returning 404; {$result['slack_messages']} Slack messages sent."
+    );
+
+    return self::SUCCESS;
+})->purpose('Send one focused daily Slack reminder directly to each maintenance task owner.');
+
+Artisan::command('notifications:send-weekly-complementary-report', function (ComplementaryProductMaintenanceService $maintenance): int {
+    $result = $maintenance->sendWeeklyReport();
+
+    $this->info("Weekly complementary report complete: {$result['flagged']} flagged; {$result['notified']} emailed.");
+
+    return self::SUCCESS;
+})->purpose('Email the weekly complementary-products action report to Leanne and copy the administrators.');
+
+Artisan::command('notifications:send-monthly-maintenance-reports', function (MaintenanceTaskNotificationService $notifications): int {
+    $result = $notifications->sendMonthlyReports();
+
+    $this->info(
+        "Monthly maintenance emails complete: {$result['missing_alt']} missing-alt products for Nicky; "
+        . "{$result['url_404']} 404 URLs for Mack and Freddy. The same-time daily task run sends each owner one Slack reminder."
+    );
+
+    return self::SUCCESS;
+})->purpose('Email monthly owner reports: missing alt text to Nicky and 404-only URLs to Mack and Freddy.');
+
+Schedule::command('notifications:send-daily-task-reminders')
+    ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))
+    ->timezone((string) config('services.slack.task_reminder_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-owner-task-reminders');
+
+Schedule::command('notifications:send-weekly-complementary-report')
+    ->fridays()
+    ->at((string) config('services.slack.maintenance_report_time', '09:00'))
+    ->timezone((string) config('services.slack.maintenance_report_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('weekly-complementary-products-email');
+
+Schedule::command('notifications:send-monthly-maintenance-reports')
+    ->monthlyOn(1, (string) config('services.slack.maintenance_report_time', '09:00'))
+    ->timezone((string) config('services.slack.maintenance_report_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('monthly-maintenance-owner-emails');
 
 Artisan::command('sku:audit-duplicates', function (DuplicateSkuReminderService $reminders): int {
     $result = $reminders->sendDailyReminder();

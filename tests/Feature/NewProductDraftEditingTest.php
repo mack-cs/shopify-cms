@@ -158,8 +158,8 @@ it('replaces stale bundle tags immediately when collection selection changes', f
     );
 
     expect($tags)
-        ->toContain('elevated-basics', 'elevated-basics-bracelets', 'elevated-basics-new-in')
-        ->not->toContain('bundles', 'elevated-basics-bundles', 'elevated-basics-bracelet-stacks-new-in');
+        ->toContain('all-products', 'all-products-collections', 'elevated-basics', 'elevated-basics-bracelets', 'elevated-basics-new-in')
+        ->not->toContain('all-products-collection', 'bundles', 'elevated-basics-bundles', 'elevated-basics-bracelet-stacks-new-in');
 });
 
 it('infers type and category fields from the selected collection', function (): void {

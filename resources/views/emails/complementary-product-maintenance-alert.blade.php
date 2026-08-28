@@ -1,4 +1,4 @@
-<p>The daily complementary products audit found products that still need attention. This audit is read-only and does not sync anything back to Shopify.</p>
+<p>The weekly complementary products audit found products that still need attention. This audit is read-only and does not sync anything back to Shopify.</p>
 
 <table cellpadding="8" cellspacing="0" border="1" style="border-collapse: collapse;">
     <thead>

@@ -408,6 +408,47 @@ it('hides existing boolean casing sync warnings', function (): void {
         ->and($draft->shopifySyncWarningCount())->toBe(0);
 });
 
+it('does not flag a tag conflict when shopify returns the same tags in a different order', function (): void {
+    $product = createWorkflowTestProduct([
+        'tags' => 'all-products, all-products-collection, bundles, exclude-from-the-sale, new-arrivals, new-in, newbies, pata-pata-bracelet-stacks-new-in, pata-pata-bundles',
+        'approval_version' => 1,
+    ]);
+
+    $draftTags = 'all-products, all-products-collection, bundles, pata-pata-bundles, new-arrivals, new-in, newbies, pata-pata-bracelet-stacks-new-in, exclude-from-the-sale';
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'tags' => $draftTags,
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
+
+    expect($seeded->tags)->toBe($draftTags)
+        ->and(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('tags');
+});
+
+it('hides an already stored tag warning when only tag order differs', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => 'reordered-tag-warning',
+        'title' => 'Reordered Tag Warning',
+        'tags' => 'new-in, all-products, bundles',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'shopify_sync_warnings' => [[
+            'field' => 'tags',
+            'label' => 'Tags',
+            'draft_value' => 'new-in, all-products, bundles',
+            'shopify_value' => 'all-products, bundles, new-in',
+        ]],
+    ]));
+
+    expect($draft->shopifySyncWarnings())->toBe([])
+        ->and($draft->shopifySyncWarningCount())->toBe(0);
+});
+
 it('does not flag uvp short paragraph conflicts when only rich text formatting and punctuation differ', function (): void {
     $product = createWorkflowTestProduct([
         'uvp_short_paragraph' => '<p><strong>A Night in Barcelona</strong> is vibrant playful sophistication. For women who embody <strong>passion</strong>, <strong>confidence</strong>, and radiant <strong>allure</strong>.</p>',

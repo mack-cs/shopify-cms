@@ -47,8 +47,10 @@ class NewProductDraft extends Model
 
     private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
 
+    private const LEGACY_ALL_PRODUCTS_TAG = 'all-products-collection';
+
     private const DEFAULT_NEW_PRODUCT_TAGS = [
-        'all-products-collection',
+        'all-products-collections',
         'all-products',
     ];
 
@@ -245,6 +247,10 @@ class NewProductDraft extends Model
         $tags = self::normalizeBundleCollectionTags(
             TagNormalizer::parseTokens((string) ($this->attributes['tags'] ?? ''))
         );
+        $tags = array_values(array_filter(
+            $tags,
+            fn (string $tag): bool => $tag !== self::LEGACY_ALL_PRODUCTS_TAG
+        ));
         $isOnSale = self::booleanAttributeValue($this->attributes['is_on_sale'] ?? false)
             || in_array(self::SALE_TAG, $tags, true);
 
@@ -688,6 +694,7 @@ class NewProductDraft extends Model
         $string = trim((string) $value);
 
         return match ($field) {
+            'tags' => TagNormalizer::normalizeForComparison($string),
             'published',
             'seo_deindex',
             'is_on_sale' => static::normalizeBooleanShopifySyncWarningValue($string),

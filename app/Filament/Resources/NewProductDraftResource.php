@@ -104,8 +104,9 @@ class NewProductDraftResource extends Resource
     private static ?array $siblingCollectionLookupCache = null;
     private const SALE_TAG = 'sale';
     private const EXCLUDE_FROM_SALE_TAG = 'exclude-from-the-sale';
+    private const LEGACY_ALL_PRODUCTS_TAG = 'all-products-collection';
     private const DEFAULT_NEW_PRODUCT_TAGS = [
-        'all-products-collection',
+        'all-products-collections',
         'all-products',
     ];
     private const PRODUCT_TYPE_TAGS = [
@@ -2279,6 +2280,10 @@ class NewProductDraftResource extends Resource
     private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale): array
     {
         $tags = self::normalizeBundleCollectionTags($tags);
+        $tags = array_values(array_filter(
+            $tags,
+            fn (string $tag): bool => $tag !== self::LEGACY_ALL_PRODUCTS_TAG
+        ));
         $typeTag = self::isBundleOrStackState($type, $tags)
             ? 'bundles'
             : self::defaultTagForProductType($type);

@@ -723,6 +723,7 @@ final class NewProductDraftSeeder
         return match ($field) {
             'body_html' => $this->normalizeRichTextForComparison($string),
             'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
+            'tags' => TagNormalizer::normalizeForComparison($string),
             'product_category' => strtolower($this->normalizeCategoryDisplayValue($string)),
             'sibling_collection' => strtolower($this->normalizeSiblingCollectionDisplayValue($string)),
             'variant_price',

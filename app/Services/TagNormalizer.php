@@ -69,6 +69,14 @@ final class TagNormalizer
         return $tokens;
     }
 
+    public static function normalizeForComparison(?string $value): string
+    {
+        $tokens = self::parseTokens($value);
+        sort($tokens, SORT_STRING);
+
+        return implode("\n", $tokens);
+    }
+
     public static function normalizeToken(string $value): ?string
     {
         $trimmed = trim($value);

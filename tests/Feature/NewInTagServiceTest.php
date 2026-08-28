@@ -77,7 +77,7 @@ it('automatically adds collection-aware new in tags when normal products and sta
 
     expect($normalTags)->toContain(
         'all-products',
-        'all-products-collection',
+        'all-products-collections',
         'exclude-from-the-sale',
         'new-arrivals',
         'new-in',
@@ -86,7 +86,7 @@ it('automatically adds collection-aware new in tags when normal products and sta
     )->and($normalTags)->not->toContain('pata-pata-bracelet-stacks-new-in')
         ->and($stackTags)->toContain(
             'all-products',
-            'all-products-collection',
+            'all-products-collections',
             'exclude-from-the-sale',
             'new-arrivals',
             'new-in',
