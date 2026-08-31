@@ -2,7 +2,7 @@
 
 ## Behaviour
 
-When Shopify creates or updates a successful fulfillment, the CMS inspects only the line-item quantity in that fulfillment. Normal products are ignored. For a Stack line, every configured component quantity is multiplied by the fulfilled Stack quantity and deducted from Shopify `available` inventory at the fulfillment location.
+When Shopify creates or updates a successful fulfillment, the CMS inspects only the line-item quantity in that fulfillment. Normal products are ignored. Products identified by a `bundle`, `bundles`, `stack`, or `stacks` tag, the local `is_bundle` flag, or an existing Stack draft are treated as Stacks. A Stack with no known configured components is a safe no-op. For a configured Stack line, every component quantity is multiplied by the fulfilled Stack quantity and deducted from Shopify `available` inventory at the fulfillment location.
 
 Example: if a Stack contains X x1 and Y x2, fulfilling two Stacks deducts X x2 and Y x4.
 
@@ -10,7 +10,7 @@ Partial fulfillments are independent because each Shopify fulfillment has its ow
 
 ## Stack configuration
 
-Stack associations remain on `NewProductDraft::bundle_product_ids` for compatibility. `bundle_component_quantities` stores rows containing `product_id` and `quantity`; old associations automatically behave as quantity 1.
+Stack associations on `NewProductDraft::bundle_product_ids` are the authority for both fulfillment deductions and Stack sellability. `bundle_component_quantities` only supplies the quantity for an associated product; an orphan quantity row cannot authorize a deduction. Old associations automatically behave as quantity 1.
 
 The New Product draft editor shows **Component quantities per Stack** after associated products are selected. The Stack association CSV importer counts a repeated component SKU as another required unit, and the exporter repeats components according to their configured quantity.
 

@@ -78,6 +78,80 @@ it('deducts component quantities for partial fulfillment exactly once', function
         ->and(ShopifyStackComponentDeduction::query()->count())->toBe(2);
 });
 
+it('leaves ordinary products and unconfigured Stacks to their existing inventory flow', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'non-stack-fulfillment-test.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+    ]);
+
+    foreach ([
+        ['variant_id' => 9201, 'shopify_product_id' => 5201, 'sku' => 'NORMAL-A', 'tags' => 'bracelets', 'is_bundle' => false],
+        ['variant_id' => 9202, 'shopify_product_id' => 5202, 'sku' => 'STACK-UNKNOWN', 'tags' => 'stacks', 'is_bundle' => false],
+        ['variant_id' => 9203, 'shopify_product_id' => 5203, 'sku' => 'BUNDLE-UNKNOWN', 'tags' => null, 'is_bundle' => true],
+        ['variant_id' => 9204, 'shopify_product_id' => 5204, 'sku' => 'STACK-ORPHAN-QUANTITY', 'tags' => 'stack', 'is_bundle' => true],
+    ] as $index => $record) {
+        $product = Product::withoutEvents(fn (): Product => Product::create([
+            'import_id' => $import->id,
+            'shopify_id' => "gid://shopify/Product/{$record['shopify_product_id']}",
+            'handle' => strtolower($record['sku']),
+            'title' => $record['sku'],
+            'tags' => $record['tags'],
+            'status' => 'active',
+            'is_bundle' => $record['is_bundle'],
+            'approval_version' => 1,
+        ]));
+        Variant::withoutEvents(fn (): Variant => Variant::create([
+            'product_id' => $product->id,
+            'shopify_id' => "gid://shopify/ProductVariant/{$record['variant_id']}",
+            'sku' => $record['sku'],
+            'sync_state' => Variant::SYNC_STATE_SYNCED,
+        ]));
+
+        if ($record['sku'] === 'STACK-ORPHAN-QUANTITY') {
+            $orphan = fulfillmentComponent($import, 5301, 9301, 'ORPHAN-COMPONENT');
+            NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+                'shopify_id' => $product->shopify_id,
+                'handle' => $product->handle,
+                'sku' => $record['sku'],
+                'title' => $record['sku'],
+                'tags' => 'stack',
+                'status' => 'active',
+                'bundle_product_ids' => [],
+                'bundle_component_quantities' => [
+                    ['product_id' => $orphan['product']->id, 'quantity' => 2],
+                ],
+                'approval_version' => 1,
+                'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+            ]));
+        }
+
+        $payload = stackFulfillmentPayload(7100 + $index, 8100 + $index, $record['variant_id'], 1);
+        $payload['line_items'][0]['product_id'] = $record['shopify_product_id'];
+        $payload['line_items'][0]['sku'] = $record['sku'];
+
+        $fulfillment = ShopifyFulfillment::create([
+            'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/'.(7100 + $index),
+            'shopify_order_id' => (string) (8100 + $index),
+            'shopify_location_id' => '6001',
+            'shopify_status' => 'success',
+            'payload' => $payload,
+        ]);
+
+        $inventory = Mockery::mock(ShopifyInventoryAdjustmentService::class);
+        $inventory->shouldNotReceive('decreaseAvailable');
+        $summary = (new StackFulfillmentInventoryService($inventory))->process($fulfillment);
+
+        expect($summary['deductions'])->toBe(0)
+            ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
+    }
+
+    expect(ShopifyStackComponentDeduction::query()->count())->toBe(0);
+});
+
 it('deducts only the quantity in each partial fulfillment', function (): void {
     createFulfillmentStackRecords();
     $inventory = Mockery::mock(ShopifyInventoryAdjustmentService::class);

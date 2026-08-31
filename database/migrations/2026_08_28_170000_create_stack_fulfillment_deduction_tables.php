@@ -16,7 +16,9 @@ return new class extends Migration
             $table->id();
             $table->string('shopify_fulfillment_id', 128)->unique();
             $table->string('shopify_order_id', 128)->index();
-            $table->foreignId('shopify_order_db_id')->nullable()->constrained('shopify_orders')->nullOnDelete();
+            $table->foreignId('shopify_order_db_id')->nullable();
+            $table->foreign('shopify_order_db_id', 'sf_order_db_fk')
+                ->references('id')->on('shopify_orders')->nullOnDelete();
             $table->string('shopify_location_id', 128)->nullable()->index();
             $table->string('shopify_status', 32)->nullable()->index();
             $table->string('webhook_id', 128)->nullable()->index();
@@ -32,23 +34,33 @@ return new class extends Migration
 
         Schema::create('shopify_stack_component_deductions', function (Blueprint $table): void {
             $table->id();
-            $table->foreignId('shopify_fulfillment_id')->constrained('shopify_fulfillments')->cascadeOnDelete();
+            $table->foreignId('shopify_fulfillment_id');
+            $table->foreign('shopify_fulfillment_id', 'sscd_fulfillment_fk')
+                ->references('id')->on('shopify_fulfillments')->cascadeOnDelete();
             $table->string('shopify_fulfillment_line_item_id', 128);
-            $table->string('shopify_order_id', 128)->index();
-            $table->string('shopify_stack_variant_id', 128)->index();
-            $table->foreignId('stack_product_id')->nullable()->constrained('products')->nullOnDelete();
-            $table->foreignId('stack_variant_id')->nullable()->constrained('variants')->nullOnDelete();
+            $table->string('shopify_order_id', 128)->index('sscd_order_idx');
+            $table->string('shopify_stack_variant_id', 128)->index('sscd_stack_variant_idx');
+            $table->foreignId('stack_product_id')->nullable();
+            $table->foreign('stack_product_id', 'sscd_stack_product_fk')
+                ->references('id')->on('products')->nullOnDelete();
+            $table->foreignId('stack_variant_id')->nullable();
+            $table->foreign('stack_variant_id', 'sscd_stack_variant_fk')
+                ->references('id')->on('variants')->nullOnDelete();
             $table->unsignedInteger('stack_quantity_fulfilled');
             $table->unsignedBigInteger('configured_component_product_id');
-            $table->foreignId('component_product_id')->nullable()->constrained('products')->nullOnDelete();
-            $table->foreignId('component_variant_id')->nullable()->constrained('variants')->nullOnDelete();
+            $table->foreignId('component_product_id')->nullable();
+            $table->foreign('component_product_id', 'sscd_component_product_fk')
+                ->references('id')->on('products')->nullOnDelete();
+            $table->foreignId('component_variant_id')->nullable();
+            $table->foreign('component_variant_id', 'sscd_component_variant_fk')
+                ->references('id')->on('variants')->nullOnDelete();
             $table->string('shopify_component_variant_id', 128)->nullable();
-            $table->string('shopify_inventory_item_id', 128)->nullable()->index();
-            $table->string('shopify_location_id', 128)->nullable()->index();
+            $table->string('shopify_inventory_item_id', 128)->nullable()->index('sscd_inventory_item_idx');
+            $table->string('shopify_location_id', 128)->nullable()->index('sscd_location_idx');
             $table->unsignedInteger('component_quantity_per_stack');
             $table->unsignedInteger('quantity_deducted');
-            $table->uuid('idempotency_key')->unique();
-            $table->string('status', 32)->default('pending')->index();
+            $table->uuid('idempotency_key')->unique('sscd_idempotency_unique');
+            $table->string('status', 32)->default('pending')->index('sscd_status_idx');
             $table->unsignedInteger('attempts')->default(0);
             $table->json('shopify_response')->nullable();
             $table->text('error_message')->nullable();

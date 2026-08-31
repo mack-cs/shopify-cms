@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\ShopifyFulfillment;
 use App\Models\ShopifyStackComponentDeduction;
 use App\Models\Variant;
+use App\Services\TagNormalizer;
 use Illuminate\Support\Str;
 
 final class StackFulfillmentInventoryService
@@ -47,22 +48,20 @@ final class StackFulfillmentInventoryService
             }
 
             $draft = $this->findStackDraft($stackVariant, $lineItem);
-            $isStack = (bool) $stackVariant->product->is_bundle || $draft instanceof NewProductDraft;
+            $isStack = (bool) $stackVariant->product->is_bundle
+                || TagNormalizer::containsBundleOrStackTag($stackVariant->product->tags)
+                || $draft instanceof NewProductDraft;
             if (! $isStack) {
                 continue;
             }
 
             $summary['stack_lines']++;
             if (! $draft instanceof NewProductDraft) {
-                $errors[] = "Stack variant {$stackVariant->shopify_id} has no linked Stack draft configuration.";
-
                 continue;
             }
 
             $components = $this->componentConfiguration($draft);
             if ($components === []) {
-                $errors[] = "Stack draft {$draft->id} has no configured components.";
-
                 continue;
             }
 
@@ -260,7 +259,7 @@ final class StackFulfillmentInventoryService
     /** @return array<int, int> */
     private function componentConfiguration(NewProductDraft $draft): array
     {
-        $configured = collect((array) $draft->bundle_component_quantities)
+        $quantities = collect((array) $draft->bundle_component_quantities)
             ->mapWithKeys(function (mixed $row): array {
                 if (! is_array($row)) {
                     return [];
@@ -272,10 +271,11 @@ final class StackFulfillmentInventoryService
             })
             ->all();
 
+        $configured = [];
         foreach ((array) $draft->bundle_product_ids as $productId) {
             $productId = (int) $productId;
-            if ($productId > 0 && ! isset($configured[$productId])) {
-                $configured[$productId] = 1;
+            if ($productId > 0) {
+                $configured[$productId] = (int) ($quantities[$productId] ?? 1);
             }
         }
 
