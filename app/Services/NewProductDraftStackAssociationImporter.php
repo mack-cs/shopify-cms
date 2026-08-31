@@ -66,7 +66,7 @@ final class NewProductDraftStackAssociationImporter
 
                 $componentSkus = $this->componentSkus($data);
                 $productIds = [];
-                $seen = [];
+                $quantities = [];
 
                 foreach ($componentSkus as $componentSku) {
                     $skipReason = 'component_skus_not_found';
@@ -77,12 +77,12 @@ final class NewProductDraftStackAssociationImporter
                         continue;
                     }
 
-                    if (isset($seen[$productId])) {
-                        continue;
+                    if (!isset($quantities[$productId])) {
+                        $productIds[] = $productId;
+                        $quantities[$productId] = 0;
                     }
 
-                    $seen[$productId] = true;
-                    $productIds[] = $productId;
+                    $quantities[$productId]++;
                     $result['component_skus_resolved']++;
                 }
 
@@ -93,13 +93,23 @@ final class NewProductDraftStackAssociationImporter
                 }
 
                 $current = $this->normalizeProductIds($draft->bundle_product_ids);
-                if ($current === $productIds) {
+                $componentQuantities = array_map(
+                    fn (int $productId): array => [
+                        'product_id' => $productId,
+                        'quantity' => $quantities[$productId],
+                    ],
+                    $productIds,
+                );
+                if ($current === $productIds && $draft->bundle_component_quantities === $componentQuantities) {
                     $result['unchanged']++;
                     continue;
                 }
 
-                NewProductDraft::withoutEvents(function () use ($draft, $productIds): void {
-                    $draft->forceFill(['bundle_product_ids' => $productIds])->save();
+                NewProductDraft::withoutEvents(function () use ($draft, $productIds, $componentQuantities): void {
+                    $draft->forceFill([
+                        'bundle_product_ids' => $productIds,
+                        'bundle_component_quantities' => $componentQuantities,
+                    ])->save();
                 });
 
                 $result['updated']++;
@@ -214,7 +224,7 @@ final class NewProductDraftStackAssociationImporter
 
         ksort($skusByPosition);
 
-        return array_values(array_unique($skusByPosition));
+        return array_values($skusByPosition);
     }
 
     private function resolveDraftByStackSku(string $stackSku): ?NewProductDraft

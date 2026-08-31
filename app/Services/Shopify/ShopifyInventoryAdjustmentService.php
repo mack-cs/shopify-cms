@@ -63,4 +63,69 @@ GRAPHQL, ['input' => [
             throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
         }
     }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function decreaseAvailable(
+        Variant $variant,
+        int $quantity,
+        string $referenceUri,
+        string $idempotencyKey,
+        ?string $locationId = null,
+    ): array {
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
+        }
+
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        if ($inventoryItemId === '') {
+            throw new \RuntimeException("Variant {$variant->id} has no Shopify inventory item ID.");
+        }
+
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        if ($locationId === '') {
+            throw new \RuntimeException('No Shopify inventory location could be resolved.');
+        }
+
+        $data = $this->client->graphql(<<<'GRAPHQL'
+mutation DeductStackComponentInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      createdAt
+      reason
+      referenceDocumentUri
+      changes { name delta quantityAfterChange }
+    }
+    userErrors { field message }
+  }
+}
+GRAPHQL, [
+            'input' => [
+                'name' => 'available',
+                'reason' => 'correction',
+                'referenceDocumentUri' => $referenceUri,
+                'changes' => [[
+                    'inventoryItemId' => $inventoryItemId,
+                    'locationId' => $locationId,
+                    'delta' => -$quantity,
+                ]],
+            ],
+            'idempotencyKey' => $idempotencyKey,
+        ]);
+
+        $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
+        if ($errors !== []) {
+            throw new \RuntimeException(
+                'Shopify inventory adjustment failed: ' . collect($errors)->pluck('message')->implode('; ')
+            );
+        }
+
+        $group = data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup');
+        if (!is_array($group)) {
+            throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
+        }
+
+        return $group;
+    }
 }

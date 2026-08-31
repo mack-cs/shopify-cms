@@ -88,4 +88,9 @@ class ShopifyOrder extends Model
     {
         return $this->hasMany(ShopifyOrderTransaction::class, 'shopify_order_db_id');
     }
+
+    public function fulfillments(): HasMany
+    {
+        return $this->hasMany(ShopifyFulfillment::class, 'shopify_order_db_id');
+    }
 }

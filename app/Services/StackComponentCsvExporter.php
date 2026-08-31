@@ -86,9 +86,16 @@ final class StackComponentCsvExporter
      */
     private function componentIds(NewProductDraft $draft): array
     {
+        $quantities = collect((array) $draft->bundle_component_quantities)
+            ->filter(fn ($row): bool => is_array($row) && (int) ($row['product_id'] ?? 0) > 0)
+            ->mapWithKeys(fn (array $row): array => [
+                (int) $row['product_id'] => max(1, (int) ($row['quantity'] ?? 1)),
+            ]);
+
         return collect((array) $draft->bundle_product_ids)
             ->map(fn ($id): int => (int) $id)
             ->filter(fn (int $id): bool => $id > 0)
+            ->flatMap(fn (int $id): array => array_fill(0, (int) ($quantities[$id] ?? 1), $id))
             ->values()
             ->all();
     }

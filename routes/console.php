@@ -370,6 +370,51 @@ Artisan::command('notifications:send-monthly-maintenance-reports', function (Mai
     return self::SUCCESS;
 })->purpose('Email monthly owner reports: missing alt text to Nicky and 404-only URLs to Mack and Freddy.');
 
+Artisan::command('shopify:register-stack-fulfillment-webhooks', function (ShopifyApiClient $client): int {
+    $uri = rtrim((string) config('app.url'), '/') . route('webhooks.shopify.fulfillments', absolute: false);
+    $existing = $client->graphql(<<<'GRAPHQL'
+query StackFulfillmentWebhooks {
+  webhookSubscriptions(first: 250) {
+    nodes { id topic uri }
+  }
+}
+GRAPHQL);
+
+    $subscriptions = collect(data_get($existing, 'webhookSubscriptions.nodes', []));
+    foreach (['FULFILLMENTS_CREATE', 'FULFILLMENTS_UPDATE'] as $topic) {
+        $alreadyRegistered = $subscriptions->contains(
+            fn (array $subscription): bool => ($subscription['topic'] ?? null) === $topic
+                && rtrim((string) ($subscription['uri'] ?? ''), '/') === rtrim($uri, '/')
+        );
+        if ($alreadyRegistered) {
+            $this->line("{$topic} is already registered at {$uri}.");
+            continue;
+        }
+
+        $result = $client->graphql(<<<'GRAPHQL'
+mutation RegisterStackFulfillmentWebhook($topic: WebhookSubscriptionTopic!, $subscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $subscription) {
+    webhookSubscription { id topic uri }
+    userErrors { field message }
+  }
+}
+GRAPHQL, [
+            'topic' => $topic,
+            'subscription' => ['uri' => $uri],
+        ]);
+        $errors = data_get($result, 'webhookSubscriptionCreate.userErrors', []);
+        if ($errors !== []) {
+            $this->error("{$topic} failed: " . collect($errors)->pluck('message')->implode('; '));
+
+            return self::FAILURE;
+        }
+
+        $this->info("Registered {$topic} at {$uri}.");
+    }
+
+    return self::SUCCESS;
+})->purpose('Register the fulfillment create/update webhooks used for Stack component inventory deductions.');
+
 Schedule::command('notifications:send-daily-task-reminders')
     ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))
     ->timezone((string) config('services.slack.task_reminder_timezone', 'Africa/Johannesburg'))

@@ -344,7 +344,7 @@ final class StackBundleSellabilityService
             $missingComponentCount = count($componentIds) - $components->count();
         }
 
-        $componentIssue = $this->firstComponentIssue($componentIds, $components);
+        $componentIssue = $this->firstComponentIssue($componentIds, $components, $draft);
 
         if ($componentIssue !== null) {
             return $this->forceUnsellableForIssue($draft, $componentIssue, $userId, $dryRun, $result);
@@ -457,8 +457,14 @@ final class StackBundleSellabilityService
      * @param Collection<int, Product> $components
      * @return array<string, mixed>|null
      */
-    private function firstComponentIssue(array $componentIds, Collection $components): ?array
+    private function firstComponentIssue(array $componentIds, Collection $components, NewProductDraft $draft): ?array
     {
+        $requiredQuantities = collect((array) $draft->bundle_component_quantities)
+            ->filter(fn ($row): bool => is_array($row) && (int) ($row['product_id'] ?? 0) > 0)
+            ->mapWithKeys(fn (array $row): array => [
+                (int) $row['product_id'] => max(1, (int) ($row['quantity'] ?? 1)),
+            ]);
+
         foreach ($componentIds as $componentId) {
             $component = $components->get($componentId);
 
@@ -475,6 +481,21 @@ final class StackBundleSellabilityService
 
             if (!$this->sellabilityService->isLocallySellable($component)) {
                 return $this->componentPayload($component);
+            }
+
+            $required = (int) ($requiredQuantities[$componentId] ?? 1);
+            $variant = $this->primaryVariant($component);
+            if (
+                $required > 1
+                && $variant instanceof Variant
+                && $variant->inventory_tracked !== false
+                && $variant->inventory_qty !== null
+                && (int) $variant->inventory_qty < $required
+            ) {
+                $payload = $this->componentPayload($component);
+                $payload['reason'] = "Component needs {$required} units per Stack but only {$variant->inventory_qty} are available";
+
+                return $payload;
             }
         }
 

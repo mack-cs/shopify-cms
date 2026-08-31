@@ -896,6 +896,11 @@ class NewProductDraftResource extends Resource
                                     $component->state(self::normalizeBundleProductIds($state));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get, ?NewProductDraft $record): void {
+                                    $set('bundle_component_quantities', self::normalizeBundleComponentQuantities(
+                                        $get('bundle_component_quantities'),
+                                        $state,
+                                    ));
+
                                     if (!self::shouldShowBundleImageTools($get, $record)) {
                                         return;
                                     }
@@ -913,6 +918,38 @@ class NewProductDraftResource extends Resource
                                     }
                                 })
                                 ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
+                            Forms\Components\Repeater::make('bundle_component_quantities')
+                                ->label('Component quantities per Stack')
+                                ->helperText('Set how many units of each selected product are deducted when one Stack is fulfilled.')
+                                ->schema([
+                                    Select::make('product_id')
+                                        ->label('Component')
+                                        ->options(fn (): array => self::bundleProductOptions())
+                                        ->disabled()
+                                        ->dehydrated(),
+                                    TextInput::make('quantity')
+                                        ->label('Units per Stack')
+                                        ->integer()
+                                        ->minValue(1)
+                                        ->required()
+                                        ->default(1),
+                                ])
+                                ->columns(2)
+                                ->addable(false)
+                                ->deletable(false)
+                                ->reorderable(false)
+                                ->columnSpanFull()
+                                ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleAssociationField($get, $record)
+                                    && self::normalizeBundleProductIds($get('bundle_product_ids')) !== [])
+                                ->afterStateHydrated(function (Forms\Components\Repeater $component, $state, ?NewProductDraft $record): void {
+                                    $component->state(self::normalizeBundleComponentQuantities(
+                                        $state,
+                                        $record?->bundle_product_ids,
+                                    ));
+                                })
+                                ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(
+                                    self::normalizeBundleComponentQuantities($state)
+                                )),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -2401,6 +2438,37 @@ class NewProductDraftResource extends Resource
             static fn (mixed $value): int => (int) $value,
             $values
         ), static fn (int $value): bool => $value > 0)));
+    }
+
+    /**
+     * @return array<int, array{product_id:int,quantity:int}>
+     */
+    private static function normalizeBundleComponentQuantities(mixed $state, mixed $productIds = null): array
+    {
+        $quantities = [];
+
+        foreach (is_array($state) ? $state : [] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $productId = (int) ($row['product_id'] ?? 0);
+            if ($productId > 0) {
+                $quantities[$productId] = max(1, (int) ($row['quantity'] ?? 1));
+            }
+        }
+
+        $ids = $productIds === null
+            ? array_keys($quantities)
+            : self::normalizeBundleProductIds($productIds);
+
+        return array_map(
+            fn (int $productId): array => [
+                'product_id' => $productId,
+                'quantity' => $quantities[$productId] ?? 1,
+            ],
+            $ids,
+        );
     }
 
     /**
@@ -6557,6 +6625,7 @@ class NewProductDraftResource extends Resource
 
         if (!$isBundleOrStack) {
             $data['bundle_product_ids'] = null;
+            $data['bundle_component_quantities'] = null;
             $data['bundle_image_urls'] = null;
 
             return $data;
@@ -6566,6 +6635,12 @@ class NewProductDraftResource extends Resource
 
         $data['bundle_product_ids'] = self::nullableArray(
             self::normalizeBundleProductIds($data['bundle_product_ids'] ?? null)
+        );
+        $data['bundle_component_quantities'] = self::nullableArray(
+            self::normalizeBundleComponentQuantities(
+                $data['bundle_component_quantities'] ?? null,
+                $data['bundle_product_ids'],
+            )
         );
         $data['bundle_image_urls'] = self::nullableArray(
             self::normalizeBundleImageUrls($data['bundle_image_urls'] ?? null)
