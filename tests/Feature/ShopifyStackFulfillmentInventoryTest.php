@@ -13,8 +13,24 @@ use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use App\Services\Shopify\StackFulfillmentInventoryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Schema;
 
 uses(RefreshDatabase::class);
+
+it('can resume the Stack fulfillment migration when its schema objects already exist', function (): void {
+    $migration = require database_path('migrations/2026_08_28_170000_create_stack_fulfillment_deduction_tables.php');
+
+    $migration->up();
+
+    expect(Schema::hasColumn('new_product_drafts', 'bundle_component_quantities'))->toBeTrue()
+        ->and(Schema::hasTable('shopify_fulfillments'))->toBeTrue()
+        ->and(Schema::hasTable('shopify_stack_component_deductions'))->toBeTrue()
+        ->and(Schema::hasIndex(
+            'shopify_stack_component_deductions',
+            ['shopify_fulfillment_id', 'shopify_fulfillment_line_item_id', 'configured_component_product_id'],
+            'unique',
+        ))->toBeTrue();
+});
 
 it('accepts a verified fulfillment webhook and queues its persisted fulfillment', function (): void {
     Queue::fake();
