@@ -152,14 +152,14 @@ it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', 
 
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
-    expect(array_slice($headers, 4, 5))->toBe([
-        'Currently on Sale', 'Sale Percentage', 'Available', 'cms_movement_classification', 'Ignore',
-    ])->and(array_slice($headers, 9, 3))->toBe([
+    expect(array_slice($headers, 4, 7))->toBe([
+        'Currently on Sale', 'Sale Percentage', 'Available', 'Committed', 'On Hand',
+        'cms_movement_classification', 'Ignore',
+    ])->and(array_slice($headers, 11, 3))->toBe([
         'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
-    ])->and(array_slice($headers, 12, 4))->toBe([
+    ])->and(array_slice($headers, 14, 4))->toBe([
         'Next Order ID', 'Next ETA', 'Second Order ID', 'Second ETA',
-    ])->and($headers[26])->toBe('Action Required')
-        ->and(array_slice($headers, -3))->toBe(['Committed', 'On Hand', 'Last Updated'])
+    ])->and($headers[28])->toBe('Action Required')
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
@@ -246,7 +246,7 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     $row = array_fill(0, count($headers), '');
     $row[0] = 'LRB0004';
-    $row[6] = 60;
+    $row[11] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
         if (str_contains(urldecode($request->url()), "'livi-road'!A:AG")) {
             return Http::response(['values' => [$headers, $row]]);
@@ -305,7 +305,7 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AG")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
-            $row[9] = 60;
+            $row[11] = 60;
 
             return Http::response(['values' => [$headers, $row]]);
         }
@@ -340,10 +340,11 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
     expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
-        ->and($ranges)->not->toContain("'livi-road'!I2")
-        ->and($ranges)->toContain("'livi-road'!K2")
-        ->and($ranges)->toContain("'livi-road'!L2")
-        ->and($ranges)->toContain("'livi-road'!M2");
+        ->and($ranges)->not->toContain("'livi-road'!K2")
+        ->and($ranges)->not->toContain("'livi-road'!L2")
+        ->and($ranges)->toContain("'livi-road'!M2")
+        ->and($ranges)->toContain("'livi-road'!N2")
+        ->and($ranges)->toContain("'livi-road'!S2");
 });
 
 it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
@@ -385,18 +386,18 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     )->filter()->values();
 
     expect($ranges)->toContain("'master-file'!G2")
-        ->and($ranges)->toContain("'master-file'!K2")
-        ->and($ranges)->toContain("'master-file'!L2")
+        ->and($ranges)->toContain("'master-file'!H2")
+        ->and($ranges)->toContain("'master-file'!I2")
         ->and($ranges)->toContain("'master-file'!M2")
         ->and($ranges)->toContain("'master-file'!N2")
-        ->and($ranges)->toContain("'master-file'!U2")
-        ->and($ranges)->toContain("'master-file'!V2")
-        ->and($ranges)->toContain("'livi-road'!AE2")
-        ->and($ranges)->toContain("'livi-road'!AF2")
+        ->and($ranges)->toContain("'master-file'!O2")
+        ->and($ranges)->toContain("'master-file'!P2")
+        ->and($ranges)->toContain("'master-file'!W2")
+        ->and($ranges)->toContain("'master-file'!X2")
         ->and($ranges)->toContain("'livi-road'!AG2")
-        ->and($ranges)->not->toContain("'master-file'!I2")
-        ->and($ranges)->not->toContain("'master-file'!J2")
-        ->and($ranges)->not->toContain("'master-file'!R2");
+        ->and($ranges)->not->toContain("'master-file'!K2")
+        ->and($ranges)->not->toContain("'master-file'!L2")
+        ->and($ranges)->not->toContain("'master-file'!T2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {

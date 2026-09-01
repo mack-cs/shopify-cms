@@ -9,6 +9,8 @@ final class ProcurementSheetSchema
         'product_type' => 'Product Type', 'currently_on_sale' => 'Currently on Sale',
         'sale_percentage' => 'Sale Percentage',
         'current_inventory' => 'Available',
+        'current_committed_inventory' => 'Committed',
+        'current_on_hand_inventory' => 'On Hand',
         'cms_movement_classification' => 'cms_movement_classification',
         'ignore' => 'Ignore',
         'quantity_to_order' => 'Quantity To Order',
@@ -32,8 +34,6 @@ final class ProcurementSheetSchema
         'action_reason' => 'Action Reason',
         'stockout_before_incoming_arrival' => 'Stockout Before Incoming Arrival',
         'incoming_stock_covers_requirement' => 'Incoming Stock Covers Requirement',
-        'current_committed_inventory' => 'Committed',
-        'current_on_hand_inventory' => 'On Hand',
         'last_updated' => 'Last Updated',
     ];
 

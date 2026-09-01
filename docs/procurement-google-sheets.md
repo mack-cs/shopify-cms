@@ -68,7 +68,7 @@ The user-owned Sheet fields are `Ignore` and `Quantity To Order`. Confirmed inco
 
 `Ignore = TRUE` marks an end-of-life SKU. Inventory remains visible and sellable, but the procurement pipeline forces its recommendation to `NO_ACTION` with zero additional order quantity. Archiving remains a separate established CMS workflow.
 
-The report layout is 33 columns (`A:AG`). `Available` is column G, `cms_movement_classification` remains column H, `Ignore` remains column I, and `Action Required` is column AA. Columns M:P show the two earliest complete pending orders. `Replenishment Date` uses the earliest ETA and `Stock Gap Status` compares it with predicted runout. `Committed` and `On Hand` are included before `Last Updated`, which remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
+The report layout is 33 columns (`A:AG`). The Shopify inventory quantities are grouped together as `Available` in column G, `Committed` in H, and `On Hand` in I. `cms_movement_classification` is column J, `Ignore` is K, and `Action Required` is AC. Columns O:R show the two earliest complete pending orders. `Replenishment Date` uses the earliest ETA and `Stock Gap Status` compares it with predicted runout. `Last Updated` remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
 
 A Google write failure is stored on the completed prediction run and does not remove the successful report. Retry output with `php artisan procurement:sheets-publish`.
 
