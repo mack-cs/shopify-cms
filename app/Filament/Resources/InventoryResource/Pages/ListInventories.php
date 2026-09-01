@@ -80,7 +80,7 @@ class ListInventories extends ListRecords
                         Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
                     }
                 }),
-            ])->label('Upload Files')->icon('heroicon-o-arrow-up-tray')->button()
+            ])->label('Upload Files')->icon('heroicon-o-arrow-up-tray')->color('info')->button()
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())),
             Actions\Action::make('pasteSupplierOrder')
@@ -165,7 +165,7 @@ class ListInventories extends ListRecords
             Actions\Action::make('recalculateProcurement')
                 ->label('Recalculate Procurement')
                 ->icon('heroicon-o-calculator')
-                ->color('primary')
+                ->color('danger')
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->requiresConfirmation()
