@@ -251,7 +251,15 @@ class UserResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        return parent::getEloquentQuery()
-            ->whereDoesntHave('roles', fn (Builder $query) => $query->where('name', RolesEnum::SuperAdmin->value));
+        $query = parent::getEloquentQuery();
+
+        if (Auth::user()?->hasRole(RolesEnum::SuperAdmin->value)) {
+            return $query;
+        }
+
+        return $query->whereDoesntHave(
+            'roles',
+            fn (Builder $roleQuery) => $roleQuery->where('name', RolesEnum::SuperAdmin->value)
+        );
     }
 }
