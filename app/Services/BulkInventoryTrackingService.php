@@ -57,7 +57,7 @@ final class BulkInventoryTrackingService
 
             InventoryOperationContext::run(function () use ($variant, $quantity): void {
                 $variant->inventory_tracked = true;
-                $variant->inventory_qty = $quantity;
+                $variant->current_on_hand_quantity = $quantity;
                 $variant->inventory_sync_error = null;
                 $variant->save();
             });

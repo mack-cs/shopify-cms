@@ -9,7 +9,7 @@ final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
-    private const DATA_COLUMNS = 'A:AF';
+    private const DATA_COLUMNS = 'A:AG';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 
@@ -67,7 +67,7 @@ final class GoogleSheetsClient
     {
         if ($rows !== []) {
             $this->batchUpdateValues([[
-                'range' => $this->range($tab, 'A2:AF'.(count($rows) + 1)),
+                'range' => $this->range($tab, 'A2:AG'.(count($rows) + 1)),
                 'values' => $rows,
             ]]);
         }
@@ -75,7 +75,7 @@ final class GoogleSheetsClient
             $firstStaleRow = count($rows) + 2;
             $lastExistingRow = $existingRowCount + 1;
             $clear = $this->request()->withBody('{}', 'application/json')
-                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AF{$lastExistingRow}")).':clear');
+                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AG{$lastExistingRow}")).':clear');
             $this->ensureSuccess($clear->successful(), $clear->body(), 'clear stale Master rows');
         }
     }
@@ -85,13 +85,13 @@ final class GoogleSheetsClient
     {
         $rowsToClear = max(1, $existingRowCount, count($rows));
         $clear = $this->request()->withBody('{}', 'application/json')->post(
-            $this->valuesUrl($this->range($tab, "A1:AF{$rowsToClear}")).':clear'
+            $this->valuesUrl($this->range($tab, "A1:AG{$rowsToClear}")).':clear'
         );
         $this->ensureSuccess($clear->successful(), $clear->body(), 'clear existing Sheet layout');
 
         if ($rows !== []) {
             $this->batchUpdateValues([[
-                'range' => $this->range($tab, 'A1:AF'.count($rows)),
+                'range' => $this->range($tab, 'A1:AG'.count($rows)),
                 'values' => $rows,
             ]]);
         }

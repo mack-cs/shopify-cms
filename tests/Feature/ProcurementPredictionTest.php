@@ -60,6 +60,24 @@ it('creates only one daily movement and procurement run when the same date is qu
     Queue::assertPushed(RunProcurementPipelineJob::class, 1);
 });
 
+it('can explicitly requeue a completed daily procurement run', function (): void {
+    Queue::fake();
+    $service = app(ProcurementPipelineService::class);
+    $first = $service->queue('2026-08-04');
+    $first['run']->forceFill([
+        'status' => ProcurementPredictionRun::STATUS_COMPLETED,
+        'completed_at' => now(),
+    ])->save();
+
+    $recalculation = $service->queue('2026-08-04', forceRecalculation: true);
+
+    expect($recalculation['queued'])->toBeTrue()
+        ->and($recalculation['run']->id)->toBe($first['run']->id)
+        ->and($recalculation['run']->status)->toBe(ProcurementPredictionRun::STATUS_QUEUED)
+        ->and($recalculation['run']->completed_at)->toBeNull();
+    Queue::assertPushed(RunProcurementPipelineJob::class, 2);
+});
+
 it('persists a complete prediction run atomically and treats a repeated successful submission as idempotent', function (): void {
     $run = predictionRun();
     $payload = predictionPayload($run);

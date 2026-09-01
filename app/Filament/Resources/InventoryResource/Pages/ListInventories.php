@@ -11,6 +11,7 @@ use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
 use App\Services\Procurement\SupplierOrderCsvService;
+use App\Services\ProcurementPipelineService;
 use App\Services\ProductInventoryCsvImporter;
 use Filament\Actions;
 use Filament\Forms\Components\FileUpload;
@@ -30,6 +31,7 @@ class ListInventories extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\ActionGroup::make([
             Actions\Action::make('previewSupplierOrdersCsv')
                 ->label('Upload Supplier Orders')->icon('heroicon-o-truck')->color('info')
                 ->modalWidth(MaxWidth::Medium)
@@ -78,6 +80,9 @@ class ListInventories extends ListRecords
                         Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
                     }
                 }),
+            ])->label('Upload Files')->icon('heroicon-o-arrow-up-tray')->button()
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())),
             Actions\Action::make('pasteSupplierOrder')
                 ->label('Paste Purchase Order')->icon('heroicon-o-clipboard-document-list')->color('warning')
                 ->modalWidth(MaxWidth::FiveExtraLarge)
@@ -157,6 +162,33 @@ class ListInventories extends ListRecords
                         Notification::make()->title('Received quantities were not staged')->body($e->getMessage())->danger()->persistent()->send();
                     }
                 }),
+            Actions\Action::make('recalculateProcurement')
+                ->label('Recalculate Procurement')
+                ->icon('heroicon-o-calculator')
+                ->color('primary')
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->requiresConfirmation()
+                ->modalHeading('Run procurement recalculation?')
+                ->modalDescription('This queues the full procurement pipeline using the latest CMS supplier orders and inventory. Results and Google Sheets update when the background run completes.')
+                ->modalSubmitActionLabel('Queue Recalculation')
+                ->action(function (ProcurementPipelineService $pipeline): void {
+                    try {
+                        $timezone = (string) config('procurement.timezone', 'Africa/Johannesburg');
+                        $result = $pipeline->queue(now($timezone)->toDateString(), Auth::id(), forceRecalculation: true);
+                        $run = $result['run'];
+
+                        Notification::make()
+                            ->title($result['queued'] ? 'Procurement recalculation queued' : 'Procurement recalculation already running')
+                            ->body($result['queued']
+                                ? "Run #{$run->id} will update predictions and Google Sheets when complete."
+                                : "Run #{$run->id} currently has status {$run->status}.")
+                            ->success()
+                            ->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('Recalculation was not queued')->body($e->getMessage())->danger()->send();
+                    }
+                }),
             Actions\Action::make('checkShopifyInventory')
                 ->label('Check Shopify Inventory')
                 ->icon('heroicon-o-arrow-path')
@@ -184,7 +216,7 @@ class ListInventories extends ListRecords
                 ->visible(fn (): bool => $this->activeTab === 'everyday'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->modalHeading('Import Stock CSV')
-                ->modalDescription('This updates local inventory from a CSV and records inventory history. It does not push changes to Shopify.')
+                ->modalDescription('This stages physical On Hand counts from a CSV and records inventory history. It does not push changes to Shopify.')
                 ->form([
                     FileUpload::make('file')
                         ->label('CSV File')
@@ -192,7 +224,7 @@ class ListInventories extends ListRecords
                         ->disk('local')
                         ->directory('imports/inventory')
                         ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
-                        ->helperText('Accepted match columns: product_id, shopify_product_id, handle, sku, variant_id, or shopify_variant_id. Stock column can be inventory_qty, stock, quantity, or qty. Multi-variant products need SKU or variant ID.'),
+                        ->helperText('Accepted match columns: product_id, shopify_product_id, handle, sku, variant_id, or shopify_variant_id. The physical count column can be on_hand, inventory_qty, stock, quantity, or qty. Multi-variant products need SKU or variant ID.'),
                 ])
                 ->action(function (array $data, ProductInventoryCsvImporter $importer): void {
                     $file = is_string($data['file'] ?? null) ? $data['file'] : null;

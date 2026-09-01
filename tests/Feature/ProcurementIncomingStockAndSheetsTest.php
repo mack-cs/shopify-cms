@@ -5,6 +5,8 @@ use App\Models\Import;
 use App\Models\ProcurementCollectionConfig;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementPredictionRun;
+use App\Models\ProcurementSupplierOrder;
+use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
@@ -15,6 +17,7 @@ use App\Services\GoogleSheets\ProcurementSheetSchema;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\ProcurementIncomingStockService;
+use App\Services\Procurement\ProcurementActionPolicy;
 use App\Services\ProcurementPredictionIngestService;
 use App\Services\SalePercentageCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -150,11 +153,31 @@ it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', 
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect(array_slice($headers, 4, 5))->toBe([
-        'Currently on Sale', 'Sale Percentage', 'Current Inventory', 'cms_movement_classification', 'Ignore',
+        'Currently on Sale', 'Sale Percentage', 'Available', 'cms_movement_classification', 'Ignore',
     ])->and(array_slice($headers, 9, 3))->toBe([
         'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
-    ])->and($headers[20])->toBe('Action Required')
+    ])->and(array_slice($headers, 12, 4))->toBe([
+        'Next Order ID', 'Next ETA', 'Second Order ID', 'Second ETA',
+    ])->and($headers[26])->toBe('Action Required')
+        ->and(array_slice($headers, -3))->toBe(['Committed', 'On Hand', 'Last Updated'])
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
+});
+
+it('upgrades legacy Current Inventory into Available without losing values', function (): void {
+    $schema = new ProcurementSheetSchema;
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $availableIndex = array_search('Available', $headers, true);
+    $headers[$availableIndex] = 'Current Inventory';
+    $headers = array_values(array_filter($headers, fn (string $header): bool => ! in_array($header, ['Committed', 'On Hand'], true)));
+    $row = array_fill(0, count($headers), '');
+    $row[array_search('Current Inventory', $headers, true)] = 17;
+
+    $upgraded = $schema->upgradeLayout([$headers, $row]);
+    $map = $schema->map($upgraded[0]);
+
+    expect($upgraded[1][$map['current_inventory']])->toBe(17)
+        ->and($upgraded[1][$map['current_committed_inventory']])->toBe('')
+        ->and($upgraded[1][$map['current_on_hand_inventory']])->toBe('');
 });
 
 it('pulls Ignore and Quantity To Order but does not import CMS order totals from brand Sheets', function (): void {
@@ -225,7 +248,7 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $row[0] = 'LRB0004';
     $row[6] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:AF")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AG")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -276,10 +299,10 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AF")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AG")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AF")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AG")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
             $row[9] = 60;
@@ -306,7 +329,9 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $resolver = new OperationalProcurementCollectionResolver;
     $sync = new ProcurementSheetSyncService(
         $client, new ProcurementSheetSchema, app(ProcurementIncomingStockService::class),
-        $resolver, new ProcurementSheetDatasetBuilder($resolver, app(SalePercentageCalculator::class)),
+        $resolver, new ProcurementSheetDatasetBuilder(
+            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class)
+        ),
     );
 
     $sync->publish();
@@ -362,10 +387,16 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     expect($ranges)->toContain("'master-file'!G2")
         ->and($ranges)->toContain("'master-file'!K2")
         ->and($ranges)->toContain("'master-file'!L2")
-        ->and($ranges)->toContain("'livi-road'!Y2")
+        ->and($ranges)->toContain("'master-file'!M2")
+        ->and($ranges)->toContain("'master-file'!N2")
+        ->and($ranges)->toContain("'master-file'!U2")
+        ->and($ranges)->toContain("'master-file'!V2")
+        ->and($ranges)->toContain("'livi-road'!AE2")
+        ->and($ranges)->toContain("'livi-road'!AF2")
+        ->and($ranges)->toContain("'livi-road'!AG2")
         ->and($ranges)->not->toContain("'master-file'!I2")
         ->and($ranges)->not->toContain("'master-file'!J2")
-        ->and($ranges)->not->toContain("'master-file'!N2");
+        ->and($ranges)->not->toContain("'master-file'!R2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -411,6 +442,8 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
         'inventory_qty' => 15,
         'current_inventory_quantity' => 15,
         'current_available_quantity' => 15,
+        'current_committed_quantity' => 4,
+        'current_on_hand_quantity' => 19,
         'inventory_last_synced_at' => '2026-10-02 14:35:00',
     ])->save());
 
@@ -418,10 +451,74 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
         ->firstWhere('sku', 'LRB0004');
 
     expect($record['current_inventory'])->toBe(15)
+        ->and($record['current_committed_inventory'])->toBe(4)
+        ->and($record['current_on_hand_inventory'])->toBe(19)
         ->and($record['projected_inventory_position'])->toBe(19)
         ->and($record['number_of_wip_orders'])->toBe(1)
         ->and($record['predicted_runout_date'])->toBe('16/08/2026')
         ->and($record['last_updated'])->toStartWith('02/10/2026 ');
+});
+
+it('shows the two earliest complete pending orders and stock gap health', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 10, 'current_inventory_quantity' => 10,
+    ])->save());
+    $run = procurementSheetRun();
+    app(ProcurementPredictionIngestService::class)->persist(procurementSheetPredictionPayload($run));
+    $run->predictions()->update([
+        'predicted_runout_date' => '2026-09-10',
+        'additional_order_required' => 30,
+        'preliminary_order_quantity' => 30,
+    ]);
+
+    foreach ([
+        ['PO-LATE', '2026-09-15'],
+        ['PO-NEXT', '2026-09-08'],
+        ['PO-SECOND', '2026-09-12'],
+    ] as [$orderNumber, $eta]) {
+        $order = ProcurementSupplierOrder::query()->create([
+            'uuid' => (string) Str::uuid(), 'order_number' => $orderNumber,
+        ]);
+        ProcurementSupplierOrderLine::query()->create([
+            'supplier_order_id' => $order->id, 'variant_id' => $variant->id,
+            'sku' => $variant->sku, 'quantity_ordered' => 10,
+            'eta_date' => $eta, 'status' => 'open',
+        ]);
+    }
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'LRB0004');
+
+    expect($record['next_order_id'])->toBe('PO-NEXT')
+        ->and($record['next_eta'])->toBe('08/09/2026')
+        ->and($record['second_order_id'])->toBe('PO-SECOND')
+        ->and($record['second_eta'])->toBe('12/09/2026')
+        ->and($record['replenishment_date'])->toBe('08/09/2026')
+        ->and($record['stock_gap_status'])->toBe('HEALTHY')
+        ->and($record['action_required'])->not->toBe('ORDER_NOW');
+
+    $run->predictions()->update(['additional_order_required' => 31]);
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'LRB0004');
+    expect($record['action_required'])->toBe('ORDER_NOW');
+});
+
+it('marks out of stock and missing replenishment explicitly', function (): void {
+    [, $variant] = procurementSheetVariant('NO-ORDER', 'livi-road');
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0]['shopify_product_id'] = 'gid://shopify/Product/NO-ORDER';
+    $payload['predictions'][0]['shopify_variant_id'] = 'gid://shopify/ProductVariant/NO-ORDER';
+    $payload['predictions'][0]['sku'] = 'NO-ORDER';
+    app(ProcurementPredictionIngestService::class)->persist($payload);
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'NO-ORDER');
+
+    expect($record['predicted_runout_date'])->toBe('OUT_OF_STOCK')
+        ->and($record['replenishment_date'])->toBeNull()
+        ->and($record['stock_gap_status'])->toBe('NO_PENDING_ORDER');
 });
 
 it('uses the shared CMS sale percentage calculation in procurement sheets', function (): void {
@@ -589,6 +686,8 @@ function procurementTestSheetSync(): ProcurementSheetSyncService
     return new ProcurementSheetSyncService(
         new GoogleSheetsClient($tokens), new ProcurementSheetSchema,
         app(ProcurementIncomingStockService::class), $resolver,
-        new ProcurementSheetDatasetBuilder($resolver, app(SalePercentageCalculator::class)),
+        new ProcurementSheetDatasetBuilder(
+            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class)
+        ),
     );
 }

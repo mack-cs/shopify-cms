@@ -3,6 +3,8 @@
 return [
     'default_lead_time_days' => (int) env('PROCUREMENT_DEFAULT_LEAD_TIME_DAYS', 56),
     'attention_horizon_days' => (int) env('PROCUREMENT_ATTENTION_HORIZON_DAYS', 21),
+    'order_now_threshold' => (int) env('PROCUREMENT_ORDER_NOW_THRESHOLD', 30),
+    'stock_gap_grace_days' => (int) env('PROCUREMENT_STOCK_GAP_GRACE_DAYS', 0),
     'product_movement_daily' => (bool) env('PROCUREMENT_PRODUCT_MOVEMENT_DAILY', true),
     'pipeline_daily' => (bool) env('PROCUREMENT_PIPELINE_DAILY', true),
     'daily_time' => env('PROCUREMENT_DAILY_TIME', '06:30'),

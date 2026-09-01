@@ -8,7 +8,7 @@ Laravel is the only orchestrator. Shopify and Google Sheets write state into Lar
 2. Create a service account and JSON key.
 3. Share the procurement workbook with the JSON key's `client_email` as Editor.
 4. Permit that service account to edit the workbook's protected system ranges.
-5. Keep human users restricted to `Ignore` plus each phase's Quantity, Order ID, and ETA columns in brand tabs.
+5. Keep human users restricted to `Ignore` and `Quantity To Order` in brand tabs.
 6. Store the key outside the repository and configure its absolute path or base64 value.
 
 ```dotenv
@@ -64,11 +64,11 @@ The scheduled `procurement:run` sequence is:
 
 ## Supplier-order workflow
 
-The user-owned fields are `Ignore` and the Quantity, Order ID, and ETA for each of the three phases. Laravel always preserves the raw values. A phase contributes incoming stock to predictions only when quantity is greater than zero and both Order ID and ETA are present. Existing historical quantities therefore remain visible but count as zero confirmed incoming until users complete those fields.
+The user-owned Sheet fields are `Ignore` and `Quantity To Order`. Confirmed incoming stock comes from open CMS supplier-order lines that have both an Order ID and ETA.
 
 `Ignore = TRUE` marks an end-of-life SKU. Inventory remains visible and sellable, but the procurement pipeline forces its recommendation to `NO_ACTION` with zero additional order quantity. Archiving remains a separate established CMS workflow.
 
-The report layout is 32 columns (`A:AF`). `cms_movement_classification` is column H, `Ignore` is column I, and `Action Required` is column AB. `Sale Percentage` follows `Currently on Sale`; each supplier phase is grouped Quantity, Order ID, ETA; and `Last Updated` remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
+The report layout is 33 columns (`A:AG`). `Available` is column G, `cms_movement_classification` remains column H, `Ignore` remains column I, and `Action Required` is column AA. Columns M:P show the two earliest complete pending orders. `Replenishment Date` uses the earliest ETA and `Stock Gap Status` compares it with predicted runout. `Committed` and `On Hand` are included before `Last Updated`, which remains the final column. Existing workbook layouts are backed up and upgraded by header name before synchronization, so manually sorted rows remain matched by SKU.
 
 A Google write failure is stored on the completed prediction run and does not remove the successful report. Retry output with `php artisan procurement:sheets-publish`.
 

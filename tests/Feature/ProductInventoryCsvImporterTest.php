@@ -39,6 +39,7 @@ it('imports stock by product id and records an inventory snapshot', function ():
         'sku' => 'SVP-1',
         'inventory_tracked' => true,
         'inventory_qty' => 2,
+        'current_on_hand_quantity' => 2,
         'inventory_local_dirty' => false,
     ]));
 
@@ -54,7 +55,8 @@ it('imports stock by product id and records an inventory snapshot', function ():
     expect($result['updated'])->toBe(1);
     expect($result['unchanged'])->toBe(0);
     expect($result['snapshots'])->toBe(1);
-    expect($variant->inventory_qty)->toBe(7);
+    expect($variant->inventory_qty)->toBe(2);
+    expect($variant->current_on_hand_quantity)->toBe(7);
     expect($variant->inventory_tracked)->toBeTrue();
     expect($variant->inventory_local_dirty)->toBeTrue();
     expect($variant->local_dirty)->toBeTrue();
@@ -63,7 +65,7 @@ it('imports stock by product id and records an inventory snapshot', function ():
     $snapshot = ProductInventorySnapshot::query()->firstOrFail();
     expect($snapshot->source)->toBe(ProductInventorySnapshot::SOURCE_STOCK_IMPORT);
     expect($snapshot->product_id)->toBe($product->id);
-    expect($snapshot->total_inventory_qty)->toBe(7);
+    expect($snapshot->total_inventory_qty)->toBe(2);
     expect($snapshot->observed_by)->toBe($user->id);
 });
 
@@ -143,6 +145,7 @@ it('exports local stock in a csv that can be edited and imported back', function
         'sku' => 'ROUND-1',
         'inventory_tracked' => true,
         'inventory_qty' => 4,
+        'current_on_hand_quantity' => 4,
         'inventory_local_dirty' => false,
     ]));
 
@@ -158,9 +161,9 @@ it('exports local stock in a csv that can be edited and imported back', function
     expect($rows[0]['shopify_variant_id'])->toBe('gid://shopify/ProductVariant/2004');
     expect($rows[0]['sku'])->toBe('ROUND-1');
     expect($rows[0]['inventory_tracked'])->toBe('true');
-    expect($rows[0]['stock'])->toBe('4');
+    expect($rows[0]['on_hand'])->toBe('4');
 
-    $rows[0]['stock'] = '12';
+    $rows[0]['on_hand'] = '12';
 
     $path = tempnam(sys_get_temp_dir(), 'inventory-roundtrip-');
     $writer = Writer::createFromPath($path, 'w+');
@@ -172,6 +175,7 @@ it('exports local stock in a csv that can be edited and imported back', function
     $variant->refresh();
 
     expect($result['updated'])->toBe(1);
-    expect($variant->inventory_qty)->toBe(12);
+    expect($variant->inventory_qty)->toBe(4);
+    expect($variant->current_on_hand_quantity)->toBe(12);
     expect($variant->inventory_local_dirty)->toBeTrue();
 });

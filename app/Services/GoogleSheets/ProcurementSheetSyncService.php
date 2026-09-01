@@ -189,8 +189,13 @@ final class ProcurementSheetSyncService
             Log::warning('Skipping duplicate catalog SKUs during operational procurement Sheet publish', ['skus' => $ambiguous->all()]);
             $records = $records->reject(fn (array $record): bool => $ambiguous->contains($record['sku']));
         }
-        $fields = ['current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
-            'projected_inventory_position', 'last_updated'];
+        $fields = [
+            'current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
+            'next_order_id', 'next_eta', 'second_order_id', 'second_eta',
+            'projected_inventory_position', 'predicted_runout_date',
+            'replenishment_date', 'stock_gap_status', 'additional_order_required',
+            'action_required', 'current_committed_inventory', 'current_on_hand_inventory', 'last_updated',
+        ];
         if ($includeHumanInputs) {
             $fields[] = 'quantity_to_order';
         }
@@ -287,7 +292,7 @@ final class ProcurementSheetSyncService
     private function formatDateColumns(string $tab, array $map): void
     {
         $this->sheets->formatDateColumns($tab, [
-            $map['predicted_runout_date'],
+            $map['next_eta'], $map['second_eta'], $map['predicted_runout_date'], $map['replenishment_date'],
         ], [$map['last_updated']]);
     }
 

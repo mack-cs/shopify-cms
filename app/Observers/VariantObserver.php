@@ -84,7 +84,9 @@ class VariantObserver
             return false;
         }
 
-        return count(array_diff($meaningful, ['inventory_qty', 'inventory_tracked', 'inventory_sync_error'])) === 0;
+        return count(array_diff($meaningful, [
+            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked', 'inventory_sync_error',
+        ])) === 0;
     }
 
     private function logChanges(Variant $variant): void
@@ -177,6 +179,8 @@ class VariantObserver
      */
     private function hasInventoryDirtyFields(array $contentDirty): bool
     {
-        return array_intersect($contentDirty, ['inventory_qty', 'inventory_tracked']) !== [];
+        return array_intersect($contentDirty, [
+            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked',
+        ]) !== [];
     }
 }

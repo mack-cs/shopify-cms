@@ -131,18 +131,6 @@ class Variant extends Model
 
     public function scopeInventoryWorkspaceEligible(Builder $query): Builder
     {
-        return $query->where(function (Builder $eligible): void {
-            $eligible->whereHas('product', fn (Builder $product): Builder => $product->activeStatus())
-                ->orWhere(function (Builder $draft): void {
-                    $draft->whereHas('product', fn (Builder $product): Builder => $product
-                        ->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['draft']))
-                        ->where(function (Builder $initialized): void {
-                            $initialized->whereNotNull('inventory_tracked')
-                                ->orWhereNotNull('inventory_qty')
-                                ->orWhereNotNull('current_inventory_quantity')
-                                ->orWhereNotNull('inventory_last_synced_at');
-                        });
-                });
-        });
+        return $query->whereHas('product', fn (Builder $product): Builder => $product->activeStatus());
     }
 }

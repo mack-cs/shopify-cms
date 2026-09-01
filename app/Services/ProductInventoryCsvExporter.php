@@ -24,7 +24,7 @@ final class ProductInventoryCsvExporter
             'shopify_variant_id',
             'sku',
             'inventory_tracked',
-            'stock',
+            'on_hand',
             'pending_push',
             'from_shopify_at',
             'pushed_to_shopify_at',
@@ -39,8 +39,7 @@ final class ProductInventoryCsvExporter
         $query = Variant::query()
             ->active()
             ->with('product')
-            ->whereHas('product', fn (Builder $query): Builder => $query
-                ->whereRaw('LOWER(COALESCE(status, "")) NOT IN (?, ?)', ['archived', 'unlisted']));
+            ->whereHas('product', fn (Builder $query): Builder => $query->activeStatus());
         if ($variantIds !== []) {
             $query->whereKey($variantIds);
         }
@@ -75,7 +74,7 @@ final class ProductInventoryCsvExporter
             trim((string) ($variant->shopify_id ?? '')),
             trim((string) ($variant->sku ?? '')),
             $this->boolValue($variant->inventory_tracked),
-            $variant->inventory_qty === null ? '' : (string) ((int) $variant->inventory_qty),
+            $variant->current_on_hand_quantity === null ? '' : (string) ((int) $variant->current_on_hand_quantity),
             $this->boolValue($variant->inventory_local_dirty),
             $variant->inventory_last_synced_at?->toDateTimeString() ?? '',
             $variant->inventory_pushed_at?->toDateTimeString() ?? '',

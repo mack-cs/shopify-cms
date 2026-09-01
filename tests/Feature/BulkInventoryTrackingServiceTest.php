@@ -43,7 +43,8 @@ it('starts tracking only explicitly untracked variants and records inventory his
         ->and($result['changed_variant_ids'])->toBe([$untracked->id])
         ->and($result['snapshots'])->toBe(1)
         ->and($untracked->fresh()->inventory_tracked)->toBeTrue()
-        ->and($untracked->fresh()->inventory_qty)->toBe(4)
+        ->and($untracked->fresh()->inventory_qty)->toBeNull()
+        ->and($untracked->fresh()->current_on_hand_quantity)->toBe(4)
         ->and($untracked->fresh()->inventory_local_dirty)->toBeTrue()
         ->and($tracked->fresh()->inventory_qty)->toBe(9)
         ->and($unknown->fresh()->inventory_tracked)->toBeNull()
@@ -54,7 +55,7 @@ it('starts tracking only explicitly untracked variants and records inventory his
     expect($snapshot->source)->toBe(ProductInventorySnapshot::SOURCE_LOCAL_UPDATE)
         ->and($snapshot->observed_by)->toBe($user->id)
         ->and($snapshot->tracked_variant_count)->toBe(2)
-        ->and($snapshot->unknown_inventory_variant_count)->toBe(1);
+        ->and($snapshot->unknown_inventory_variant_count)->toBe(2);
 });
 
 function createBulkTrackingVariant(Product $product, string $sku, ?bool $tracked, ?int $quantity): Variant
@@ -68,6 +69,7 @@ function createBulkTrackingVariant(Product $product, string $sku, ?bool $tracked
         'sku' => $sku,
         'inventory_tracked' => $tracked,
         'inventory_qty' => $quantity,
+        'current_on_hand_quantity' => $quantity,
         'inventory_local_dirty' => false,
     ]));
 }

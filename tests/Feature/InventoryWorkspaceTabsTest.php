@@ -2,6 +2,7 @@
 
 use App\Enums\PermissionEnum;
 use App\Filament\Resources\InventoryResource\Pages\ListInventories;
+use App\Models\ChangeLog;
 use App\Models\Import;
 use App\Models\ProcurementIncomingStock;
 use App\Models\Product;
@@ -39,6 +40,9 @@ it('separates everyday inventory controls from supplier order controls', functio
         'product_id' => $product->id,
         'sku' => 'TAB-001',
         'inventory_qty' => 12,
+        'current_available_quantity' => 12,
+        'current_committed_quantity' => 2,
+        'current_on_hand_quantity' => 14,
         'inventory_tracked' => true,
     ]);
 
@@ -47,6 +51,9 @@ it('separates everyday inventory controls from supplier order controls', functio
     Livewire::test(ListInventories::class)
         ->assertSet('activeTab', 'everyday')
         ->assertTableColumnVisible('product.id')
+        ->assertTableColumnVisible('inventory_qty')
+        ->assertTableColumnVisible('current_committed_quantity')
+        ->assertTableColumnVisible('current_on_hand_quantity')
         ->assertTableColumnHidden('quantity_on_order')
         ->assertTableFilterHidden('order_state')
         ->assertTableActionVisible('editInventory', $variant)
@@ -83,9 +90,47 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertSee('Upload Receipts')
         ->assertSee('Paste Purchase Order')
         ->assertSee('Paste Received Orders')
+        ->assertSee('Recalculate Procurement')
         ->assertDontSee('Confirm Paste')
         ->assertDontSee('Confirm Supplier Import')
         ->assertDontSee('Import Stock CSV');
+});
+
+it('stages a manual physical count as on hand without overwriting available', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'on-hand-edit.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'on-hand-edit', 'title' => 'On Hand Edit', 'status' => 'active',
+    ]);
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::query()->create([
+        'product_id' => $product->id, 'sku' => 'ON-HAND-1',
+        'inventory_tracked' => true, 'inventory_qty' => 4,
+        'current_available_quantity' => 4, 'current_committed_quantity' => 2,
+        'current_on_hand_quantity' => 6, 'inventory_local_dirty' => false,
+    ]));
+    $this->actingAs($user);
+
+    Livewire::test(ListInventories::class)
+        ->callTableAction('editInventory', $variant, data: [
+            'inventory_tracked' => true,
+            'on_hand_quantity' => 10,
+        ]);
+
+    expect($variant->fresh()->inventory_qty)->toBe(4)
+        ->and($variant->fresh()->current_available_quantity)->toBe(4)
+        ->and($variant->fresh()->current_committed_quantity)->toBe(2)
+        ->and($variant->fresh()->current_on_hand_quantity)->toBe(10)
+        ->and($variant->fresh()->inventory_local_dirty)->toBeTrue()
+        ->and(ChangeLog::query()
+            ->where('model_type', Variant::class)
+            ->where('model_id', $variant->id)
+            ->where('field', 'current_on_hand_quantity')
+            ->where('changed_by', $user->id)
+            ->exists())->toBeTrue();
 });
 
 it('filters the inventory table using a pasted SKU list', function (): void {
@@ -108,7 +153,7 @@ it('filters the inventory table using a pasted SKU list', function (): void {
         ->assertCanNotSeeTableRecords([$other]);
 });
 
-it('shows active products and initialized drafts but excludes archived and unlisted products', function (): void {
+it('shows only active products in the inventory workspace', function (): void {
     $user = User::factory()->create();
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
@@ -137,13 +182,13 @@ it('shows active products and initialized drafts but excludes archived and unlis
     $unlisted = $variant('unlisted', 'UNLISTED-STOCK', 10);
 
     expect(Variant::query()->inventoryWorkspaceEligible()->pluck('id')->all())
-        ->toContain($active->id, $draftWithInventory->id)
-        ->not->toContain($draftWithoutInventory->id, $archived->id, $unlisted->id);
+        ->toContain($active->id)
+        ->not->toContain($draftWithoutInventory->id, $draftWithInventory->id, $archived->id, $unlisted->id);
 
     $this->actingAs($user);
     Livewire::test(ListInventories::class)
-        ->assertCanSeeTableRecords([$active, $draftWithInventory])
-        ->assertCanNotSeeTableRecords([$draftWithoutInventory, $archived, $unlisted]);
+        ->assertCanSeeTableRecords([$active])
+        ->assertCanNotSeeTableRecords([$draftWithoutInventory, $draftWithInventory, $archived, $unlisted]);
 });
 
 it('filters products by placed, planned, and multiple WIP order summaries', function (): void {

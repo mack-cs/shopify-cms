@@ -61,6 +61,9 @@ final class ProductInventoryCsvImporter
                 $data = $this->normalizeRow($row);
 
                 $quantityValue = $this->firstValue($data, [
+                    'on_hand',
+                    'on hand',
+                    'stock on hand',
                     'inventory_qty',
                     'inventory quantity',
                     'inventory qty',
@@ -75,8 +78,6 @@ final class ProductInventoryCsvImporter
                     'available quantity',
                     'inventory available',
                     'inventory available in stock',
-                    'on hand',
-                    'stock on hand',
                 ]);
 
                 $trackedValue = $this->firstValue($data, [
@@ -119,7 +120,9 @@ final class ProductInventoryCsvImporter
 
                 $newTracked = $tracked ?? true;
                 $newQuantity = $newTracked === false ? null : $quantity;
-                $currentQuantity = $variant->inventory_qty === null ? null : (int) $variant->inventory_qty;
+                $currentQuantity = $variant->current_on_hand_quantity === null
+                    ? null
+                    : (int) $variant->current_on_hand_quantity;
 
                 $changed = $variant->inventory_tracked !== $newTracked
                     || $currentQuantity !== $newQuantity
@@ -127,7 +130,7 @@ final class ProductInventoryCsvImporter
 
                 InventoryOperationContext::run(function () use ($variant, $newTracked, $newQuantity): void {
                     $variant->inventory_tracked = $newTracked;
-                    $variant->inventory_qty = $newTracked === false ? null : $newQuantity;
+                    $variant->current_on_hand_quantity = $newTracked === false ? null : $newQuantity;
                     $variant->inventory_sync_error = null;
                     $variant->save();
                 });
@@ -167,7 +170,7 @@ final class ProductInventoryCsvImporter
                 ->active()
                 ->with('product')
                 ->whereKey((int) $variantId)
-                ->whereHas('product', fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+                ->whereHas('product', fn (Builder $query): Builder => $this->activeProductQuery($query))
                 ->first();
 
             if ($variant instanceof Variant) {
@@ -240,7 +243,7 @@ final class ProductInventoryCsvImporter
         if ($handle !== null) {
             return Product::query()
                 ->where('handle', $handle)
-                ->where(fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+                ->where(fn (Builder $query): Builder => $this->activeProductQuery($query))
                 ->first();
         }
 
@@ -275,7 +278,7 @@ final class ProductInventoryCsvImporter
         $variants = Variant::query()
             ->active()
             ->where('sku', $sku)
-            ->whereHas('product', fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+            ->whereHas('product', fn (Builder $query): Builder => $this->activeProductQuery($query))
             ->orderBy('id')
             ->limit(2)
             ->get();
@@ -295,7 +298,7 @@ final class ProductInventoryCsvImporter
         return Variant::query()
             ->active()
             ->whereIn('shopify_id', $candidates)
-            ->whereHas('product', fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+            ->whereHas('product', fn (Builder $query): Builder => $this->activeProductQuery($query))
             ->first();
     }
 
@@ -308,7 +311,7 @@ final class ProductInventoryCsvImporter
         if (ctype_digit($value)) {
             $product = Product::query()
                 ->whereKey((int) $value)
-                ->where(fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+                ->where(fn (Builder $query): Builder => $this->activeProductQuery($query))
                 ->first();
 
             if ($product instanceof Product) {
@@ -325,13 +328,13 @@ final class ProductInventoryCsvImporter
 
         return Product::query()
             ->whereIn('shopify_id', $candidates)
-            ->where(fn (Builder $query): Builder => $this->nonArchivedProductQuery($query))
+            ->where(fn (Builder $query): Builder => $this->activeProductQuery($query))
             ->first();
     }
 
-    private function nonArchivedProductQuery(Builder $query): Builder
+    private function activeProductQuery(Builder $query): Builder
     {
-        return $query->whereRaw('LOWER(COALESCE(status, "")) != ?', ['archived']);
+        return $query->activeStatus();
     }
 
     /**

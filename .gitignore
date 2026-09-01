@@ -31,3 +31,5 @@ only(\[shopify_id
 only(\['shopify_id'
 all()))
 .gitignore
+PROCUREMENT_PHASE1.md
+docs/procurement-google-sheets.md

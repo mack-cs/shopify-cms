@@ -107,12 +107,30 @@ class InventoryResource extends Resource
                     })
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('inventory_qty')
-                    ->label('Current Inventory')
+                    ->label('Available')
                     ->state(fn (Variant $record): string => match ($record->inventory_tracked) {
                         false => 'Not tracked',
                         null => 'Unknown',
-                        default => $record->inventory_qty !== null ? (string) ((int) $record->inventory_qty) : 'Unknown',
+                        default => ($record->current_available_quantity ?? $record->inventory_qty) !== null
+                            ? (string) ((int) ($record->current_available_quantity ?? $record->inventory_qty))
+                            : 'Unknown',
                     })
+                    ->sortable(),
+                TextColumn::make('current_committed_quantity')
+                    ->label('Committed')
+                    ->state(fn (Variant $record): string => $record->inventory_tracked === false
+                        ? 'Not tracked'
+                        : ($record->current_committed_quantity !== null
+                            ? (string) ((int) $record->current_committed_quantity)
+                            : 'Unknown'))
+                    ->sortable(),
+                TextColumn::make('current_on_hand_quantity')
+                    ->label('On Hand')
+                    ->state(fn (Variant $record): string => $record->inventory_tracked === false
+                        ? 'Not tracked'
+                        : ($record->current_on_hand_quantity !== null
+                            ? (string) ((int) $record->current_on_hand_quantity)
+                            : 'Unknown'))
                     ->sortable(),
                 TextColumn::make('quantity_on_order')
                     ->label('Qty On Order')
@@ -346,20 +364,24 @@ class InventoryResource extends Resource
                             ->label('Inventory tracked')
                             ->default(true)
                             ->live(),
-                        Forms\Components\TextInput::make('inventory_qty')
-                            ->label('Quantity')
+                        Forms\Components\TextInput::make('on_hand_quantity')
+                            ->label('On Hand quantity')
                             ->numeric()
+                            ->integer()
+                            ->minValue(0)
+                            ->required()
+                            ->helperText('Enter the physical stock count. Shopify will calculate Available inventory.')
                             ->visible(fn (Forms\Get $get): bool => (bool) $get('inventory_tracked')),
                     ])
                     ->fillForm(fn (Variant $record): array => [
                         'inventory_tracked' => $record->inventory_tracked !== false,
-                        'inventory_qty' => $record->inventory_qty,
+                        'on_hand_quantity' => $record->current_on_hand_quantity ?? $record->inventory_qty,
                     ])
                     ->action(function (Variant $record, array $data): void {
                         InventoryOperationContext::run(function () use ($record, $data): void {
                             $record->inventory_tracked = (bool) ($data['inventory_tracked'] ?? false);
-                            $record->inventory_qty = $record->inventory_tracked
-                                ? (isset($data['inventory_qty']) ? (int) $data['inventory_qty'] : 0)
+                            $record->current_on_hand_quantity = $record->inventory_tracked
+                                ? (isset($data['on_hand_quantity']) ? (int) $data['on_hand_quantity'] : 0)
                                 : null;
                             $record->inventory_sync_error = null;
                             $record->save();
@@ -445,7 +467,7 @@ class InventoryResource extends Resource
                         && app(InventoryAccessService::class)->canAccess(Auth::user()))
                     ->requiresConfirmation()
                     ->modalHeading('Push Inventory To Shopify')
-                    ->modalDescription('This will push the current local inventory, tracking state, and product status to Shopify, then refresh complementary products if needed.')
+                    ->modalDescription('This will set Shopify On Hand to the staged physical count, update tracking and product status, then refresh Shopify inventory states.')
                     ->modalSubmitActionLabel('Confirm Push')
                     ->action(function (Variant $record): void {
                         InventorySyncJob::dispatch(
@@ -530,8 +552,8 @@ class InventoryResource extends Resource
                         ->modalSubmitActionLabel('Start Tracking')
                         ->form([
                             Forms\Components\TextInput::make('inventory_qty')
-                                ->label('Starting quantity for every changed variant')
-                                ->helperText('The same starting quantity is assigned to each selected Not Tracked variant.')
+                                ->label('Starting On Hand quantity for every changed variant')
+                                ->helperText('The same physical stock count is assigned to each selected Not Tracked variant.')
                                 ->numeric()
                                 ->integer()
                                 ->minValue(0)
@@ -605,7 +627,7 @@ class InventoryResource extends Resource
                             && app(InventoryAccessService::class)->canAccess(Auth::user()))
                         ->requiresConfirmation()
                         ->modalHeading('Push Inventory To Shopify')
-                        ->modalDescription('This will push the current local inventory, tracking state, and product status to Shopify for all selected variants, then refresh complementary products if needed.')
+                        ->modalDescription('This will set Shopify On Hand to each staged physical count, update tracking and product status, then refresh Shopify inventory states.')
                         ->modalSubmitActionLabel('Confirm Push')
                         ->action(function (Collection $records): void {
                             InventorySyncJob::dispatch(
