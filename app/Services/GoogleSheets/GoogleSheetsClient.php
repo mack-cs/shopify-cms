@@ -9,7 +9,7 @@ final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
-    private const DATA_COLUMNS = 'A:AG';
+    private const DATA_COLUMNS = 'A:AH';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 

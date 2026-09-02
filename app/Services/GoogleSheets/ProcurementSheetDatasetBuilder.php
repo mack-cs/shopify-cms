@@ -142,6 +142,9 @@ final class ProcurementSheetDatasetBuilder
                         'current_committed_inventory' => $variant->inventory_tracked === true
                             ? $variant->current_committed_quantity
                             : null,
+                        'current_reserved_inventory' => $variant->inventory_tracked === true
+                            ? $variant->current_reserved_quantity
+                            : null,
                         'current_on_hand_inventory' => $variant->inventory_tracked === true
                             ? $variant->current_on_hand_quantity
                             : null,

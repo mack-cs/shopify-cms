@@ -152,14 +152,14 @@ it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', 
 
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
-    expect(array_slice($headers, 4, 7))->toBe([
-        'Currently on Sale', 'Sale Percentage', 'Available', 'Committed', 'On Hand',
+    expect(array_slice($headers, 4, 8))->toBe([
+        'Currently on Sale', 'Sale Percentage', 'Available', 'Committed', 'Reserved', 'On Hand',
         'cms_movement_classification', 'Ignore',
-    ])->and(array_slice($headers, 11, 3))->toBe([
+    ])->and(array_slice($headers, 12, 3))->toBe([
         'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
-    ])->and(array_slice($headers, 14, 4))->toBe([
+    ])->and(array_slice($headers, 15, 4))->toBe([
         'Next Order ID', 'Next ETA', 'Second Order ID', 'Second ETA',
-    ])->and($headers[28])->toBe('Action Required')
+    ])->and($headers[29])->toBe('Action Required')
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
@@ -168,7 +168,7 @@ it('upgrades legacy Current Inventory into Available without losing values', fun
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     $availableIndex = array_search('Available', $headers, true);
     $headers[$availableIndex] = 'Current Inventory';
-    $headers = array_values(array_filter($headers, fn (string $header): bool => ! in_array($header, ['Committed', 'On Hand'], true)));
+    $headers = array_values(array_filter($headers, fn (string $header): bool => ! in_array($header, ['Committed', 'Reserved', 'On Hand'], true)));
     $row = array_fill(0, count($headers), '');
     $row[array_search('Current Inventory', $headers, true)] = 17;
 
@@ -177,6 +177,7 @@ it('upgrades legacy Current Inventory into Available without losing values', fun
 
     expect($upgraded[1][$map['current_inventory']])->toBe(17)
         ->and($upgraded[1][$map['current_committed_inventory']])->toBe('')
+        ->and($upgraded[1][$map['current_reserved_inventory']])->toBe('')
         ->and($upgraded[1][$map['current_on_hand_inventory']])->toBe('');
 });
 
@@ -246,9 +247,9 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     $row = array_fill(0, count($headers), '');
     $row[0] = 'LRB0004';
-    $row[11] = 60;
+    $row[12] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:AG")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AH")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -299,13 +300,13 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AG")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AH")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AG")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AH")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
-            $row[11] = 60;
+            $row[12] = 60;
 
             return Http::response(['values' => [$headers, $row]]);
         }
@@ -340,11 +341,11 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
     expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
-        ->and($ranges)->not->toContain("'livi-road'!K2")
         ->and($ranges)->not->toContain("'livi-road'!L2")
-        ->and($ranges)->toContain("'livi-road'!M2")
+        ->and($ranges)->not->toContain("'livi-road'!M2")
         ->and($ranges)->toContain("'livi-road'!N2")
-        ->and($ranges)->toContain("'livi-road'!S2");
+        ->and($ranges)->toContain("'livi-road'!O2")
+        ->and($ranges)->toContain("'livi-road'!T2");
 });
 
 it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
@@ -388,16 +389,17 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     expect($ranges)->toContain("'master-file'!G2")
         ->and($ranges)->toContain("'master-file'!H2")
         ->and($ranges)->toContain("'master-file'!I2")
-        ->and($ranges)->toContain("'master-file'!M2")
+        ->and($ranges)->toContain("'master-file'!J2")
         ->and($ranges)->toContain("'master-file'!N2")
         ->and($ranges)->toContain("'master-file'!O2")
         ->and($ranges)->toContain("'master-file'!P2")
-        ->and($ranges)->toContain("'master-file'!W2")
+        ->and($ranges)->toContain("'master-file'!Q2")
         ->and($ranges)->toContain("'master-file'!X2")
-        ->and($ranges)->toContain("'livi-road'!AG2")
-        ->and($ranges)->not->toContain("'master-file'!K2")
+        ->and($ranges)->toContain("'master-file'!Y2")
+        ->and($ranges)->toContain("'livi-road'!AH2")
         ->and($ranges)->not->toContain("'master-file'!L2")
-        ->and($ranges)->not->toContain("'master-file'!T2");
+        ->and($ranges)->not->toContain("'master-file'!M2")
+        ->and($ranges)->not->toContain("'master-file'!U2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -444,6 +446,7 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
         'current_inventory_quantity' => 15,
         'current_available_quantity' => 15,
         'current_committed_quantity' => 4,
+        'current_reserved_quantity' => 3,
         'current_on_hand_quantity' => 19,
         'inventory_last_synced_at' => '2026-10-02 14:35:00',
     ])->save());
@@ -453,6 +456,7 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
 
     expect($record['current_inventory'])->toBe(15)
         ->and($record['current_committed_inventory'])->toBe(4)
+        ->and($record['current_reserved_inventory'])->toBe(3)
         ->and($record['current_on_hand_inventory'])->toBe(19)
         ->and($record['projected_inventory_position'])->toBe(19)
         ->and($record['number_of_wip_orders'])->toBe(1)

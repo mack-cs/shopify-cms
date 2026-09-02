@@ -117,13 +117,133 @@ GRAPHQL, [
         $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
         if ($errors !== []) {
             throw new \RuntimeException(
-                'Shopify inventory adjustment failed: ' . collect($errors)->pluck('message')->implode('; ')
+                'Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; ')
             );
         }
 
         $group = data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup');
-        if (!is_array($group)) {
+        if (! is_array($group)) {
             throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
+        }
+
+        return $group;
+    }
+
+    /** @return array<string, mixed> */
+    public function moveQuantity(
+        Variant $variant,
+        int $quantity,
+        string $from,
+        string $to,
+        string $reason,
+        string $referenceUri,
+        string $ledgerDocumentUri,
+        string $idempotencyKey,
+        ?string $locationId = null,
+    ): array {
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException('Inventory movement quantity must be greater than zero.');
+        }
+
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        if ($inventoryItemId === '' || $locationId === '') {
+            throw new \RuntimeException('The component inventory item and location are required.');
+        }
+
+        $terminal = fn (string $name): array => array_filter([
+            'locationId' => $locationId,
+            'name' => $name,
+            'ledgerDocumentUri' => $name === 'available' ? null : $ledgerDocumentUri,
+        ], fn (mixed $value): bool => $value !== null);
+
+        $data = $this->client->graphql(<<<'GRAPHQL'
+mutation MoveStackComponentInventory($input: InventoryMoveQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryMoveQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      createdAt reason referenceDocumentUri
+      changes { name delta ledgerDocumentUri }
+    }
+    userErrors { field message code }
+  }
+}
+GRAPHQL, [
+            'input' => [
+                'reason' => $reason,
+                'referenceDocumentUri' => $referenceUri,
+                'changes' => [[
+                    'quantity' => $quantity,
+                    'inventoryItemId' => $inventoryItemId,
+                    'from' => $terminal($from),
+                    'to' => $terminal($to),
+                ]],
+            ],
+            'idempotencyKey' => $idempotencyKey,
+        ]);
+
+        return $this->confirmedGroup($data, 'inventoryMoveQuantities');
+    }
+
+    /** Remove physically consumed stock from reserved; available remains unchanged. @return array<string, mixed> */
+    public function consumeReserved(
+        Variant $variant,
+        int $quantity,
+        string $referenceUri,
+        string $ledgerDocumentUri,
+        string $idempotencyKey,
+        ?string $locationId = null,
+    ): array {
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException('Consumed inventory quantity must be greater than zero.');
+        }
+
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        if ($inventoryItemId === '' || $locationId === '') {
+            throw new \RuntimeException('The component inventory item and location are required.');
+        }
+
+        $data = $this->client->graphql(<<<'GRAPHQL'
+mutation ConsumeReservedStackInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      createdAt reason referenceDocumentUri
+      changes { name delta quantityAfterChange ledgerDocumentUri }
+    }
+    userErrors { field message }
+  }
+}
+GRAPHQL, [
+            'input' => [
+                'name' => 'reserved',
+                'reason' => 'correction',
+                'referenceDocumentUri' => $referenceUri,
+                'changes' => [[
+                    'inventoryItemId' => $inventoryItemId,
+                    'locationId' => $locationId,
+                    'delta' => -$quantity,
+                    'ledgerDocumentUri' => $ledgerDocumentUri,
+                ]],
+            ],
+            'idempotencyKey' => $idempotencyKey,
+        ]);
+
+        return $this->confirmedGroup($data, 'inventoryAdjustQuantities');
+    }
+
+    /** @return array<string, mixed> */
+    private function confirmedGroup(array $data, string $mutation): array
+    {
+        $errors = data_get($data, "{$mutation}.userErrors", []);
+        if ($errors !== []) {
+            throw new \RuntimeException(
+                'Shopify inventory operation failed: '.collect($errors)->pluck('message')->implode('; ')
+            );
+        }
+
+        $group = data_get($data, "{$mutation}.inventoryAdjustmentGroup");
+        if (! is_array($group)) {
+            throw new \RuntimeException('Shopify did not return an inventory operation confirmation.');
         }
 
         return $group;

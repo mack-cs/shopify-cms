@@ -3,100 +3,107 @@
 namespace App\Services\Shopify;
 
 use App\Models\NewProductDraft;
-use App\Models\Product;
 use App\Models\ShopifyFulfillment;
-use App\Models\ShopifyStackComponentDeduction;
+use App\Models\ShopifyStackInventoryMovement;
+use App\Models\ShopifyStackInventoryReservation;
 use App\Models\Variant;
-use App\Services\TagNormalizer;
-use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 
 final class StackFulfillmentInventoryService
 {
-    public function __construct(private readonly ShopifyInventoryAdjustmentService $inventory) {}
+    public function __construct(private readonly StackInventoryMovementService $movements) {}
 
-    /** @return array{stack_lines:int,deductions:int,already_completed:int} */
+    /** @return array{stack_lines:int,consumed:int,already_completed:int} */
     public function process(ShopifyFulfillment $fulfillment): array
     {
+        if ($fulfillment->processing_status === ShopifyFulfillment::STATUS_COMPLETED) {
+            return ['stack_lines' => 0, 'consumed' => 0, 'already_completed' => 1];
+        }
         if (strtolower(trim((string) $fulfillment->shopify_status)) !== 'success') {
             $fulfillment->forceFill([
                 'processing_status' => ShopifyFulfillment::STATUS_IGNORED,
-                'error_message' => 'Fulfillment status is not success; no inventory was deducted.',
+                'error_message' => 'Fulfillment status is not success; no reserved inventory was consumed.',
                 'processed_at' => now(),
             ])->save();
 
-            return ['stack_lines' => 0, 'deductions' => 0, 'already_completed' => 0];
+            return ['stack_lines' => 0, 'consumed' => 0, 'already_completed' => 0];
         }
 
+        $orderId = $this->gid('Order', $fulfillment->shopify_order_id);
+        $lock = Cache::lock('stack-order-inventory:'.$orderId, 300);
+        if (! $lock->get()) {
+            throw new \RuntimeException('Stack order inventory is already being processed; retrying.');
+        }
+
+        try {
+            return $this->processLocked($fulfillment, $orderId);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /** @return array{stack_lines:int,consumed:int,already_completed:int} */
+    private function processLocked(ShopifyFulfillment $fulfillment, string $orderId): array
+    {
         $fulfillment->forceFill([
             'processing_status' => ShopifyFulfillment::STATUS_PROCESSING,
             'attempts' => (int) $fulfillment->attempts + 1,
             'processing_started_at' => now(),
             'error_message' => null,
         ])->save();
+        $summary = ['stack_lines' => 0, 'consumed' => 0, 'already_completed' => 0];
 
-        $summary = ['stack_lines' => 0, 'deductions' => 0, 'already_completed' => 0];
-        $errors = [];
+        try {
+            foreach ((array) data_get($fulfillment->payload, 'line_items', []) as $lineItem) {
+                if (! is_array($lineItem) || (int) ($lineItem['quantity'] ?? 0) <= 0) {
+                    continue;
+                }
+                $lineId = $this->gid('LineItem', $lineItem['admin_graphql_api_id'] ?? $lineItem['id'] ?? null);
+                $reservations = ShopifyStackInventoryReservation::query()
+                    ->where('shopify_order_id', $orderId)
+                    ->where('shopify_order_line_item_id', $lineId)
+                    ->get();
+                if ($reservations->isEmpty()) {
+                    if ($this->isConfiguredStack($lineItem)) {
+                        throw new \RuntimeException("No component reservation exists for fulfilled Stack line {$lineId}; retrying after the order webhook.");
+                    }
 
-        foreach ((array) data_get($fulfillment->payload, 'line_items', []) as $lineItem) {
-            if (! is_array($lineItem) || (int) ($lineItem['quantity'] ?? 0) <= 0) {
-                continue;
-            }
+                    continue;
+                }
 
-            $stackVariant = $this->findVariant($lineItem['variant_id'] ?? null);
-            if (! $stackVariant instanceof Variant || ! $stackVariant->product instanceof Product) {
-                continue;
-            }
+                $summary['stack_lines']++;
+                foreach ($reservations as $reservation) {
+                    $quantity = (int) $lineItem['quantity'] * (int) $reservation->component_quantity_per_stack;
+                    $source = "fulfillment:{$fulfillment->shopify_fulfillment_id}:{$lineId}";
+                    $eventKey = hash('sha256', implode('|', [
+                        $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME, $quantity,
+                    ]));
+                    if ($reservation->movements()->where('event_key', $eventKey)
+                        ->where('status', ShopifyStackInventoryMovement::STATUS_COMPLETED)->exists()) {
+                        $summary['already_completed']++;
 
-            $draft = $this->findStackDraft($stackVariant, $lineItem);
-            $isStack = (bool) $stackVariant->product->is_bundle
-                || TagNormalizer::containsBundleOrStackTag($stackVariant->product->tags)
-                || $draft instanceof NewProductDraft;
-            if (! $isStack) {
-                continue;
-            }
-
-            $summary['stack_lines']++;
-            if (! $draft instanceof NewProductDraft) {
-                continue;
-            }
-
-            $components = $this->componentConfiguration($draft);
-            if ($components === []) {
-                continue;
-            }
-
-            $lineItemId = trim((string) ($lineItem['fulfillment_line_item_id'] ?? $lineItem['id'] ?? ''));
-            if ($lineItemId === '') {
-                $errors[] = "Stack variant {$stackVariant->shopify_id} has no fulfillment line-item identifier.";
-
-                continue;
-            }
-
-            foreach ($components as $componentProductId => $quantityPerStack) {
-                try {
-                    $result = $this->processComponent(
-                        $fulfillment,
-                        $lineItemId,
-                        $stackVariant,
-                        (int) $lineItem['quantity'],
-                        $componentProductId,
-                        $quantityPerStack,
+                        continue;
+                    }
+                    if ($quantity > $reservation->remainingReserved()) {
+                        throw new \RuntimeException(
+                            "Stack component {$reservation->component_sku} needs {$quantity} reserved units but only {$reservation->remainingReserved()} remain."
+                        );
+                    }
+                    $this->movements->execute(
+                        $reservation,
+                        ShopifyStackInventoryMovement::ACTION_CONSUME,
+                        $quantity,
+                        $source,
                     );
-                    $summary[$result]++;
-                } catch (\Throwable $exception) {
-                    $errors[] = $exception->getMessage();
+                    $summary['consumed']++;
                 }
             }
-        }
-
-        if ($errors !== []) {
-            $message = implode(' | ', array_values(array_unique($errors)));
+        } catch (\Throwable $exception) {
             $fulfillment->forceFill([
                 'processing_status' => ShopifyFulfillment::STATUS_FAILED,
-                'error_message' => $message,
+                'error_message' => $exception->getMessage(),
             ])->save();
-
-            throw new \RuntimeException($message);
+            throw $exception;
         }
 
         $fulfillment->forceFill([
@@ -108,178 +115,24 @@ final class StackFulfillmentInventoryService
         return $summary;
     }
 
-    private function processComponent(
-        ShopifyFulfillment $fulfillment,
-        string $lineItemId,
-        Variant $stackVariant,
-        int $stackQuantity,
-        int $componentProductId,
-        int $quantityPerStack,
-    ): string {
-        $component = Product::query()->with('variants')->find($componentProductId);
-        $deduct = $stackQuantity * $quantityPerStack;
-        $locationId = $this->gid('Location', $fulfillment->shopify_location_id);
-
-        $ledger = ShopifyStackComponentDeduction::query()->firstOrCreate(
-            [
-                'shopify_fulfillment_id' => $fulfillment->id,
-                'shopify_fulfillment_line_item_id' => $lineItemId,
-                'configured_component_product_id' => $componentProductId,
-            ],
-            [
-                'shopify_order_id' => $fulfillment->shopify_order_id,
-                'shopify_stack_variant_id' => (string) $stackVariant->shopify_id,
-                'stack_product_id' => $stackVariant->product_id,
-                'stack_variant_id' => $stackVariant->id,
-                'stack_quantity_fulfilled' => $stackQuantity,
-                'component_product_id' => $component?->id,
-                'shopify_location_id' => $locationId,
-                'component_quantity_per_stack' => $quantityPerStack,
-                'quantity_deducted' => $deduct,
-                'idempotency_key' => (string) Str::uuid(),
-                'status' => ShopifyStackComponentDeduction::STATUS_PENDING,
-            ],
-        );
-
-        if ($ledger->status === ShopifyStackComponentDeduction::STATUS_COMPLETED) {
-            return 'already_completed';
-        }
-
-        $locationId = trim((string) $ledger->shopify_location_id);
-
-        if (! $component instanceof Product) {
-            $message = "Stack component product {$componentProductId} could not be found.";
-            $this->failLedger($ledger, $message);
-            throw new \RuntimeException($message);
-        }
-
-        $componentVariants = $component->variants
-            ->filter(fn (Variant $variant): bool => trim((string) $variant->shopify_inventory_item_id) !== '')
-            ->values();
-        if ($componentVariants->count() !== 1) {
-            $message = "Stack component product {$componentProductId} must have exactly one active variant with a Shopify inventory item ID.";
-            $ledger->forceFill(['component_product_id' => $component->id])->save();
-            $this->failLedger($ledger, $message);
-            throw new \RuntimeException($message);
-        }
-
-        /** @var Variant $variant */
-        $variant = $componentVariants->first();
-
-        $ledger->forceFill([
-            'status' => ShopifyStackComponentDeduction::STATUS_PROCESSING,
-            'attempts' => (int) $ledger->attempts + 1,
-            'processing_started_at' => now(),
-            'component_product_id' => $component->id,
-            'component_variant_id' => $variant->id,
-            'shopify_component_variant_id' => $variant->shopify_id,
-            'shopify_inventory_item_id' => $variant->shopify_inventory_item_id,
-            'error_message' => null,
-        ])->save();
-
-        try {
-            $reference = 'gid://shopify/Fulfillment/'.$this->numericId($fulfillment->shopify_fulfillment_id)
-                .'#stack-component-'.$ledger->id;
-            $response = $this->inventory->decreaseAvailable(
-                $variant,
-                (int) $ledger->quantity_deducted,
-                $reference,
-                (string) $ledger->idempotency_key,
-                $locationId !== '' ? $locationId : null,
-            );
-
-            $ledger->forceFill([
-                'status' => ShopifyStackComponentDeduction::STATUS_COMPLETED,
-                'shopify_response' => $response,
-                'processed_at' => now(),
-                'error_message' => null,
-            ])->save();
-        } catch (\Throwable $exception) {
-            $ledger->forceFill([
-                'status' => ShopifyStackComponentDeduction::STATUS_FAILED,
-                'error_message' => $exception->getMessage(),
-            ])->save();
-            throw $exception;
-        }
-
-        return 'deductions';
-    }
-
-    private function failLedger(ShopifyStackComponentDeduction $ledger, string $message): void
+    private function isConfiguredStack(array $lineItem): bool
     {
-        $ledger->forceFill([
-            'status' => ShopifyStackComponentDeduction::STATUS_FAILED,
-            'attempts' => (int) $ledger->attempts + 1,
-            'error_message' => $message,
-        ])->save();
-    }
-
-    private function findVariant(mixed $shopifyVariantId): ?Variant
-    {
-        $id = trim((string) ($shopifyVariantId ?? ''));
-        if ($id === '') {
-            return null;
+        $variantId = trim((string) ($lineItem['variant_id'] ?? ''));
+        if ($variantId === '') {
+            return false;
+        }
+        $variant = Variant::query()->with('product')->whereIn('shopify_id', [
+            $variantId, $this->gid('ProductVariant', $variantId),
+        ])->first();
+        if (! $variant instanceof Variant) {
+            return false;
         }
 
-        return Variant::query()
-            ->with('product')
-            ->whereIn('shopify_id', array_unique([$id, $this->gid('ProductVariant', $id)]))
-            ->first();
-    }
-
-    private function findStackDraft(Variant $variant, array $lineItem): ?NewProductDraft
-    {
-        $product = $variant->product;
-        $shopifyId = trim((string) ($product?->shopify_id ?? ''));
-        $handle = trim((string) ($product?->handle ?? ''));
-        $sku = trim((string) ($variant->sku ?: ($lineItem['sku'] ?? '')));
-
-        if ($shopifyId === '' && $handle === '' && $sku === '') {
-            return null;
-        }
-
-        return NewProductDraft::query()
-            ->where(function ($query) use ($shopifyId, $handle, $sku): void {
-                $hasCondition = false;
-                foreach (['shopify_id' => $shopifyId, 'handle' => $handle, 'sku' => $sku] as $column => $value) {
-                    if ($value === '') {
-                        continue;
-                    }
-
-                    $hasCondition
-                        ? $query->orWhere($column, $value)
-                        : $query->where($column, $value);
-                    $hasCondition = true;
-                }
-            })
-            ->whereNotNull('bundle_product_ids')
-            ->first();
-    }
-
-    /** @return array<int, int> */
-    private function componentConfiguration(NewProductDraft $draft): array
-    {
-        $quantities = collect((array) $draft->bundle_component_quantities)
-            ->mapWithKeys(function (mixed $row): array {
-                if (! is_array($row)) {
-                    return [];
-                }
-                $productId = (int) ($row['product_id'] ?? 0);
-                $quantity = max(1, (int) ($row['quantity'] ?? 1));
-
-                return $productId > 0 ? [$productId => $quantity] : [];
-            })
-            ->all();
-
-        $configured = [];
-        foreach ((array) $draft->bundle_product_ids as $productId) {
-            $productId = (int) $productId;
-            if ($productId > 0) {
-                $configured[$productId] = (int) ($quantities[$productId] ?? 1);
-            }
-        }
-
-        return $configured;
+        return NewProductDraft::query()->whereNotNull('bundle_product_ids')->where(function ($query) use ($variant): void {
+            $query->where('shopify_id', $variant->product?->shopify_id)
+                ->orWhere('handle', $variant->product?->handle)
+                ->orWhere('sku', $variant->sku);
+        })->exists();
     }
 
     private function gid(string $type, mixed $id): string
@@ -290,12 +143,5 @@ final class StackFulfillmentInventoryService
         }
 
         return str_starts_with($id, 'gid://shopify/') ? $id : "gid://shopify/{$type}/{$id}";
-    }
-
-    private function numericId(mixed $id): string
-    {
-        $parts = explode('/', trim((string) $id));
-
-        return (string) end($parts);
     }
 }

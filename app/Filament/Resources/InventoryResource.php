@@ -124,6 +124,14 @@ class InventoryResource extends Resource
                             ? (string) ((int) $record->current_committed_quantity)
                             : 'Unknown'))
                     ->sortable(),
+                TextColumn::make('current_reserved_quantity')
+                    ->label('Reserved')
+                    ->state(fn (Variant $record): string => $record->inventory_tracked === false
+                        ? 'Not tracked'
+                        : ($record->current_reserved_quantity !== null
+                            ? (string) ((int) $record->current_reserved_quantity)
+                            : 'Unknown'))
+                    ->sortable(),
                 TextColumn::make('current_on_hand_quantity')
                     ->label('On Hand')
                     ->state(fn (Variant $record): string => $record->inventory_tracked === false

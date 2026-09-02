@@ -45,7 +45,7 @@ final class ShopifyFulfillmentWebhookController extends Controller
             ->first();
         $webhookId = trim((string) $request->header('X-Shopify-Webhook-Id')) ?: null;
 
-        $fulfillment = ShopifyFulfillment::query()->updateOrCreate(
+        $fulfillment = ShopifyFulfillment::query()->firstOrCreate(
             ['shopify_fulfillment_id' => $fulfillmentId],
             [
                 'shopify_order_id' => $orderId,
@@ -59,6 +59,23 @@ final class ShopifyFulfillmentWebhookController extends Controller
                 'error_message' => null,
             ],
         );
+
+        if (! $fulfillment->wasRecentlyCreated && $fulfillment->processing_status === ShopifyFulfillment::STATUS_COMPLETED) {
+            return response()->json(['status' => 'duplicate'], 200);
+        }
+
+        if (! $fulfillment->wasRecentlyCreated) {
+            $fulfillment->forceFill([
+                'shopify_order_id' => $orderId,
+                'shopify_order_db_id' => $order?->id,
+                'shopify_location_id' => trim((string) ($payload['location_id'] ?? '')) ?: $fulfillment->shopify_location_id,
+                'shopify_status' => strtolower(trim((string) ($payload['status'] ?? ''))),
+                'webhook_id' => $webhookId,
+                'processing_status' => ShopifyFulfillment::STATUS_PENDING,
+                'payload' => $payload,
+                'error_message' => null,
+            ])->save();
+        }
 
         ProcessShopifyStackFulfillmentJob::dispatch($fulfillment->id);
 

@@ -8,12 +8,14 @@ use App\Jobs\Shopify\RunHistoricalShopifyOrdersImport;
 use App\Jobs\Shopify\RunShopifyOrdersBackfill;
 use App\Jobs\Shopify\StartShopifyInventoryBulkExport;
 use App\Models\ShopifySyncRun;
+use App\Models\ShopifyStackOrderEvent;
 use App\Models\NewProductDraftAssignment;
 use App\Models\ShopifyAudit;
 use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
+use App\Services\Shopify\StackOrderReservationService;
 use App\Services\ComplementaryProductMaintenanceService;
 use App\Services\StackBundleSellabilityService;
 use App\Services\StackSellabilityShopifyPushService;
@@ -371,7 +373,7 @@ Artisan::command('notifications:send-monthly-maintenance-reports', function (Mai
 })->purpose('Email monthly owner reports: missing alt text to Nicky and 404-only URLs to Mack and Freddy.');
 
 Artisan::command('shopify:register-stack-fulfillment-webhooks', function (ShopifyApiClient $client): int {
-    $uri = rtrim((string) config('app.url'), '/') . route('webhooks.shopify.fulfillments', absolute: false);
+    $baseUrl = rtrim((string) config('app.url'), '/');
     $existing = $client->graphql(<<<'GRAPHQL'
 query StackFulfillmentWebhooks {
   webhookSubscriptions(first: 250) {
@@ -381,7 +383,14 @@ query StackFulfillmentWebhooks {
 GRAPHQL);
 
     $subscriptions = collect(data_get($existing, 'webhookSubscriptions.nodes', []));
-    foreach (['FULFILLMENTS_CREATE', 'FULFILLMENTS_UPDATE'] as $topic) {
+    $topics = [
+        'ORDERS_CREATE' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'ORDERS_UPDATED' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'ORDERS_CANCELLED' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'FULFILLMENTS_CREATE' => $baseUrl.route('webhooks.shopify.fulfillments', absolute: false),
+        'FULFILLMENTS_UPDATE' => $baseUrl.route('webhooks.shopify.fulfillments', absolute: false),
+    ];
+    foreach ($topics as $topic => $uri) {
         $alreadyRegistered = $subscriptions->contains(
             fn (array $subscription): bool => ($subscription['topic'] ?? null) === $topic
                 && rtrim((string) ($subscription['uri'] ?? ''), '/') === rtrim($uri, '/')
@@ -413,7 +422,94 @@ GRAPHQL, [
     }
 
     return self::SUCCESS;
-})->purpose('Register the fulfillment create/update webhooks used for Stack component inventory deductions.');
+})->purpose('Register order and fulfillment webhooks used for Stack component inventory reservations.');
+
+Artisan::command('shopify:reconcile-stack-reservations', function (
+    ShopifyApiClient $client,
+    StackOrderReservationService $service,
+): int {
+    $cursor = null;
+    $orders = 0;
+    $reservations = 0;
+    do {
+        $data = $client->graphql(<<<'GRAPHQL'
+query OpenOrdersForStackReservation($after: String) {
+  orders(first: 50, after: $after, query: "status:open", sortKey: UPDATED_AT) {
+    nodes {
+      id name cancelledAt updatedAt
+      lineItems(first: 250) {
+        nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+GRAPHQL, ['after' => $cursor]);
+
+        foreach ((array) data_get($data, 'orders.nodes', []) as $order) {
+            if (! is_array($order) || data_get($order, 'cancelledAt') !== null) {
+                continue;
+            }
+            $lineNodes = (array) data_get($order, 'lineItems.nodes', []);
+            $lineCursor = data_get($order, 'lineItems.pageInfo.endCursor');
+            while ((bool) data_get($order, 'lineItems.pageInfo.hasNextPage', false) && is_string($lineCursor) && $lineCursor !== '') {
+                $more = $client->graphql(<<<'GRAPHQL'
+query MoreOpenOrderLines($orderId: ID!, $after: String!) {
+  order(id: $orderId) {
+    lineItems(first: 250, after: $after) {
+      nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
+                $lineNodes = array_merge($lineNodes, (array) data_get($more, 'order.lineItems.nodes', []));
+                $order['lineItems']['pageInfo'] = data_get($more, 'order.lineItems.pageInfo', []);
+                $lineCursor = data_get($more, 'order.lineItems.pageInfo.endCursor');
+            }
+            $lines = collect($lineNodes)->map(function (array $line): array {
+                $current = max(0, (int) ($line['currentQuantity'] ?? $line['quantity'] ?? 0));
+                $unfulfilled = max(0, min($current, (int) ($line['unfulfilledQuantity'] ?? $current)));
+
+                return [
+                    'admin_graphql_api_id' => $line['id'] ?? null,
+                    'variant_id' => data_get($line, 'variant.id'),
+                    'sku' => $line['sku'] ?? null,
+                    'quantity' => $current,
+                    'current_quantity' => $current,
+                    '_stack_baseline_fulfilled_quantity' => $current - $unfulfilled,
+                ];
+            })->all();
+            $orderId = trim((string) ($order['id'] ?? ''));
+            if ($orderId === '') {
+                continue;
+            }
+            $event = ShopifyStackOrderEvent::query()->firstOrCreate(
+                ['webhook_id' => 'backfill-'.sha1($orderId)],
+                [
+                    'topic' => 'orders/updated',
+                    'shopify_order_id' => $orderId,
+                    'shopify_order_name' => trim((string) ($order['name'] ?? '')) ?: null,
+                    'shopify_updated_at' => $order['updatedAt'] ?? null,
+                    'payload' => ['admin_graphql_api_id' => $orderId, 'name' => $order['name'] ?? null, 'line_items' => $lines],
+                ],
+            );
+            if ($event->status !== ShopifyStackOrderEvent::STATUS_COMPLETED) {
+                $summary = $service->process($event);
+                $reservations += $summary['reserved'];
+            }
+            $orders++;
+        }
+
+        $hasNextPage = (bool) data_get($data, 'orders.pageInfo.hasNextPage', false);
+        $cursor = data_get($data, 'orders.pageInfo.endCursor');
+    } while ($hasNextPage && is_string($cursor) && $cursor !== '');
+
+    $this->info("Reconciled {$orders} open orders; {$reservations} Stack component reservation movements completed.");
+
+    return self::SUCCESS;
+})->purpose('Backfill current open Shopify Stack orders into the component reservation ledger.');
 
 Schedule::command('notifications:send-daily-task-reminders')
     ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))

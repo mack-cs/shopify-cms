@@ -10,6 +10,7 @@ final class ProcurementSheetSchema
         'sale_percentage' => 'Sale Percentage',
         'current_inventory' => 'Available',
         'current_committed_inventory' => 'Committed',
+        'current_reserved_inventory' => 'Reserved',
         'current_on_hand_inventory' => 'On Hand',
         'cms_movement_classification' => 'cms_movement_classification',
         'ignore' => 'Ignore',

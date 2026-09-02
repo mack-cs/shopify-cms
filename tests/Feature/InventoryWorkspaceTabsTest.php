@@ -42,6 +42,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         'inventory_qty' => 12,
         'current_available_quantity' => 12,
         'current_committed_quantity' => 2,
+        'current_reserved_quantity' => 1,
         'current_on_hand_quantity' => 14,
         'inventory_tracked' => true,
     ]);
@@ -53,6 +54,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableColumnVisible('product.id')
         ->assertTableColumnVisible('inventory_qty')
         ->assertTableColumnVisible('current_committed_quantity')
+        ->assertTableColumnVisible('current_reserved_quantity')
         ->assertTableColumnVisible('current_on_hand_quantity')
         ->assertTableColumnHidden('quantity_on_order')
         ->assertTableFilterHidden('order_state')
