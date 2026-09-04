@@ -20,6 +20,7 @@ final class ProcurementSheetSchema
         'next_eta' => 'Next ETA',
         'second_order_id' => 'Second Order ID',
         'second_eta' => 'Second ETA',
+        'predicted_runout_date_after_replenishment' => 'Predicted Runout Date After Replenishment',
         'projected_stock_before_second_eta' => 'Projected Stock Before Second ETA',
         'between_orders_stock_gap_status' => 'Between Orders Stock Gap Status',
         'projected_inventory_position' => 'Projected Inventory Position',

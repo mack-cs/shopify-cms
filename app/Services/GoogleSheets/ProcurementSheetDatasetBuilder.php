@@ -65,6 +65,9 @@ final class ProcurementSheetDatasetBuilder
                     $current = $variant->inventory_tracked === true
                         ? ($variant->current_inventory_quantity ?? $variant->inventory_qty)
                         : null;
+                    $currentOnHand = $variant->inventory_tracked === true
+                        ? ($variant->current_on_hand_quantity ?? $current)
+                        : null;
                     $nextOrders = $pendingOrders->get($variant->id, collect())->take(2)->values();
                     $nextOrder = $nextOrders->get(0);
                     $secondOrder = $nextOrders->get(1);
@@ -74,28 +77,38 @@ final class ProcurementSheetDatasetBuilder
                         ?? $prediction?->preliminary_order_quantity ?? 0);
                     $stockGapStatus = $replenishment === null
                         ? 'NO_PENDING_ORDER'
-                        : ($runout === null && ! ($current !== null && $current <= 0)
+                        : ($runout === null && ! ($currentOnHand !== null && $currentOnHand <= 0)
                             ? null
-                            : (($current !== null && $current <= 0) || $runout?->copy()
+                            : (($currentOnHand !== null && $currentOnHand <= 0) || $runout?->copy()
                                 ->addDays((int) config('procurement.stock_gap_grace_days', 0))->lt($replenishment)
                                 ? 'UNHEALTHY'
                                 : 'HEALTHY'));
+                    $runoutAfterReplenishment = null;
                     $projectedBeforeSecondEta = null;
                     $betweenOrdersGapStatus = $secondOrder === null ? 'NO_SECOND_ORDER' : 'INSUFFICIENT_DATA';
                     $weeklyDemand = $prediction?->predicted_weekly_demand;
-                    if ($nextOrder !== null && $secondOrder !== null && $current !== null && $weeklyDemand !== null) {
+                    if ($nextOrder !== null && $currentOnHand !== null && $weeklyDemand !== null) {
                         $today = now((string) config('procurement.timezone', 'Africa/Johannesburg'))->startOfDay();
                         $daysUntilFirstEta = max(0, (int) $today->diffInDays($nextOrder->eta_date, false));
-                        $daysBetweenEtas = max(0, (int) $nextOrder->eta_date->diffInDays($secondOrder->eta_date, false));
                         $dailyDemand = max(0, (float) $weeklyDemand) / 7;
-                        $stockRemainingAtFirstEta = max(0, (float) $current - ($dailyDemand * $daysUntilFirstEta));
-                        $projectedBeforeSecondEta = round(
-                            $stockRemainingAtFirstEta
-                            + (int) $nextOrder->quantity_outstanding
-                            - ($dailyDemand * $daysBetweenEtas),
-                            2,
-                        );
-                        $betweenOrdersGapStatus = $projectedBeforeSecondEta < 0 ? 'UNHEALTHY' : 'HEALTHY';
+                        $stockRemainingAtFirstEta = max(0, (float) $currentOnHand - ($dailyDemand * $daysUntilFirstEta));
+                        $stockAfterReplenishment = $stockRemainingAtFirstEta + (int) $nextOrder->quantity_outstanding;
+                        if ($dailyDemand > 0) {
+                            $runoutAfterReplenishment = $nextOrder->eta_date->copy()->addDays(
+                                (int) floor($stockAfterReplenishment / $dailyDemand)
+                            );
+                        }
+                        if ($secondOrder !== null) {
+                            $daysBetweenEtas = max(0, (int) $nextOrder->eta_date->diffInDays($secondOrder->eta_date, false));
+                            $projectedBeforeSecondEta = round(
+                                $stockAfterReplenishment - ($dailyDemand * $daysBetweenEtas),
+                                2,
+                            );
+                            $betweenOrdersGapStatus = $dailyDemand <= 0
+                                || ($runoutAfterReplenishment !== null && $runoutAfterReplenishment->gte($secondOrder->eta_date))
+                                ? 'HEALTHY'
+                                : 'UNHEALTHY';
+                        }
                     }
                     $action = $prediction === null ? null : $this->actionPolicy->resolve(
                         $prediction->action_status,
@@ -139,6 +152,7 @@ final class ProcurementSheetDatasetBuilder
                         'next_eta' => $nextOrder?->eta_date?->format('d/m/Y'),
                         'second_order_id' => $secondOrder?->order?->order_number,
                         'second_eta' => $secondOrder?->eta_date?->format('d/m/Y'),
+                        'predicted_runout_date_after_replenishment' => $runoutAfterReplenishment?->format('d/m/Y'),
                         'projected_stock_before_second_eta' => $projectedBeforeSecondEta,
                         'between_orders_stock_gap_status' => $betweenOrdersGapStatus,
                         // This operational column must move with live inventory even
@@ -146,7 +160,7 @@ final class ProcurementSheetDatasetBuilder
                         'projected_inventory_position' => ($current ?? 0) + $outstandingTotal,
                         'predicted_weekly_demand' => $prediction?->predicted_weekly_demand,
                         'estimated_days_of_stock_remaining' => $prediction?->estimated_days_of_stock_remaining,
-                        'predicted_runout_date' => $current !== null && $current <= 0
+                        'predicted_runout_date' => $currentOnHand !== null && $currentOnHand <= 0
                             ? 'OUT_OF_STOCK'
                             : $runout?->format('d/m/Y'),
                         'replenishment_date' => $replenishment?->format('d/m/Y'),

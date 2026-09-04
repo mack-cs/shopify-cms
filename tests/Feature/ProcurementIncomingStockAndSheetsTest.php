@@ -161,16 +161,17 @@ it('keeps the required procurement column groups in the exact report order', fun
         'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
     ])->and(array_slice($headers, 14, 4))->toBe([
         'Next Order ID', 'Next ETA', 'Second Order ID', 'Second ETA',
-    ])->and(array_slice($headers, 18, 2))->toBe([
+    ])->and(array_slice($headers, 18, 3))->toBe([
+        'Predicted Runout Date After Replenishment',
         'Projected Stock Before Second ETA', 'Between Orders Stock Gap Status',
-    ])->and($headers[30])->toBe('Action Required')
+    ])->and($headers[31])->toBe('Action Required')
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
 it('accepts removed columns that are already outside the Google Sheet grid', function (): void {
     config(['google_sheets.spreadsheet_id' => 'sheet-1']);
     Http::fake(function (Request $request) {
-        if (str_contains(urldecode($request->url()), "'pata-pata'!AH1:AJ1")) {
+        if (str_contains(urldecode($request->url()), "'pata-pata'!AI1:AJ1")) {
             return Http::response(['error' => ['message' => 'Range exceeds grid limits. Max columns: 33']], 400);
         }
 
@@ -184,12 +185,12 @@ it('accepts removed columns that are already outside the Google Sheet grid', fun
         }
     };
 
-    (new GoogleSheetsClient($tokens))->replaceAll('pata-pata', [array_fill(0, 33, 'value')], 1);
+    (new GoogleSheetsClient($tokens))->replaceAll('pata-pata', [array_fill(0, 34, 'value')], 1);
 
     $requests = collect(Http::recorded())->pluck(0);
     expect($requests)->toHaveCount(2)
         ->and($requests->first()->url())->toContain('/values:batchUpdate')
-        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AH1:AJ1");
+        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AI1:AJ1");
 });
 
 it('upgrades legacy Current Inventory into Available without losing values', function (): void {
@@ -277,7 +278,7 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $row[0] = 'LRB0004';
     $row[11] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:AG")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AH")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -328,10 +329,10 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AG")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AH")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AG")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AH")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
             $row[11] = 60;
@@ -426,10 +427,10 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         ->and($ranges)->toContain("'master-file'!T2")
         ->and($ranges)->toContain("'master-file'!Y2")
         ->and($ranges)->toContain("'master-file'!Z2")
-        ->and($ranges)->toContain("'livi-road'!AG2")
+        ->and($ranges)->toContain("'livi-road'!AH2")
         ->and($ranges)->not->toContain("'master-file'!K2")
         ->and($ranges)->not->toContain("'master-file'!L2")
-        ->and($ranges)->not->toContain("'master-file'!V2");
+        ->and($ranges)->not->toContain("'master-file'!W2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -537,6 +538,7 @@ it('shows the two earliest complete pending orders and stock gap health', functi
         ->and($record['next_eta'])->toBe('08/09/2026')
         ->and($record['second_order_id'])->toBe('PO-SECOND')
         ->and($record['second_eta'])->toBe('12/09/2026')
+        ->and($record['predicted_runout_date_after_replenishment'])->toBe('23/09/2026')
         ->and($record['projected_stock_before_second_eta'])->toBe(11.0)
         ->and($record['between_orders_stock_gap_status'])->toBe('HEALTHY')
         ->and($record['replenishment_date'])->toBe('08/09/2026')
@@ -567,7 +569,41 @@ it('shows the two earliest complete pending orders and stock gap health', functi
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
     expect($record['projected_stock_before_second_eta'])->toBe(-2.0)
+        ->and($record['predicted_runout_date_after_replenishment'])->toBe('11/09/2026')
         ->and($record['between_orders_stock_gap_status'])->toBe('UNHEALTHY');
+});
+
+it('projects the post-replenishment runout with one order and reports no second order', function (): void {
+    $this->travelTo('2026-09-03 00:00:00');
+    [, $variant] = procurementSheetVariant('ONE-ORDER', 'livi-road');
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 2,
+        'current_inventory_quantity' => 2,
+        'current_on_hand_quantity' => 10,
+    ])->save());
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0]['shopify_product_id'] = 'gid://shopify/Product/ONE-ORDER';
+    $payload['predictions'][0]['shopify_variant_id'] = 'gid://shopify/ProductVariant/ONE-ORDER';
+    $payload['predictions'][0]['sku'] = 'ONE-ORDER';
+    app(ProcurementPredictionIngestService::class)->persist($payload);
+    $run->predictions()->update(['predicted_weekly_demand' => 7]);
+
+    $order = ProcurementSupplierOrder::query()->create([
+        'uuid' => (string) Str::uuid(), 'order_number' => 'PO-ONLY',
+    ]);
+    ProcurementSupplierOrderLine::query()->create([
+        'supplier_order_id' => $order->id, 'variant_id' => $variant->id,
+        'sku' => $variant->sku, 'quantity_ordered' => 10,
+        'eta_date' => '2026-09-08', 'status' => 'open',
+    ]);
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'ONE-ORDER');
+
+    expect($record['predicted_runout_date_after_replenishment'])->toBe('23/09/2026')
+        ->and($record['projected_stock_before_second_eta'])->toBeNull()
+        ->and($record['between_orders_stock_gap_status'])->toBe('NO_SECOND_ORDER');
 });
 
 it('marks out of stock and missing replenishment explicitly', function (): void {
@@ -585,6 +621,7 @@ it('marks out of stock and missing replenishment explicitly', function (): void 
     expect($record['predicted_runout_date'])->toBe('OUT_OF_STOCK')
         ->and($record['replenishment_date'])->toBeNull()
         ->and($record['stock_gap_status'])->toBe('NO_PENDING_ORDER')
+        ->and($record['predicted_runout_date_after_replenishment'])->toBeNull()
         ->and($record['projected_stock_before_second_eta'])->toBeNull()
         ->and($record['between_orders_stock_gap_status'])->toBe('NO_SECOND_ORDER')
         ->and($record['stockout_before_incoming_arrival'])->toBeFalse()

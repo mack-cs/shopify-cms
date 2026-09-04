@@ -193,6 +193,7 @@ final class ProcurementSheetSyncService
         $fields = [
             'current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
             'next_order_id', 'next_eta', 'second_order_id', 'second_eta',
+            'predicted_runout_date_after_replenishment',
             'projected_stock_before_second_eta', 'between_orders_stock_gap_status',
             'projected_inventory_position', 'predicted_runout_date',
             'replenishment_date', 'stock_gap_status', 'additional_order_required',
@@ -295,7 +296,8 @@ final class ProcurementSheetSyncService
     private function formatDateColumns(string $tab, array $map): void
     {
         $this->sheets->formatDateColumns($tab, [
-            $map['next_eta'], $map['second_eta'], $map['predicted_runout_date'], $map['replenishment_date'],
+            $map['next_eta'], $map['second_eta'], $map['predicted_runout_date_after_replenishment'],
+            $map['predicted_runout_date'], $map['replenishment_date'],
         ], [$map['last_updated']]);
     }
 
