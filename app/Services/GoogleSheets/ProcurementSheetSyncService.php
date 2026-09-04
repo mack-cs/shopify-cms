@@ -400,10 +400,13 @@ final class ProcurementSheetSyncService
 
         $upgraded = $this->schema->upgradeLayout($values);
         $name = now()->format('Y-m-d_His_u').'_layout_'.Str::slug($tab).'_'.Str::uuid().'.json';
-        Storage::disk('local')->put(
+        $backedUp = Storage::disk('local')->put(
             'procurement-sheet-backups/'.$name,
             json_encode(['captured_at' => now()->toIso8601String(), 'tabs' => [$tab => $values]], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
         );
+        if (! $backedUp) {
+            throw new \RuntimeException("Could not back up Google Sheet tab [{$tab}]; layout update was cancelled.");
+        }
         $this->sheets->replaceAll($tab, $upgraded, count($values));
 
         return $upgraded;
@@ -417,9 +420,12 @@ final class ProcurementSheetSyncService
             $tabs[$collection->google_sheet_tab_name] = $brandSheets[$collection->id] ?? [];
         }
         $name = now()->format('Y-m-d_His_u').'_'.Str::uuid().'.json';
-        Storage::disk('local')->put(
+        $backedUp = Storage::disk('local')->put(
             'procurement-sheet-backups/'.$name,
             json_encode(['captured_at' => now()->toIso8601String(), 'tabs' => $tabs], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
         );
+        if (! $backedUp) {
+            throw new \RuntimeException('Could not back up the procurement Google Sheets; publish was cancelled.');
+        }
     }
 }

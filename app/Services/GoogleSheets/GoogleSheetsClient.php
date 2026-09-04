@@ -85,17 +85,32 @@ final class GoogleSheetsClient
     /** @param array<int,array<int,mixed>> $rows */
     public function replaceAll(string $tab, array $rows, int $existingRowCount): void
     {
-        $rowsToClear = max(1, $existingRowCount, count($rows));
-        $clear = $this->request()->withBody('{}', 'application/json')->post(
-            $this->valuesUrl($this->range($tab, 'A1:'.self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
-        );
-        $this->ensureSuccess($clear->successful(), $clear->body(), 'clear existing Sheet layout');
+        if ($rows === []) {
+            throw new \RuntimeException("Refusing to replace Google Sheet tab [{$tab}] with no rows.");
+        }
 
-        if ($rows !== []) {
-            $this->batchUpdateValues([[
-                'range' => $this->range($tab, 'A1:AG'.count($rows)),
-                'values' => $rows,
-            ]]);
+        $rowsToClear = max(1, $existingRowCount, count($rows));
+        $width = max(array_map('count', $rows));
+        $lastWrittenColumn = $this->columnName(max(0, $width - 1));
+        $this->batchUpdateValues([[
+            'range' => $this->range($tab, "A1:{$lastWrittenColumn}".count($rows)),
+            'values' => $rows,
+        ]]);
+
+        if ($existingRowCount > count($rows)) {
+            $firstStaleRow = count($rows) + 1;
+            $clearRows = $this->request()->withBody('{}', 'application/json')->post(
+                $this->valuesUrl($this->range($tab, "A{$firstStaleRow}:".self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
+            );
+            $this->ensureSuccess($clearRows->successful(), $clearRows->body(), 'clear stale Sheet rows');
+        }
+
+        if ($lastWrittenColumn !== self::LEGACY_LAST_COLUMN) {
+            $firstTrailingColumn = $this->columnName($width);
+            $clearColumns = $this->request()->withBody('{}', 'application/json')->post(
+                $this->valuesUrl($this->range($tab, "{$firstTrailingColumn}1:".self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
+            );
+            $this->ensureSuccess($clearColumns->successful(), $clearColumns->body(), 'clear removed Sheet columns');
         }
     }
 
@@ -180,6 +195,16 @@ final class GoogleSheetsClient
     private function valuesUrl(string $range): string
     {
         return $this->baseUrl().'/values/'.rawurlencode($range);
+    }
+
+    private function columnName(int $zeroBased): string
+    {
+        $name = '';
+        for ($number = $zeroBased + 1; $number > 0; $number = intdiv($number - 1, 26)) {
+            $name = chr(65 + (($number - 1) % 26)).$name;
+        }
+
+        return $name;
     }
 
     public function range(string $tab, string $cells): string
