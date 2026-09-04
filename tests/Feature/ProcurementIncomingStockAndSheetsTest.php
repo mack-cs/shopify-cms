@@ -152,14 +152,18 @@ it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', 
 
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
-    expect(array_slice($headers, 4, 8))->toBe([
-        'Currently on Sale', 'Sale Percentage', 'Available', 'Committed', 'Reserved', 'On Hand',
+    expect(array_slice($headers, 4, 7))->toBe([
+        'Currently on Sale', 'Sale Percentage', 'Available', 'Reserved', 'On Hand',
         'cms_movement_classification', 'Ignore',
-    ])->and(array_slice($headers, 12, 3))->toBe([
+    ])->and($headers)->not->toContain(
+        'Committed', 'Stockout Before Incoming Arrival', 'Incoming Stock Covers Requirement',
+    )->and(array_slice($headers, 11, 3))->toBe([
         'Quantity To Order', 'Total Quantity On Order', 'Number of WIP Orders',
-    ])->and(array_slice($headers, 15, 4))->toBe([
+    ])->and(array_slice($headers, 14, 4))->toBe([
         'Next Order ID', 'Next ETA', 'Second Order ID', 'Second ETA',
-    ])->and($headers[29])->toBe('Action Required')
+    ])->and(array_slice($headers, 18, 2))->toBe([
+        'Projected Stock Before Second ETA', 'Between Orders Stock Gap Status',
+    ])->and($headers[30])->toBe('Action Required')
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
@@ -168,7 +172,7 @@ it('upgrades legacy Current Inventory into Available without losing values', fun
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     $availableIndex = array_search('Available', $headers, true);
     $headers[$availableIndex] = 'Current Inventory';
-    $headers = array_values(array_filter($headers, fn (string $header): bool => ! in_array($header, ['Committed', 'Reserved', 'On Hand'], true)));
+    $headers = array_values(array_filter($headers, fn (string $header): bool => ! in_array($header, ['Reserved', 'On Hand'], true)));
     $row = array_fill(0, count($headers), '');
     $row[array_search('Current Inventory', $headers, true)] = 17;
 
@@ -176,7 +180,6 @@ it('upgrades legacy Current Inventory into Available without losing values', fun
     $map = $schema->map($upgraded[0]);
 
     expect($upgraded[1][$map['current_inventory']])->toBe(17)
-        ->and($upgraded[1][$map['current_committed_inventory']])->toBe('')
         ->and($upgraded[1][$map['current_reserved_inventory']])->toBe('')
         ->and($upgraded[1][$map['current_on_hand_inventory']])->toBe('');
 });
@@ -247,9 +250,9 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     $row = array_fill(0, count($headers), '');
     $row[0] = 'LRB0004';
-    $row[12] = 60;
+    $row[11] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:AH")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AG")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -300,13 +303,13 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AH")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AG")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AH")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AG")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
-            $row[12] = 60;
+            $row[11] = 60;
 
             return Http::response(['values' => [$headers, $row]]);
         }
@@ -341,11 +344,11 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
     expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
+        ->and($ranges)->not->toContain("'livi-road'!K2")
         ->and($ranges)->not->toContain("'livi-road'!L2")
-        ->and($ranges)->not->toContain("'livi-road'!M2")
+        ->and($ranges)->toContain("'livi-road'!M2")
         ->and($ranges)->toContain("'livi-road'!N2")
-        ->and($ranges)->toContain("'livi-road'!O2")
-        ->and($ranges)->toContain("'livi-road'!T2");
+        ->and($ranges)->toContain("'livi-road'!U2");
 });
 
 it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
@@ -389,17 +392,19 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
     expect($ranges)->toContain("'master-file'!G2")
         ->and($ranges)->toContain("'master-file'!H2")
         ->and($ranges)->toContain("'master-file'!I2")
-        ->and($ranges)->toContain("'master-file'!J2")
+        ->and($ranges)->not->toContain("'master-file'!J2")
+        ->and($ranges)->toContain("'master-file'!M2")
         ->and($ranges)->toContain("'master-file'!N2")
         ->and($ranges)->toContain("'master-file'!O2")
         ->and($ranges)->toContain("'master-file'!P2")
-        ->and($ranges)->toContain("'master-file'!Q2")
-        ->and($ranges)->toContain("'master-file'!X2")
+        ->and($ranges)->toContain("'master-file'!S2")
+        ->and($ranges)->toContain("'master-file'!T2")
         ->and($ranges)->toContain("'master-file'!Y2")
-        ->and($ranges)->toContain("'livi-road'!AH2")
+        ->and($ranges)->toContain("'master-file'!Z2")
+        ->and($ranges)->toContain("'livi-road'!AG2")
+        ->and($ranges)->not->toContain("'master-file'!K2")
         ->and($ranges)->not->toContain("'master-file'!L2")
-        ->and($ranges)->not->toContain("'master-file'!M2")
-        ->and($ranges)->not->toContain("'master-file'!U2");
+        ->and($ranges)->not->toContain("'master-file'!V2");
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -465,6 +470,7 @@ it('builds current and projected sheet inventory from refreshed Shopify truth', 
 });
 
 it('shows the two earliest complete pending orders and stock gap health', function (): void {
+    $this->travelTo('2026-09-03 00:00:00');
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     Variant::withoutEvents(fn () => $variant->forceFill([
         'inventory_qty' => 10, 'current_inventory_quantity' => 10,
@@ -473,6 +479,7 @@ it('shows the two earliest complete pending orders and stock gap health', functi
     app(ProcurementPredictionIngestService::class)->persist(procurementSheetPredictionPayload($run));
     $run->predictions()->update([
         'predicted_runout_date' => '2026-09-10',
+        'predicted_weekly_demand' => 7,
         'additional_order_required' => 30,
         'preliminary_order_quantity' => 30,
     ]);
@@ -491,6 +498,12 @@ it('shows the two earliest complete pending orders and stock gap health', functi
             'eta_date' => $eta, 'status' => 'open',
         ]);
     }
+    ProcurementIncomingStock::query()->updateOrCreate(['variant_id' => $variant->id], [
+        'sku' => $variant->sku,
+        'total_quantity_on_order' => 30,
+        'total_confirmed_quantity_on_order' => 30,
+        'number_of_wip_orders' => 3,
+    ]);
 
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
@@ -499,6 +512,8 @@ it('shows the two earliest complete pending orders and stock gap health', functi
         ->and($record['next_eta'])->toBe('08/09/2026')
         ->and($record['second_order_id'])->toBe('PO-SECOND')
         ->and($record['second_eta'])->toBe('12/09/2026')
+        ->and($record['projected_stock_before_second_eta'])->toBe(11.0)
+        ->and($record['between_orders_stock_gap_status'])->toBe('HEALTHY')
         ->and($record['replenishment_date'])->toBe('08/09/2026')
         ->and($record['stock_gap_status'])->toBe('HEALTHY')
         ->and($record['action_required'])->not->toBe('ORDER_NOW');
@@ -507,6 +522,27 @@ it('shows the two earliest complete pending orders and stock gap health', functi
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
     expect($record['action_required'])->toBe('ORDER_NOW');
+
+    $run->predictions()->update([
+        'predicted_runout_date' => '2026-09-01',
+        'additional_order_required' => 31,
+    ]);
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'LRB0004');
+    expect($record['stock_gap_status'])->toBe('UNHEALTHY')
+        ->and($record['stockout_before_incoming_arrival'])->toBeTrue()
+        ->and($record['incoming_stock_covers_requirement'])->toBeFalse();
+
+    $run->predictions()->update(['additional_order_required' => 0]);
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'LRB0004');
+    expect($record['incoming_stock_covers_requirement'])->toBeTrue();
+
+    $run->predictions()->update(['predicted_weekly_demand' => 21]);
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'LRB0004');
+    expect($record['projected_stock_before_second_eta'])->toBe(-2.0)
+        ->and($record['between_orders_stock_gap_status'])->toBe('UNHEALTHY');
 });
 
 it('marks out of stock and missing replenishment explicitly', function (): void {
@@ -523,7 +559,41 @@ it('marks out of stock and missing replenishment explicitly', function (): void 
 
     expect($record['predicted_runout_date'])->toBe('OUT_OF_STOCK')
         ->and($record['replenishment_date'])->toBeNull()
-        ->and($record['stock_gap_status'])->toBe('NO_PENDING_ORDER');
+        ->and($record['stock_gap_status'])->toBe('NO_PENDING_ORDER')
+        ->and($record['projected_stock_before_second_eta'])->toBeNull()
+        ->and($record['between_orders_stock_gap_status'])->toBe('NO_SECOND_ORDER')
+        ->and($record['stockout_before_incoming_arrival'])->toBeFalse()
+        ->and($record['incoming_stock_covers_requirement'])->toBeFalse();
+});
+
+it('excludes stack products from procurement sheets and prediction inputs', function (): void {
+    [, $stack] = procurementSheetVariant('STACK-001', 'livi-road');
+    Product::withoutEvents(fn () => $stack->product->update(['is_bundle' => true]));
+
+    expect(collect(app(ProcurementSheetDatasetBuilder::class)->records())->pluck('sku'))
+        ->not->toContain('STACK-001');
+
+    $run = procurementSheetRun();
+    app(ProcurementIncomingStockService::class)->snapshotForRun($run);
+
+    expect($run->incomingStockInputs()->where('sku', 'STACK-001')->exists())->toBeFalse();
+});
+
+it('orders immediately when available inventory is out of stock even below the threshold', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    $run = procurementSheetRun();
+    app(ProcurementPredictionIngestService::class)->persist(procurementSheetPredictionPayload($run));
+    $run->predictions()->update([
+        'additional_order_required' => 1,
+        'preliminary_order_quantity' => 1,
+    ]);
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', $variant->sku);
+
+    expect($record['current_inventory'])->toBe(0)
+        ->and($record['additional_order_required'])->toBe(1)
+        ->and($record['action_required'])->toBe('ORDER_NOW');
 });
 
 it('uses the shared CMS sale percentage calculation in procurement sheets', function (): void {

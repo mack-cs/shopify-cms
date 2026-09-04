@@ -195,7 +195,7 @@ final class ProcurementIncomingStockService
                 ->active()
                 ->whereNotNull('sku')
                 ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
-                ->whereHas('product', fn ($query) => $query->activeStatus())
+                ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
                 ->with(['product:id,shopify_id', 'procurementIncomingStock'])
                 ->orderBy('id')
                 ->chunkById(500, function ($variants) use (&$rows, $lockedRun, $now): void {

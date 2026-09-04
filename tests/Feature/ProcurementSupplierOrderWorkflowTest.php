@@ -32,6 +32,17 @@ it('creates an order and updates the CMS-owned outstanding summary', function ()
         ->and($stock->number_of_wip_orders)->toBe(1);
 });
 
+it('rejects stack products from procurement orders', function (): void {
+    $variant = supplierWorkflowVariant('STACK-NOT-ORDERED');
+    Product::withoutEvents(fn () => $variant->product->update(['is_bundle' => true]));
+
+    expect(fn () => app(SupplierOrderService::class)
+        ->createForVariant($variant->fresh(), 'PO-STACK', 5, '2026-09-15'))
+        ->toThrow(ValidationException::class, 'Stack products cannot be added');
+
+    expect(ProcurementSupplierOrderLine::query()->count())->toBe(0);
+});
+
 it('supports partial receipts and prevents duplicate or excessive receipt requests', function (): void {
     Bus::fake();
     $variant = supplierWorkflowVariant('RECEIVE-1');

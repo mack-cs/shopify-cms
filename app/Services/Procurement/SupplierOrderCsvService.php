@@ -236,8 +236,12 @@ final class SupplierOrderCsvService
             $errors[] = 'quantity must be a positive whole number';
         }
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
-        if ($sku !== '' && Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->count() !== 1) {
-            $errors[] = 'SKU must match exactly one active variant';
+        if ($sku !== '' && Variant::query()->active()
+            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->count() !== 1) {
+            $errors[] = $type === 'order'
+                ? 'SKU must match exactly one active non-stack variant'
+                : 'SKU must match exactly one active variant';
         }
         if ($type === 'order' && trim((string) ($row['eta'] ?? '')) !== '') {
             try {

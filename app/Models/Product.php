@@ -113,6 +113,13 @@ class Product extends Model
         return $query->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['active']);
     }
 
+    public function scopeNonBundle(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $product): Builder => $product
+            ->where('is_bundle', false)
+            ->orWhereNull('is_bundle'));
+    }
+
     public function scopeMissingImageAltText(Builder $query): Builder
     {
         return $query->whereHas('images', fn (Builder $imageQuery): Builder => self::applyMissingImageAltTextImageFilter($imageQuery));

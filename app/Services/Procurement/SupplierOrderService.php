@@ -18,6 +18,11 @@ final class SupplierOrderService
 
     public function createForVariant(Variant $variant, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms', bool $allowExistingOrder = false): ProcurementSupplierOrderLine
     {
+        $variant->loadMissing('product');
+        if ($variant->product?->is_bundle === true) {
+            throw ValidationException::withMessages(['sku' => 'Stack products cannot be added to procurement orders.']);
+        }
+
         $orderNumber = trim($orderNumber);
         if ($orderNumber === '') {
             throw ValidationException::withMessages(['order_number' => 'Order ID is required.']);
@@ -76,7 +81,9 @@ final class SupplierOrderService
     public function createFromRow(array $row, ?int $userId = null, string $source = 'csv'): ProcurementSupplierOrderLine
     {
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
-        $matches = Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->get();
+        $matches = Variant::query()->active()
+            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->get();
         if ($matches->count() !== 1) {
             throw ValidationException::withMessages(['sku' => $matches->isEmpty() ? "SKU {$sku} was not found." : "SKU {$sku} is ambiguous."]);
         }

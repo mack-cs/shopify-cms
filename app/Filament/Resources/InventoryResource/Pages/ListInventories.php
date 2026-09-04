@@ -305,8 +305,11 @@ class ListInventories extends ListRecords
                 ->badge((string) Variant::query()->inventoryWorkspaceEligible()->count()),
             'orders' => Tab::make('Supplier Orders')
                 ->icon('heroicon-o-truck')
+                ->modifyQueryUsing(fn ($query) => $query
+                    ->whereHas('product', fn ($product) => $product->nonBundle()))
                 ->badge((string) Variant::query()
                     ->inventoryWorkspaceEligible()
+                    ->whereHas('product', fn ($product) => $product->nonBundle())
                     ->whereHas('procurementIncomingStock', fn ($query) => $query
                         ->where('total_quantity_on_order', '>', 0))
                     ->count())

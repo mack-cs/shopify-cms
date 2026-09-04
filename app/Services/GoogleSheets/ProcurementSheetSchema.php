@@ -9,7 +9,6 @@ final class ProcurementSheetSchema
         'product_type' => 'Product Type', 'currently_on_sale' => 'Currently on Sale',
         'sale_percentage' => 'Sale Percentage',
         'current_inventory' => 'Available',
-        'current_committed_inventory' => 'Committed',
         'current_reserved_inventory' => 'Reserved',
         'current_on_hand_inventory' => 'On Hand',
         'cms_movement_classification' => 'cms_movement_classification',
@@ -21,6 +20,8 @@ final class ProcurementSheetSchema
         'next_eta' => 'Next ETA',
         'second_order_id' => 'Second Order ID',
         'second_eta' => 'Second ETA',
+        'projected_stock_before_second_eta' => 'Projected Stock Before Second ETA',
+        'between_orders_stock_gap_status' => 'Between Orders Stock Gap Status',
         'projected_inventory_position' => 'Projected Inventory Position',
         'predicted_weekly_demand' => 'Predicted Weekly Demand',
         'estimated_days_of_stock_remaining' => 'Estimated Days of Stock Remaining',
@@ -33,8 +34,6 @@ final class ProcurementSheetSchema
         'additional_order_required' => 'Additional Order Required',
         'action_required' => 'Action Required',
         'action_reason' => 'Action Reason',
-        'stockout_before_incoming_arrival' => 'Stockout Before Incoming Arrival',
-        'incoming_stock_covers_requirement' => 'Incoming Stock Covers Requirement',
         'last_updated' => 'Last Updated',
     ];
 

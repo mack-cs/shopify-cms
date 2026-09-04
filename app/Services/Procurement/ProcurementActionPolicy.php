@@ -13,9 +13,14 @@ final class ProcurementActionPolicy
         int $attentionHorizonDays,
         bool $ignore = false,
         ?CarbonInterface $asOf = null,
+        ?int $availableInventory = null,
     ): string {
         if ($ignore || $additionalOrderRequired <= 0) {
             return 'NO_ACTION';
+        }
+
+        if ($availableInventory !== null && $availableInventory <= 0) {
+            return 'ORDER_NOW';
         }
 
         if ($additionalOrderRequired > (int) config('procurement.order_now_threshold', 30)) {

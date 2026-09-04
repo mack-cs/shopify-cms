@@ -9,7 +9,9 @@ final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
-    private const DATA_COLUMNS = 'A:AH';
+    private const DATA_COLUMNS = 'A:AG';
+
+    private const LEGACY_LAST_COLUMN = 'AJ';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 
@@ -85,7 +87,7 @@ final class GoogleSheetsClient
     {
         $rowsToClear = max(1, $existingRowCount, count($rows));
         $clear = $this->request()->withBody('{}', 'application/json')->post(
-            $this->valuesUrl($this->range($tab, "A1:AG{$rowsToClear}")).':clear'
+            $this->valuesUrl($this->range($tab, 'A1:'.self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
         );
         $this->ensureSuccess($clear->successful(), $clear->body(), 'clear existing Sheet layout');
 
