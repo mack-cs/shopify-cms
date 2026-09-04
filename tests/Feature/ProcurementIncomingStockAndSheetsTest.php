@@ -167,6 +167,31 @@ it('keeps the required procurement column groups in the exact report order', fun
         ->and($headers[array_key_last($headers)])->toBe('Last Updated');
 });
 
+it('accepts removed columns that are already outside the Google Sheet grid', function (): void {
+    config(['google_sheets.spreadsheet_id' => 'sheet-1']);
+    Http::fake(function (Request $request) {
+        if (str_contains(urldecode($request->url()), "'pata-pata'!AH1:AJ1")) {
+            return Http::response(['error' => ['message' => 'Range exceeds grid limits. Max columns: 33']], 400);
+        }
+
+        return Http::response(['ok' => true]);
+    });
+    $tokens = new class extends GoogleServiceAccountTokenProvider
+    {
+        public function token(): string
+        {
+            return 'fake-google-token';
+        }
+    };
+
+    (new GoogleSheetsClient($tokens))->replaceAll('pata-pata', [array_fill(0, 33, 'value')], 1);
+
+    $requests = collect(Http::recorded())->pluck(0);
+    expect($requests)->toHaveCount(2)
+        ->and($requests->first()->url())->toContain('/values:batchUpdate')
+        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AH1:AJ1");
+});
+
 it('upgrades legacy Current Inventory into Available without losing values', function (): void {
     $schema = new ProcurementSheetSchema;
     $headers = array_values(ProcurementSheetSchema::FIELDS);

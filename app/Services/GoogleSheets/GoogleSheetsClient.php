@@ -110,7 +110,11 @@ final class GoogleSheetsClient
             $clearColumns = $this->request()->withBody('{}', 'application/json')->post(
                 $this->valuesUrl($this->range($tab, "{$firstTrailingColumn}1:".self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
             );
-            $this->ensureSuccess($clearColumns->successful(), $clearColumns->body(), 'clear removed Sheet columns');
+            $alreadyRemoved = $clearColumns->status() === 400
+                && str_contains($clearColumns->body(), 'exceeds grid limits');
+            if (! $alreadyRemoved) {
+                $this->ensureSuccess($clearColumns->successful(), $clearColumns->body(), 'clear removed Sheet columns');
+            }
         }
     }
 
