@@ -751,6 +751,19 @@ it('replaces the stale arrival timing action reason for timely WIP', function ()
         ->and($record['action_reason'])->toBe('Existing incoming stock arriving in time covers the forecast requirement.');
 });
 
+it('sanitizes legacy arrival timing wording during prediction ingestion', function (): void {
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0]['action_reason'] = 'Existing incoming stock covers the quantity requirement; arrival timing is not tracked in this workflow.';
+
+    $prediction = app(ProcurementPredictionIngestService::class)->persist($payload)
+        ->predictions()->firstOrFail();
+
+    expect($prediction->action_reason)
+        ->not->toContain('arrival timing is not tracked')
+        ->toContain('arrival timing is evaluated by the CMS');
+});
+
 it('projects the post-replenishment runout with one order and reports no second order', function (): void {
     $this->travelTo('2026-09-03 00:00:00');
     [, $variant] = procurementSheetVariant('ONE-ORDER', 'livi-road');

@@ -197,7 +197,7 @@ final class ProcurementSheetSyncService
             'projected_stock_before_second_eta', 'between_orders_stock_gap_status',
             'projected_inventory_position', 'predicted_runout_date',
             'replenishment_date', 'stock_gap_status', 'additional_order_required',
-            'action_required', 'current_on_hand_inventory', 'last_updated',
+            'action_required', 'action_reason', 'current_on_hand_inventory', 'last_updated',
         ];
         if ($includeHumanInputs) {
             $fields[] = 'quantity_to_order';

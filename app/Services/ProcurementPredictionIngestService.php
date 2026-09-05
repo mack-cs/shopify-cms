@@ -198,6 +198,9 @@ final class ProcurementPredictionIngestService
             ?? $row['preliminary_order_quantity'] ?? null;
         $result['incoming_stock_covers_requirement'] = (bool) ($row['incoming_stock_covers_requirement'] ?? false);
         $result['stockout_before_incoming_arrival'] = (bool) ($row['stockout_before_incoming_arrival'] ?? false);
+        if (str_contains(strtolower(trim((string) ($result['action_reason'] ?? ''))), 'arrival timing is not tracked')) {
+            $result['action_reason'] = 'Existing incoming stock quantity covers the forecast requirement; arrival timing is evaluated by the CMS operational recommendation.';
+        }
         if ($result['ignore']) {
             $result['recommended_order_before_incoming_stock'] = 0;
             $result['additional_order_required'] = 0;
