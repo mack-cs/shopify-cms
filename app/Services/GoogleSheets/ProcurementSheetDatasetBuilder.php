@@ -46,21 +46,26 @@ final class ProcurementSheetDatasetBuilder
             : collect();
         $pendingOrders = ProcurementSupplierOrderLine::query()
             ->where('status', 'open')
-            ->whereNotNull('eta_date')
-            ->whereHas('order', fn ($query) => $query->whereNotNull('order_number'))
             ->with('order')
             ->withSum(['receipts as received_quantity' => fn ($query) => $query->where('status', 'succeeded')], 'quantity_received')
             ->orderBy('eta_date')->orderBy('id')->get()
-            ->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0
-                && filled($line->order?->order_number))
+            ->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0)
             ->groupBy('variant_id');
+        $duplicateSkus = Variant::query()->active()->whereNotNull('sku')
+            ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
+            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->selectRaw('UPPER(TRIM(sku)) AS normalized_sku')
+            ->groupByRaw('UPPER(TRIM(sku))')
+            ->havingRaw('COUNT(*) > 1')
+            ->pluck('normalized_sku')
+            ->flip();
 
         $records = [];
         Variant::query()->active()->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
             ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
             ->with(['product', 'procurementIncomingStock'])
-            ->orderBy('id')->chunkById(500, function ($variants) use (&$records, $predictions, $movement, $predictionRun, $pendingOrders): void {
+            ->orderBy('id')->chunkById(500, function ($variants) use (&$records, $predictions, $movement, $predictionRun, $pendingOrders, $duplicateSkus): void {
                 foreach ($variants as $variant) {
                     $sku = strtoupper(trim((string) $variant->sku));
                     $prediction = $predictions->get(trim((string) $variant->shopify_id));
@@ -91,15 +96,30 @@ final class ProcurementSheetDatasetBuilder
                     $runoutAfterReplenishment = $calculation['predicted_runout_date_after_replenishment'] ?? null;
                     $projectedBeforeSecondEta = $calculation['projected_stock_before_second_eta'] ?? null;
                     $betweenOrdersGapStatus = $calculation['between_orders_stock_gap_status'] ?? 'NO_SECOND_ORDER';
-                    $action = $prediction === null ? null : $this->actionPolicy->resolve(
-                        $prediction->action_status,
+                    $ignored = (bool) ($stock?->ignore ?? false);
+                    $action = $prediction === null
+                        ? ($ignored ? 'NO_ACTION' : 'INSUFFICIENT_DATA')
+                        : $this->actionPolicy->resolve(
+                            $prediction->action_status,
+                            $additional,
+                            $runout,
+                            (int) ($prediction->attention_horizon_days ?? config('procurement.attention_horizon_days', 21)),
+                            $ignored,
+                            availableInventory: $current,
+                            unhealthyCurrentStockGap: $stockGapStatus === 'UNHEALTHY',
+                            unhealthyBetweenOrdersGap: $betweenOrdersGapStatus === 'UNHEALTHY',
+                        );
+                    $actionReason = $this->actionReason(
+                        $prediction,
+                        $predictionRun !== null,
+                        $ignored,
+                        $stockGapStatus,
+                        $betweenOrdersGapStatus,
+                        (bool) ($calculation['next_order_is_overdue'] ?? false),
                         $additional,
-                        $runout,
-                        (int) ($prediction->attention_horizon_days ?? config('procurement.attention_horizon_days', 21)),
-                        (bool) ($stock?->ignore ?? false),
-                        availableInventory: $current,
-                        unhealthyCurrentStockGap: $stockGapStatus === 'UNHEALTHY',
-                        unhealthyBetweenOrdersGap: $betweenOrdersGapStatus === 'UNHEALTHY',
+                        (int) ($calculation['timely_outstanding'] ?? 0),
+                        $movementRow?->data_quality_note,
+                        $duplicateSkus->has($sku),
                     );
                     $collectionId = null;
                     try {
@@ -127,7 +147,7 @@ final class ProcurementSheetDatasetBuilder
                         ),
                         'current_inventory' => $current,
                         'action_required' => $action,
-                        'ignore' => (bool) ($stock?->ignore ?? false),
+                        'ignore' => $ignored,
                         'quantity_to_order' => (int) ($stock?->quantity_to_order ?? 0),
                         'total_quantity_on_order' => $outstandingTotal,
                         'number_of_wip_orders' => (int) ($stock?->number_of_wip_orders ?? 0),
@@ -155,11 +175,7 @@ final class ProcurementSheetDatasetBuilder
                         'additional_order_required' => $prediction === null ? null : $additional,
                         'cms_movement_classification' => $prediction?->cms_movement_classification
                             ?? $movementRow?->movement_classification,
-                        'action_reason' => $stockGapStatus === 'UNHEALTHY'
-                            ? 'Incoming stock arrives after the predicted stockout; the timing gap requires action.'
-                            : ($betweenOrdersGapStatus === 'UNHEALTHY'
-                                ? 'The first replenishment is projected to run out before the second order arrives.'
-                                : $prediction?->action_reason),
+                        'action_reason' => $actionReason,
                         'stockout_before_incoming_arrival' => $stockGapStatus === 'UNHEALTHY',
                         'incoming_stock_covers_requirement' => ($calculation['timely_outstanding'] ?? 0) > 0 && $additional === 0,
                         'current_committed_inventory' => $variant->inventory_tracked === true
@@ -197,5 +213,56 @@ final class ProcurementSheetDatasetBuilder
         });
 
         return $records;
+    }
+
+    private function actionReason(
+        ?ProcurementPrediction $prediction,
+        bool $hasCompletedRun,
+        bool $ignored,
+        ?string $stockGapStatus,
+        string $betweenOrdersGapStatus,
+        bool $nextOrderIsOverdue,
+        int $additional,
+        int $timelyOutstanding,
+        ?string $movementDataNote,
+        bool $duplicateSku,
+    ): string {
+        if ($prediction === null) {
+            if ($ignored) {
+                return 'SKU is marked Ignore / end of life; sell through remaining inventory and do not replenish.';
+            }
+
+            $reason = $duplicateSku
+                ? 'The SKU is duplicated across multiple active product variants, so it was excluded from the procurement forecast.'
+                : ($hasCompletedRun
+                ? 'The latest procurement run did not produce a forecast for this SKU; review its demand history or exclusion status.'
+                : 'No completed procurement calculation is available for this SKU.');
+            $movementDataNote = trim((string) $movementDataNote);
+
+            return $movementDataNote === '' ? $reason : $reason.' '.$movementDataNote;
+        }
+
+        if ($nextOrderIsOverdue) {
+            return 'The earliest open incoming order is overdue and has not been received; it is not counted as timely stock.';
+        }
+        if ($stockGapStatus === 'UNHEALTHY') {
+            return 'Incoming stock does not arrive in time to prevent the predicted stock gap.';
+        }
+        if ($betweenOrdersGapStatus === 'UNHEALTHY') {
+            return 'The first replenishment is projected to run out before the second order arrives.';
+        }
+        if ($additional === 0 && $timelyOutstanding > 0) {
+            return 'Existing incoming stock arriving in time covers the forecast requirement.';
+        }
+
+        $reason = trim((string) $prediction->action_reason);
+        if (str_contains(strtolower($reason), 'arrival timing is not tracked')) {
+            return 'Outstanding incoming stock has been assessed using its ETA; additional stock is still required.';
+        }
+
+        return $reason !== ''
+            ? $reason
+            : (trim((string) $prediction->data_quality_warning)
+                ?: 'The procurement calculation did not provide an explanation; review the forecast data.');
     }
 }

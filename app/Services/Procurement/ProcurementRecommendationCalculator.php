@@ -18,7 +18,7 @@ final class ProcurementRecommendationCalculator
     {
         $lines ??= $this->openLines($variant->id);
         $lines = $lines->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0)
-            ->sortBy(fn (ProcurementSupplierOrderLine $line): string => $line->eta_date?->format('Y-m-d').'|'.str_pad((string) $line->id, 12, '0', STR_PAD_LEFT))
+            ->sortBy(fn (ProcurementSupplierOrderLine $line): string => ($line->eta_date?->format('Y-m-d') ?? '9999-12-31').'|'.str_pad((string) $line->id, 12, '0', STR_PAD_LEFT))
             ->values();
 
         $available = $variant->inventory_tracked === true
@@ -41,20 +41,23 @@ final class ProcurementRecommendationCalculator
 
         $first = $lines->get(0);
         $second = $lines->get(1);
+        $firstIsOverdue = $first?->eta_date?->lt($today) ?? false;
         $stockGapStatus = $first === null
             ? 'NO_PENDING_ORDER'
-            : ($runout === null && $onHand > 0
-                ? null
-                : ($onHand <= 0 || $runout?->copy()->addDays($graceDays)->lt($first->eta_date)
+            : ($first->eta_date === null
+                ? 'INSUFFICIENT_DATA'
+                : ($runout === null && $onHand > 0
+                ? ($firstIsOverdue ? 'UNHEALTHY' : null)
+                : ($firstIsOverdue || $onHand <= 0 || $runout?->copy()->addDays($graceDays)->lt($first->eta_date)
                     ? 'UNHEALTHY'
-                    : 'HEALTHY'));
+                    : 'HEALTHY')));
 
         $timelyOutstanding = 0;
         $runoutAfterFirst = null;
         $projectedBeforeSecond = null;
         $betweenOrdersStatus = $second === null ? 'NO_SECOND_ORDER' : 'INSUFFICIENT_DATA';
 
-        if ($first !== null) {
+        if ($first?->eta_date !== null) {
             // When demand/runout data is unavailable, preserve the quantity-based
             // behaviour instead of claiming that a known PO is late.
             if ($stockGapStatus !== 'UNHEALTHY') {
@@ -71,6 +74,12 @@ final class ProcurementRecommendationCalculator
 
                 $previousEta = $first->eta_date;
                 foreach ($lines->skip(1) as $index => $line) {
+                    if ($line->eta_date === null) {
+                        if ($index === 1) {
+                            $betweenOrdersStatus = 'INSUFFICIENT_DATA';
+                        }
+                        break;
+                    }
                     $daysBetween = max(0, (int) $previousEta->diffInDays($line->eta_date, false));
                     $projected -= $dailyDemand * $daysBetween;
                     $healthy = $dailyDemand <= 0 || $projected + ($dailyDemand * $graceDays) >= 0;
@@ -108,6 +117,7 @@ final class ProcurementRecommendationCalculator
             'between_orders_stock_gap_status' => $betweenOrdersStatus,
             'next_order' => $first,
             'second_order' => $second,
+            'next_order_is_overdue' => $firstIsOverdue,
         ];
     }
 
@@ -117,8 +127,6 @@ final class ProcurementRecommendationCalculator
         return ProcurementSupplierOrderLine::query()
             ->where('variant_id', $variantId)
             ->where('status', 'open')
-            ->whereNotNull('eta_date')
-            ->whereHas('order', fn ($query) => $query->whereNotNull('order_number'))
             ->with('order')
             ->withSum(['receipts as received_quantity' => fn ($query) => $query->where('status', 'succeeded')], 'quantity_received')
             ->get();

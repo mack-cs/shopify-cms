@@ -641,6 +641,116 @@ it('keeps gross and additional requirements aligned with timely WIP orders', fun
         ->and($caseC['action_required'])->toBe('ORDER_NOW');
 });
 
+it('makes blank forecasts explicit for missing and intentionally insufficient predictions', function (): void {
+    [, $outOfStock] = procurementSheetVariant('BLANK-OOS', 'livi-road');
+    [, $inStock] = procurementSheetVariant('BLANK-STOCK', 'livi-road');
+    Variant::withoutEvents(fn () => $inStock->forceFill([
+        'inventory_qty' => 12,
+        'current_inventory_quantity' => 12,
+        'current_on_hand_quantity' => 12,
+    ])->save());
+    [, $insufficient] = procurementSheetVariant('BLANK-INTENTIONAL', 'livi-road');
+
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0] = array_merge($payload['predictions'][0], [
+        'shopify_product_id' => $insufficient->product->shopify_id,
+        'shopify_variant_id' => $insufficient->shopify_id,
+        'sku' => $insufficient->sku,
+        'predicted_weekly_demand' => null,
+        'estimated_days_of_stock_remaining' => null,
+        'predicted_runout_date' => null,
+        'preliminary_order_quantity' => null,
+        'additional_order_required' => null,
+        'recommended_order_before_incoming_stock' => null,
+        'action_status' => 'INSUFFICIENT_DATA',
+        'action_reason' => 'Insufficient sales history to produce a defensible demand forecast.',
+        'data_quality_status' => 'INSUFFICIENT_DATA',
+    ]);
+    app(ProcurementPredictionIngestService::class)->persist($payload);
+
+    $records = collect(app(ProcurementSheetDatasetBuilder::class)->records())->keyBy('sku');
+    foreach ([$outOfStock->sku, $inStock->sku] as $sku) {
+        expect($records[$sku]['predicted_weekly_demand'])->toBeNull()
+            ->and($records[$sku]['additional_order_required'])->toBeNull()
+            ->and($records[$sku]['action_required'])->toBe('INSUFFICIENT_DATA')
+            ->and($records[$sku]['action_reason'])->toContain('did not produce a forecast');
+    }
+    expect($records[$outOfStock->sku]['predicted_runout_date'])->toBe('OUT_OF_STOCK')
+        ->and($records[$outOfStock->sku]['stock_gap_status'])->toBe('NO_PENDING_ORDER')
+        ->and($records[$insufficient->sku]['predicted_weekly_demand'])->toBeNull()
+        ->and($records[$insufficient->sku]['action_required'])->toBe('INSUFFICIENT_DATA')
+        ->and($records[$insufficient->sku]['action_reason'])->toContain('Insufficient sales history');
+});
+
+it('keeps overdue WIP visible but excludes it from timely incoming stock', function (): void {
+    $this->travelTo('2026-09-10 00:00:00');
+    [, $variant] = procurementSheetVariant('OVERDUE-WIP', 'livi-road');
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 20,
+        'current_inventory_quantity' => 20,
+        'current_on_hand_quantity' => 20,
+    ])->save());
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0] = array_merge($payload['predictions'][0], [
+        'shopify_product_id' => $variant->product->shopify_id,
+        'shopify_variant_id' => $variant->shopify_id,
+        'sku' => $variant->sku,
+        'current_inventory' => 20,
+        'predicted_weekly_demand' => 7,
+        'predicted_runout_date' => '2026-09-30',
+        'recommended_order_before_incoming_stock' => 100,
+        'additional_order_required' => 100,
+    ]);
+    app(ProcurementPredictionIngestService::class)->persist($payload);
+    app(SupplierOrderService::class)
+        ->createForVariant($variant, 'PO-OVERDUE', 100, '2026-09-09');
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'OVERDUE-WIP');
+    expect($record['total_quantity_on_order'])->toBe(100)
+        ->and($record['replenishment_date'])->toBe('09/09/2026')
+        ->and($record['stock_gap_status'])->toBe('UNHEALTHY')
+        ->and($record['additional_order_required'])->toBe(100)
+        ->and($record['action_required'])->toBe('ORDER_NOW')
+        ->and($record['action_reason'])->toContain('overdue')
+        ->and($record['incoming_stock_covers_requirement'])->toBeFalse();
+});
+
+it('replaces the stale arrival timing action reason for timely WIP', function (): void {
+    $this->travelTo('2026-09-01 00:00:00');
+    [, $variant] = procurementSheetVariant('TIMELY-REASON', 'livi-road');
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 20,
+        'current_inventory_quantity' => 20,
+        'current_on_hand_quantity' => 20,
+    ])->save());
+    $run = procurementSheetRun();
+    $payload = procurementSheetPredictionPayload($run);
+    $payload['predictions'][0] = array_merge($payload['predictions'][0], [
+        'shopify_product_id' => $variant->product->shopify_id,
+        'shopify_variant_id' => $variant->shopify_id,
+        'sku' => $variant->sku,
+        'current_inventory' => 20,
+        'predicted_weekly_demand' => 7,
+        'predicted_runout_date' => '2026-09-30',
+        'recommended_order_before_incoming_stock' => 60,
+        'additional_order_required' => 60,
+        'action_reason' => 'Existing incoming stock covers the quantity requirement; arrival timing is not tracked in this workflow.',
+    ]);
+    app(ProcurementPredictionIngestService::class)->persist($payload);
+    app(SupplierOrderService::class)
+        ->createForVariant($variant, 'PO-TIMELY-REASON', 60, '2026-09-10');
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'TIMELY-REASON');
+    expect($record['stock_gap_status'])->toBe('HEALTHY')
+        ->and($record['additional_order_required'])->toBe(0)
+        ->and($record['action_required'])->toBe('NO_ACTION')
+        ->and($record['action_reason'])->toBe('Existing incoming stock arriving in time covers the forecast requirement.');
+});
+
 it('projects the post-replenishment runout with one order and reports no second order', function (): void {
     $this->travelTo('2026-09-03 00:00:00');
     [, $variant] = procurementSheetVariant('ONE-ORDER', 'livi-road');

@@ -25,6 +25,10 @@ final class ProcurementActionPolicy
             return 'ORDER_NOW';
         }
 
+        if (in_array($currentAction, ['MANUAL_REVIEW', 'INSUFFICIENT_DATA'], true)) {
+            return $currentAction;
+        }
+
         if ($additionalOrderRequired > 0 && $availableInventory !== null && $availableInventory <= 0) {
             return 'ORDER_NOW';
         }
@@ -39,10 +43,6 @@ final class ProcurementActionPolicy
 
         if ($additionalOrderRequired <= 0) {
             return 'NO_ACTION';
-        }
-
-        if (in_array($currentAction, ['MANUAL_REVIEW', 'INSUFFICIENT_DATA'], true)) {
-            return $currentAction;
         }
 
         $asOf ??= now((string) config('procurement.timezone', 'Africa/Johannesburg'));
