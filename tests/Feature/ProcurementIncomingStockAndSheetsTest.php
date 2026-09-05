@@ -16,8 +16,9 @@ use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
 use App\Services\GoogleSheets\ProcurementSheetSchema;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\OperationalProcurementCollectionResolver;
-use App\Services\ProcurementIncomingStockService;
 use App\Services\Procurement\ProcurementActionPolicy;
+use App\Services\Procurement\SupplierOrderService;
+use App\Services\ProcurementIncomingStockService;
 use App\Services\ProcurementPredictionIngestService;
 use App\Services\SalePercentageCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -562,14 +563,82 @@ it('shows the two earliest complete pending orders and stock gap health', functi
     $run->predictions()->update(['additional_order_required' => 0]);
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
-    expect($record['incoming_stock_covers_requirement'])->toBeTrue();
+    expect($record['additional_order_required'])->toBe(30)
+        ->and($record['incoming_stock_covers_requirement'])->toBeFalse()
+        ->and($record['action_required'])->toBe('ORDER_NOW');
 
-    $run->predictions()->update(['predicted_weekly_demand' => 21]);
+    $run->predictions()->update([
+        'predicted_runout_date' => '2026-09-10',
+        'predicted_weekly_demand' => 21,
+    ]);
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())
         ->firstWhere('sku', 'LRB0004');
     expect($record['projected_stock_before_second_eta'])->toBe(-2.0)
         ->and($record['predicted_runout_date_after_replenishment'])->toBe('11/09/2026')
-        ->and($record['between_orders_stock_gap_status'])->toBe('UNHEALTHY');
+        ->and($record['between_orders_stock_gap_status'])->toBe('UNHEALTHY')
+        ->and($record['action_required'])->not->toBe('NO_ACTION');
+});
+
+it('keeps gross and additional requirements aligned with timely WIP orders', function (): void {
+    $this->travelTo('2026-09-01 00:00:00');
+    $runNumber = 0;
+
+    $makePrediction = function (string $sku, int $inventory, string $runout) use (&$runNumber): array {
+        [, $variant] = procurementSheetVariant($sku, 'livi-road');
+        Variant::withoutEvents(fn () => $variant->forceFill([
+            'inventory_qty' => $inventory,
+            'current_inventory_quantity' => $inventory,
+            'current_on_hand_quantity' => $inventory,
+        ])->save());
+        $run = ProcurementPredictionRun::query()->create([
+            'run_uuid' => (string) Str::uuid(),
+            'calculation_date' => now()->subDays(10 - $runNumber++)->toDateString(),
+            'status' => ProcurementPredictionRun::STATUS_RUNNING,
+            'default_lead_time_days' => 56,
+            'attention_horizon_days' => 21,
+        ]);
+        $payload = procurementSheetPredictionPayload($run);
+        $payload['predictions'][0] = array_merge($payload['predictions'][0], [
+            'shopify_product_id' => 'gid://shopify/Product/'.$sku,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/'.$sku,
+            'sku' => $sku,
+            'current_inventory' => $inventory,
+            'predicted_weekly_demand' => 7,
+            'predicted_runout_date' => $runout,
+            'recommended_order_before_incoming_stock' => 100,
+            'additional_order_required' => 100,
+        ]);
+        app(ProcurementPredictionIngestService::class)->persist($payload);
+
+        return [$variant, $run];
+    };
+
+    [$noOrder] = $makePrediction('GAP-A', 0, '2026-09-01');
+    $caseA = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'GAP-A');
+    expect($caseA['recommended_order_before_incoming_stock'])->toBe(100)
+        ->and($caseA['total_quantity_on_order'])->toBe(0)
+        ->and($caseA['number_of_wip_orders'])->toBe(0)
+        ->and($caseA['additional_order_required'])->toBe(100)
+        ->and($caseA['action_required'])->toBe('ORDER_NOW');
+
+    [$timely] = $makePrediction('GAP-B', 20, '2026-09-30');
+    app(SupplierOrderService::class)
+        ->createForVariant($timely, 'PO-GAP-B', 60, '2026-09-10');
+    $caseB = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'GAP-B');
+    expect($caseB['recommended_order_before_incoming_stock'])->toBe(100)
+        ->and($caseB['total_quantity_on_order'])->toBe(60)
+        ->and($caseB['additional_order_required'])->toBe(40)
+        ->and($caseB['stock_gap_status'])->toBe('HEALTHY');
+
+    [$late] = $makePrediction('GAP-C', 20, '2026-09-10');
+    app(SupplierOrderService::class)
+        ->createForVariant($late, 'PO-GAP-C', 100, '2026-09-30');
+    $caseC = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'GAP-C');
+    expect($caseC['recommended_order_before_incoming_stock'])->toBe(100)
+        ->and($caseC['total_quantity_on_order'])->toBe(100)
+        ->and($caseC['additional_order_required'])->toBe(100)
+        ->and($caseC['stock_gap_status'])->toBe('UNHEALTHY')
+        ->and($caseC['action_required'])->toBe('ORDER_NOW');
 });
 
 it('projects the post-replenishment runout with one order and reports no second order', function (): void {

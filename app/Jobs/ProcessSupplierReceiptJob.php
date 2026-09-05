@@ -78,15 +78,18 @@ class ProcessSupplierReceiptJob implements ShouldQueue
                     ]);
                 }
             });
-            $summary->refreshVariant(
-                $line->variant->fresh(['procurementIncomingStock']),
-                $receipt->created_by,
-                $receipt->source.':receipt',
-            );
             $result = $inventory->refreshVariants(collect([$line->variant]), $receipt->created_by);
             if (($result['failed'] ?? 0) > 0) {
                 throw new \RuntimeException(implode('; ', $result['failures'] ?? ['Shopify refresh failed.']));
             }
+            // A receipt transfers quantity from WIP into Shopify inventory. Refresh
+            // Shopify first so the recommendation never sees the WIP reduction
+            // without the corresponding increase in actual inventory.
+            $summary->refreshVariant(
+                $line->variant->fresh(['product', 'procurementIncomingStock']),
+                $receipt->created_by,
+                $receipt->source.':receipt',
+            );
             $sheets->publishOperational([$line->variant_id]);
             $receipt->update(['post_process_status' => 'completed', 'processed_at' => now(), 'error' => null]);
         } catch (\Throwable $e) {

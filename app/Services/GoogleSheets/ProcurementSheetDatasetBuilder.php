@@ -4,22 +4,28 @@ namespace App\Services\GoogleSheets;
 
 use App\Models\ProcurementPrediction;
 use App\Models\ProcurementPredictionRun;
+use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
-use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Variant;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\Procurement\ProcurementActionPolicy;
+use App\Services\Procurement\ProcurementRecommendationCalculator;
 use App\Services\SalePercentageCalculator;
 use Illuminate\Support\Facades\Log;
 
 final class ProcurementSheetDatasetBuilder
 {
+    private readonly ProcurementRecommendationCalculator $recommendations;
+
     public function __construct(
         private readonly OperationalProcurementCollectionResolver $collections,
         private readonly SalePercentageCalculator $salePercentages,
         private readonly ProcurementActionPolicy $actionPolicy,
-    ) {}
+        ?ProcurementRecommendationCalculator $recommendations = null,
+    ) {
+        $this->recommendations = $recommendations ?? app(ProcurementRecommendationCalculator::class);
+    }
 
     /** @return array<int,array<string,mixed>> */
     public function records(): array
@@ -69,47 +75,22 @@ final class ProcurementSheetDatasetBuilder
                         ? ($variant->current_on_hand_quantity ?? $current)
                         : null;
                     $nextOrders = $pendingOrders->get($variant->id, collect())->take(2)->values();
-                    $nextOrder = $nextOrders->get(0);
-                    $secondOrder = $nextOrders->get(1);
-                    $runout = $prediction?->predicted_runout_date;
+                    $calculation = $prediction === null ? null : $this->recommendations->calculate(
+                        $variant,
+                        $prediction,
+                        $pendingOrders->get($variant->id, collect()),
+                    );
+                    $nextOrder = $calculation['next_order'] ?? $nextOrders->get(0);
+                    $secondOrder = $calculation['second_order'] ?? $nextOrders->get(1);
+                    $runout = $calculation['predicted_runout_date'] ?? null;
                     $replenishment = $nextOrder?->eta_date;
-                    $additional = (int) ($prediction?->additional_order_required
-                        ?? $prediction?->preliminary_order_quantity ?? 0);
-                    $stockGapStatus = $replenishment === null
-                        ? 'NO_PENDING_ORDER'
-                        : ($runout === null && ! ($currentOnHand !== null && $currentOnHand <= 0)
-                            ? null
-                            : (($currentOnHand !== null && $currentOnHand <= 0) || $runout?->copy()
-                                ->addDays((int) config('procurement.stock_gap_grace_days', 0))->lt($replenishment)
-                                ? 'UNHEALTHY'
-                                : 'HEALTHY'));
-                    $runoutAfterReplenishment = null;
-                    $projectedBeforeSecondEta = null;
-                    $betweenOrdersGapStatus = $secondOrder === null ? 'NO_SECOND_ORDER' : 'INSUFFICIENT_DATA';
-                    $weeklyDemand = $prediction?->predicted_weekly_demand;
-                    if ($nextOrder !== null && $currentOnHand !== null && $weeklyDemand !== null) {
-                        $today = now((string) config('procurement.timezone', 'Africa/Johannesburg'))->startOfDay();
-                        $daysUntilFirstEta = max(0, (int) $today->diffInDays($nextOrder->eta_date, false));
-                        $dailyDemand = max(0, (float) $weeklyDemand) / 7;
-                        $stockRemainingAtFirstEta = max(0, (float) $currentOnHand - ($dailyDemand * $daysUntilFirstEta));
-                        $stockAfterReplenishment = $stockRemainingAtFirstEta + (int) $nextOrder->quantity_outstanding;
-                        if ($dailyDemand > 0) {
-                            $runoutAfterReplenishment = $nextOrder->eta_date->copy()->addDays(
-                                (int) floor($stockAfterReplenishment / $dailyDemand)
-                            );
-                        }
-                        if ($secondOrder !== null) {
-                            $daysBetweenEtas = max(0, (int) $nextOrder->eta_date->diffInDays($secondOrder->eta_date, false));
-                            $projectedBeforeSecondEta = round(
-                                $stockAfterReplenishment - ($dailyDemand * $daysBetweenEtas),
-                                2,
-                            );
-                            $betweenOrdersGapStatus = $dailyDemand <= 0
-                                || ($runoutAfterReplenishment !== null && $runoutAfterReplenishment->gte($secondOrder->eta_date))
-                                ? 'HEALTHY'
-                                : 'UNHEALTHY';
-                        }
-                    }
+                    $additional = (int) ($calculation['additional_order_required']
+                        ?? $prediction?->additional_order_required ?? $prediction?->preliminary_order_quantity ?? 0);
+                    $stockGapStatus = $calculation['stock_gap_status']
+                        ?? ($nextOrder === null ? 'NO_PENDING_ORDER' : null);
+                    $runoutAfterReplenishment = $calculation['predicted_runout_date_after_replenishment'] ?? null;
+                    $projectedBeforeSecondEta = $calculation['projected_stock_before_second_eta'] ?? null;
+                    $betweenOrdersGapStatus = $calculation['between_orders_stock_gap_status'] ?? 'NO_SECOND_ORDER';
                     $action = $prediction === null ? null : $this->actionPolicy->resolve(
                         $prediction->action_status,
                         $additional,
@@ -117,6 +98,8 @@ final class ProcurementSheetDatasetBuilder
                         (int) ($prediction->attention_horizon_days ?? config('procurement.attention_horizon_days', 21)),
                         (bool) ($stock?->ignore ?? false),
                         availableInventory: $current,
+                        unhealthyCurrentStockGap: $stockGapStatus === 'UNHEALTHY',
+                        unhealthyBetweenOrdersGap: $betweenOrdersGapStatus === 'UNHEALTHY',
                     );
                     $collectionId = null;
                     try {
@@ -167,13 +150,18 @@ final class ProcurementSheetDatasetBuilder
                         'stock_gap_status' => $stockGapStatus,
                         'lead_time_days' => $prediction?->lead_time_days_used,
                         'stock_required_for_lead_time' => $prediction?->stock_required_for_lead_time,
-                        'recommended_order_before_incoming_stock' => $prediction?->recommended_order_before_incoming_stock,
+                        'recommended_order_before_incoming_stock' => $calculation['gross_requirement']
+                            ?? $prediction?->recommended_order_before_incoming_stock,
                         'additional_order_required' => $prediction === null ? null : $additional,
                         'cms_movement_classification' => $prediction?->cms_movement_classification
                             ?? $movementRow?->movement_classification,
-                        'action_reason' => $prediction?->action_reason,
+                        'action_reason' => $stockGapStatus === 'UNHEALTHY'
+                            ? 'Incoming stock arrives after the predicted stockout; the timing gap requires action.'
+                            : ($betweenOrdersGapStatus === 'UNHEALTHY'
+                                ? 'The first replenishment is projected to run out before the second order arrives.'
+                                : $prediction?->action_reason),
                         'stockout_before_incoming_arrival' => $stockGapStatus === 'UNHEALTHY',
-                        'incoming_stock_covers_requirement' => $outstandingTotal > 0 && $additional === 0,
+                        'incoming_stock_covers_requirement' => ($calculation['timely_outstanding'] ?? 0) > 0 && $additional === 0,
                         'current_committed_inventory' => $variant->inventory_tracked === true
                             ? $variant->current_committed_quantity
                             : null,

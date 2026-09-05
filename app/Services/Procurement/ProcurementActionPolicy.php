@@ -14,17 +14,31 @@ final class ProcurementActionPolicy
         bool $ignore = false,
         ?CarbonInterface $asOf = null,
         ?int $availableInventory = null,
+        bool $unhealthyCurrentStockGap = false,
+        bool $unhealthyBetweenOrdersGap = false,
     ): string {
-        if ($ignore || $additionalOrderRequired <= 0) {
+        if ($ignore) {
             return 'NO_ACTION';
         }
 
-        if ($availableInventory !== null && $availableInventory <= 0) {
+        if ($unhealthyCurrentStockGap) {
+            return 'ORDER_NOW';
+        }
+
+        if ($additionalOrderRequired > 0 && $availableInventory !== null && $availableInventory <= 0) {
             return 'ORDER_NOW';
         }
 
         if ($additionalOrderRequired > (int) config('procurement.order_now_threshold', 30)) {
             return 'ORDER_NOW';
+        }
+
+        if ($unhealthyBetweenOrdersGap) {
+            return 'ATTENTION_WITHIN_3_WEEKS';
+        }
+
+        if ($additionalOrderRequired <= 0) {
+            return 'NO_ACTION';
         }
 
         if (in_array($currentAction, ['MANUAL_REVIEW', 'INSUFFICIENT_DATA'], true)) {

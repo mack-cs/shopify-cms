@@ -3,6 +3,8 @@
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Jobs\ProcessSupplierReceiptJob;
 use App\Models\Import;
+use App\Models\ProcurementPrediction;
+use App\Models\ProcurementPredictionRun;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierReceipt;
@@ -14,6 +16,7 @@ use App\Services\Procurement\ProcurementSelectionCsvExporter;
 use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\Procurement\SupplierOrderProjectionService;
 use App\Services\Procurement\SupplierOrderService;
+use App\Services\Procurement\SupplierOrderSummaryService;
 use App\Services\Procurement\SupplierReceiptService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -58,6 +61,87 @@ it('supports partial receipts and prevents duplicate or excessive receipt reques
 
     expect(fn () => $service->create($line, 7, 'receipt-key-2', dispatch: false))
         ->toThrow(ValidationException::class, 'Only 6 unit(s) remain outstanding.');
+});
+
+it('recalculates receipt transfers from fresh inventory without an artificial shortage', function (): void {
+    $this->travelTo('2026-09-01 00:00:00');
+    $variant = supplierWorkflowVariant('RECEIPT-TRANSFER');
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 20,
+        'current_inventory_quantity' => 20,
+        'current_on_hand_quantity' => 20,
+    ])->save());
+    $run = ProcurementPredictionRun::query()->create([
+        'run_uuid' => (string) Str::uuid(),
+        'calculation_date' => '2026-09-01',
+        'status' => ProcurementPredictionRun::STATUS_COMPLETED,
+        'default_lead_time_days' => 56,
+        'attention_horizon_days' => 21,
+    ]);
+    ProcurementPrediction::query()->create([
+        'procurement_prediction_run_id' => $run->id,
+        'shopify_variant_id' => $variant->shopify_id,
+        'sku' => $variant->sku,
+        'current_inventory' => 20,
+        'attention_horizon_days' => 21,
+        'lead_time_days_used' => 56,
+        'lead_time_source' => 'GLOBAL_DEFAULT',
+        'predicted_weekly_demand' => 7,
+        'predicted_runout_date' => '2026-09-30',
+        'recommended_order_before_incoming_stock' => 100,
+        'additional_order_required' => 100,
+        'action_status' => 'ORDER_NOW',
+        'generated_at' => now(),
+    ]);
+    $line = app(SupplierOrderService::class)
+        ->createForVariant($variant, 'PO-TRANSFER', 100, '2026-09-15');
+
+    $line->receipts()->create([
+        'uuid' => (string) Str::uuid(),
+        'quantity_received' => 40,
+        'idempotency_key' => 'transfer-partial',
+        'source' => 'test',
+        'status' => 'succeeded',
+        'post_process_status' => 'completed',
+        'shopify_reference_uri' => 'test://transfer-partial',
+    ]);
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 60,
+        'current_inventory_quantity' => 60,
+        'current_on_hand_quantity' => 60,
+    ])->save());
+    app(SupplierOrderSummaryService::class)->refreshVariant($variant->fresh());
+
+    $partial = $run->predictions()->firstOrFail();
+    $partialStock = $variant->procurementIncomingStock()->firstOrFail();
+    expect($partial->recommended_order_before_incoming_stock)->toBe(60)
+        ->and($partial->additional_order_required)->toBe(0)
+        ->and($partialStock->total_quantity_on_order)->toBe(60)
+        ->and($partialStock->number_of_wip_orders)->toBe(1);
+
+    $line->receipts()->create([
+        'uuid' => (string) Str::uuid(),
+        'quantity_received' => 60,
+        'idempotency_key' => 'transfer-full',
+        'source' => 'test',
+        'status' => 'succeeded',
+        'post_process_status' => 'completed',
+        'shopify_reference_uri' => 'test://transfer-full',
+    ]);
+    $line->update(['status' => 'completed']);
+    Variant::withoutEvents(fn () => $variant->forceFill([
+        'inventory_qty' => 120,
+        'current_inventory_quantity' => 120,
+        'current_on_hand_quantity' => 120,
+    ])->save());
+    app(SupplierOrderSummaryService::class)->refreshVariant($variant->fresh());
+
+    $complete = $run->predictions()->firstOrFail();
+    $completeStock = $variant->procurementIncomingStock()->firstOrFail();
+    expect($complete->recommended_order_before_incoming_stock)->toBe(0)
+        ->and($complete->additional_order_required)->toBe(0)
+        ->and($completeStock->total_quantity_on_order)->toBe(0)
+        ->and($completeStock->number_of_wip_orders)->toBe(0);
 });
 
 it('recalculates totals and WIP count when an order is completed', function (): void {

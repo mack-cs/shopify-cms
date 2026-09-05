@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\DB;
 
 final class SupplierOrderSummaryService
 {
+    public function __construct(private readonly ProcurementRecommendationCalculator $recommendations) {}
+
     /** @return array{total_quantity_on_order:int,number_of_wip_orders:int} */
     public function forVariant(int $variantId): array
     {
@@ -98,16 +100,23 @@ final class SupplierOrderSummaryService
         $currentInventory = $variant->inventory_tracked === true
             ? (int) ($variant->current_inventory_quantity ?? $variant->inventory_qty ?? 0)
             : 0;
-        $requiredBeforeIncoming = max(0, (int) ($prediction->recommended_order_before_incoming_stock ?? 0));
-        $additional = max(0, $requiredBeforeIncoming - $outstanding);
+        $calculation = $this->recommendations->calculate($variant, $prediction);
+        $requiredBeforeIncoming = $calculation['gross_requirement'];
+        $additional = $calculation['additional_order_required'];
         $prediction->forceFill([
+            'current_inventory' => $calculation['available'],
+            'estimated_days_of_stock_remaining' => $prediction->predicted_weekly_demand > 0
+                ? round($calculation['available'] / ((float) $prediction->predicted_weekly_demand / 7), 2)
+                : $prediction->estimated_days_of_stock_remaining,
+            'predicted_runout_date' => $calculation['predicted_runout_date'],
+            'recommended_order_before_incoming_stock' => $requiredBeforeIncoming,
             'total_quantity_on_order' => $outstanding,
             'total_confirmed_quantity_on_order' => $outstanding,
             'procurement_actioned' => $outstanding > 0,
             'projected_inventory_position' => $currentInventory + $outstanding,
             'additional_order_required' => $additional,
             'preliminary_order_quantity' => $additional,
-            'incoming_stock_covers_requirement' => $outstanding > 0 && $additional === 0,
+            'incoming_stock_covers_requirement' => $calculation['timely_outstanding'] > 0 && $additional === 0,
         ])->save();
     }
 }
