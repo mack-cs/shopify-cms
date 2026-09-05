@@ -9,6 +9,7 @@ use App\Models\ProcurementSupplierReceipt;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
+use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
 use App\Services\Procurement\ProcurementSelectionCsvExporter;
 use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\Procurement\SupplierOrderProjectionService;
@@ -65,7 +66,21 @@ it('recalculates totals and WIP count when an order is completed', function (): 
     $first = $orders->createForVariant($variant, 'PO-A', 5, '2026-09-01');
     $orders->createForVariant($variant, 'PO-B', 7, '2026-10-01');
     $first->receipts()->create([
-        'uuid' => (string) Str::uuid(), 'quantity_received' => 5,
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 2,
+        'idempotency_key' => 'partial-a', 'source' => 'test', 'status' => 'succeeded',
+        'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://partial-a',
+    ]);
+    app(SupplierOrderProjectionService::class)->projectVariant($variant->fresh(['procurementIncomingStock']));
+    $partialStock = $variant->procurementIncomingStock()->firstOrFail();
+    $partialSheet = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'PHASES-1');
+    expect($partialStock->total_quantity_on_order)->toBe(10)
+        ->and($partialStock->number_of_wip_orders)->toBe(2)
+        ->and($partialSheet['next_order_id'])->toBe('PO-A')
+        ->and($partialSheet['replenishment_date'])->toBe('01/09/2026');
+
+    $first->receipts()->create([
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 3,
         'idempotency_key' => 'done-a', 'source' => 'test', 'status' => 'succeeded',
         'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://done-a',
     ]);
@@ -73,8 +88,14 @@ it('recalculates totals and WIP count when an order is completed', function (): 
     app(SupplierOrderProjectionService::class)->projectVariant($variant->fresh(['procurementIncomingStock']));
 
     $stock = $variant->procurementIncomingStock()->firstOrFail();
+    $sheet = collect(app(ProcurementSheetDatasetBuilder::class)->records())
+        ->firstWhere('sku', 'PHASES-1');
     expect($stock->total_quantity_on_order)->toBe(7)
-        ->and($stock->number_of_wip_orders)->toBe(1);
+        ->and($stock->number_of_wip_orders)->toBe(1)
+        ->and($sheet['next_order_id'])->toBe('PO-B')
+        ->and($sheet['replenishment_date'])->toBe('01/10/2026')
+        ->and($sheet['second_order_id'])->toBeNull()
+        ->and($sheet['between_orders_stock_gap_status'])->toBe('NO_SECOND_ORDER');
 });
 
 it('supports more than three WIP orders for one SKU', function (): void {

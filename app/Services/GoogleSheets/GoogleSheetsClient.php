@@ -9,9 +9,9 @@ final class GoogleSheetsClient
 {
     private const API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
-    private const DATA_COLUMNS = 'A:AH';
-
-    private const LEGACY_LAST_COLUMN = 'AJ';
+    // Read through the widest historical layout so a layout upgrade can retain
+    // values before removing obsolete columns.
+    private const DATA_COLUMNS = 'A:AJ';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 
@@ -83,7 +83,12 @@ final class GoogleSheetsClient
     }
 
     /** @param array<int,array<int,mixed>> $rows */
-    public function replaceAll(string $tab, array $rows, int $existingRowCount): void
+    public function replaceAll(
+        string $tab,
+        array $rows,
+        int $existingRowCount,
+        ?int $existingColumnCount = null,
+    ): void
     {
         if ($rows === []) {
             throw new \RuntimeException("Refusing to replace Google Sheet tab [{$tab}] with no rows.");
@@ -92,6 +97,8 @@ final class GoogleSheetsClient
         $rowsToClear = max(1, $existingRowCount, count($rows));
         $width = max(array_map('count', $rows));
         $lastWrittenColumn = $this->columnName(max(0, $width - 1));
+        $existingWidth = max($width, $existingColumnCount ?? $width);
+        $lastExistingColumn = $this->columnName(max(0, $existingWidth - 1));
         $this->batchUpdateValues([[
             'range' => $this->range($tab, "A1:{$lastWrittenColumn}".count($rows)),
             'values' => $rows,
@@ -100,21 +107,17 @@ final class GoogleSheetsClient
         if ($existingRowCount > count($rows)) {
             $firstStaleRow = count($rows) + 1;
             $clearRows = $this->request()->withBody('{}', 'application/json')->post(
-                $this->valuesUrl($this->range($tab, "A{$firstStaleRow}:".self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
+                $this->valuesUrl($this->range($tab, "A{$firstStaleRow}:{$lastExistingColumn}{$rowsToClear}")).':clear'
             );
             $this->ensureSuccess($clearRows->successful(), $clearRows->body(), 'clear stale Sheet rows');
         }
 
-        if ($lastWrittenColumn !== self::LEGACY_LAST_COLUMN) {
+        if ($width < $existingWidth) {
             $firstTrailingColumn = $this->columnName($width);
             $clearColumns = $this->request()->withBody('{}', 'application/json')->post(
-                $this->valuesUrl($this->range($tab, "{$firstTrailingColumn}1:".self::LEGACY_LAST_COLUMN.$rowsToClear)).':clear'
+                $this->valuesUrl($this->range($tab, "{$firstTrailingColumn}1:{$lastExistingColumn}{$rowsToClear}")).':clear'
             );
-            $alreadyRemoved = $clearColumns->status() === 400
-                && str_contains($clearColumns->body(), 'exceeds grid limits');
-            if (! $alreadyRemoved) {
-                $this->ensureSuccess($clearColumns->successful(), $clearColumns->body(), 'clear removed Sheet columns');
-            }
+            $this->ensureSuccess($clearColumns->successful(), $clearColumns->body(), 'clear removed Sheet columns');
         }
     }
 
