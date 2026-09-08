@@ -53,6 +53,33 @@ it('shows stack component available and on hand inventory', function (): void {
         ->assertSee('BRACELET-001')
         ->assertSee('Ready')
         ->assertSee('11');
+
+    $page = Livewire::test(ListStackInventories::class)
+        ->assertActionExists('exportCsv')
+        ->searchTable('Golden Stack');
+    $response = $page->instance()->exportCsv();
+    ob_start();
+    $response->sendContent();
+    $content = ob_get_clean();
+    $csv = \League\Csv\Reader::createFromString($content);
+    $csv->setHeaderOffset(0);
+    $rows = iterator_to_array($csv->getRecords());
+
+    expect($rows)->toHaveCount(1);
+    $row = array_values($rows)[0];
+    expect($row['Stack SKU'])->toBe('STACK-001')
+        ->and($row['Stack Status'])->toBe('Ready')
+        ->and($row['Component SKU'])->toBe('BRACELET-001')
+        ->and($row['Quantity Per Stack'])->toBe('2')
+        ->and($row['Available'])->toBe('8')
+        ->and($row['On Hand'])->toBe('11');
+
+    $page->searchTable('No matching stack');
+    ob_start();
+    $page->instance()->exportCsv()->sendContent();
+    $emptyCsv = \League\Csv\Reader::createFromString(ob_get_clean());
+    $emptyCsv->setHeaderOffset(0);
+    expect(iterator_to_array($emptyCsv->getRecords()))->toBe([]);
 });
 
 it('explains which component makes a stack out of stock', function (): void {
