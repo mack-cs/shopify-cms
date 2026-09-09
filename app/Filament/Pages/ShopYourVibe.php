@@ -12,10 +12,16 @@ use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\FileUpload;
+use Filament\Forms\Get;
+use Filament\Forms\Set;
 use Filament\Forms\Form;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Livewire\Attributes\Locked;
 use Throwable;
 
@@ -52,6 +58,10 @@ class ShopYourVibe extends Page
     public string $search = '';
 
     public ?string $selectedCollectionGid = '';
+
+    public string $collectionMode = 'existing';
+
+    public array $newCollection = [];
 
     public string $productSearch = '';
 
@@ -152,6 +162,8 @@ class ShopYourVibe extends Page
         $this->addingParent = ! $forCard;
         $this->addingCard = $forCard;
         $this->selectedCollectionGid = '';
+        $this->collectionMode = 'existing';
+        $this->newCollectionForm->fill(['image_mode' => 'none']);
         $this->loadError = null;
         $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
     }
@@ -162,11 +174,79 @@ class ShopYourVibe extends Page
         $this->addingParent = false;
         $this->addingCard = false;
         $this->selectedCollectionGid = '';
+        $this->collectionMode = 'existing';
+        $this->newCollection = [];
+        $this->resetValidation();
     }
 
     protected function getForms(): array
     {
-        return ['collectionPickerForm'];
+        return ['collectionPickerForm', 'newCollectionForm'];
+    }
+
+    public function newCollectionForm(Form $form): Form
+    {
+        return $form->statePath('newCollection')->schema([
+            TextInput::make('title')->label('Collection name')->required()->maxLength(255)->live(debounce: 300)
+                ->afterStateUpdated(function (Set $set, Get $get, ?string $state, ?string $old): void {
+                    if (blank($get('handle')) || $get('handle') === Str::slug($old ?? '')) {
+                        $set('handle', Str::slug($state ?? ''));
+                    }
+                }),
+            TextInput::make('handle')->label('Slug (Shopify handle)')->required()->maxLength(255)
+                ->regex('/^[a-z0-9]+(?:-[a-z0-9]+)*$/')
+                ->helperText('Automatically generated from the collection name. You can edit it; your changes will be kept. URL: /collections/your-slug'),
+            Select::make('image_mode')->label('Collection image')->options([
+                'none' => 'No image', 'upload' => 'Upload a new image', 'existing' => 'Choose an image from Shopify',
+            ])->default('none')->required()->live(),
+            FileUpload::make('upload')->label('Image')->image()->acceptedFileTypes(['image/jpeg', 'image/png', 'image/webp'])
+                ->maxSize(10240)->storeFiles(false)->required()->visible(fn (Get $get) => $get('image_mode') === 'upload'),
+            Select::make('image_gid')->label('Shopify image')->searchable()->native(false)->required()
+                ->visible(fn (Get $get) => $get('image_mode') === 'existing')
+                ->options(fn () => $this->shopifyImageOptions(''))
+                ->getSearchResultsUsing(fn (string $search) => $this->shopifyImageOptions($search))
+                ->getOptionLabelUsing(function ($value): ?string {
+                    $this->guard();
+
+                    return $value ? (app(ShopYourVibeShopify::class)->image($value)['alt'] ?: $value) : null;
+                }),
+        ]);
+    }
+
+    protected function shopifyImageOptions(string $search): array
+    {
+        $this->guard();
+        if (! $this->addingCard || $this->collectionMode !== 'new' || ($this->newCollection['image_mode'] ?? '') !== 'existing') {
+            return [];
+        }
+
+        return collect(app(ShopYourVibeShopify::class)->images($search)['images'])
+            ->mapWithKeys(fn ($image) => [$image['id'] => $image['alt'] ?: basename(parse_url($image['image']['url'], PHP_URL_PATH))])->all();
+    }
+
+    public function createCollectionVibe(): void
+    {
+        $this->guard();
+        abort_unless($this->addingCard && $this->collectionMode === 'new' && $this->draftId, 422);
+        $data = $this->newCollectionForm->getState();
+        $this->attempt(function () use ($data): void {
+            $input = ['title' => trim($data['title']), 'handle' => $data['handle']];
+            if ($data['image_mode'] === 'upload') {
+                $input['image_path'] = $data['upload']->store('shop-your-vibe', 'public');
+                if (! $input['image_path']) {
+                    throw new \RuntimeException('The image could not be saved. Please upload it again.');
+                }
+                $input['image_url'] = url(Storage::disk('public')->url($input['image_path']));
+            } elseif ($data['image_mode'] === 'existing') {
+                $image = app(ShopYourVibeShopify::class)->image($data['image_gid']);
+                $input['image'] = $image['id'];
+                $input['image_url'] = $image['image']['url'];
+            }
+            $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'create_collection', $input));
+            $this->confirmingPush = false;
+            $this->closeCollectionPicker();
+            $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
+        });
     }
 
     public function collectionPickerForm(Form $form): Form

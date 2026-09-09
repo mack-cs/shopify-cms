@@ -52,3 +52,5 @@
     .syv-card-grid.syv-product-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; }
     .syv-image-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
+.syv-collection-mode { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
+.syv-collection-mode label { display: flex; align-items: center; gap: .5rem; cursor: pointer; }

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Product;
+use App\Models\Import;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use Illuminate\Support\Facades\Cache;
@@ -86,6 +87,34 @@ class ShopYourVibeWorkflow
             }
             $state = $draft->desired;
             switch ($operation) {
+                case 'create_collection':
+                    $importId = ShopifyCollection::where('shopify_id', $draft->collection_gid)->latest('id')->value('import_id')
+                        ?? Import::orderByDesc('is_current')->latest('id')->value('id');
+                    if (! $importId) {
+                        throw new RuntimeException('Synchronize the collection catalogue before creating a collection.');
+                    }
+                    $fields = Validator::make($input, [
+                        'title' => 'required|string|max:255',
+                        'handle' => ['required', 'string', 'max:255', 'regex:/^[a-z0-9]+(?:-[a-z0-9]+)*$/'],
+                        'image' => ['nullable', 'regex:~^gid://shopify/MediaImage/\d+$~'],
+                        'image_path' => ['nullable', 'regex:~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~'],
+                        'image_url' => 'nullable|url|max:4096',
+                    ])->validate();
+                    if (ShopifyCollection::where('handle', $fields['handle'])->exists()
+                        || in_array($fields['handle'], array_column($state['new_collections'] ?? [], 'handle'), true)) {
+                        throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
+                    }
+                    $key = (string) Str::uuid();
+                    $gid = 'new:'.$key;
+                    $state['new_collections'][$key] = $fields + ['token' => $key, 'gid' => $gid, 'published' => false, 'import_id' => $importId];
+                    $state['collections'][$gid] = ['gid' => $gid, 'title' => $fields['title'], 'handle' => $fields['handle'],
+                        'sort' => 'MANUAL', 'manual_supported' => true, 'membership_supported' => true,
+                        'enable_manual' => false, 'products' => []];
+                    $state['cards'][] = ['key' => $key, 'id' => null, 'handle' => 'cms-vibe-'.$key,
+                        'name' => $fields['title'], 'image' => $fields['image'] ?? '', 'image_url' => $fields['image_url'] ?? null,
+                        'link' => rtrim(config('services.shopify.storefront_url'), '/').'/collections/'.$fields['handle'],
+                        'collection_gid' => $gid];
+                    break;
                 case 'add_card':
                     $collection = $this->localCollection($input['collection_gid'] ?? '');
                     $key = (string) Str::uuid();
@@ -98,13 +127,23 @@ class ShopYourVibeWorkflow
                     $card = $this->card($state, $input['key']);
                     $fields = Validator::make($input, ['name' => 'required|string|max:255', 'link' => 'required|string|max:2048',
                         'image' => ['present', 'nullable', 'regex:~^gid://shopify/MediaImage/\d+$~'],
-                        'image_url' => 'nullable|url:https|max:4096'])->validate();
+                        'image_url' => 'nullable|url:http,https|max:4096'])->validate();
                     $this->validateLink($fields['link']);
                     if (str_starts_with($fields['link'], '/')) {
                         $fields['link'] = rtrim(config('services.shopify.storefront_url'), '/').$fields['link'];
                     }
                     $fields['image'] = $fields['image'] ?? '';
                     $fields['collection_gid'] = $this->localLink($fields['link']);
+                    if (str_starts_with($card['collection_gid'] ?? '', 'new:')) {
+                        if ($fields['link'] !== $card['link']) {
+                            throw new RuntimeException('Push the new collection before changing its link.');
+                        }
+                        $fields['collection_gid'] = $card['collection_gid'];
+                        if ($fields['image'] !== $card['image']) {
+                            $state['new_collections'][$card['key']]['image'] = $fields['image'];
+                            unset($state['new_collections'][$card['key']]['image_path']);
+                        }
+                    }
                     foreach ($state['cards'] as &$item) {
                         if ($item['key'] === $card['key']) {
                             $item = array_replace($item, $fields);
@@ -171,6 +210,9 @@ class ShopYourVibeWorkflow
             }
             $represented = array_filter(array_column($state['cards'], 'collection_gid'));
             $state['collections'] = array_intersect_key($state['collections'], array_flip($represented));
+            if (isset($state['new_collections'])) {
+                $state['new_collections'] = array_filter($state['new_collections'], fn ($item) => in_array($item['gid'], $represented, true));
+            }
             $pending = $this->different($draft->snapshot, $state);
             $draft->update(['desired' => $state, 'pending' => $pending, 'status' => $pending ? 'pending' : 'synced',
                 'last_error' => null, 'revision' => $revision + 1]);
@@ -238,6 +280,9 @@ class ShopYourVibeWorkflow
             }
             $currentCollections = [];
             foreach ($state['collections'] as $gid => $desiredCollection) {
+                if (str_starts_with($gid, 'new:')) {
+                    continue;
+                }
                 if (! $this->collectionDifferent($baseline['collections'][$gid], $desiredCollection)) {
                     continue;
                 }
@@ -258,6 +303,42 @@ class ShopYourVibeWorkflow
                     throw new RuntimeException('Manual sorting is not supported for '.$current['title'].'.');
                 }
                 $currentCollections[$gid] = $current;
+            }
+            $publication = ! empty($state['new_collections']) ? $this->shopify->onlineStorePublication() : null;
+            foreach ($state['new_collections'] ?? [] as $token => $creation) {
+                if (! str_starts_with($creation['gid'], 'new:')) {
+                    continue;
+                }
+                if (! empty($creation['image_path']) && empty($creation['image'])) {
+                    $creation['image'] = $this->shopify->uploadImage($creation['image_path'], $token, $creation['title']);
+                    $state['new_collections'][$token] = $creation;
+                    $draft->update(['desired' => $state]);
+                }
+                $image = ! empty($creation['image']) ? $this->shopify->image($creation['image'], true) : null;
+                $created = $this->shopify->createCollection($creation, $image['image']['url'] ?? null);
+                $oldGid = $creation['gid'];
+                $gid = $created['id'];
+                $creation['gid'] = $gid;
+                $state['new_collections'][$token] = $creation;
+                $state['collections'][$gid] = array_replace($state['collections'][$oldGid], ['gid' => $gid, 'handle' => $created['handle']]);
+                unset($state['collections'][$oldGid]);
+                foreach ($state['cards'] as &$item) {
+                    if ($item['collection_gid'] === $oldGid) {
+                        $item['collection_gid'] = $gid;
+                        $item['link'] = rtrim(config('services.shopify.storefront_url'), '/').'/collections/'.$created['handle'];
+                        $item['image'] = $creation['image'] ?? '';
+                        $item['image_url'] = $image['image']['url'] ?? null;
+                    }
+                }
+                unset($item);
+                // Creation is checkpointed before publication or product changes can fail.
+                $baseline['collections'][$gid] = array_replace($state['collections'][$gid], ['products' => []]);
+                $currentCollections[$gid] = $baseline['collections'][$gid];
+                $progress[] = 'Collection created: '.$created['title'];
+                $draft->update(['desired' => $state, 'snapshot' => $baseline, 'progress' => $progress]);
+            }
+            foreach ($state['new_collections'] ?? [] as $creation) {
+                $this->rememberCreatedCollection($draft, $creation);
             }
             foreach ($state['cards'] as $index => $card) {
                 $current = collect($remote['cards'])->firstWhere('id', $card['id'])
@@ -327,6 +408,12 @@ class ShopYourVibeWorkflow
                 $progress[] = 'Products synced: '.$current['title'];
                 $draft->update(['snapshot' => $baseline, 'desired' => $state, 'progress' => $progress]);
             }
+            foreach ($state['new_collections'] ?? [] as $token => $creation) {
+                $this->shopify->publishCollection($creation['gid'], $publication);
+                $state['new_collections'][$token]['published'] = true;
+                $progress[] = 'Collection published to Online Store: '.$creation['title'];
+                $draft->update(['desired' => $state, 'progress' => $progress]);
+            }
             // A final read confirms the complete layout, including exact reference order and fields.
             $confirmed = $this->shopify->parent($draft->collection_gid);
             if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
@@ -349,6 +436,16 @@ class ShopYourVibeWorkflow
         $jobs[$gid] = $job;
         $draft->update(['remote_jobs' => $jobs]);
         $this->waitForJob($job);
+    }
+
+    private function rememberCreatedCollection(ShopYourVibeDraft $draft, array $creation): void
+    {
+        $collection = $draft->desired['collections'][$creation['gid']];
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::firstOrCreate(['shopify_id' => $creation['gid']], [
+            'import_id' => $creation['import_id'],
+            'handle' => $collection['handle'], 'title' => $creation['title'],
+            'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED, 'last_synced_at' => now(),
+        ]));
     }
 
     protected function waitForJob(string $job): void
@@ -375,7 +472,8 @@ class ShopYourVibeWorkflow
         $after = array_column($draft->desired['cards'], 'key');
         $summary = ['Vibe cards added' => count(array_diff($after, $before)), 'Vibe cards removed' => count(array_diff($before, $after)),
             'Vibe layout changed' => $before !== $after ? 'Yes' : 'No', 'Card fields changed' => 0,
-            'Products added' => 0, 'Products removed' => 0, 'Product sorting changed' => 'No'];
+            'Products added' => 0, 'Products removed' => 0, 'Product sorting changed' => 'No',
+            'New collections to publish' => count($draft->desired['new_collections'] ?? [])];
         foreach ($draft->desired['cards'] as $card) {
             $original = collect($draft->snapshot['cards'])->firstWhere('key', $card['key']);
             if ($original && $this->fields($original) !== $this->fields($card)) {
@@ -383,7 +481,7 @@ class ShopYourVibeWorkflow
             }
         }
         foreach ($draft->desired['collections'] as $gid => $collection) {
-            $original = $draft->snapshot['collections'][$gid];
+            $original = $draft->snapshot['collections'][$gid] ?? array_replace($collection, ['products' => []]);
             $summary['Products added'] += count(array_diff($this->membership($collection), $this->membership($original)));
             $summary['Products removed'] += count(array_diff($this->membership($original), $this->membership($collection)));
             if ($this->collectionDifferent($original, $collection)) {
@@ -396,6 +494,9 @@ class ShopYourVibeWorkflow
 
     public function different(array $before, array $after): bool
     {
+        if (! empty($after['new_collections'])) {
+            return true;
+        }
         if (array_column($after['cards'], 'id') !== $before['reference_ids'] || array_map($this->fields(...), $before['cards']) !== array_map($this->fields(...), $after['cards'])) {
             return true;
         }

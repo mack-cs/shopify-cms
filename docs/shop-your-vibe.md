@@ -13,7 +13,9 @@ php artisan queue:work shop-your-vibe --queue=shop-your-vibe --timeout=840 --tri
 
 The dedicated database queue uses the existing jobs table with a 960-second reservation. Its worker must run separately from the default queue, whose 90-second reservation is too short for paginated Shopify pushes. Restart workers and rebuild any cached configuration after deployment. Without this worker, the editor saves drafts but pushes remain queued.
 
-The Shopify app needs existing collection/product read/write access, metaobject definition read access, metaobject read/write access, and file read access for the image chooser. Image selection uses existing, ready Shopify files.
+The Shopify app needs existing collection/product read/write access, metaobject definition read access, and metaobject read/write access. The image chooser requires `read_files`; new image uploads also require `write_files`. New collection publication requires `read_publications` and `write_publications`. Reauthorize the app if these scopes are newly enabled. Creation uses [collectionCreate](https://shopify.dev/docs/api/admin-graphql/2026-01/mutations/collectionCreate), followed by [publishablePublish](https://shopify.dev/docs/api/admin-graphql/latest/mutations/publishablepublish) for the Online Store publication only.
+
+Uploaded images are saved under `storage/app/public/shop-your-vibe` until the worker sends them through Shopify staged uploads and `fileCreate`. Keep this storage available to the web process and queue worker. Run `php artisan storage:link` for CMS image previews. Uploads accept JPEG, PNG and WebP up to 10 MB; PHP and web-server upload limits must allow that size. The worker does not depend on Shopify being able to fetch the CMS preview URL.
 
 ## Verified Shopify structure
 
@@ -33,6 +35,9 @@ The inspected Bracelets, Necklaces and Earrings parents had 13, 4 and 4 cards re
 
 ## Draft and push behavior
 
+- **Add Vibe** offers a searchable existing collection selector or **Create a new collection**. Enter a title, edit the automatically generated handle if needed, and optionally upload an image or select a ready Shopify image. The image is used for both the collection and its preview card.
+- New collections are manual collections. They support adding/removing products and sorting in the local draft before creation. Confirming **Push Changes** creates them with their handles and images, applies the saved product order, then publishes them to the live Online Store. The review explicitly lists new collections to publish; the vibe layout itself still targets the preview metafield.
+- New collection creation is checkpointed with a UUID token in `custom.syv_creation_token`. A retry looks up the requested handle and recovers only a collection bearing that token, rejecting unrelated handle collisions. Uploaded files use stable UUID filenames with duplicate rejection; file IDs are saved before waiting for Shopify image processing. A failed image or publication remains pending for retry. Created collections become searchable in the CMS catalogue.
 - Dragging, product selections, removals and saving card fields update the database only. Field inputs show an immediate unsaved warning; **Save card to draft** persists those fields. Navigation warns about unpublished changes.
 - Opening a vibe loads its products and current sorting mode with read-only Shopify requests. Shopify image searches also make read-only requests.
 - **Enable Manual Sorting** requires confirmation and stages the change until the final push. Dragging never enables manual sorting implicitly.

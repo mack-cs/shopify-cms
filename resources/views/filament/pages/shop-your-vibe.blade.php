@@ -104,6 +104,7 @@
                         <div class="syv-push-scope">
                             <p><strong>Preview layout:</strong> Card names, images, links and card order update the preview only.</p>
                             <p><strong>Linked collections:</strong> Product additions, removals and sorting update the actual Shopify collections and can affect the live storefront.</p>
+                            @if (!empty($draft->desired['new_collections']))<p><strong>New collections:</strong> These will be created with their handles and images and published to the live Online Store.</p>@endif
                         </div>
                         <x-filament::button wire:click="pushChanges" x-bind:disabled="formDirty" wire:loading.attr="disabled">Push Changes</x-filament::button>
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
@@ -140,7 +141,7 @@
                     <x-filament::section :heading="$card['name']">
                         <div class="grid gap-4 md:grid-cols-2">
                             <label class="space-y-1"><span>Name</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.name" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
-                            <label class="space-y-1"><span>Link</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.link" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
+                            <label class="space-y-1"><span>Link</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.link" :disabled="str_starts_with($card['collection_gid'] ?? '', 'new:')" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
                             <div>
                                 @if ($cardForm['image_url'] ?? null)<img src="{{ $cardForm['image_url'] }}" alt="Card preview" class="syv-edit-image">@endif
                                 <x-filament::button color="gray" wire:click="findImages" wire:loading.attr="disabled">Choose image from Shopify</x-filament::button>
@@ -161,7 +162,7 @@
                                 <p class="text-sm text-gray-500">This card’s link has no loaded collection. Save a link to a synchronized collection, then reopen the vibe to load its products.</p>
                             @else
                                 <h4 class="font-semibold">{{ $collection['title'] }}</h4>
-                                <p>Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($collection['sort']), '_')) }}</p>
+                                @if (str_starts_with($collection['gid'], 'new:'))<p class="text-sm text-gray-500">New collection — will be created and published when you push. Add and sort its products below.</p>@else<p>Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($collection['sort']), '_')) }}</p>@endif
                                 @if (!$collection['manual_supported'])
                                     <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
                                 @elseif ($collection['sort'] === 'MANUAL')
@@ -230,11 +231,26 @@
             x-on:modal-closed.stop="$wire.closeCollectionPicker()">
             @if ($addingParent || $addingCard)
                 @if ($loadError)<p role="alert" class="syv-picker-error">{{ $loadError }}</p>@endif
-                <p class="my-3 text-sm text-gray-500">Search by collection title or handle inside the dropdown. Already configured collections are excluded when adding Shop Your Vibe.</p>
-                {{ $this->collectionPickerForm }}
+                @if ($addingCard)
+                    <div class="syv-collection-mode" role="group" aria-label="Collection source">
+                        <label><input type="radio" wire:model.live="collectionMode" value="existing"> Select an existing collection</label>
+                        <label><input type="radio" wire:model.live="collectionMode" value="new"> Create a new collection</label>
+                    </div>
+                @endif
+                @if ($addingCard && $collectionMode === 'new')
+                    <p class="my-3 text-sm text-gray-500">Save a new collection to this draft. Pushing changes creates it in Shopify, applies its image and publishes it to the Online Store.</p>
+                    {{ $this->newCollectionForm }}
+                @else
+                    <p class="my-3 text-sm text-gray-500">Search by collection title or handle inside the dropdown. Already configured collections are excluded when adding Shop Your Vibe.</p>
+                    {{ $this->collectionPickerForm }}
+                @endif
             @endif
             <x-slot name="footer">
-                <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
+                @if ($addingCard && $collectionMode === 'new')
+                    <x-filament::button wire:click="createCollectionVibe" wire:loading.attr="disabled">Add new collection to draft</x-filament::button>
+                @else
+                    <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
+                @endif
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'shop-your-vibe-collections' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>

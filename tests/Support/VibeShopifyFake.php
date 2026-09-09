@@ -19,6 +19,14 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
 
     public bool $jobDone = true;
 
+    public bool $loseCreateResponse = false;
+
+    public array $published = [];
+
+    public array $files = [];
+
+    public string $fileStatus = 'READY';
+
     public function __construct()
     {
         foreach ([1 => 'necklaces', 2 => 'pearl', 3 => 'pastels', 4 => 'empty'] as $id => $handle) {
@@ -54,6 +62,59 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         if ($this->fail && str_contains($query, $this->fail)) {
             throw new RuntimeException('Simulated Shopify failure: '.$this->fail);
         }
+        if (str_contains($query, 'query VibeImages')) {
+            return ['files' => ['nodes' => [['id' => 'gid://shopify/MediaImage/1', 'alt' => 'Gold jewellery',
+                'fileStatus' => 'READY', 'image' => ['url' => 'https://cdn.shopify.com/image.jpg']]],
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+        }
+        if (str_contains($query, 'query VibeImage(')) {
+            return ['node' => ['id' => $variables['id'], 'alt' => 'Gold jewellery', 'fileStatus' => $this->fileStatus,
+                'image' => ['url' => 'https://cdn.shopify.com/image.jpg']]];
+        }
+        if (str_contains($query, 'query VibeUploadedImage')) {
+            $filename = json_decode(substr($variables['query'], strlen('filename:')), true);
+
+            return ['files' => ['nodes' => isset($this->files[$filename]) ? [['id' => $this->files[$filename]]] : []]];
+        }
+        if (str_contains($query, 'mutation VibeStageImage')) {
+            return ['stagedUploadsCreate' => ['stagedTargets' => [['url' => 'https://uploads.shopify.test/',
+                'resourceUrl' => 'https://uploads.shopify.test/image.jpg', 'parameters' => [['name' => 'key', 'value' => 'image']]]], 'userErrors' => []]];
+        }
+        if (str_contains($query, 'mutation VibeFileCreate')) {
+            $id = 'gid://shopify/MediaImage/'.(count($this->files) + 500);
+            $this->files[$variables['files'][0]['filename']] = $id;
+
+            return ['fileCreate' => ['files' => [['id' => $id]], 'userErrors' => []]];
+        }
+        if (str_contains($query, 'query VibeCollectionByHandle')) {
+            return ['collectionByIdentifier' => collect($this->collections)->firstWhere('handle', $variables['handle'])];
+        }
+        if (str_contains($query, 'mutation VibeCollectionCreate')) {
+            $input = $variables['input'];
+            $id = 'gid://shopify/Collection/'.(count($this->collections) + 100);
+            $this->collections[$id] = ['id' => $id, 'title' => $input['title'], 'handle' => $input['handle'],
+                'image' => isset($input['image']) ? ['url' => $input['image']['src']] : null, 'updatedAt' => '2026-09-09T12:00:00Z',
+                'sortOrder' => $input['sortOrder'], 'ruleSet' => null, 'metafield' => ['value' => $input['metafields'][0]['value']],
+                'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+            if ($this->loseCreateResponse) {
+                $this->loseCreateResponse = false;
+                throw new RuntimeException('Lost collection create response');
+            }
+
+            return ['collectionCreate' => ['collection' => $this->collections[$id], 'userErrors' => []]];
+        }
+        if (str_contains($query, 'query VibePublications')) {
+            return ['publications' => ['nodes' => [['id' => 'gid://shopify/Publication/1', 'name' => 'Online Store', 'app' => ['title' => 'Online Store']]],
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+        }
+        if (str_contains($query, 'mutation VibePublishCollection')) {
+            $this->published[$variables['id']] = $variables['input'][0]['publicationId'];
+
+            return ['publishablePublish' => ['userErrors' => []]];
+        }
+        if (str_contains($query, 'query VibePublicationStatus')) {
+            return ['collection' => ['publishedOnPublication' => ($this->published[$variables['id']] ?? null) === $variables['publication']]];
+        }
         if (str_contains($query, 'query VibeDefinition')) {
             return ['metaobjectDefinitionByType' => ['type' => 'shop_your_vibe_card_preview', 'fieldDefinitions' => [
                 ['key' => 'name', 'type' => ['name' => 'single_line_text_field']],
@@ -62,11 +123,11 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             ]]];
         }
         if (str_contains($query, 'query VibeParents')) {
-            return ['collections' => ['nodes' => array_map(fn ($collection) => $collection + ['metafield' => $this->metafield($collection['id'])], array_values($this->collections)),
+            return ['collections' => ['nodes' => array_map(fn ($collection) => array_replace($collection, ['metafield' => $this->metafield($collection['id'])]), array_values($this->collections)),
                 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
         }
         if (str_contains($query, 'query VibeParent(')) {
-            return ['collection' => $this->collections[$variables['id']] + ['metafield' => $this->metafield($variables['id'])]];
+            return ['collection' => array_replace($this->collections[$variables['id']], ['metafield' => $this->metafield($variables['id'])])];
         }
         if (str_contains($query, 'query VibeCards')) {
             return ['nodes' => array_map(fn ($id) => $this->cards[$id] ?? null, $variables['ids'])];

@@ -13,6 +13,9 @@ use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Http\UploadedFile;
 use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 use Tests\Support\VibeShopifyFake;
@@ -464,4 +467,143 @@ it('searches modal collections by title and handle beyond the initial results', 
     expect($search(''))->toHaveCount(60)->not->toContain('gid://shopify/Collection/2000');
     expect($search('Zebra'))->toBe(['gid://shopify/Collection/2000']);
     expect($search('striped-accessories'))->toBe(['gid://shopify/Collection/2000']);
+});
+
+it('creates a new collection draft from the modal and generates an editable handle', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->set('newCollection.title', 'Golden Summer')->assertSet('newCollection.handle', 'golden-summer')
+        ->set('newCollection.handle', 'summer-gold')->set('newCollection.title', 'Golden Summer Vibes')
+        ->assertSet('newCollection.handle', 'summer-gold');
+    $this->fake->calls = [];
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false)
+        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Golden Summer Vibes');
+    $card = $this->draft->fresh()->desired['cards'][2];
+    $page->call('editCard', $card['key'])->assertSee('New collection')->assertSee('Add Products');
+    expect($card['link'])->toBe('https://leighavenue.co.za/collections/summer-gold')
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('creates and publishes a new vibe collection with its image and product order only on push', function () {
+    $this->fake->calls = [];
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer',
+        'image' => 'gid://shopify/MediaImage/1', 'image_url' => 'https://cdn.shopify.com/image.jpg']);
+    $card = $this->draft->desired['cards'][2];
+    vibeEdit($this, 'add_products', ['collection_gid' => $card['collection_gid'], 'ids' => ['gid://shopify/Product/102', 'gid://shopify/Product/101']]);
+    expect($this->fake->calls)->toBe([])->and($this->workflow->summary($this->draft)['New collections to publish'])->toBe(1);
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->draft->last_error)->toBeNull();
+    $card = $this->draft->desired['cards'][2];
+    $created = $this->fake->collections[$card['collection_gid']];
+    expect($created['handle'])->toBe('golden-summer')->and($created['image']['url'])->toBe('https://cdn.shopify.com/image.jpg')
+        ->and(array_column($created['products']['nodes'], 'id'))->toBe(['gid://shopify/Product/102', 'gid://shopify/Product/101'])
+        ->and($this->fake->published[$created['id']])->toBe('gid://shopify/Publication/1')
+        ->and(ShopifyCollection::where('shopify_id', $created['id'])->value('handle'))->toBe('golden-summer');
+});
+
+it('resumes a lost new collection creation response without duplicating the collection', function () {
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
+    $this->fake->loseCreateResponse = true;
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->fake->collections)->toHaveCount(5);
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->collections)->toHaveCount(5)
+        ->and($this->fake->published)->toHaveCount(1);
+});
+
+it('keeps a new collection pending when publication fails and retries without recreating it', function () {
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
+    $this->fake->fail = 'mutation VibePublishCollection';
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->pending)->toBeTrue()->and($this->fake->collections)->toHaveCount(5);
+    $this->fake->fail = null;
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->collections)->toHaveCount(5);
+});
+
+it('rejects existing handles locally and conflicting handles in Shopify', function () {
+    expect(fn () => vibeEdit($this, 'create_collection', ['title' => 'Pearl', 'handle' => 'pearl']))->toThrow(RuntimeException::class, 'handle already exists');
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
+    $this->fake->collections['gid://shopify/Collection/4']['handle'] = 'golden-summer';
+    $this->fake->calls = [];
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->last_error)->toContain('already used in Shopify')
+        ->and($this->fake->mutations())->toBe([]);
+});
+
+it('drops an unpushed new collection when its vibe is removed', function () {
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
+    vibeEdit($this, 'remove_card', ['key' => $this->draft->desired['cards'][2]['key']]);
+    expect($this->draft->desired['new_collections'])->toBe([])->and($this->draft->pending)->toBeFalse();
+});
+
+it('uploads a new collection image to Shopify and reuses it when processing is delayed', function () {
+    Storage::fake('public');
+    Http::fake(['uploads.shopify.test/*' => Http::response('', 201)]);
+    $path = UploadedFile::fake()->image('summer.jpg')->store('shop-your-vibe', 'public');
+    vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer', 'image_path' => $path]);
+    $this->fake->fileStatus = 'PROCESSING';
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->fake->files)->toHaveCount(1)->and($this->fake->collections)->toHaveCount(4);
+    $this->fake->fileStatus = 'READY';
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->files)->toHaveCount(1)
+        ->and($this->draft->desired['cards'][2]['image'])->toBe('gid://shopify/MediaImage/500');
+    Http::assertSentCount(1);
+});
+
+it('accepts an uploaded image in the new collection modal without publishing it', function () {
+    Storage::fake('public');
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->fillForm(['title' => 'Summer Gold', 'handle' => 'summer-gold', 'image_mode' => 'upload',
+            'upload' => UploadedFile::fake()->image('summer.jpg')], 'newCollectionForm');
+    $this->fake->calls = [];
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('loadError', null)->assertSet('addingCard', false);
+    $creation = array_values($this->draft->fresh()->desired['new_collections'])[0];
+    Storage::disk('public')->assertExists($creation['image_path']);
+    expect($this->fake->calls)->toBe([]);
+});
+
+it('allows choosing an existing Shopify image for a new collection', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->fillForm(['title' => 'Summer Gold', 'handle' => 'summer-gold', 'image_mode' => 'existing',
+            'image_gid' => 'gid://shopify/MediaImage/1'], 'newCollectionForm');
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false);
+    expect($this->draft->fresh()->desired['cards'][2]['image'])->toBe('gid://shopify/MediaImage/1')
+        ->and($this->fake->mutations())->toBe([]);
+});
+
+it('keeps an incomplete publication pending after further draft edits', function () {
+    vibeEdit($this, 'create_collection', ['title' => 'Summer Gold', 'handle' => 'summer-gold']);
+    $this->fake->fail = 'mutation VibePublishCollection';
+    vibePush($this);
+    vibeEdit($this, 'reorder_cards', ['keys' => array_column($this->draft->desired['cards'], 'key')]);
+    expect($this->draft->pending)->toBeTrue();
+    $this->fake->fail = null;
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced');
+});
+
+it('validates new collection details and requires the chosen upload before saving', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new');
+    $page->call('createCollectionVibe')->assertHasErrors(['newCollection.title', 'newCollection.handle'])
+        ->assertSet('addingCard', true);
+    $page->fillForm(['title' => 'Summer', 'handle' => 'Invalid Handle!', 'image_mode' => 'upload'], 'newCollectionForm')
+        ->call('createCollectionVibe')->assertHasErrors(['newCollection.handle', 'newCollection.upload']);
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(2)->and($this->fake->mutations())->toBe([]);
 });

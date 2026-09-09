@@ -4,9 +4,11 @@ namespace App\Services;
 
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Models\ShopifyCollection;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 
-/** All remote access for this editor is scoped to the existing preview definition. */
+/** Shopify access for preview cards, linked collections and their images. */
 class ShopYourVibeShopify
 {
     public const TYPE = 'shop_your_vibe_card_preview';
@@ -177,6 +179,129 @@ GQL, ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']], 'input' =
         }
 
         return $data['metaobject']['id'] ?? throw new RuntimeException('Shopify did not confirm the saved card.');
+    }
+
+    public function image(string $gid, bool $wait = false): array
+    {
+        $this->gid($gid, 'MediaImage');
+        for ($attempt = 0; $attempt < ($wait ? 10 : 1); $attempt++) {
+            $data = $this->client->graphql(<<<'GQL'
+query VibeImage($id: ID!) { node(id: $id) { ... on MediaImage { id alt fileStatus image { url } } } }
+GQL, ['id' => $gid]);
+            $image = $data['node'] ?? null;
+            if (($image['fileStatus'] ?? '') === 'READY' && ! empty($image['image']['url'])) {
+                return $image;
+            }
+            if (! $wait || ! $image || ($image['fileStatus'] ?? '') === 'FAILED') {
+                break;
+            }
+            usleep(500000);
+        }
+        throw new RuntimeException('The Shopify image is not ready. Wait a moment and retry the push, or choose another image.');
+    }
+
+    public function uploadImage(string $path, string $token, string $title): string
+    {
+        if (! preg_match('~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~', $path)) {
+            throw new RuntimeException('Invalid collection image path.');
+        }
+        $filename = 'cms-vibe-'.$token.'.'.pathinfo($path, PATHINFO_EXTENSION);
+        // A stable filename and RAISE_ERROR prevent duplicate files after a lost response.
+        $found = $this->client->graphql(<<<'GQL'
+query VibeUploadedImage($query: String!) { files(first: 2, query: $query) { nodes { ... on MediaImage { id } } } }
+GQL, ['query' => 'filename:'.json_encode($filename)]);
+        if ($gid = data_get($found, 'files.nodes.0.id')) {
+            return $gid;
+        }
+        $disk = Storage::disk('public');
+        if (! $disk->exists($path)) {
+            throw new RuntimeException('The uploaded image is missing. Choose another image before pushing.');
+        }
+        $staged = $this->mutation(<<<'GQL'
+mutation VibeStageImage($input: [StagedUploadInput!]!) { stagedUploadsCreate(input: $input) {
+  stagedTargets { url resourceUrl parameters { name value } } userErrors { field message }
+} }
+GQL, ['input' => [['resource' => 'FILE', 'filename' => $filename, 'mimeType' => $disk->mimeType($path), 'httpMethod' => 'POST']]], 'stagedUploadsCreate');
+        $target = $staged['stagedTargets'][0] ?? throw new RuntimeException('Shopify did not provide an upload target.');
+        $stream = $disk->readStream($path);
+        try {
+            Http::timeout(120)->attach('file', $stream, $filename)
+                ->post($target['url'], array_column($target['parameters'], 'value', 'name'))->throw();
+        } finally {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+        $result = $this->mutation(<<<'GQL'
+mutation VibeFileCreate($files: [FileCreateInput!]!) { fileCreate(files: $files) {
+  files { id } userErrors { field message }
+} }
+GQL, ['files' => [['originalSource' => $target['resourceUrl'], 'filename' => $filename,
+            'contentType' => 'IMAGE', 'alt' => $title, 'duplicateResolutionMode' => 'RAISE_ERROR']]], 'fileCreate');
+
+        return $result['files'][0]['id'] ?? throw new RuntimeException('Shopify did not confirm the uploaded image.');
+    }
+
+    public function createCollection(array $creation, ?string $imageUrl): array
+    {
+        $existing = $this->client->graphql(<<<'GQL'
+query VibeCollectionByHandle($handle: String!) { collectionByIdentifier(identifier: {handle: $handle}) {
+  id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
+} }
+GQL, ['handle' => $creation['handle']]);
+        if ($collection = $existing['collectionByIdentifier'] ?? null) {
+            if (data_get($collection, 'metafield.value') !== $creation['token']) {
+                throw new RuntimeException('The handle "'.$creation['handle'].'" is already used in Shopify. Remove this new vibe and choose the existing collection or a different handle.');
+            }
+
+            return $collection;
+        }
+        $input = ['title' => $creation['title'], 'handle' => $creation['handle'], 'sortOrder' => 'MANUAL',
+            'metafields' => [['namespace' => 'custom', 'key' => 'syv_creation_token', 'type' => 'single_line_text_field', 'value' => $creation['token']]]];
+        if ($imageUrl) {
+            $input['image'] = ['src' => $imageUrl, 'altText' => $creation['title']];
+        }
+        $result = $this->mutation(<<<'GQL'
+mutation VibeCollectionCreate($input: CollectionInput!) { collectionCreate(input: $input) {
+  collection { id title handle image { url } } userErrors { field message }
+} }
+GQL, ['input' => $input], 'collectionCreate');
+
+        return $result['collection'] ?? throw new RuntimeException('Shopify did not confirm the new collection.');
+    }
+
+    public function onlineStorePublication(): string
+    {
+        $after = null;
+        do {
+            $data = $this->client->graphql(<<<'GQL'
+query VibePublications($after: String) { publications(first: 100, after: $after) {
+  nodes { id name app { title } } pageInfo { hasNextPage endCursor }
+} }
+GQL, ['after' => $after]);
+            foreach ($data['publications']['nodes'] as $publication) {
+                if (strtolower($publication['name']) === 'online store' || strtolower(data_get($publication, 'app.title', '')) === 'online store') {
+                    return $publication['id'];
+                }
+            }
+            $after = $this->cursor($data['publications']);
+        } while ($after !== null);
+        throw new RuntimeException('The Online Store publication was not found. Check the Shopify app’s read_publications and write_publications access.');
+    }
+
+    public function publishCollection(string $gid, string $publication): void
+    {
+        $this->mutation(<<<'GQL'
+mutation VibePublishCollection($id: ID!, $input: [PublicationInput!]!) { publishablePublish(id: $id, input: $input) {
+  userErrors { field message }
+} }
+GQL, ['id' => $gid, 'input' => [['publicationId' => $publication]]], 'publishablePublish');
+        $result = $this->client->graphql(<<<'GQL'
+query VibePublicationStatus($id: ID!, $publication: ID!) { collection(id: $id) { publishedOnPublication(publicationId: $publication) } }
+GQL, ['id' => $gid, 'publication' => $publication]);
+        if (data_get($result, 'collection.publishedOnPublication') !== true) {
+            throw new RuntimeException('Shopify has not confirmed Online Store publication. Retry the push to confirm.');
+        }
     }
 
     public function setReferences(string $gid, array $ids, ?string $digest): void
