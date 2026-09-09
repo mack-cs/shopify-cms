@@ -230,21 +230,11 @@
             x-on:modal-closed.stop="$wire.closeCollectionPicker()">
             @if ($addingParent || $addingCard)
                 @if ($loadError)<p role="alert" class="syv-picker-error">{{ $loadError }}</p>@endif
-                <x-filament::input.wrapper><x-filament::input wire:model.live.debounce.300ms="collectionSearch" placeholder="Search collection title or handle" aria-label="Search collections" /></x-filament::input.wrapper>
-                <p class="my-3 text-sm text-gray-500">Choose a collection below. Already configured collections are excluded when adding Shop Your Vibe. Search to narrow the first 60 matches.</p>
-                <div class="syv-collection-select">
-                    <label for="syv-collection-choice">Collection</label>
-                    <select id="syv-collection-choice" wire:model.live="selectedCollectionGid" aria-label="Choose collection">
-                        <option value="">Choose a collection…</option>
-                        @foreach ($collections as $option)
-                            <option value="{{ $option->shopify_id }}">{{ $option->title }} — {{ $option->handle }}</option>
-                        @endforeach
-                    </select>
-                    @if ($collections->isEmpty())<p>No eligible synchronized collections match your search.</p>@endif
-                </div>
+                <p class="my-3 text-sm text-gray-500">Search by collection title or handle inside the dropdown. Already configured collections are excluded when adding Shop Your Vibe.</p>
+                {{ $this->collectionPickerForm }}
             @endif
             <x-slot name="footer">
-                <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="$selectedCollectionGid === ''">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
+                <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'shop-your-vibe-collections' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>

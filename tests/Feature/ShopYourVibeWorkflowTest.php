@@ -389,10 +389,11 @@ it('opens a searchable collection modal and closes it after selecting a parent',
     @$html->loadHTML($page->html());
     $xpath = new DOMXPath($html);
     $modal = $xpath->query('//*[@data-fi-modal-id="shop-your-vibe-collections"]')->item(0);
-    expect($modal->getAttribute('role'))->toBe('dialog')
-        ->and($xpath->query('.//input[@aria-label="Search collections"]', $modal))->toHaveCount(1);
-    expect($xpath->query('.//select[@id="syv-collection-choice"]/option[@value="gid://shopify/Collection/4"]', $modal))->toHaveCount(1);
-    $page->set('collectionSearch', 'Empty')->assertSee('Empty')->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')
+    expect($modal->getAttribute('role'))->toBe('dialog');
+    $results = $page->instance()->getFormSelectSearchResults('selectedCollectionGid', 'Empty');
+    expect(array_column($results, 'value'))->toBe(['gid://shopify/Collection/4']);
+    expect($page->instance()->getFormSelectSearchResults('selectedCollectionGid', 'no-such-collection'))->toBe([]);
+    $page->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')
         ->assertSet('addingParent', false)->assertDispatched('close-modal', id: 'shop-your-vibe-collections')
         ->assertSee('Up to date with Shopify');
     expect($this->fake->mutations())->toBe([]);
@@ -410,8 +411,8 @@ it('uses the modal for adding a vibe and retains it on a failed selection', func
     $page->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')->assertSet('addingCard', false)
         ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Pending changes');
     expect($this->fake->calls)->toBe([])->and($this->draft->fresh()->desired['cards'])->toHaveCount(3);
-    $page->call('openCollectionPicker', true)->set('collectionSearch', 'Pearl')->call('closeCollectionPicker')
-        ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('collectionSearch', '');
+    $page->call('openCollectionPicker', true)->set('selectedCollectionGid', 'gid://shopify/Collection/2')->call('closeCollectionPicker')
+        ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('selectedCollectionGid', '');
 });
 
 it('explains preview scope and why automated collection membership cannot be removed', function () {
@@ -438,10 +439,29 @@ it('keeps repeated collection imports from hiding other modal dropdown options',
         ]));
     }
     $page = Livewire::test(ShopYourVibe::class)->call('openCollectionPicker');
-    $html = new DOMDocument;
-    @$html->loadHTML($page->html());
-    $xpath = new DOMXPath($html);
-    expect($xpath->query('//select[@id="syv-collection-choice"]/option'))->toHaveCount(4)
-        ->and($xpath->query('//select[@id="syv-collection-choice"]/option[@value="gid://shopify/Collection/2"]'))->toHaveCount(1);
-    $page->set('selectedCollectionGid', 'gid://shopify/Collection/2')->set('collectionSearch', 'Empty')->assertSet('selectedCollectionGid', '');
+    $results = $page->instance()->getFormSelectSearchResults('selectedCollectionGid', '');
+    expect($results)->toHaveCount(3)
+        ->and(array_column($results, 'value'))->toContain('gid://shopify/Collection/2')
+        ->not->toContain('gid://shopify/Collection/1');
+});
+
+it('searches modal collections by title and handle beyond the initial results', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    for ($i = 0; $i < 65; $i++) {
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+            'import_id' => $this->import->id, 'shopify_id' => 'gid://shopify/Collection/'.(1000 + $i),
+            'title' => 'Catalogue '.$i, 'handle' => 'catalogue-'.$i,
+        ]));
+    }
+    ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+        'import_id' => $this->import->id, 'shopify_id' => 'gid://shopify/Collection/2000',
+        'title' => 'Zebra Jewellery', 'handle' => 'striped-accessories',
+    ]));
+    $page = Livewire::test(ShopYourVibe::class)->call('openCollectionPicker');
+    $search = fn (string $term) => array_column($page->instance()->getFormSelectSearchResults('selectedCollectionGid', $term), 'value');
+    expect($search(''))->toHaveCount(60)->not->toContain('gid://shopify/Collection/2000');
+    expect($search('Zebra'))->toBe(['gid://shopify/Collection/2000']);
+    expect($search('striped-accessories'))->toBe(['gid://shopify/Collection/2000']);
 });

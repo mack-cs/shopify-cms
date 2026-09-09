@@ -11,6 +11,9 @@ use App\Models\ShopYourVibeDraft;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Form;
+use Illuminate\Database\Eloquent\Builder;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Cache;
 use Livewire\Attributes\Locked;
@@ -48,9 +51,7 @@ class ShopYourVibe extends Page
 
     public string $search = '';
 
-    public string $collectionSearch = '';
-
-    public string $selectedCollectionGid = '';
+    public ?string $selectedCollectionGid = '';
 
     public string $productSearch = '';
 
@@ -150,7 +151,6 @@ class ShopYourVibe extends Page
         abort_if($forCard && ! $this->draftId, 422);
         $this->addingParent = ! $forCard;
         $this->addingCard = $forCard;
-        $this->collectionSearch = '';
         $this->selectedCollectionGid = '';
         $this->loadError = null;
         $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
@@ -161,19 +161,57 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->addingParent = false;
         $this->addingCard = false;
-        $this->collectionSearch = '';
         $this->selectedCollectionGid = '';
     }
 
-    public function updatedCollectionSearch(): void
+    protected function getForms(): array
     {
-        $this->selectedCollectionGid = '';
+        return ['collectionPickerForm'];
+    }
+
+    public function collectionPickerForm(Form $form): Form
+    {
+        return $form->schema([
+            Select::make('selectedCollectionGid')
+                ->label('Collection')
+                ->placeholder('Search and choose a collection…')
+                ->searchable()
+                ->native(false)
+                ->live()
+                ->searchDebounce(300)
+                ->searchPrompt('Type a collection title or handle')
+                ->noSearchResultsMessage('No eligible collections match your search.')
+                ->options(fn (): array => $this->collectionOptions(''))
+                ->getSearchResultsUsing(fn (string $search): array => $this->collectionOptions($search))
+                ->getOptionLabelUsing(function ($value): ?string {
+                    $collection = $this->collectionQuery()->where('shopify_id', $value)->first();
+
+                    return $collection ? $collection->title.' — '.$collection->handle : null;
+                }),
+        ]);
+    }
+
+    protected function collectionQuery(): Builder
+    {
+        $this->guard();
+
+        return ShopifyCollection::query()->whereNotNull('shopify_id')
+            ->whereIn('id', ShopifyCollection::query()->selectRaw('MAX(id)')->groupBy('shopify_id'))
+            ->when($this->addingParent, fn ($query) => $query->whereNotIn('shopify_id', array_column($this->parents, 'gid')));
+    }
+
+    protected function collectionOptions(string $search): array
+    {
+        return $this->collectionQuery()
+            ->where(fn ($query) => $query->where('title', 'like', '%'.$search.'%')->orWhere('handle', 'like', '%'.$search.'%'))
+            ->orderBy('title')->limit(60)->get()
+            ->mapWithKeys(fn ($collection): array => [$collection->shopify_id => $collection->title.' — '.$collection->handle])->all();
     }
 
     public function confirmCollectionSelection(): void
     {
         $this->guard();
-        if ((! $this->addingParent && ! $this->addingCard) || $this->selectedCollectionGid === '') {
+        if ((! $this->addingParent && ! $this->addingCard) || blank($this->selectedCollectionGid)) {
             $this->loadError = 'Choose a collection from the dropdown first.';
 
             return;
@@ -367,14 +405,6 @@ class ShopYourVibe extends Page
             }
         }
         $parents = $parents->filter(fn ($parent) => $this->search === '' || str_contains(strtolower($parent['title'].' '.$parent['handle']), strtolower($this->search)));
-        $collections = collect();
-        if ($this->addingParent || $this->addingCard) {
-            $collections = ShopifyCollection::query()->whereNotNull('shopify_id')
-                ->whereIn('id', ShopifyCollection::query()->selectRaw('MAX(id)')->groupBy('shopify_id'))
-                ->where(fn ($query) => $query->where('title', 'like', '%'.$this->collectionSearch.'%')->orWhere('handle', 'like', '%'.$this->collectionSearch.'%'))
-                ->when($this->addingParent, fn ($query) => $query->whereNotIn('shopify_id', collect($this->parents)->pluck('gid')))
-                ->orderBy('title')->limit(60)->get()->unique('shopify_id');
-        }
         $card = $draft ? collect($draft->desired['cards'])->firstWhere('key', $this->activeCard) : null;
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
         $products = collect();
@@ -386,7 +416,7 @@ class ShopYourVibe extends Page
                 ->orderBy('title')->limit(60)->get()->unique('shopify_id');
         }
 
-        return compact('draft', 'parents', 'pendingDrafts', 'collections', 'card', 'collection', 'products') + [
+        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }
