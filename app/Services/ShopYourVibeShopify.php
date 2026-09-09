@@ -15,13 +15,15 @@ class ShopYourVibeShopify
 
     public const KEY = 'shop_your_vibe_preview';
 
+    private ?bool $publishable = null;
+
     public function __construct(private readonly ShopifyGraphqlGateway $client) {}
 
     public function definition(): array
     {
         $data = $this->client->graphql(<<<'GQL'
 query VibeDefinition { metaobjectDefinitionByType(type: "shop_your_vibe_card_preview") {
-  type fieldDefinitions { key type { name } }
+  type capabilities { publishable { enabled } } fieldDefinitions { key type { name } }
 } }
 GQL);
         $fields = collect(data_get($data, 'metaobjectDefinitionByType.fieldDefinitions', []))
@@ -31,6 +33,8 @@ GQL);
                 throw new RuntimeException('The Shopify preview card definition has changed. Please ask an administrator to review it.');
             }
         }
+
+        $this->publishable = (bool) data_get($data, 'metaobjectDefinitionByType.capabilities.publishable.enabled', false);
 
         return $fields;
     }
@@ -170,12 +174,22 @@ mutation VibeUpdate($id: ID!, $input: MetaobjectUpdateInput!) { metaobjectUpdate
 } }
 GQL, ['id' => $card['id'], 'input' => ['fields' => $fields]], 'metaobjectUpdate');
         } else {
+            if ($this->publishable === null) {
+                $this->definition();
+            }
+            $input = ['fields' => $fields];
+            if ($this->publishable) {
+                $input['capabilities'] = ['publishable' => ['status' => 'ACTIVE']];
+            }
             // A persisted UUID handle makes retries safe after an ambiguous network response.
             $data = $this->mutation(<<<'GQL'
 mutation VibeCreate($handle: MetaobjectHandleInput!, $input: MetaobjectUpsertInput!) { metaobjectUpsert(handle: $handle, metaobject: $input) {
-  metaobject { id } userErrors { field message }
+  metaobject { id capabilities { publishable { status } } } userErrors { field message }
 } }
-GQL, ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']], 'input' => ['fields' => $fields]], 'metaobjectUpsert');
+GQL, ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']], 'input' => $input], 'metaobjectUpsert');
+            if ($this->publishable && data_get($data, 'metaobject.capabilities.publishable.status') !== 'ACTIVE') {
+                throw new RuntimeException('Shopify did not confirm that the new vibe card is active. Retry the push to finish activating it.');
+            }
         }
 
         return $data['metaobject']['id'] ?? throw new RuntimeException('Shopify did not confirm the saved card.');

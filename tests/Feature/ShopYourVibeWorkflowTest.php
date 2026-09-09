@@ -57,6 +57,34 @@ function vibePush($test): void
     $test->draft->refresh();
 }
 
+it('creates new vibe cards as active during the push', function () {
+    vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
+    expect($this->fake->mutations())->toBe([]);
+    vibePush($this);
+    $card = $this->draft->desired['cards'][2];
+    expect($this->draft->status)->toBe('synced')
+        ->and(data_get($this->fake->cards[$card['id']], 'capabilities.publishable.status'))->toBe('ACTIVE');
+});
+
+it('retries unconfirmed card activation without creating duplicate cards', function () {
+    vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
+    $this->fake->activateCards = false;
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->last_error)->toContain('new vibe card is active')
+        ->and($this->fake->cards)->toHaveCount(3)->and($this->fake->references)->toHaveCount(2);
+    $this->fake->activateCards = true;
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->cards)->toHaveCount(3);
+});
+
+it('supports definitions without draft and active statuses', function () {
+    $this->fake->publishable = false;
+    vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
+    vibePush($this);
+    $create = collect($this->fake->mutations())->first(fn ($call) => str_contains($call[0], 'mutation VibeCreate'));
+    expect($this->draft->status)->toBe('synced')->and($create[1]['input'])->not->toHaveKey('capabilities');
+});
+
 it('loads only preview data and preserves the exact Shopify reference order', function () {
     expect(array_column($this->draft->desired['cards'], 'id'))->toBe($this->fake->references)
         ->and($this->draft->pending)->toBeFalse()

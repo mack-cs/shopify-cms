@@ -19,6 +19,10 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
 
     public bool $jobDone = true;
 
+    public bool $publishable = true;
+
+    public bool $activateCards = true;
+
     public bool $loseCreateResponse = false;
 
     public array $published = [];
@@ -116,7 +120,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             return ['collection' => ['publishedOnPublication' => ($this->published[$variables['id']] ?? null) === $variables['publication']]];
         }
         if (str_contains($query, 'query VibeDefinition')) {
-            return ['metaobjectDefinitionByType' => ['type' => 'shop_your_vibe_card_preview', 'fieldDefinitions' => [
+            return ['metaobjectDefinitionByType' => ['type' => 'shop_your_vibe_card_preview',
+                'capabilities' => ['publishable' => ['enabled' => $this->publishable]], 'fieldDefinitions' => [
                 ['key' => 'name', 'type' => ['name' => 'single_line_text_field']],
                 ['key' => 'image', 'type' => ['name' => 'file_reference']],
                 ['key' => 'link', 'type' => ['name' => 'url']],
@@ -149,7 +154,11 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             $this->cards[$id] = ['id' => $id, 'type' => 'shop_your_vibe_card_preview', 'handle' => $handle ?? $this->cards[$id]['handle'],
                 'fields' => array_map(fn ($field) => $field + ['reference' => null], $variables['input']['fields'])];
 
-            return [$create ? 'metaobjectUpsert' : 'metaobjectUpdate' => ['metaobject' => ['id' => $id], 'userErrors' => []]];
+            $status = $this->activateCards ? data_get($variables, 'input.capabilities.publishable.status', 'DRAFT') : 'DRAFT';
+            $this->cards[$id]['capabilities'] = ['publishable' => $this->publishable ? ['status' => $status] : null];
+
+            return [$create ? 'metaobjectUpsert' : 'metaobjectUpdate' => ['metaobject' => ['id' => $id,
+                'capabilities' => $this->cards[$id]['capabilities']], 'userErrors' => []]];
         }
         if (str_contains($query, 'mutation VibeReferences')) {
             $input = $variables['metafields'][0];

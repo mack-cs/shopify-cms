@@ -35,6 +35,7 @@ The inspected Bracelets, Necklaces and Earrings parents had 13, 4 and 4 cards re
 
 ## Draft and push behavior
 
+- New vibe metaobjects are automatically created as **ACTIVE** during the push when the definition supports draft/active statuses. The push checks Shopify's returned status before attaching the card, and retries reuse the same UUID handle. Existing entries are not bulk-activated by this change.
 - **Add Vibe** offers a searchable existing collection selector or **Create a new collection**. Enter a title, edit the automatically generated handle if needed, and optionally upload an image or select a ready Shopify image. The image is used for both the collection and its preview card.
 - New collections are manual collections. They support adding/removing products and sorting in the local draft before creation. Confirming **Push Changes** creates them with their handles and images, applies the saved product order, then publishes them to the live Online Store. The review explicitly lists new collections to publish; the vibe layout itself still targets the preview metafield.
 - New collection creation is checkpointed with a UUID token in `custom.syv_creation_token`. A retry looks up the requested handle and recovers only a collection bearing that token, rejecting unrelated handle collisions. Uploaded files use stable UUID filenames with duplicate rejection; file IDs are saved before waiting for Shopify image processing. A failed image or publication remains pending for retry. Created collections become searchable in the CMS catalogue.
