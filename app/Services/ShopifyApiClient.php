@@ -78,6 +78,13 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
             $payload = $response->json() ?? [];
             if ($this->isThrottledResponse($response->status(), $payload) && $attempt < 4) {
                 $delay = $this->throttleDelayMilliseconds($payload, $attempt);
+                $retryAfter = $response->header('Retry-After');
+                if ($retryAfter !== null) {
+                    $retrySeconds = is_numeric($retryAfter)
+                        ? (float) $retryAfter
+                        : max(0, (strtotime($retryAfter) ?: time()) - time());
+                    $delay = max($delay, (int) ceil($retrySeconds * 1000));
+                }
                 logger()->warning('Shopify GraphQL request throttled; retrying', [
                     'attempt' => $attempt,
                     'delay_ms' => $delay,
@@ -86,6 +93,14 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
                 usleep($delay * 1000);
 
                 continue;
+            }
+
+            if ($this->isThrottledResponse($response->status(), $payload)) {
+                logger()->error('Shopify GraphQL request remained throttled after retries', [
+                    'attempt' => $attempt,
+                    'cost' => data_get($payload, 'extensions.cost'),
+                ]);
+                throw new \RuntimeException('Shopify is rate limiting requests. Some changes may still be pending; please retry shortly.');
             }
 
             if (! $response->successful()) {

@@ -1,0 +1,36 @@
+/* Standalone page styles: Filament's prebuilt theme does not include all Tailwind utilities. */
+.syv-workflow { min-width: 0; scroll-margin-top: 5rem; }
+.syv-workflow > * + * { margin-top: 1.5rem; }
+.syv-parent-grid, .syv-card-grid, .syv-image-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: stretch;
+}
+.syv-parent-grid > *, .syv-card-grid > * { min-width: 0; overflow: hidden; }
+.syv-parent-card .fi-section-content { padding: 1rem; }
+.syv-parent-card h2 { margin-top: 0; font-size: 1rem; font-weight: 600; }
+.syv-parent-card p { overflow-wrap: anywhere; }
+.syv-parent-card .fi-badge { width: fit-content; margin-top: .75rem; }
+.syv-vibe-image, .syv-product-image {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    border-radius: .6rem;
+    object-fit: cover;
+    object-position: center;
+}
+.syv-vibe-image { height: 160px; }
+.syv-product-image { height: 128px; }
+.syv-image-placeholder { display: flex; align-items: center; justify-content: center; background: #f3f4f6; color: #6b7280; }
+.syv-manage-button { margin-top: 1rem; }
+.syv-edit-image { display: block; width: 128px; height: 128px; margin-bottom: .75rem; border-radius: .6rem; object-fit: cover; }
+.syv-product-thumbnail { width: 48px; height: 48px; flex-shrink: 0; border-radius: .3rem; object-fit: cover; }
+.syv-image-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (min-width: 640px) {
+    .syv-parent-grid, .syv-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1024px) {
+    .syv-parent-grid, .syv-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .syv-image-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}

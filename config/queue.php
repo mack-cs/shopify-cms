@@ -31,6 +31,17 @@ return [
 
     'connections' => [
 
+        // Preview pushes may paginate large collections and wait for Shopify jobs.
+        // Use a dedicated worker so the default 90-second reservation cannot expire mid-push.
+        'shop-your-vibe' => [
+            'driver' => 'database',
+            'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => 'shop-your-vibe',
+            'retry_after' => 960,
+            'after_commit' => true,
+        ],
+
         'sync' => [
             'driver' => 'sync',
         ],
