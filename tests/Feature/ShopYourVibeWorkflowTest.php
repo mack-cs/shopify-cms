@@ -321,3 +321,127 @@ it('normalizes relative collection links into valid Shopify URL field values loc
     expect($this->draft->desired['cards'][1]['link'])->toBe('https://leighavenue.co.za/collections/pearl')
         ->and($this->fake->calls)->toBe([]);
 });
+
+it('renders Filament sortable grids and saves the final drop position for cards and products', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $xpath = new DOMXPath($html);
+    $grid = $xpath->query('//*[@data-order-grid]')->item(0);
+    expect($grid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($grid->getAttribute('x-on:end.stop'))->toContain("saveOrder($".'el, \'cards\')');
+    $keys = array_map(fn ($item) => $item->getAttribute('x-sortable-item'), iterator_to_array($xpath->query('./*[@x-sortable-item]', $grid)));
+    $this->fake->calls = [];
+    // Sortable supplies the resulting DOM order, including moving the first card to the very end.
+    $keys[] = array_shift($keys);
+    $page->call('reorderCards', $keys)->assertSee('Pending changes');
+    expect(array_column($this->draft->fresh()->desired['cards'], 'key'))->toBe($keys)
+        ->and($this->fake->calls)->toBe([]);
+    array_unshift($keys, array_pop($keys));
+    $page->call('reorderCards', $keys);
+    expect(array_column($this->draft->fresh()->desired['cards'], 'key'))->toBe($keys);
+    $page->call('editCard', 'gid://shopify/Metaobject/11');
+    @$html->loadHTML($page->html());
+    $xpath = new DOMXPath($html);
+    $productGrid = $xpath->query('//*[@data-order-grid]')->item(1);
+    expect($productGrid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($productGrid->getAttribute('x-on:end.stop'))->toContain("'products'")
+        ->and($page->html())->not->toContain('x-on:drop=', 'x-on:dragstart=');
+    $this->fake->calls = [];
+    $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/103', 'gid://shopify/Product/101'];
+    $page->call('reorderProducts', 'gid://shopify/Collection/2', $ids);
+    expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/2']['products'], 'id'))->toBe($ids)
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('only mounts the product sortable grid after manual sorting is explicitly requested', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $this->fake->collections['gid://shopify/Collection/2']['sortOrder'] = 'BEST_SELLING';
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')->call('editCard', 'gid://shopify/Metaobject/11');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $grid = (new DOMXPath($html))->query('//*[@data-order-grid]')->item(1);
+    expect($grid->hasAttribute('x-sortable'))->toBeFalse();
+    $oldKey = $grid->getAttribute('wire:key');
+    $this->fake->calls = [];
+    $page->call('enableManual', 'gid://shopify/Collection/2');
+    @$html->loadHTML($page->html());
+    $grid = (new DOMXPath($html))->query('//*[@data-order-grid]')->item(1);
+    expect($grid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($grid->getAttribute('wire:key'))->not->toBe($oldKey)
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('opens a searchable collection modal and closes it after selecting a parent', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('openCollectionPicker')
+        ->assertSet('addingParent', true)->assertSet('addingCard', false)
+        ->assertDispatched('open-modal', id: 'shop-your-vibe-collections');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $xpath = new DOMXPath($html);
+    $modal = $xpath->query('//*[@data-fi-modal-id="shop-your-vibe-collections"]')->item(0);
+    expect($modal->getAttribute('role'))->toBe('dialog')
+        ->and($xpath->query('.//input[@aria-label="Search collections"]', $modal))->toHaveCount(1);
+    expect($xpath->query('.//select[@id="syv-collection-choice"]/option[@value="gid://shopify/Collection/4"]', $modal))->toHaveCount(1);
+    $page->set('collectionSearch', 'Empty')->assertSee('Empty')->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')
+        ->assertSet('addingParent', false)->assertDispatched('close-modal', id: 'shop-your-vibe-collections')
+        ->assertSee('Up to date with Shopify');
+    expect($this->fake->mutations())->toBe([]);
+});
+
+it('uses the modal for adding a vibe and retains it on a failed selection', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->assertSet('addingCard', true)
+        ->assertDispatched('open-modal', id: 'shop-your-vibe-collections');
+    $this->fake->calls = [];
+    $page->call('addCard', 'invalid')->assertSet('addingCard', true)->assertNotDispatched('close-modal');
+    $page->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')->assertSet('addingCard', false)
+        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Pending changes');
+    expect($this->fake->calls)->toBe([])->and($this->draft->fresh()->desired['cards'])->toHaveCount(3);
+    $page->call('openCollectionPicker', true)->set('collectionSearch', 'Pearl')->call('closeCollectionPicker')
+        ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('collectionSearch', '');
+});
+
+it('explains preview scope and why automated collection membership cannot be removed', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $this->fake->collections['gid://shopify/Collection/2']['ruleSet'] = ['appliedDisjunctively' => false];
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('editCard', 'gid://shopify/Metaobject/11')->assertSee('cannot remove them individually')
+        ->assertSee('Manual sorting does not change these membership rules.');
+    $page->call('reorderCards', array_reverse($this->fake->references))->call('reviewPush')
+        ->assertSee('update the preview only')->assertSee('can affect the live storefront');
+});
+
+it('keeps repeated collection imports from hiding other modal dropdown options', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    for ($i = 0; $i < 65; $i++) {
+        $import = $this->import->replicate();
+        $import->save();
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+            'import_id' => $import->id, 'shopify_id' => 'gid://shopify/Collection/4', 'title' => 'Empty', 'handle' => 'empty',
+        ]));
+    }
+    $page = Livewire::test(ShopYourVibe::class)->call('openCollectionPicker');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $xpath = new DOMXPath($html);
+    expect($xpath->query('//select[@id="syv-collection-choice"]/option'))->toHaveCount(4)
+        ->and($xpath->query('//select[@id="syv-collection-choice"]/option[@value="gid://shopify/Collection/2"]'))->toHaveCount(1);
+    $page->set('selectedCollectionGid', 'gid://shopify/Collection/2')->set('collectionSearch', 'Empty')->assertSet('selectedCollectionGid', '');
+});

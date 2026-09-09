@@ -22,6 +22,23 @@
 }
 .syv-vibe-image { height: 160px; }
 .syv-product-image { height: 128px; }
+.syv-drag-handle { display: inline-flex; align-items: center; min-height: 36px; padding: .35rem .65rem; margin-bottom: .5rem; border: 1px solid #d1d5db; border-radius: .4rem; color: #6b7280; cursor: grab; touch-action: none; user-select: none; }
+.syv-drag-handle:active { cursor: grabbing; }
+.syv-drag-handle:disabled { cursor: wait; opacity: .5; }
+.syv-card-grid > .fi-sortable-ghost { opacity: .3; outline: 2px dashed #d97706; outline-offset: -2px; }
+.syv-order-status { color: #b45309; font-size: .875rem; }
+.syv-collection-options { display: grid; gap: .5rem; max-height: 55vh; overflow-y: auto; }
+.syv-collection-option { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid #d1d5db; border-radius: .5rem; }
+.syv-collection-option > span { min-width: 0; overflow-wrap: anywhere; }
+.syv-collection-option > button { flex-shrink: 0; }
+.syv-push-scope { margin: 1rem 0; padding: .875rem; border: 1px solid #f59e0b; border-radius: .5rem; font-size: .875rem; }
+.syv-push-scope p + p { margin-top: .5rem; }
+.syv-membership-note { font-size: .875rem; line-height: 1.5; color: #6b7280; }
+.syv-picker-error { color: #dc2626; }
+.syv-collection-select { display: grid; gap: .5rem; }
+.syv-collection-select label { font-weight: 600; }
+.syv-collection-select select { display: block; width: 100%; min-height: 44px; padding: .65rem 2rem .65rem .75rem; border: 1px solid #d1d5db; border-radius: .5rem; background-color: white; color: #111827; }
+.dark .syv-collection-select select { background-color: #111827; color: #f9fafb; border-color: #4b5563; }
 .syv-image-placeholder { display: flex; align-items: center; justify-content: center; background: #f3f4f6; color: #6b7280; }
 .syv-manage-button { margin-top: 1rem; }
 .syv-edit-image { display: block; width: 128px; height: 128px; margin-bottom: .75rem; border-radius: .6rem; object-fit: cover; }
@@ -32,5 +49,6 @@
 }
 @media (min-width: 1024px) {
     .syv-parent-grid, .syv-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .syv-card-grid.syv-product-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; }
     .syv-image-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }

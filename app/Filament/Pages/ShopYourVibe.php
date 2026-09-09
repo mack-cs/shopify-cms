@@ -50,6 +50,8 @@ class ShopYourVibe extends Page
 
     public string $collectionSearch = '';
 
+    public string $selectedCollectionGid = '';
+
     public string $productSearch = '';
 
     public string $imageSearch = '';
@@ -104,6 +106,7 @@ class ShopYourVibe extends Page
             $this->addingParent = false;
             $this->addingCard = false;
             $this->cardForm = [];
+            $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
             $this->dispatch('vibe-editor-opened');
         });
     }
@@ -132,8 +135,64 @@ class ShopYourVibe extends Page
 
     public function addCard(string $gid): void
     {
-        $this->change('add_card', ['collection_gid' => $gid]);
+        $this->guard();
+        $this->attempt(function () use ($gid): void {
+            $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'add_card', ['collection_gid' => $gid]));
+            $this->confirmingPush = false;
+            $this->closeCollectionPicker();
+            $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
+        });
+    }
+
+    public function openCollectionPicker(bool $forCard = false): void
+    {
+        $this->guard();
+        abort_if($forCard && ! $this->draftId, 422);
+        $this->addingParent = ! $forCard;
+        $this->addingCard = $forCard;
+        $this->collectionSearch = '';
+        $this->selectedCollectionGid = '';
+        $this->loadError = null;
+        $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
+    }
+
+    public function closeCollectionPicker(): void
+    {
+        $this->guard();
+        $this->addingParent = false;
         $this->addingCard = false;
+        $this->collectionSearch = '';
+        $this->selectedCollectionGid = '';
+    }
+
+    public function updatedCollectionSearch(): void
+    {
+        $this->selectedCollectionGid = '';
+    }
+
+    public function confirmCollectionSelection(): void
+    {
+        $this->guard();
+        if ((! $this->addingParent && ! $this->addingCard) || $this->selectedCollectionGid === '') {
+            $this->loadError = 'Choose a collection from the dropdown first.';
+
+            return;
+        }
+        if (! ShopifyCollection::where('shopify_id', $this->selectedCollectionGid)->exists()) {
+            $this->loadError = 'This collection is no longer available. Choose another collection.';
+
+            return;
+        }
+        if ($this->addingParent && in_array($this->selectedCollectionGid, array_column($this->parents, 'gid'), true)) {
+            $this->loadError = 'This collection is already configured. Use its Manage button.';
+
+            return;
+        }
+        if ($this->addingCard) {
+            $this->addCard($this->selectedCollectionGid);
+        } else {
+            $this->manage($this->selectedCollectionGid);
+        }
     }
 
     public function editCard(string $key): void
@@ -311,6 +370,7 @@ class ShopYourVibe extends Page
         $collections = collect();
         if ($this->addingParent || $this->addingCard) {
             $collections = ShopifyCollection::query()->whereNotNull('shopify_id')
+                ->whereIn('id', ShopifyCollection::query()->selectRaw('MAX(id)')->groupBy('shopify_id'))
                 ->where(fn ($query) => $query->where('title', 'like', '%'.$this->collectionSearch.'%')->orWhere('handle', 'like', '%'.$this->collectionSearch.'%'))
                 ->when($this->addingParent, fn ($query) => $query->whereNotIn('shopify_id', collect($this->parents)->pluck('gid')))
                 ->orderBy('title')->limit(60)->get()->unique('shopify_id');
