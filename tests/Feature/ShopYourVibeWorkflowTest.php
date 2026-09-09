@@ -66,6 +66,127 @@ it('creates new vibe cards as active during the push', function () {
         ->and(data_get($this->fake->cards[$card['id']], 'capabilities.publishable.status'))->toBe('ACTIVE');
 });
 
+it('uses a Filament confirmation before removing a vibe and allows cancellation', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
+        ->assertSee('Permanently delete the vibe card from Shopify');
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(2);
+    $page->call('unmountAction');
+    expect($this->draft->fresh()->pending)->toBeFalse();
+    $page->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
+        ->setActionData(['mode' => 'layout'])->callMountedAction()->assertHasNoErrors();
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(1)
+        ->and($this->draft->fresh()->desired['delete_cards'] ?? [])->toBe([])
+        ->and($this->fake->mutations())->toBe([]);
+});
+
+it('stages permanent card deletion through the Filament modal and deletes only on push', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
+        ->setActionData(['mode' => 'permanent'])->callMountedAction()->assertHasNoErrors()
+        ->call('reviewPush')->assertSee('Permanent Shopify deletions');
+    $this->draft->refresh();
+    expect($this->draft->desired['delete_cards'])->toHaveCount(1)->and($this->fake->mutations())->toBe([]);
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')
+        ->and($this->fake->cards)->not->toHaveKey('gid://shopify/Metaobject/11')
+        ->and($this->fake->collections)->toHaveCount(4);
+    expect(array_column($this->fake->collections['gid://shopify/Collection/2']['products']['nodes'], 'id'))
+        ->toBe(['gid://shopify/Product/101', 'gid://shopify/Product/102', 'gid://shopify/Product/103']);
+    $mutations = array_column($this->fake->mutations(), 0);
+    expect($mutations[0])->toContain('VibeReferences');
+    expect($mutations[1])->toContain('VibeDeleteCard');
+});
+
+it('blocks permanent deletion of a card referenced elsewhere', function () {
+    $this->fake->cardReferences['gid://shopify/Metaobject/11'] = [
+        ['namespace' => 'custom', 'key' => 'shop_your_vibe_preview', 'referencer' => ['id' => 'gid://shopify/Collection/4']],
+    ];
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_from_shopify' => true]);
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->last_error)->toContain('still referenced elsewhere')
+        ->and($this->fake->mutations())->toBe([])->and($this->fake->cards)->toHaveCount(2);
+});
+
+it('lets users delete the linked Shopify collection while keeping every product', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $productsBefore = $this->fake->products;
+    $otherCollections = array_diff_key($this->fake->collections, ['gid://shopify/Collection/2' => true]);
+    $localProducts = Product::orderBy('id')->get()->toArray();
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
+        ->setActionData(['mode' => 'collection'])->callMountedAction()->assertHasNoErrors()
+        ->call('reviewPush')->assertSee('Collections to delete from Shopify')->assertSee('/collections/pearl');
+    $this->draft->refresh();
+    expect($this->fake->mutations())->toBe([])->and($this->fake->collections)->toHaveCount(4);
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->draft->last_error)->toBeNull()
+        ->and($this->fake->collections)->toBe($otherCollections)
+        ->and($this->fake->products)->toBe($productsBefore)
+        ->and(Product::orderBy('id')->get()->toArray())->toBe($localProducts)
+        ->and(ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/2')->exists())->toBeFalse();
+    foreach ($this->fake->mutations() as [$query]) {
+        expect($query)->not->toContain('productDelete', 'collectionRemoveProducts', 'collectionAddProducts');
+    }
+});
+
+it('retries collection deletion after a lost response without touching products', function () {
+    $products = $this->fake->products;
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_collection' => true]);
+    $this->fake->loseCollectionDeleteResponse = true;
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->pending)->toBeTrue();
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->products)->toBe($products)
+        ->and(ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/2')->exists())->toBeFalse();
+    expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeDeleteCollection')))->toHaveCount(1);
+});
+
+it('discards an unpushed collection deletion without deleting the collection', function () {
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_collection' => true]);
+    $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
+    expect($this->draft->pending)->toBeFalse()->and($this->draft->desired['delete_collections'] ?? [])->toBe([])
+        ->and($this->fake->collections)->toHaveCount(4)->and($this->fake->mutations())->toBe([]);
+});
+
+it('drops staged membership changes when deleting the collection and preserves products', function () {
+    vibeLoadProducts($this);
+    vibeEdit($this, 'remove_product', ['collection_gid' => 'gid://shopify/Collection/2', 'product_gid' => 'gid://shopify/Product/101']);
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_collection' => true]);
+    $products = $this->fake->products;
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->products)->toBe($products);
+    foreach ($this->fake->mutations() as [$query]) {
+        expect($query)->not->toContain('productDelete', 'collectionRemoveProducts');
+    }
+});
+
+it('recovers permanent deletion after a lost Shopify response', function () {
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_from_shopify' => true]);
+    $this->fake->loseDeleteResponse = true;
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->fake->cards)->toHaveCount(1);
+    vibePush($this);
+    expect($this->draft->status)->toBe('synced')->and($this->fake->cards)->toHaveCount(1);
+    expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeDeleteCard')))->toHaveCount(1);
+});
+
+it('does not delete a card changed in Shopify after the removal was staged', function () {
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11', 'delete_from_shopify' => true]);
+    $this->fake->cards['gid://shopify/Metaobject/11']['fields'][0]['value'] = 'Changed in Shopify';
+    vibePush($this);
+    expect($this->draft->status)->toBe('failed')->and($this->draft->last_error)->toContain('changed in Shopify')
+        ->and($this->fake->mutations())->toBe([]);
+});
+
 it('retries unconfirmed card activation without creating duplicate cards', function () {
     vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
     $this->fake->activateCards = false;

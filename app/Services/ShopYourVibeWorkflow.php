@@ -152,7 +152,22 @@ class ShopYourVibeWorkflow
                     unset($item);
                     break;
                 case 'remove_card':
-                    $this->card($state, $input['key']);
+                    $removed = $this->card($state, $input['key']);
+                    if (($input['delete_collection'] ?? false) === true) {
+                        $gid = $removed['collection_gid'];
+                        if (! $gid || $gid === $draft->collection_gid) {
+                            throw new RuntimeException('Choose a vibe linked to a collection other than the parent collection being edited.');
+                        }
+                        $creation = collect($state['new_collections'] ?? [])->firstWhere('gid', $gid);
+                        $linked = str_starts_with($gid, 'new:') ? $state['collections'][$gid] : $this->localCollection($gid)->toArray();
+                        $this->assertCollectionLink($removed, $linked);
+                        $state['delete_collections'][$gid] = ['gid' => $gid, 'handle' => $linked['handle'],
+                            'title' => $linked['title'], 'token' => $creation['token'] ?? null, 'deleted' => false];
+                    }
+                    if (($input['delete_from_shopify'] ?? false) === true || ($input['delete_collection'] ?? false) === true) {
+                        $original = collect($draft->snapshot['cards'])->firstWhere('key', $removed['key']) ?? $removed;
+                        $state['delete_cards'][$removed['key']] = ['card' => $original, 'deleted' => false];
+                    }
                     $state['cards'] = array_values(array_filter($state['cards'], fn ($card) => $card['key'] !== $input['key']));
                     // Do not push product edits for a collection no longer represented in this layout.
                     $gids = array_column($state['cards'], 'collection_gid');
@@ -209,6 +224,11 @@ class ShopYourVibeWorkflow
                     throw new RuntimeException('Unknown workflow edit.');
             }
             $represented = array_filter(array_column($state['cards'], 'collection_gid'));
+            foreach ($state['delete_collections'] ?? [] as $gid => $deletion) {
+                if (in_array($gid, $represented, true)) {
+                    throw new RuntimeException('Another vibe in this layout uses the collection selected for deletion. Remove that vibe first.');
+                }
+            }
             $state['collections'] = array_intersect_key($state['collections'], array_flip($represented));
             if (isset($state['new_collections'])) {
                 $state['new_collections'] = array_filter($state['new_collections'], fn ($item) => in_array($item['gid'], $represented, true));
@@ -279,6 +299,16 @@ class ShopYourVibeWorkflow
                 }
             }
             $currentCollections = [];
+            foreach ($state['delete_collections'] ?? [] as $deletion) {
+                if (! $deletion['deleted']) {
+                    $this->shopify->collectionForDeletion($deletion);
+                }
+            }
+            foreach ($state['delete_cards'] ?? [] as $deletion) {
+                if (! $deletion['deleted']) {
+                    $this->shopify->assertCardDeletable($deletion['card'], $draft->collection_gid);
+                }
+            }
             foreach ($state['collections'] as $gid => $desiredCollection) {
                 if (str_starts_with($gid, 'new:')) {
                     continue;
@@ -415,6 +445,29 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
             }
             // A final read confirms the complete layout, including exact reference order and fields.
+            foreach ($state['delete_cards'] ?? [] as $key => $deletion) {
+                if ($deletion['deleted']) {
+                    continue;
+                }
+                $this->shopify->deleteCard($deletion['card']);
+                $state['delete_cards'][$key]['deleted'] = true;
+                $progress[] = 'Vibe card deleted from Shopify: '.$deletion['card']['name'];
+                $draft->update(['desired' => $state, 'progress' => $progress]);
+            }
+            foreach ($state['delete_collections'] ?? [] as $key => $deletion) {
+                if ($deletion['deleted']) {
+                    continue;
+                }
+                $deletedGid = $this->shopify->deleteCollectionOnly($deletion);
+                // Delete catalogue entries only. Never invoke product deletion or touch product records.
+                $gid = $deletedGid ?? $deletion['gid'];
+                ShopifyCollection::where('shopify_id', $gid)->delete();
+                ShopYourVibeDraft::where('collection_gid', $gid)->where('id', '!=', $draft->id)->delete();
+                $state['delete_collections'][$key]['deleted'] = true;
+                $progress[] = 'Collection deleted from Shopify; all products kept: '.$deletion['title'];
+                $draft->update(['desired' => $state, 'progress' => $progress]);
+                Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
+            }
             $confirmed = $this->shopify->parent($draft->collection_gid);
             if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
                 throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
@@ -473,7 +526,9 @@ class ShopYourVibeWorkflow
         $summary = ['Vibe cards added' => count(array_diff($after, $before)), 'Vibe cards removed' => count(array_diff($before, $after)),
             'Vibe layout changed' => $before !== $after ? 'Yes' : 'No', 'Card fields changed' => 0,
             'Products added' => 0, 'Products removed' => 0, 'Product sorting changed' => 'No',
-            'New collections to publish' => count($draft->desired['new_collections'] ?? [])];
+            'New collections to publish' => count($draft->desired['new_collections'] ?? []),
+            'Vibe cards to permanently delete' => count($draft->desired['delete_cards'] ?? []),
+            'Collections to delete (products kept)' => count($draft->desired['delete_collections'] ?? [])];
         foreach ($draft->desired['cards'] as $card) {
             $original = collect($draft->snapshot['cards'])->firstWhere('key', $card['key']);
             if ($original && $this->fields($original) !== $this->fields($card)) {
@@ -494,7 +549,7 @@ class ShopYourVibeWorkflow
 
     public function different(array $before, array $after): bool
     {
-        if (! empty($after['new_collections'])) {
+        if (! empty($after['new_collections']) || ! empty($after['delete_cards']) || ! empty($after['delete_collections'])) {
             return true;
         }
         if (array_column($after['cards'], 'id') !== $before['reference_ids'] || array_map($this->fields(...), $before['cards']) !== array_map($this->fields(...), $after['cards'])) {

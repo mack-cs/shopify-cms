@@ -14,6 +14,8 @@ use Filament\Notifications\Notification;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\FileUpload;
+use Filament\Forms\Components\Radio;
+use Filament\Actions\Action;
 use Filament\Forms\Get;
 use Filament\Forms\Set;
 use Filament\Forms\Form;
@@ -348,6 +350,42 @@ class ShopYourVibe extends Page
             $this->activeCard = null;
             $this->cardForm = [];
         }
+    }
+
+    public function removeVibeAction(): Action
+    {
+        return Action::make('removeVibe')->color('danger')->requiresConfirmation()
+            ->modalHeading('Remove vibe')->modalSubmitActionLabel('Confirm removal')
+            ->modalDescription('The selected removal will be saved to your draft and applied when you push changes to Shopify.')
+            ->form([
+                Radio::make('mode')->label('Removal option')->options([
+                    'layout' => 'Remove from this preview layout only',
+                    'permanent' => 'Permanently delete the vibe card from Shopify',
+                    'collection' => 'Delete the vibe card and its collection from Shopify — keep all products',
+                ])->descriptions([
+                    'layout' => 'Keep the Shopify vibe card and its linked collection.',
+                    'permanent' => 'Delete the Shopify vibe card. Its linked collection, products and images are kept. This cannot be undone after pushing.',
+                    'collection' => 'Permanently delete the linked collection and its collection page, plus this vibe card. Every product stays in Shopify and in its other collections. Images are kept. Applied on the next push.',
+                ])->default('layout')->required(),
+            ])
+            ->action(function (array $arguments, array $data, Action $action): void {
+                $this->guard();
+                $this->attempt(function () use ($arguments, $data): void {
+                    $key = $arguments['key'] ?? '';
+                    $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'remove_card', [
+                        'key' => $key, 'delete_from_shopify' => in_array($data['mode'] ?? '', ['permanent', 'collection'], true),
+                        'delete_collection' => ($data['mode'] ?? '') === 'collection',
+                    ]));
+                    if ($this->activeCard === $key) {
+                        $this->activeCard = null;
+                        $this->cardForm = [];
+                    }
+                    $this->confirmingPush = false;
+                });
+                if ($this->loadError) {
+                    $action->halt();
+                }
+            });
     }
 
     public function reorderCards(array $keys): void

@@ -105,6 +105,14 @@
                             <p><strong>Preview layout:</strong> Card names, images, links and card order update the preview only.</p>
                             <p><strong>Linked collections:</strong> Product additions, removals and sorting update the actual Shopify collections and can affect the live storefront.</p>
                             @if (!empty($draft->desired['new_collections']))<p><strong>New collections:</strong> These will be created with their handles and images and published to the live Online Store.</p>@endif
+                            @if (!empty($draft->desired['delete_cards']))
+                                <p><strong>Permanent Shopify deletions:</strong> The following vibe cards will be deleted. This cannot be undone. Products and images will be kept.</p>
+                                <ul>@foreach ($draft->desired['delete_cards'] as $deletion)<li>{{ $deletion['card']['name'] }}</li>@endforeach</ul>
+                            @endif
+                            @if (!empty($draft->desired['delete_collections']))
+                                <p><strong>Collections to delete from Shopify:</strong> Their collection pages will be removed. All products stay in Shopify and in their other collections. This cannot be undone.</p>
+                                <ul>@foreach ($draft->desired['delete_collections'] as $deletion)<li>{{ $deletion['title'] }} — /collections/{{ $deletion['handle'] }}</li>@endforeach</ul>
+                            @endif
                         </div>
                         <x-filament::button wire:click="pushChanges" x-bind:disabled="formDirty" wire:loading.attr="disabled">Push Changes</x-filament::button>
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
@@ -132,7 +140,7 @@
                                 <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">←</x-filament::button>
                                 <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, 1)" aria-label="Move vibe later">→</x-filament::button>
                                 <x-filament::button size="xs" color="gray" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty &amp;&amp; !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false">Edit</x-filament::button>
-                                <x-filament::button size="xs" color="danger" wire:click="removeCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" wire:confirm="Remove this vibe from the preview layout? Its Shopify card will be kept. Product edits for this vibe will be dropped if no other card represents the same collection.">Remove</x-filament::button>
+                                <x-filament::button size="xs" color="danger" wire:click="mountAction('removeVibe', {{ \Illuminate\Support\Js::from(['key' => $vibe['key']]) }})">Remove</x-filament::button>
                             </div>
                         </article>
                     @endforeach

@@ -214,6 +214,108 @@ GQL, ['id' => $gid]);
         throw new RuntimeException('The Shopify image is not ready. Wait a moment and retry the push, or choose another image.');
     }
 
+    public function assertCardDeletable(array $card, ?string $allowedParent = null): ?string
+    {
+        if ($card['id']) {
+            $this->gid($card['id'], 'Metaobject');
+        }
+        $after = null;
+        do {
+            $selection = $card['id'] ? 'metaobject(id: $id)' : 'metaobjectByHandle(handle: $handle)';
+            $argument = $card['id'] ? '$id: ID!' : '$handle: MetaobjectHandleInput!';
+            $variables = $card['id'] ? ['id' => $card['id']] : ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']]];
+            $data = $this->client->graphql('query VibeDeletionCheck('.$argument.', $after: String) { object: '.$selection.' {
+                id type fields { key value }
+                referencedBy(first: 100, after: $after) {
+                    nodes { namespace key referencer { ... on Collection { id } } }
+                    pageInfo { hasNextPage endCursor }
+                }
+            } }', $variables + ['after' => $after]);
+            if (! array_key_exists('object', $data)) {
+                throw new RuntimeException('Shopify did not confirm whether the vibe card exists.');
+            }
+            $object = $data['object'];
+            if ($object === null) {
+                return null;
+            }
+            if ($object['type'] !== self::TYPE) {
+                throw new RuntimeException('Only Shop Your Vibe preview cards can be deleted here.');
+            }
+            $fields = array_column($object['fields'], 'value', 'key');
+            foreach (['name', 'image', 'link'] as $field) {
+                if ((string) ($fields[$field] ?? '') !== (string) ($card[$field] ?? '')) {
+                    throw new RuntimeException('The vibe card changed in Shopify after removal was requested. Refresh and review it before deleting.');
+                }
+            }
+            foreach ($object['referencedBy']['nodes'] as $reference) {
+                if (! $allowedParent || $reference['namespace'] !== 'custom' || $reference['key'] !== self::KEY
+                    || data_get($reference, 'referencer.id') !== $allowedParent) {
+                    throw new RuntimeException('This vibe card is still referenced elsewhere in Shopify. Remove it from this layout only, or remove its other references before deleting it permanently.');
+                }
+            }
+            $after = $this->cursor($object['referencedBy']);
+        } while ($after !== null);
+
+        return $object['id'];
+    }
+
+    public function deleteCard(array $card): void
+    {
+        // Recheck after detaching the current layout; never delete a shared card.
+        $gid = $this->assertCardDeletable($card);
+        if ($gid === null) {
+            return;
+        }
+        $result = $this->mutation(<<<'GQL'
+mutation VibeDeleteCard($id: ID!) { metaobjectDelete(id: $id) { deletedId userErrors { field message } } }
+GQL, ['id' => $gid], 'metaobjectDelete');
+        if (($result['deletedId'] ?? null) !== $gid) {
+            throw new RuntimeException('Shopify did not confirm deletion of the vibe card. Retry the push to confirm.');
+        }
+    }
+
+    public function collectionForDeletion(array $deletion): ?array
+    {
+        $isNew = str_starts_with($deletion['gid'], 'new:');
+        if (! $isNew) {
+            $this->gid($deletion['gid'], 'Collection');
+        }
+        $argument = $isNew ? '$handle: String!' : '$id: ID!';
+        $selection = $isNew ? 'collectionByIdentifier(identifier: {handle: $handle})' : 'collection(id: $id)';
+        $data = $this->client->graphql('query VibeCollectionDeletionCheck('.$argument.') { target: '.$selection.' {
+            id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
+        } }', $isNew ? ['handle' => $deletion['handle']] : ['id' => $deletion['gid']]);
+        if (! array_key_exists('target', $data)) {
+            throw new RuntimeException('Shopify did not confirm whether the collection exists.');
+        }
+        $collection = $data['target'];
+        if ($collection && ($collection['handle'] !== $deletion['handle']
+            || ($isNew && (empty($deletion['token']) || data_get($collection, 'metafield.value') !== $deletion['token'])))) {
+            throw new RuntimeException('The collection changed in Shopify. Refresh and review before deleting it.');
+        }
+
+        return $collection;
+    }
+
+    public function deleteCollectionOnly(array $deletion): ?string
+    {
+        $collection = $this->collectionForDeletion($deletion);
+        if ($collection === null) {
+            return null;
+        }
+        // collectionDelete removes the grouping, not its products. Do not use productDelete here.
+        $result = $this->mutation(<<<'GQL'
+mutation VibeDeleteCollection($input: CollectionDeleteInput!) { collectionDelete(input: $input) {
+  deletedCollectionId userErrors { field message }
+} }
+GQL, ['input' => ['id' => $collection['id']]], 'collectionDelete');
+        if (($result['deletedCollectionId'] ?? null) !== $collection['id']) {
+            throw new RuntimeException('Shopify did not confirm deletion of the collection. Retry the push to confirm.');
+        }
+
+        return $collection['id'];
+    }
+
     public function uploadImage(string $path, string $token, string $title): string
     {
         if (! preg_match('~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~', $path)) {

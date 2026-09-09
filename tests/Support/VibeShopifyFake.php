@@ -23,6 +23,14 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
 
     public bool $activateCards = true;
 
+    public array $cardReferences = [];
+
+    public bool $loseDeleteResponse = false;
+
+    public bool $loseCollectionDeleteResponse = false;
+
+    public array $products = [];
+
     public bool $loseCreateResponse = false;
 
     public array $published = [];
@@ -53,7 +61,7 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
 
     public function product(int $id): array
     {
-        return ['id' => 'gid://shopify/Product/'.$id, 'title' => 'Product '.$id,
+        return $this->products['gid://shopify/Product/'.$id] = ['id' => 'gid://shopify/Product/'.$id, 'title' => 'Product '.$id,
             'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'], 'variants' => ['nodes' => [['sku' => 'SKU-'.$id]]]];
     }
 
@@ -65,6 +73,42 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         }
         if ($this->fail && str_contains($query, $this->fail)) {
             throw new RuntimeException('Simulated Shopify failure: '.$this->fail);
+        }
+        if (str_contains($query, 'query VibeCollectionDeletionCheck')) {
+            return ['target' => isset($variables['id']) ? ($this->collections[$variables['id']] ?? null)
+                : collect($this->collections)->firstWhere('handle', $variables['handle'])];
+        }
+        if (str_contains($query, 'mutation VibeDeleteCollection')) {
+            $id = $variables['input']['id'];
+            unset($this->collections[$id]);
+            if ($this->loseCollectionDeleteResponse) {
+                $this->loseCollectionDeleteResponse = false;
+                throw new RuntimeException('Lost collection deletion response');
+            }
+
+            return ['collectionDelete' => ['deletedCollectionId' => $id, 'userErrors' => []]];
+        }
+        if (str_contains($query, 'query VibeDeletionCheck')) {
+            $id = $variables['id'] ?? array_search($variables['handle']['handle'], array_column($this->cards, 'handle', 'id'), true);
+            $object = $this->cards[$id] ?? null;
+            if ($object) {
+                $references = $this->cardReferences[$id] ?? [];
+                if (in_array($id, $this->references, true)) {
+                    $references[] = ['namespace' => 'custom', 'key' => 'shop_your_vibe_preview', 'referencer' => ['id' => 'gid://shopify/Collection/1']];
+                }
+                $object['referencedBy'] = ['nodes' => $references, 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]];
+            }
+
+            return ['object' => $object];
+        }
+        if (str_contains($query, 'mutation VibeDeleteCard')) {
+            unset($this->cards[$variables['id']]);
+            if ($this->loseDeleteResponse) {
+                $this->loseDeleteResponse = false;
+                throw new RuntimeException('Lost deletion response');
+            }
+
+            return ['metaobjectDelete' => ['deletedId' => $variables['id'], 'userErrors' => []]];
         }
         if (str_contains($query, 'query VibeImages')) {
             return ['files' => ['nodes' => [['id' => 'gid://shopify/MediaImage/1', 'alt' => 'Gold jewellery',
