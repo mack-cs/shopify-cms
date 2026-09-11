@@ -38,22 +38,24 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
                 Forms\Components\Grid::make(24)->schema([
                     Forms\Components\TextInput::make('title')
                         ->label('Title')
-                        ->required()
                         ->maxLength(255)
                         ->columnSpan(['default' => 24, 'xl' => 5]),
                     Forms\Components\TextInput::make('sku')
                         ->label('SKU')
+                        ->required()
                         ->maxLength(255)
                         ->rules([
                             function () {
                                 return function (string $attribute, $value, $fail): void {
                                     $sku = trim((string) $value);
                                     if ($sku === '') {
+                                        $fail('SKU is required.');
                                         return;
                                     }
 
-                                    $draftQuery = NewProductDraft::query()->where('sku', $sku);
-                                    if ($draftQuery->exists() || Variant::where('sku', $sku)->exists()) {
+                                    $draftQuery = NewProductDraft::query()
+                                        ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+                                    if ($draftQuery->exists() || Variant::whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])->exists()) {
                                         $fail('SKU must be unique across new products and existing products.');
                                     }
                                 };
@@ -107,7 +109,7 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
         $state = NewProductDraftResource::mutateDraftFormData($this->form->getState());
 
         $draft = NewProductDraft::create([
-            'title' => $state['title'],
+            'title' => $state['title'] ?? null,
             'sku' => $state['sku'] ?? null,
             'image_path' => $state['image_path'] ?? null,
             'status' => 'draft',
@@ -122,7 +124,7 @@ class QuickCreateNewProductDraft extends Widget implements HasForms
 
         AdminNotification::send(Notification::make()
             ->title('Draft created')
-            ->body("{$draft->title} was added.")
+            ->body((trim((string) $draft->title) ?: $draft->sku) . ' was added.')
             ->success()
         );
 

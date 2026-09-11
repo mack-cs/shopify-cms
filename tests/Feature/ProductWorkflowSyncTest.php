@@ -1724,6 +1724,35 @@ it('enables inventory tracking when creating an ordinary product in Shopify', fu
         ]);
 });
 
+it('does not create an approved draft in Shopify when the title is missing', function (): void {
+    Http::fake(function () {
+        throw new RuntimeException('Shopify should not be called for a title-less draft.');
+    });
+
+    $users = User::factory()->count(2)->create();
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'TITLELESS-001',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]));
+
+    foreach ($users as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => $draft->approval_version,
+        ]);
+    }
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(0)
+        ->and($result['skipped_has_errors'])->toBe(1)
+        ->and($result['failures'][0]['reason'])->toBe('missing_title')
+        ->and($draft->fresh()->handle)->toBeNull();
+});
+
 it('forces existing ordinary products to tracked and stacks to untracked during approved sync', function (): void {
     $ordinary = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1451',

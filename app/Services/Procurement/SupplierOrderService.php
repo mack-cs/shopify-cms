@@ -5,6 +5,7 @@ namespace App\Services\Procurement;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ChangeLog;
+use App\Models\NewProductDraft;
 use App\Models\ProcurementIncomingStock;
 use App\Models\Variant;
 use Illuminate\Support\Carbon;
@@ -78,18 +79,81 @@ final class SupplierOrderService
         return $line;
     }
 
+    public function createForDraft(NewProductDraft $draft, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms', bool $allowExistingOrder = false): ProcurementSupplierOrderLine
+    {
+        $sku = strtoupper(trim((string) ($draft->sku ?? '')));
+        if ($sku === '') {
+            throw ValidationException::withMessages(['sku' => 'Draft SKU is required.']);
+        }
+
+        $orderNumber = trim($orderNumber);
+        if ($orderNumber === '') {
+            throw ValidationException::withMessages(['order_number' => 'Order ID is required.']);
+        }
+        if (! is_numeric($quantity) || (int) $quantity <= 0 || (float) $quantity !== (float) (int) $quantity) {
+            throw ValidationException::withMessages(['quantity_ordered' => 'Quantity must be a positive whole number.']);
+        }
+        try {
+            $etaDate = $this->date((string) $eta)->toDateString();
+        } catch (\Throwable) {
+            throw ValidationException::withMessages(['eta_date' => 'ETA must be a valid date.']);
+        }
+
+        return DB::transaction(function () use ($draft, $sku, $orderNumber, $quantity, $etaDate, $userId, $source, $allowExistingOrder): ProcurementSupplierOrderLine {
+            $order = ProcurementSupplierOrder::query()->where('order_number', $orderNumber)->lockForUpdate()->first();
+            if ($order && ! $allowExistingOrder) {
+                throw ValidationException::withMessages(['order_number' => "Order ID {$orderNumber} already exists and cannot be uploaded as a new pending order."]);
+            }
+            $order ??= ProcurementSupplierOrder::query()->create([
+                'uuid' => (string) Str::uuid(), 'order_number' => $orderNumber,
+                'source' => $source, 'created_by' => $userId,
+            ]);
+            $existing = ProcurementSupplierOrderLine::query()
+                ->where('supplier_order_id', $order->id)
+                ->where('new_product_draft_id', $draft->id)
+                ->first();
+            if ($existing) {
+                throw ValidationException::withMessages(['order_number' => 'This order already contains this SKU.']);
+            }
+
+            return ProcurementSupplierOrderLine::query()->create([
+                'supplier_order_id' => $order->id,
+                'variant_id' => null,
+                'new_product_draft_id' => $draft->id,
+                'sku' => $sku,
+                'quantity_ordered' => (int) $quantity,
+                'eta_date' => $etaDate,
+                'status' => 'open',
+                'source' => $source,
+            ]);
+        });
+    }
+
     public function createFromRow(array $row, ?int $userId = null, string $source = 'csv'): ProcurementSupplierOrderLine
     {
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()
             ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->get();
-        if ($matches->count() !== 1) {
-            throw ValidationException::withMessages(['sku' => $matches->isEmpty() ? "SKU {$sku} was not found." : "SKU {$sku} is ambiguous."]);
+        $drafts = NewProductDraft::query()
+            ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+            ->get();
+        $matchCount = $matches->count() + $drafts->count();
+        if ($matchCount !== 1) {
+            throw ValidationException::withMessages(['sku' => $matchCount === 0 ? "SKU {$sku} was not found." : "SKU {$sku} is ambiguous."]);
         }
 
-        return $this->createForVariant(
-            $matches->first(), (string) ($row['order_id'] ?? ''),
+        if ($matches->count() === 1) {
+            return $this->createForVariant(
+                $matches->first(), (string) ($row['order_id'] ?? ''),
+                $row['quantity_ordered'] ?? null, $row['eta'] ?? null,
+                $userId, $source, allowExistingOrder: true,
+            );
+        }
+
+        return $this->createForDraft(
+            $drafts->first(), (string) ($row['order_id'] ?? ''),
             $row['quantity_ordered'] ?? null, $row['eta'] ?? null,
             $userId, $source, allowExistingOrder: true,
         );

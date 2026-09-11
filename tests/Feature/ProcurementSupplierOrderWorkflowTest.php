@@ -7,6 +7,7 @@ use App\Models\ProcurementPrediction;
 use App\Models\ProcurementPredictionRun;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\NewProductDraft;
 use App\Models\ProcurementSupplierReceipt;
 use App\Models\Product;
 use App\Models\User;
@@ -215,6 +216,46 @@ it('previews pasted tab-separated orders and clears quantity to order after conf
         ->and(ProcurementSupplierOrderLine::query()->where('sku', 'PASTE-1')->count())->toBe(1)
         ->and($variant->product->fresh()->title)->toBe($originalTitle)
         ->and($variant->product->fresh()->vendor)->toBe($originalVendor);
+});
+
+it('previews and confirms supplier orders for draft skus', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $draft = NewProductDraft::create([
+        'sku' => 'DRAFT-PO-1',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]);
+
+    $csv = app(SupplierOrderCsvService::class);
+    $batch = $csv->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tDRAFT-PO-1\t18\tPO-DRAFT\t07/09/2026");
+
+    expect($batch->valid_count)->toBe(1)
+        ->and($batch->invalid_count)->toBe(0);
+
+    $csv->confirm($batch->uuid);
+
+    $line = ProcurementSupplierOrderLine::query()->where('sku', 'DRAFT-PO-1')->first();
+
+    expect($line)->not->toBeNull()
+        ->and($line->variant_id)->toBeNull()
+        ->and($line->new_product_draft_id)->toBe($draft->id)
+        ->and($line->quantity_ordered)->toBe(18);
+});
+
+it('rejects supplier orders when a sku matches both a draft and an active product', function (): void {
+    supplierWorkflowVariant('AMBIG-DRAFT-1');
+    NewProductDraft::create([
+        'sku' => 'AMBIG-DRAFT-1',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]);
+
+    $batch = app(SupplierOrderCsvService::class)
+        ->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tAMBIG-DRAFT-1\t18\tPO-AMBIG\t07/09/2026");
+
+    expect($batch->valid_count)->toBe(0)
+        ->and($batch->invalid_count)->toBe(1)
+        ->and($batch->errors['2'][0])->toContain('SKU must match exactly one');
 });
 
 it('previews pasted received orders and stages them for Shopify review', function (): void {

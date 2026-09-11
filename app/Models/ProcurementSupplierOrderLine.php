@@ -16,6 +16,7 @@ class ProcurementSupplierOrderLine extends Model
 
     public function order(): BelongsTo { return $this->belongsTo(ProcurementSupplierOrder::class, 'supplier_order_id'); }
     public function variant(): BelongsTo { return $this->belongsTo(Variant::class); }
+    public function draft(): BelongsTo { return $this->belongsTo(NewProductDraft::class, 'new_product_draft_id'); }
     public function receipts(): HasMany { return $this->hasMany(ProcurementSupplierReceipt::class, 'supplier_order_line_id'); }
 
     public function getQuantityReceivedAttribute(): int

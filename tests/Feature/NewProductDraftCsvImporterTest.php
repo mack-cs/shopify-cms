@@ -68,6 +68,29 @@ it('allows a roundtrip update when the sku belongs to the linked product variant
     @unlink($path);
 });
 
+it('creates a sku-only draft from csv and reuses the sku for later details', function (): void {
+    $path = tempnam(sys_get_temp_dir(), 'draft-sku-only-import-');
+    file_put_contents(
+        $path,
+        "SKU,Price\n"
+        ."SKU-ONLY-001,125\n"
+        ."SKU-ONLY-001,130\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'SKU-ONLY-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['updated'])->toBe(1)
+        ->and($result['skipped_duplicate_sku'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->title)->toBeNull()
+        ->and($draft->variant_price)->toBe('130.00');
+
+    @unlink($path);
+});
+
 it('still rejects an update when another product owns the same sku', function (): void {
     $product = Product::create([
         'import_id' => $this->draftCsvImport->id,

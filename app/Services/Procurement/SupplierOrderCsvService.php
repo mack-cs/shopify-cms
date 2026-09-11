@@ -6,6 +6,7 @@ use App\Jobs\ProcessSupplierReceiptJob;
 use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\NewProductDraft;
 use App\Models\Variant;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Support\Carbon;
@@ -220,7 +221,9 @@ final class SupplierOrderCsvService
     {
         $skus = collect($batch->preview_rows)->pluck('sku')->map(fn ($sku) => strtoupper(trim((string) $sku)))->unique();
         $ids = Variant::query()->active()->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus)->pluck('id')->all();
-        $this->sheets->publishOperational($ids, includeHumanInputs: true);
+        if ($ids !== []) {
+            $this->sheets->publishOperational($ids, includeHumanInputs: true);
+        }
     }
 
     private function validateRow(array $row, string $type): array
@@ -236,11 +239,9 @@ final class SupplierOrderCsvService
             $errors[] = 'quantity must be a positive whole number';
         }
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
-        if ($sku !== '' && Variant::query()->active()
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
-            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->count() !== 1) {
+        if ($sku !== '' && $this->skuMatchCount($sku, $type) !== 1) {
             $errors[] = $type === 'order'
-                ? 'SKU must match exactly one active non-stack variant'
+                ? 'SKU must match exactly one active non-stack variant or draft'
                 : 'SKU must match exactly one active variant';
         }
         if ($type === 'order' && trim((string) ($row['eta'] ?? '')) !== '') {
@@ -263,6 +264,7 @@ final class SupplierOrderCsvService
         }
         if ($type === 'receipt' && $sku !== '' && trim((string) ($row['order_id'] ?? '')) !== '') {
             $lines = ProcurementSupplierOrderLine::query()->where('status', 'open')
+                ->whereNotNull('variant_id')
                 ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
                 ->whereHas('order', fn ($query) => $query->where('order_number', trim((string) $row['order_id'])))->get();
             if ($lines->count() !== 1) {
@@ -288,5 +290,24 @@ final class SupplierOrderCsvService
             'qty_received', 'received' => 'quantity_received',
             'eta_date' => 'eta', default => str_replace([' ', '-'], '_', $header),
         };
+    }
+
+    private function skuMatchCount(string $sku, string $type): int
+    {
+        $variantQuery = Variant::query()->active()
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku]);
+
+        if ($type === 'order') {
+            $variantQuery->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle());
+        }
+
+        $draftCount = $type === 'order'
+            ? NewProductDraft::query()
+                ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
+                ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+                ->count()
+            : 0;
+
+        return $variantQuery->count() + $draftCount;
     }
 }

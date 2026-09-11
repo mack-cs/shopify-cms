@@ -448,12 +448,14 @@ class NewProductDraftResource extends Resource
                                 })
                                 ->columnSpan(1),
                             TextInput::make('sku')
+                                ->required()
                                 ->maxLength(255)
                                 ->rules([
                                     function (?NewProductDraft $record) {
                                         return function (string $attribute, $value, $fail) use ($record): void {
                                             $sku = trim((string) $value);
                                             if ($sku === '') {
+                                                $fail('SKU is required.');
                                                 return;
                                             }
 
@@ -3060,7 +3062,7 @@ class NewProductDraftResource extends Resource
 
         $draftQuery = NewProductDraft::query()
             ->select(['id', 'title', 'handle'])
-            ->where('sku', $normalizedSku);
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($normalizedSku)]);
 
         if ($record) {
             $draftQuery->where('id', '!=', $record->id);
@@ -3068,7 +3070,7 @@ class NewProductDraftResource extends Resource
 
         $variantQuery = Variant::query()
             ->with(['product:id,title,handle'])
-            ->where('sku', $normalizedSku);
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($normalizedSku)]);
 
         if ($record) {
             $currentProductId = self::linkedProductForDraft($record)?->id;
@@ -4321,6 +4323,11 @@ class NewProductDraftResource extends Resource
 
                                 if (filled(trim((string) ($record->handle ?? '')))) {
                                     $skippedHasHandleCount++;
+                                    continue;
+                                }
+
+                                if (blank(trim((string) ($record->title ?? '')))) {
+                                    $skippedErrorCount++;
                                     continue;
                                 }
 

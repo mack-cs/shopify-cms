@@ -60,6 +60,17 @@ final class NewProductDraftShopifyCreator
                 continue;
             }
 
+            if (trim((string) ($draft->title ?? '')) === '') {
+                $skippedHasErrors++;
+                $failures[] = [
+                    'id' => $draft->id,
+                    'title' => $draft->title,
+                    'reason' => 'missing_title',
+                    'details' => 'A title is required before a draft can be sent to Shopify.',
+                ];
+                continue;
+            }
+
             if (($draft->product?->has_errors ?? false) === true) {
                 $skippedHasErrors++;
                 continue;

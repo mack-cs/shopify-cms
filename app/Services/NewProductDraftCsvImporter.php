@@ -237,7 +237,7 @@ final class NewProductDraftCsvImporter
                     $handle = trim((string) ($draft->handle ?? '')) ?: null;
                 }
 
-                if (! $handle && ! $draft) {
+                if (! $sku && ! $draft) {
                     $skippedMissingHandle++;
 
                     continue;
@@ -336,7 +336,6 @@ final class NewProductDraftCsvImporter
                 } else {
                     $data['payload'] = $payload ?: null;
                     $data['created_by'] = Auth::id();
-                    $data['title'] = $data['title'] ?? $handle;
                     $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
                     $data['variant_fulfillment_service'] = $data['variant_fulfillment_service'] ?? 'manual';
                     $data['batch'] = $data['batch'] ?? ('batch'.now()->format('Ymd'));

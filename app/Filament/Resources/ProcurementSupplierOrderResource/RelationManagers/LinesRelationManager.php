@@ -19,11 +19,15 @@ final class LinesRelationManager extends RelationManager
     public function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn ($query) => $query->with(['variant.product', 'receipts']))
+            ->modifyQueryUsing(fn ($query) => $query->with(['variant.product', 'draft', 'receipts']))
             ->columns([
                 TextColumn::make('sku')->searchable(),
-                TextColumn::make('variant.product.title')->label('Product')->wrap(),
-                TextColumn::make('variant.product.vendor')->label('Vendor'),
+                TextColumn::make('product_label')
+                    ->label('Product')
+                    ->state(fn (ProcurementSupplierOrderLine $record): string => trim((string) ($record->variant?->product?->title ?? ''))
+                        ?: (trim((string) ($record->draft?->title ?? '')) ?: 'Draft #' . $record->new_product_draft_id))
+                    ->wrap(),
+                TextColumn::make('variant.product.vendor')->label('Vendor')->placeholder('Draft'),
                 TextColumn::make('quantity_ordered')->label('Ordered')->numeric(),
                 TextColumn::make('quantity_received')->label('Received')->numeric(),
                 TextColumn::make('quantity_outstanding')->label('Outstanding')->numeric(),
@@ -40,7 +44,13 @@ final class LinesRelationManager extends RelationManager
                             'cancelled_at' => now(),
                             'updated_by' => Auth::id(),
                         ]);
-                        $variant = $record->variant()->with(['product', 'procurementIncomingStock'])->firstOrFail();
+                        $variant = $record->variant()->with(['product', 'procurementIncomingStock'])->first();
+                        if ($variant === null) {
+                            Notification::make()->title('Draft order line cancelled')->success()->send();
+
+                            return;
+                        }
+
                         app(SupplierOrderSummaryService::class)->refreshVariant($variant, Auth::id(), 'cms:order-cancelled');
                         try {
                             app(ProcurementSheetSyncService::class)->publishOperational([$variant->id]);
