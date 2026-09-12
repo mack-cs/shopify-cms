@@ -8,7 +8,9 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
+use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\User;
+use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -56,6 +58,60 @@ function vibePush($test): void
     $test->workflow->push($test->draft->id);
     $test->draft->refresh();
 }
+
+it('detects one exact Shopify tag rule as the automated vibe membership tag', function () {
+    $this->fake->collections['gid://shopify/Collection/2']['ruleSet'] = [
+        'appliedDisjunctively' => false,
+        'rules' => [['column' => 'TAG', 'relation' => 'EQUALS', 'condition' => 'gold-bracelets']],
+    ];
+    $collection = app(ShopYourVibeShopify::class)->collection('gid://shopify/Collection/2');
+    $mapping = app(ShopYourVibeAssignmentService::class)->syncMapping(
+        'gid://shopify/Collection/1',
+        ['name' => 'Bracelets Gold'],
+        $collection,
+    );
+
+    expect($mapping->membership_tag)->toBe('gold-bracelets')
+        ->and($collection['membership_supported'])->toBeFalse();
+});
+
+it('updates only configured vibe membership tags and preserves unrelated Shopify tags', function () {
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/2',
+        'collection_name' => 'Bracelets Gold', 'collection_handle' => 'pearl', 'membership_tag' => 'gold-bracelets',
+    ]);
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/3',
+        'collection_name' => 'Pastels', 'collection_handle' => 'pastels', 'membership_tag' => 'pastels-bracelets',
+    ]);
+    $this->fake->products['gid://shopify/Product/101']['tags'] = ['new-arrival', 'pastels-bracelets', 'summer'];
+
+    $confirmed = app(ShopYourVibeAssignmentService::class)->assign(
+        'gid://shopify/Collection/1',
+        'gid://shopify/Product/101',
+        ['gid://shopify/Collection/2'],
+    );
+
+    expect($confirmed['tags'])->toBe(['new-arrival', 'summer', 'gold-bracelets'])
+        ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))
+        ->toBe('new-arrival, summer, gold-bracelets');
+    $queries = collect($this->fake->mutations())->pluck(0)->join("\n");
+    expect($queries)->toContain('VibeTagsAdd')->toContain('VibeTagsRemove')->not->toContain('productUpdate');
+});
+
+it('opens product assignments when mappings have no configured membership tag', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->call('openProductAssignments', 'gid://shopify/Product/101')
+        ->assertHasNoErrors()
+        ->assertSet('managingProductGid', 'gid://shopify/Product/101')
+        ->assertSet('selectedVibes', [])
+        ->assertSee('Membership tag requires configuration');
+});
 
 it('creates new vibe cards as active during the push', function () {
     vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
@@ -567,14 +623,13 @@ it('uses the modal for adding a vibe and retains it on a failed selection', func
         ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('selectedCollectionGid', '');
 });
 
-it('explains preview scope and why automated collection membership cannot be removed', function () {
+it('explains preview scope and how automated collection membership is managed', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
     $this->fake->collections['gid://shopify/Collection/2']['ruleSet'] = ['appliedDisjunctively' => false];
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
-        ->call('editCard', 'gid://shopify/Metaobject/11')->assertSee('cannot remove them individually')
-        ->assertSee('Manual sorting does not change these membership rules.');
+        ->call('editCard', 'gid://shopify/Metaobject/11')->assertSee('managed by adding or removing only its configured membership tag');
     $page->call('reorderCards', array_reverse($this->fake->references))->call('reviewPush')
         ->assertSee('update the preview only')->assertSee('can affect the live storefront');
 });

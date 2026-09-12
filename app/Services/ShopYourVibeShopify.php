@@ -46,7 +46,7 @@ GQL);
         do {
             $data = $this->client->graphql(<<<'GQL'
 query VibeParents($after: String) { collections(first: 100, after: $after) {
-  nodes { id title handle image { url } updatedAt
+  nodes { id title handle image { url } updatedAt productsCount { count }
     metafield(namespace: "custom", key: "shop_your_vibe_preview") { type value }
   } pageInfo { hasNextPage endCursor }
 } }
@@ -55,7 +55,8 @@ GQL, ['after' => $after]);
                 $ids = $this->references($node['metafield']);
                 if ($ids !== []) {
                     $result[] = ['gid' => $node['id'], 'title' => $node['title'], 'handle' => $node['handle'],
-                        'image' => data_get($node, 'image.url'), 'count' => count($ids), 'updated_at' => $node['updatedAt']];
+                        'image' => data_get($node, 'image.url'), 'count' => count($ids),
+                        'product_count' => (int) data_get($node, 'productsCount.count', 0), 'updated_at' => $node['updatedAt']];
                 }
             }
             $after = $this->cursor($data['collections']);
@@ -68,7 +69,7 @@ GQL, ['after' => $after]);
     {
         $this->gid($gid, 'Collection');
         $data = $this->client->graphql(<<<'GQL'
-query VibeParent($id: ID!) { collection(id: $id) { id title handle image { url }
+query VibeParent($id: ID!) { collection(id: $id) { id title handle image { url } productsCount { count }
   metafield(namespace: "custom", key: "shop_your_vibe_preview") { type value compareDigest }
 } }
 GQL, ['id' => $gid]);
@@ -97,7 +98,8 @@ GQL, ['ids' => $chunk]);
             }
         }
 
-        return ['parent' => ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'image' => data_get($node, 'image.url')],
+        return ['parent' => ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'],
+            'image' => data_get($node, 'image.url'), 'product_count' => (int) data_get($node, 'productsCount.count', 0)],
             'cards' => $cards, 'reference_ids' => $ids, 'collections' => [], 'digest' => data_get($node, 'metafield.compareDigest')];
     }
 
@@ -131,7 +133,8 @@ GQL, ['query' => 'handle:'.json_encode($handle)]);
         do {
             $data = $this->client->graphql(<<<'GQL'
 query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
-  id title handle sortOrder ruleSet { appliedDisjunctively }
+  id title handle sortOrder productsCount { count }
+  ruleSet { appliedDisjunctively rules { column relation condition } }
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
     nodes { id title featuredImage { url } variants(first: 1) { nodes { sku } } }
     pageInfo { hasNextPage endCursor }
@@ -146,9 +149,77 @@ GQL, ['id' => $gid, 'after' => $after]);
             $after = $this->cursor($node['products']);
         } while ($after !== null);
 
+        $tagRules = collect(data_get($node, 'ruleSet.rules', []))
+            ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG'
+                && strtoupper((string) ($rule['relation'] ?? '')) === 'EQUALS')
+            ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
+
         return ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'sort' => $node['sortOrder'],
             'manual_supported' => in_array($node['sortOrder'], ['MANUAL', 'BEST_SELLING', 'ALPHA_ASC', 'ALPHA_DESC', 'PRICE_ASC', 'PRICE_DESC', 'CREATED', 'CREATED_DESC'], true),
-            'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false, 'products' => $products];
+            'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false,
+            'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
+            'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
+    }
+
+    public function parentProducts(string $gid): array
+    {
+        $this->gid($gid, 'Collection');
+        $after = null;
+        $products = [];
+        do {
+            $data = $this->client->graphql(<<<'GQL'
+query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
+  products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
+    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku } } }
+    pageInfo { hasNextPage endCursor }
+  }
+} }
+GQL, ['id' => $gid, 'after' => $after]);
+            $connection = data_get($data, 'collection.products')
+                ?? throw new RuntimeException('The selected collection is no longer available in Shopify.');
+            foreach ($connection['nodes'] as $product) {
+                $products[] = [
+                    'id' => $product['id'], 'title' => $product['title'], 'status' => $product['status'] ?? null,
+                    'tags' => array_values($product['tags'] ?? []), 'image' => data_get($product, 'featuredImage.url'),
+                    'sku' => data_get($product, 'variants.nodes.0.sku'),
+                ];
+            }
+            $after = $this->cursor($connection);
+        } while ($after !== null);
+
+        return $products;
+    }
+
+    public function productTags(string $gid): array
+    {
+        $this->gid($gid, 'Product');
+        $data = $this->client->graphql(<<<'GQL'
+query VibeProductTags($id: ID!) { product(id: $id) { id tags } }
+GQL, ['id' => $gid]);
+
+        return $data['product'] ?? throw new RuntimeException('This product is no longer available in Shopify.');
+    }
+
+    public function addProductTags(string $gid, array $tags): void
+    {
+        $this->tagMutation('tagsAdd', 'VibeTagsAdd', $gid, $tags);
+    }
+
+    public function removeProductTags(string $gid, array $tags): void
+    {
+        $this->tagMutation('tagsRemove', 'VibeTagsRemove', $gid, $tags);
+    }
+
+    private function tagMutation(string $field, string $operation, string $gid, array $tags): void
+    {
+        $this->gid($gid, 'Product');
+        $data = $this->client->graphql("mutation {$operation}(\$id: ID!, \$tags: [String!]!) { {$field}(id: \$id, tags: \$tags) { node { id } userErrors { field message } } }", [
+            'id' => $gid, 'tags' => array_values(array_unique($tags)),
+        ]);
+        $errors = data_get($data, $field.'.userErrors', []);
+        if ($errors !== []) {
+            throw new RuntimeException(collect($errors)->pluck('message')->join('; '));
+        }
     }
 
     public function images(string $search = '', ?string $after = null): array

@@ -42,13 +42,14 @@
                 <x-filament::button wire:click="openCollectionPicker" wire:loading.attr="disabled">Add Shop Your Vibe</x-filament::button>
                 <x-filament::button color="gray" wire:click="loadParents(true)" wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
             </div>
-            <p class="text-sm text-gray-500">Vibe cards are saved to the preview layout. Product changes affect the linked Shopify collections when pushed.</p>
+            <p class="text-sm text-gray-500">Vibe cards and sorting use a reviewable draft. Product vibe assignments update their configured Shopify membership tags immediately after confirmation.</p>
             <div class="syv-parent-grid">
                 @forelse ($parents as $parent)
                     <x-filament::section class="syv-parent-card" wire:key="parent-{{ $parent['gid'] }}">
                         <h2 class="text-lg font-semibold">{{ $parent['title'] }}</h2>
                         <p class="text-sm text-gray-500">{{ $parent['handle'] }}</p>
-                        <p class="my-3">{{ $parent['count'] }} Vibes</p>
+                        <p class="mt-3 font-medium">{{ $parent['product_count'] ?? 0 }} Products</p>
+                        <p class="mb-3">{{ $parent['count'] }} Shop Your Vibes</p>
                         @if ($pendingDrafts->has($parent['gid']))
                             <x-filament::badge color="warning">Pending Changes</x-filament::badge>
                         @else
@@ -75,6 +76,16 @@
                     <p class="text-sm text-gray-500">Last confirmed with Shopify: {{ $draft->refreshed_at?->format('d M Y H:i') ?? 'Not yet refreshed' }}</p>
                 </div>
                 <x-filament::button color="gray" wire:click="back" wire:confirm="You may have changes that have not been pushed to Shopify. Leave this editor? Saved drafts will be kept.">Back to collections</x-filament::button>
+            </div>
+            <div class="flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
+                <button type="button" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
+                    class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'products' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
+                    Products ({{ count($parentProducts) }})
+                </button>
+                <button type="button" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
+                    class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'vibes' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
+                    Shop Your Vibes ({{ count($draft->desired['cards']) }})
+                </button>
             </div>
             <div x-show="formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                 Pending field edits — not pushed to Shopify. Save the card to keep these edits in your draft.
@@ -104,6 +115,7 @@
                         <div class="syv-push-scope">
                             <p><strong>Preview layout:</strong> Card names, images, links and card order update the preview only.</p>
                             <p><strong>Linked collections:</strong> Product additions, removals and sorting update the actual Shopify collections and can affect the live storefront.</p>
+                            <p><strong>Vibe assignments:</strong> Automated-collection membership tags are confirmed and applied separately when an assignment is saved.</p>
                             @if (!empty($draft->desired['new_collections']))<p><strong>New collections:</strong> These will be created with their handles and images and published to the live Online Store.</p>@endif
                             @if (!empty($draft->desired['delete_cards']))
                                 <p><strong>Permanent Shopify deletions:</strong> The following vibe cards will be deleted. This cannot be undone. Products and images will be kept.</p>
@@ -118,6 +130,36 @@
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
                     </x-filament::section>
                 @endif
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products'])>
+                    <div class="flex items-center justify-between gap-3">
+                        <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
+                    </div>
+                    <div class="syv-card-grid syv-product-grid">
+                        @forelse ($parentProducts as $product)
+                            @php
+                                $productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag)));
+                                $assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag']))));
+                            @endphp
+                            <article wire:key="parent-product-{{ $product['id'] }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                @if ($product['image'])<img src="{{ $product['image'] }}" alt="" class="syv-product-image" loading="lazy">@endif
+                                <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
+                                <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
+                                <div class="my-3">
+                                    <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
+                                    @forelse ($assignments as $assignment)
+                                        <x-filament::badge color="info">{{ $assignment['collection_name'] }}</x-filament::badge>
+                                    @empty
+                                        <span class="text-sm text-gray-500">None</span>
+                                    @endforelse
+                                </div>
+                                <x-filament::button size="xs" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                            </article>
+                        @empty
+                            <p class="text-gray-500">No products belong to this Shopify collection.</p>
+                        @endforelse
+                    </div>
+                </div>
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes'])>
                 <div class="flex items-center justify-between gap-3">
                     <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder, or use the arrow buttons. Reordering saves a pending draft.</p></div>
                     <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled">Add Vibe</x-filament::button>
@@ -135,6 +177,16 @@
                             <button type="button" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
                                 @if ($vibe['image_url'])<img src="{{ $vibe['image_url'] }}" alt="" draggable="false" class="syv-vibe-image" loading="lazy">@else<div class="syv-vibe-image syv-image-placeholder">Choose an image</div>@endif
                                 <h4 class="my-3 font-semibold">{{ $vibe['name'] }}</h4>
+                                @php($vibeMapping = collect($vibeMappings)->firstWhere('shopify_collection_id', $vibe['collection_gid']))
+                                @if ($vibeMapping)
+                                    <dl class="space-y-1 text-xs text-gray-500">
+                                        <div><dt class="inline font-semibold">Handle:</dt> <dd class="inline">{{ $vibeMapping['collection_handle'] }}</dd></div>
+                                        <div><dt class="inline font-semibold">Membership Tag:</dt> <dd class="inline">{{ ($vibeMapping['membership_tag'] ?? null) ?: 'Requires configuration' }}</dd></div>
+                                        @if (filled($vibeMapping['design_value'] ?? null))<div><dt class="inline font-semibold">Design:</dt> <dd class="inline">{{ $vibeMapping['design_value'] }}</dd></div>@endif
+                                        @if (filled($vibeMapping['colour_style_value'] ?? null))<div><dt class="inline font-semibold">Colour Style:</dt> <dd class="inline">{{ $vibeMapping['colour_style_value'] }}</dd></div>@endif
+                                        <div><dd>{{ $vibeMapping['product_count'] ?? 0 }} Products</dd></div>
+                                    </dl>
+                                @endif
                             </button>
                             <div class="flex flex-wrap gap-2">
                                 <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">←</x-filament::button>
@@ -154,8 +206,13 @@
                                 @if ($cardForm['image_url'] ?? null)<img src="{{ $cardForm['image_url'] }}" alt="Card preview" class="syv-edit-image">@endif
                                 <x-filament::button color="gray" wire:click="findImages" wire:loading.attr="disabled">Choose image from Shopify</x-filament::button>
                             </div>
+                            @if (!empty($mappingForm['id']))
+                                <label class="space-y-1"><span>Membership Tag</span><x-filament::input.wrapper><x-filament::input wire:model="mappingForm.membership_tag" x-on:input="formDirty = true" placeholder="Requires configuration" /></x-filament::input.wrapper><small class="text-gray-500">The Shopify tag that controls automated collection membership.</small></label>
+                                <label class="space-y-1"><span>Design</span><x-filament::input.wrapper><x-filament::input wire:model="mappingForm.design_value" x-on:input="formDirty = true" /></x-filament::input.wrapper><small class="text-gray-500">Generic CMS Design value; this is not assumed to be a tag.</small></label>
+                                <label class="space-y-1"><span>Colour Style</span><x-filament::input.wrapper><x-filament::input wire:model="mappingForm.colour_style_value" x-on:input="formDirty = true" /></x-filament::input.wrapper><small class="text-gray-500">Generic CMS Colour Style value; this is not assumed to be a tag.</small></label>
+                            @endif
                         </div>
-                        <x-filament::button class="mt-4" wire:click="saveCard" wire:loading.attr="disabled">Save card to draft</x-filament::button>
+                        <x-filament::button class="mt-4" wire:click="saveCard" wire:loading.attr="disabled">Save card and mapping</x-filament::button>
                         @if ($choosingImage)
                             <div class="mt-4 space-y-4 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
                                 <div class="flex gap-3"><x-filament::input.wrapper><x-filament::input wire:model="imageSearch" placeholder="Search image filenames" aria-label="Search image filenames" /></x-filament::input.wrapper><x-filament::button wire:click="findImages">Search images</x-filament::button><x-filament::button color="gray" wire:click="$set('choosingImage', false)">Cancel</x-filament::button></div>
@@ -182,7 +239,7 @@
                                     <x-filament::button color="gray" wire:click="enableManual({{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="This will change the Shopify collection’s product sorting mode to Manual when you push changes. Continue?">Enable Manual Sorting</x-filament::button>
                                 @endif
                                 @if (!$collection['membership_supported'])
-                                    <p class="syv-membership-note">This is an automated collection. Products are included by Shopify rules, so this editor cannot remove them individually. Removal requires changing the matching product details or collection rules in Shopify, which can also affect the live storefront. Manual sorting does not change these membership rules.</p>
+                                    <p class="syv-membership-note">This is an automated collection. Shop Your Vibe assignments are managed by adding or removing only its configured membership tag.</p>
                                 @else
                                     <p class="syv-membership-note">Remove takes a product out of this linked Shopify collection when you push changes. It does not delete the product. This can also affect the live storefront.</p>
                                 @endif
@@ -204,7 +261,14 @@
                                                     <x-filament::button size="xs" color="gray" x-on:click="move($el, 'products', {{ \Illuminate\Support\Js::from($product['id']) }}, -1, {{ \Illuminate\Support\Js::from($collection['gid']) }})" aria-label="Move product earlier">←</x-filament::button>
                                                     <x-filament::button size="xs" color="gray" x-on:click="move($el, 'products', {{ \Illuminate\Support\Js::from($product['id']) }}, 1, {{ \Illuminate\Support\Js::from($collection['gid']) }})" aria-label="Move product later">→</x-filament::button>
                                                 @endif
-                                                @if ($collection['membership_supported'])<x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>@endif
+                                                @if ($collection['membership_supported'])
+                                                    <x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
+                                                @elseif (filled(collect($vibeMappings)->firstWhere('shopify_collection_id', $collection['gid'])['membership_tag'] ?? null))
+                                                    <x-filament::button size="xs" color="danger" wire:click="removeProductAssignment({{ \Illuminate\Support\Js::from($product['id']) }}, {{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="Remove this product from {{ $collection['title'] }}? Only its configured Shopify membership tag will be removed.">Remove from this Vibe</x-filament::button>
+                                                @endif
+                                                @if (collect($parentProducts)->contains('id', $product['id']))
+                                                    <x-filament::button size="xs" color="gray" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                                @endif
                                             </div>
                                         </article>
                                     @endforeach
@@ -231,6 +295,7 @@
                         </div>
                     </x-filament::section>
                 @endif
+                </div>
             </fieldset>
         @endif
 
@@ -260,6 +325,26 @@
                     <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
                 @endif
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'shop-your-vibe-collections' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="manage-vibe-assignments" width="2xl" heading="Manage Shop Your Vibes">
+            @if ($managedProduct)
+                <p class="font-semibold">{{ $managedProduct['title'] }}</p>
+                <p class="mb-4 text-sm text-gray-500">SKU: {{ $managedProduct['sku'] ?: 'No SKU' }}</p>
+                <div class="space-y-3">
+                    @foreach ($vibeMappings as $mapping)
+                        <label class="flex items-start gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                            <input type="checkbox" wire:model="selectedVibes" value="{{ $mapping['shopify_collection_id'] }}" @disabled(blank($mapping['membership_tag'] ?? null))>
+                            <span><strong>{{ $mapping['collection_name'] }}</strong><small class="block text-gray-500">{{ ($mapping['membership_tag'] ?? null) ?: 'Membership tag requires configuration' }}</small></span>
+                        </label>
+                    @endforeach
+                </div>
+                <p class="mt-4 text-sm text-gray-500">Saving verifies the live Shopify tags, changes only the membership tags managed here, and preserves every unrelated tag.</p>
+            @endif
+            <x-slot name="footer">
+                <x-filament::button wire:click="saveProductAssignments" wire:loading.attr="disabled">Save assignments</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-vibe-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
     </div>

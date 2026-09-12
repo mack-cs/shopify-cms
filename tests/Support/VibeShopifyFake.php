@@ -46,6 +46,7 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
                 'id' => 'gid://shopify/Collection/'.$id, 'title' => ucfirst($handle), 'handle' => $handle,
                 'image' => ['url' => 'https://cdn.shopify.com/collection.jpg'], 'updatedAt' => '2026-09-08T12:00:00Z',
                 'sortOrder' => 'MANUAL', 'ruleSet' => null,
+                'productsCount' => ['count' => 3],
                 'products' => ['nodes' => array_map($this->product(...), [101, 102, 103]), 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
             ];
         }
@@ -62,7 +63,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
     public function product(int $id): array
     {
         return $this->products['gid://shopify/Product/'.$id] = ['id' => 'gid://shopify/Product/'.$id, 'title' => 'Product '.$id,
-            'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'], 'variants' => ['nodes' => [['sku' => 'SKU-'.$id]]]];
+            'status' => 'ACTIVE', 'tags' => [], 'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'],
+            'variants' => ['nodes' => [['sku' => 'SKU-'.$id]]]];
     }
 
     public function graphql(string $query, array $variables = []): array
@@ -183,6 +185,27 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         }
         if (str_contains($query, 'query VibeProducts')) {
             return ['collection' => $this->collections[$variables['id']]];
+        }
+        if (str_contains($query, 'query VibeParentProducts')) {
+            return ['collection' => ['products' => $this->collections[$variables['id']]['products']]];
+        }
+        if (str_contains($query, 'query VibeProductTags')) {
+            return ['product' => $this->products[$variables['id']] ?? null];
+        }
+        if (str_contains($query, 'mutation VibeTagsAdd')) {
+            $product = &$this->products[$variables['id']];
+            $product['tags'] = array_values(array_unique(array_merge($product['tags'] ?? [], $variables['tags'])));
+            unset($product);
+
+            return ['tagsAdd' => ['node' => ['id' => $variables['id']], 'userErrors' => []]];
+        }
+        if (str_contains($query, 'mutation VibeTagsRemove')) {
+            $product = &$this->products[$variables['id']];
+            $remove = array_map('strtolower', $variables['tags']);
+            $product['tags'] = array_values(array_filter($product['tags'] ?? [], fn ($tag) => ! in_array(strtolower($tag), $remove, true)));
+            unset($product);
+
+            return ['tagsRemove' => ['node' => ['id' => $variables['id']], 'userErrors' => []]];
         }
         if (str_contains($query, 'query VibeLinkedCollection')) {
             return ['collections' => ['nodes' => array_values($this->collections)]];
