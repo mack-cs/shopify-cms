@@ -9,7 +9,9 @@ class ProcurementSupplierReceipt extends Model
 {
     protected $guarded = [];
     protected $casts = [
-        'quantity_received' => 'integer', 'shopify_adjustment_started_at' => 'datetime',
+        'quantity_received' => 'integer', 'received_at' => 'datetime',
+        'inventory_before' => 'integer', 'inventory_after' => 'integer',
+        'shopify_adjustment_started_at' => 'datetime',
         'shopify_adjusted_at' => 'datetime', 'processed_at' => 'datetime',
     ];
 

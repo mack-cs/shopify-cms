@@ -14,6 +14,7 @@ use App\Models\Variant;
 use App\Services\BulkInventoryTrackingService;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\InventoryAccessService;
+use App\Services\InventoryAdjustmentApprovalService;
 use App\Services\InventoryOperationContext;
 use App\Services\Procurement\ProcurementSelectionCsvExporter;
 use App\Services\Procurement\SupplierOrderService;
@@ -39,6 +40,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use App\Models\User;
 
 class InventoryResource extends Resource
 {
@@ -380,32 +382,31 @@ class InventoryResource extends Resource
                             ->required()
                             ->helperText('Enter the physical stock count. Shopify will calculate Available inventory.')
                             ->visible(fn (Forms\Get $get): bool => (bool) $get('inventory_tracked')),
+                        Forms\Components\Textarea::make('reason')
+                            ->label('Reason')
+                            ->required()
+                            ->rows(3),
+                        Forms\Components\Select::make('approver_id')
+                            ->label('Approver')
+                            ->options(fn (): array => User::query()->whereKeyNot(Auth::id())->orderBy('name')->pluck('name', 'id')->all())
+                            ->searchable()
+                            ->required(),
                     ])
                     ->fillForm(fn (Variant $record): array => [
                         'inventory_tracked' => $record->inventory_tracked !== false,
                         'on_hand_quantity' => $record->current_on_hand_quantity ?? $record->inventory_qty,
                     ])
                     ->action(function (Variant $record, array $data): void {
-                        InventoryOperationContext::run(function () use ($record, $data): void {
-                            $record->inventory_tracked = (bool) ($data['inventory_tracked'] ?? false);
-                            $record->current_on_hand_quantity = $record->inventory_tracked
-                                ? (isset($data['on_hand_quantity']) ? (int) $data['on_hand_quantity'] : 0)
-                                : null;
-                            $record->inventory_sync_error = null;
-                            $record->save();
-                        });
-
-                        $product = Product::query()->with('variants')->find($record->product_id);
-                        if ($product instanceof Product) {
-                            app(ProductInventoryHistoryRecorder::class)->record(
-                                $product,
-                                Auth::id(),
-                                ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
-                            );
-                        }
+                        app(InventoryAdjustmentApprovalService::class)->submit([[
+                            'variant' => $record,
+                            'inventory_tracked' => (bool) ($data['inventory_tracked'] ?? false),
+                            'on_hand_quantity' => isset($data['on_hand_quantity']) ? (int) $data['on_hand_quantity'] : null,
+                            'reason' => (string) ($data['reason'] ?? ''),
+                        ]], (int) Auth::id(), (int) $data['approver_id'], 'single');
 
                         Notification::make()
-                            ->title('Inventory updated locally')
+                            ->title('Inventory approval requested')
+                            ->body('The correction is pending approval and has not been pushed to Shopify.')
                             ->success()
                             ->send();
                     }),

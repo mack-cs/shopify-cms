@@ -157,6 +157,45 @@ final class ProductInventoryCsvImporter
         return $result;
     }
 
+    public function createApprovalFromPath(string $absolutePath, int $requesterId, int $approverId, ?string $filename = null): \App\Models\InventoryAdjustmentRequest
+    {
+        $csv = Reader::createFromPath($absolutePath);
+        $csv->setHeaderOffset(0);
+        $items = [];
+
+        foreach ($csv->getRecords() as $row) {
+            $data = $this->normalizeRow($row);
+            $quantityValue = $this->firstValue($data, [
+                'on_hand', 'on hand', 'stock on hand', 'inventory_qty', 'inventory quantity',
+                'inventory qty', 'quantity', 'qty', 'available', 'inventory',
+            ]);
+            $tracked = $this->parseTracked($this->firstValue($data, [
+                'inventory_tracked', 'inventory tracked', 'variant inventory tracked', 'tracked',
+            ])) ?? true;
+            $reason = $this->firstValue($data, ['reason', 'correction reason', 'adjustment reason']);
+            if ($reason === null) {
+                throw \Illuminate\Validation\ValidationException::withMessages(['reason' => 'A reason is required for every inventory adjustment.']);
+            }
+            $quantity = $tracked === false ? null : ($quantityValue === null ? null : $this->parseQuantity($quantityValue));
+            if ($tracked !== false && $quantity === null) {
+                throw \Illuminate\Validation\ValidationException::withMessages(['quantity' => 'A valid stock quantity is required for every tracked inventory adjustment.']);
+            }
+            $skipReason = 'skipped_missing_identifier';
+            $variant = $this->resolveVariant($data, $skipReason);
+            if (!$variant instanceof Variant) {
+                throw \Illuminate\Validation\ValidationException::withMessages(['sku' => $this->skipMessage(count($items) + 2, $skipReason, $data)]);
+            }
+            $items[] = [
+                'variant' => $variant,
+                'inventory_tracked' => $tracked,
+                'on_hand_quantity' => $quantity,
+                'reason' => $reason,
+            ];
+        }
+
+        return app(InventoryAdjustmentApprovalService::class)->submit($items, $requesterId, $approverId, 'file', 'csv', $filename);
+    }
+
     /**
      * @param array<string,mixed> $row
      */

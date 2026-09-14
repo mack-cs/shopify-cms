@@ -5,6 +5,8 @@ namespace App\Filament\Resources\ProcurementSupplierOrderResource\RelationManage
 use App\Models\ProcurementSupplierOrderLine;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\Procurement\SupplierOrderSummaryService;
+use App\Services\Procurement\SupplierOrderService;
+use Filament\Forms;
 use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Tables\Actions\Action;
@@ -34,8 +36,27 @@ final class LinesRelationManager extends RelationManager
                 TextColumn::make('eta_date')->label('ETA')->date('d/m/Y')->placeholder('-'),
                 TextColumn::make('status')->badge(),
                 TextColumn::make('completed_at')->label('Completed')->dateTime('d/m/Y H:i')->placeholder('-'),
+                TextColumn::make('latest_grv')
+                    ->label('Latest GRV')
+                    ->state(fn (ProcurementSupplierOrderLine $record): ?string => $record->receipts->sortByDesc('created_at')->first()?->grv_number)
+                    ->copyable(),
             ])
             ->actions([
+                Action::make('amend')->label('Amend')->icon('heroicon-o-pencil-square')
+                    ->visible(fn (ProcurementSupplierOrderLine $record): bool => $record->status === 'open')
+                    ->form([
+                        Forms\Components\TextInput::make('quantity_ordered')->label('Quantity Ordered')->integer()->minValue(1)->required(),
+                        Forms\Components\DatePicker::make('eta_date')->label('ETA')->native(false),
+                        Forms\Components\Textarea::make('reason')->label('Reason')->rows(3),
+                    ])
+                    ->fillForm(fn (ProcurementSupplierOrderLine $record): array => [
+                        'quantity_ordered' => $record->quantity_ordered,
+                        'eta_date' => $record->eta_date?->toDateString(),
+                    ])
+                    ->action(function (ProcurementSupplierOrderLine $record, array $data): void {
+                        app(SupplierOrderService::class)->amendLine($record, $data, Auth::id(), $data['reason'] ?? null);
+                        Notification::make()->title('Order line amended')->success()->send();
+                    }),
                 Action::make('cancel')->label('Cancel')->color('danger')->requiresConfirmation()
                     ->visible(fn (ProcurementSupplierOrderLine $record): bool => $record->status === 'open')
                     ->action(function (ProcurementSupplierOrderLine $record): void {

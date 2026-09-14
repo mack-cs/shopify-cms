@@ -3,6 +3,7 @@
 namespace App\Services\Procurement;
 
 use App\Models\ProcurementSupplierOrder;
+use App\Models\ProcurementSupplierOrderAmendment;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
@@ -157,6 +158,62 @@ final class SupplierOrderService
             $row['quantity_ordered'] ?? null, $row['eta'] ?? null,
             $userId, $source, allowExistingOrder: true,
         );
+    }
+
+    public function amendLine(ProcurementSupplierOrderLine $line, array $data, ?int $userId = null, ?string $reason = null): ProcurementSupplierOrderLine
+    {
+        return DB::transaction(function () use ($line, $data, $userId, $reason): ProcurementSupplierOrderLine {
+            $locked = ProcurementSupplierOrderLine::query()->with('order')->lockForUpdate()->findOrFail($line->id);
+            if ($locked->status !== 'open') {
+                throw ValidationException::withMessages(['status' => 'Only open supplier order lines can be amended.']);
+            }
+
+            $changes = [];
+            if (array_key_exists('quantity_ordered', $data)) {
+                $quantity = $data['quantity_ordered'];
+                if (! is_numeric($quantity) || (int) $quantity <= 0 || (float) $quantity !== (float) (int) $quantity) {
+                    throw ValidationException::withMessages(['quantity_ordered' => 'Quantity must be a positive whole number.']);
+                }
+                $received = (int) $locked->receipts()->where('status', 'succeeded')->sum('quantity_received');
+                if ((int) $quantity < $received) {
+                    throw ValidationException::withMessages(['quantity_ordered' => "Quantity ordered cannot be less than {$received} already received."]);
+                }
+                if ((int) $locked->quantity_ordered !== (int) $quantity) {
+                    $changes['quantity_ordered'] = [(string) $locked->quantity_ordered, (string) (int) $quantity];
+                    $locked->quantity_ordered = (int) $quantity;
+                }
+            }
+            if (array_key_exists('eta_date', $data)) {
+                $eta = $data['eta_date'] ? $this->date((string) $data['eta_date'])->toDateString() : null;
+                if (($locked->eta_date?->toDateString()) !== $eta) {
+                    $changes['eta_date'] = [(string) ($locked->eta_date?->toDateString() ?? ''), (string) ($eta ?? '')];
+                    $locked->eta_date = $eta;
+                }
+            }
+
+            if ($changes === []) {
+                return $locked;
+            }
+
+            $locked->updated_by = $userId;
+            $locked->save();
+            foreach ($changes as $field => [$old, $new]) {
+                ProcurementSupplierOrderAmendment::query()->create([
+                    'supplier_order_id' => $locked->supplier_order_id,
+                    'supplier_order_line_id' => $locked->id,
+                    'amended_by' => $userId,
+                    'field' => $field,
+                    'old_value' => $old,
+                    'new_value' => $new,
+                    'reason' => $reason,
+                ]);
+            }
+            if ($locked->variant_id) {
+                $this->summary->refreshVariant($locked->variant, $userId, 'cms:order-amended');
+            }
+
+            return $locked->fresh(['order', 'receipts']);
+        });
     }
 
     private function date(string $value): Carbon

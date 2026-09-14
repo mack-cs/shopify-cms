@@ -15,6 +15,11 @@ class ProcurementSupplierOrder extends Model
         return $this->hasMany(ProcurementSupplierOrderLine::class, 'supplier_order_id');
     }
 
+    public function amendments(): HasMany
+    {
+        return $this->hasMany(ProcurementSupplierOrderAmendment::class, 'supplier_order_id');
+    }
+
     public function createdBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');

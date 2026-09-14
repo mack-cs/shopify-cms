@@ -64,6 +64,46 @@ it('supports partial receipts and prevents duplicate or excessive receipt reques
         ->toThrow(ValidationException::class, 'Only 6 unit(s) remain outstanding.');
 });
 
+it('allows pending supplier order lines to be amended and records the audit trail', function (): void {
+    $user = User::factory()->create();
+    $variant = supplierWorkflowVariant('AMEND-1');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-AMEND', 10, '2026-09-20');
+
+    $updated = app(SupplierOrderService::class)->amendLine($line, [
+        'quantity_ordered' => 12,
+        'eta_date' => '2026-09-25',
+    ], $user->id, 'Supplier confirmed two extra units');
+
+    expect($updated->quantity_ordered)->toBe(12)
+        ->and($updated->quantity_outstanding)->toBe(12)
+        ->and(\App\Models\ProcurementSupplierOrderAmendment::query()->where('supplier_order_line_id', $line->id)->count())->toBe(2);
+});
+
+it('prevents completed supplier order lines from being amended', function (): void {
+    $variant = supplierWorkflowVariant('AMEND-COMPLETE');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-AMEND-COMPLETE', 10, '2026-09-20');
+    $line->update(['status' => 'completed']);
+
+    expect(fn () => app(SupplierOrderService::class)->amendLine($line, ['quantity_ordered' => 12]))
+        ->toThrow(ValidationException::class, 'Only open supplier order lines can be amended.');
+});
+
+it('can receive an amended quantity and assigns unique GRV numbers', function (): void {
+    Bus::fake();
+    $variant = supplierWorkflowVariant('GRV-1');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-GRV', 10, '2026-09-20');
+    app(SupplierOrderService::class)->amendLine($line, ['quantity_ordered' => 12]);
+    $service = app(SupplierReceiptService::class);
+
+    $first = $service->create($line->fresh(), 5, 'grv-key-1', dispatch: false);
+    $second = $service->create($line->fresh(), 7, 'grv-key-2', dispatch: false);
+
+    expect($first->grv_number)->toBe('GRV-000001')
+        ->and($second->grv_number)->toBe('GRV-000002')
+        ->and($first->grv_number)->not->toBe($second->grv_number)
+        ->and(ProcurementSupplierReceipt::query()->where('grv_number', $second->grv_number)->first()->quantity_received)->toBe(7);
+});
+
 it('recalculates receipt transfers from fresh inventory without an artificial shortage', function (): void {
     $this->travelTo('2026-09-01 00:00:00');
     $variant = supplierWorkflowVariant('RECEIPT-TRANSFER');
