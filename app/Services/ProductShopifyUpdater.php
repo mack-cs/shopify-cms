@@ -93,6 +93,105 @@ final class ProductShopifyUpdater
     ) {}
 
     /**
+     * Apply only the Design and Colour Style values owned by Shop Your Vibe.
+     * Values not present in the mapping catalogue are preserved.
+     */
+    public function syncShopYourVibeAttributes(
+        Product $product,
+        array $designsToAdd,
+        array $colourStylesToAdd,
+        array $designsToRemove,
+        array $colourStylesToRemove
+    ): void {
+        $designsToAdd = $this->nonBlankUniqueLabels($designsToAdd);
+        $colourStylesToAdd = $this->nonBlankUniqueLabels($colourStylesToAdd);
+        $designsToRemove = $this->nonBlankUniqueLabels($designsToRemove);
+        $colourStylesToRemove = $this->nonBlankUniqueLabels($colourStylesToRemove);
+        if ($designsToAdd === [] && $colourStylesToAdd === [] && $designsToRemove === [] && $colourStylesToRemove === []) {
+            return;
+        }
+
+        $productId = trim((string) $product->shopify_id);
+        if ($productId === '') {
+            throw new \RuntimeException('The product has no Shopify ID.');
+        }
+
+        $primaryRow = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+        if (! $primaryRow) {
+            throw new \RuntimeException('The latest Shopify product data is unavailable. Refresh the product import and retry.');
+        }
+
+        $designHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
+        if ($designsToAdd !== [] && $designHeader === null) {
+            throw new \RuntimeException('A Design mapping cannot be applied because this product has no supported jewellery type.');
+        }
+
+        $updates = [];
+        if ($designHeader !== null && ($designsToAdd !== [] || $designsToRemove !== [])) {
+            $updates[$designHeader] = $this->mergeChangedLabels(
+                (string) $primaryRow->get($designHeader, ''),
+                $designsToRemove,
+                $designsToAdd
+            );
+        }
+        if ($colourStylesToAdd !== [] || $colourStylesToRemove !== []) {
+            $updates[HeaderStore::PATTERN_CATEGORY] = $this->mergeChangedLabels(
+                (string) $primaryRow->get(HeaderStore::PATTERN_CATEGORY, ''),
+                $colourStylesToRemove,
+                $colourStylesToAdd
+            );
+        }
+        if ($updates === []) {
+            return;
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $categoryId = trim((string) (data_get($details, 'category.id') ?: data_get($details, 'productCategory.productTaxonomyNode.id', '')));
+        $categoryName = trim((string) (data_get($details, 'category.name') ?: data_get($details, 'productCategory.productTaxonomyNode.fullName', '')));
+        $raw = $this->productMetafieldRawValues($product, null, $productId);
+        $payload = collect($updates)->map(fn (array $values) => json_encode(array_values($values)))->all();
+        $warnings = $this->updateMetafields(
+            $product,
+            $productId,
+            $payload,
+            $raw,
+            $categoryId !== '' ? $categoryId : null,
+            $categoryName !== '' ? $categoryName : null
+        );
+        if ($warnings !== []) {
+            throw new \RuntimeException(collect($warnings)->pluck('warning')->join('; '));
+        }
+
+        foreach ($updates as $header => $values) {
+            $primaryRow->set($header, implode('; ', $values));
+        }
+        $primaryRow->save();
+    }
+
+    /** @return array<int, string> */
+    private function mergeChangedLabels(string $current, array $remove, array $add): array
+    {
+        $tokens = $this->referenceTokensFromRaw($current);
+        $removeKeys = collect($remove)->mapWithKeys(fn ($value) => [mb_strtolower(trim((string) $value)) => true]);
+        $kept = array_values(array_filter($tokens, fn ($value) => ! $removeKeys->has(mb_strtolower(trim($value)))));
+
+        return collect(array_merge($kept, $add))
+            ->map(fn ($value) => trim((string) $value))->filter()->unique(fn ($value) => mb_strtolower($value))->values()->all();
+    }
+
+    /** @return array<int, string> */
+    private function nonBlankUniqueLabels(array $values): array
+    {
+        return collect($values)->map(fn ($value) => trim((string) $value))->filter()
+            ->unique(fn ($value) => mb_strtolower($value))->values()->all();
+    }
+
+    /**
      * @return array{product_id:int,shopify_product_id:string,variant_id:int|null,shopify_variant_id:string,tags:array<int,string>,price:string,compare_at_price:string}
      */
     public function syncSaleProductUpdate(SaleProductUpdate $saleUpdate): array
@@ -2385,7 +2484,7 @@ GQL;
     {
         return <<<'GQL'
 query MetafieldDefinition($namespace: String!, $key: String!) {
-  metafieldDefinition(ownerType: PRODUCT, namespace: $namespace, key: $key) {
+  metafieldDefinition(identifier: {ownerType: PRODUCT, namespace: $namespace, key: $key}) {
     validations {
       name
       value

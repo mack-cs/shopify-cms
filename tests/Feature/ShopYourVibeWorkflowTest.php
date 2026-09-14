@@ -5,6 +5,8 @@ use App\Enums\RolesEnum;
 use App\Filament\Pages\ShopYourVibe;
 use App\Jobs\PushShopYourVibe;
 use App\Models\Import;
+use App\Models\ChangeLog;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
@@ -99,6 +101,48 @@ it('updates only configured vibe membership tags and preserves unrelated Shopify
     expect($queries)->toContain('VibeTagsAdd')->toContain('VibeTagsRemove')->not->toContain('productUpdate');
 });
 
+it('does not reapply mapped fields when adding a tag-only vibe', function () {
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/2',
+        'collection_name' => 'Bracelets Bold', 'collection_handle' => 'bracelets-bold',
+        'membership_tag' => 'bracelets-bold-colours', 'design_value' => 'Beaded', 'colour_style_value' => 'Multicolour',
+    ]);
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/3',
+        'collection_name' => 'Test', 'collection_handle' => 'test', 'membership_tag' => 'out-of-stock',
+    ]);
+    $this->fake->products['gid://shopify/Product/101']['tags'] = ['bracelets-bold-colours'];
+
+    app(ShopYourVibeAssignmentService::class)->assign(
+        'gid://shopify/Collection/1',
+        'gid://shopify/Product/101',
+        ['gid://shopify/Collection/2', 'gid://shopify/Collection/3'],
+    );
+
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])
+        ->toBe(['bracelets-bold-colours', 'out-of-stock']);
+});
+
+it('clearly explains when a mapped design is incompatible with the product type', function () {
+    Product::where('shopify_id', 'gid://shopify/Product/101')->update(['type' => 'Charms']);
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1',
+        'shopify_collection_id' => 'gid://shopify/Collection/2',
+        'collection_name' => 'Bracelets Gold',
+        'collection_handle' => 'bracelets-gold',
+        'membership_tag' => 'gold-bracelets',
+        'design_value' => 'beaded',
+    ]);
+
+    expect(fn () => app(ShopYourVibeAssignmentService::class)->assign(
+        'gid://shopify/Collection/1',
+        'gid://shopify/Product/101',
+        ['gid://shopify/Collection/2'],
+    ))->toThrow(RuntimeException::class, 'Product Type is [Charms]');
+
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])->not->toContain('gold-bracelets');
+});
+
 it('opens product assignments when mappings have no configured membership tag', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
@@ -113,14 +157,77 @@ it('opens product assignments when mappings have no configured membership tag', 
         ->assertSee('Membership tag requires configuration');
 });
 
-it('bulk uploads membership mappings by collection handle', function () {
+it('searches parent products by product name or SKU', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->set('assignmentProductSearch', 'SKU-102')
+        ->assertSee('Product 102')
+        ->assertDontSee('Product 101');
+});
+
+it('requires explicit confirmation before updating vibe assignments in Shopify', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    ShopYourVibeCollectionMapping::updateOrCreate(
+        [
+            'parent_collection_id' => 'gid://shopify/Collection/1',
+            'shopify_collection_id' => 'gid://shopify/Collection/2',
+        ],
+        [
+            'collection_name' => 'Bracelets Gold',
+            'collection_handle' => 'pearl',
+            'membership_tag' => 'gold-bracelets',
+            'design_value' => 'Beaded',
+            'colour_style_value' => 'Solid',
+            'is_active' => true,
+        ],
+    );
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1');
+    NewProductDraft::withoutEvents(fn () => NewProductDraft::create([
+        'handle' => 'product-101', 'shopify_id' => 'gid://shopify/Product/101', 'title' => 'Product 101',
+        'tags' => 'old-tag', 'origin' => NewProductDraft::ORIGIN_PRODUCT_MIRROR,
+        'shopify_sync_warnings' => [['field' => 'tags', 'draft_value' => 'old-tag', 'shopify_value' => 'gold-bracelets']],
+    ]));
+
+    $page->call('openProductAssignments', 'gid://shopify/Product/101')
+        ->set('selectedVibes', ['gid://shopify/Collection/2'])
+        ->call('reviewProductAssignments')
+        ->assertSet('confirmingAssignments', true)
+        ->assertDispatched('open-modal', id: 'confirm-vibe-assignments')
+        ->assertSee('immediately add or remove')
+        ->assertSee('tag:')
+        ->assertSee('gold-bracelets')
+        ->assertSee('Bracelet Design:')
+        ->assertSee('Beaded')
+        ->assertSee('Colour Style:')
+        ->assertSee('Solid');
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])->not->toContain('gold-bracelets');
+
+    // This fixture has no product-primary Shopify row; keep the save assertion focused on tag confirmation.
+    ShopYourVibeCollectionMapping::where('shopify_collection_id', 'gid://shopify/Collection/2')
+        ->update(['design_value' => null, 'colour_style_value' => null]);
+    $page->call('saveProductAssignments')->assertHasNoErrors();
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])->toContain('gold-bracelets')
+        ->and(NewProductDraft::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))->toBe('gold-bracelets')
+        ->and(NewProductDraft::where('shopify_id', 'gid://shopify/Product/101')->value('shopify_sync_warnings'))->toBeNull()
+        ->and(ChangeLog::where('product_id', Product::where('shopify_id', 'gid://shopify/Product/101')->value('id'))->where('field', 'tags')->exists())->toBeTrue();
+});
+
+it('bulk uploads optional design mappings without changing membership tags', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
     $file = UploadedFile::fake()->createWithContent('vibe-mappings.csv', implode("\n", [
-        'Collection Handle,Membership Tag,Design,Colour Style',
-        'pearl,gold-bracelets,Gold,Gold',
-        'pastels,pastels-bracelets,Pastels,Pastel',
+        'Handle,Design,Colour Style',
+        'pearl,Gold,Gold',
+        'pastels,,',
+        'pastels,,',
     ]));
 
     Livewire::test(ShopYourVibe::class)
@@ -133,11 +240,35 @@ it('bulk uploads membership mappings by collection handle', function () {
         ->assertDispatched('close-modal', id: 'bulk-vibe-mappings');
 
     expect(ShopYourVibeCollectionMapping::where('collection_handle', 'pearl')->first())
-        ->membership_tag->toBe('gold-bracelets')
+        ->membership_tag->toBeNull()
         ->design_value->toBe('Gold')
         ->colour_style_value->toBe('Gold')
-        ->and(ShopYourVibeCollectionMapping::where('collection_handle', 'pastels')->value('membership_tag'))
-        ->toBe('pastels-bracelets');
+        ->and(ShopYourVibeCollectionMapping::where('collection_handle', 'pastels')->value('design_value'))->toBeNull();
+});
+
+it('globally imports a mapping before its parent collection has been opened', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    ShopYourVibeCollectionMapping::query()->delete();
+    $file = UploadedFile::fake()->createWithContent('vibe-mappings.csv', implode("\n", [
+        'Handle,Design,Colour Style',
+        'pearl,Beaded,Multicolour',
+    ]));
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('openMappingUpload')
+        ->set('mappingUpload.file', $file)
+        ->call('importMappingUpload')
+        ->assertHasNoErrors()
+        ->assertDispatched('close-modal', id: 'bulk-vibe-mappings');
+
+    $mapping = ShopYourVibeCollectionMapping::where('collection_handle', 'pearl')->first();
+    expect($mapping)->not->toBeNull()
+        ->and($mapping->parent_collection_id)->toBe('__global__')
+        ->and($mapping->membership_tag)->toBeNull()
+        ->and($mapping->design_value)->toBe('Beaded')
+        ->and($mapping->colour_style_value)->toBe('Multicolour');
 });
 
 it('creates new vibe cards as active during the push', function () {

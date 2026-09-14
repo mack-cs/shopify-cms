@@ -183,6 +183,9 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         if (str_contains($query, 'query VibeCards')) {
             return ['nodes' => array_map(fn ($id) => $this->cards[$id] ?? null, $variables['ids'])];
         }
+        if (str_contains($query, 'query VibeCollectionMapping')) {
+            return ['collection' => $this->collections[$variables['id']] ?? null];
+        }
         if (str_contains($query, 'query VibeProducts')) {
             return ['collection' => $this->collections[$variables['id']]];
         }

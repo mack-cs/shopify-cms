@@ -3,13 +3,44 @@
 namespace App\Services;
 
 use App\Models\Product;
+use App\Models\ChangeLog;
+use App\Models\NewProductDraft;
+use App\Models\ShopifyRow;
 use App\Models\ShopYourVibeCollectionMapping;
+use App\Services\HeaderStore;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 class ShopYourVibeAssignmentService
 {
-    public function __construct(private readonly ShopYourVibeShopify $shopify) {}
+    private const GLOBAL_PARENT = '__global__';
+
+    public function __construct(
+        private readonly ShopYourVibeShopify $shopify,
+        private readonly ProductShopifyUpdater $productUpdater,
+    ) {}
+
+    /** Discover every configured vibe so a single upload can configure all parents. */
+    public function syncAllMappings(): int
+    {
+        $count = 0;
+        foreach ($this->shopify->parents() as $parent) {
+            $state = $this->shopify->parent($parent['gid']);
+            $gids = [];
+            foreach ($state['cards'] as $card) {
+                $gid = $card['collection_gid'] ?? null;
+                if (! $gid) {
+                    continue;
+                }
+                $this->syncMapping($parent['gid'], $card, $this->shopify->collectionMapping($gid));
+                $gids[] = $gid;
+                $count++;
+            }
+            $this->deactivateMissing($parent['gid'], $gids);
+        }
+
+        return $count;
+    }
 
     public function syncMapping(string $parentGid, array $card, array $collection): ShopYourVibeCollectionMapping
     {
@@ -17,6 +48,18 @@ class ShopYourVibeAssignmentService
             'parent_collection_id' => $parentGid,
             'shopify_collection_id' => $collection['gid'],
         ]);
+        if (! $mapping->exists) {
+            $seed = ShopYourVibeCollectionMapping::query()
+                ->where('shopify_collection_id', $collection['gid'])
+                ->where('is_active', true)
+                ->where(fn ($query) => $query->whereNotNull('design_value')->orWhereNotNull('colour_style_value'))
+                ->latest('id')
+                ->first();
+            if ($seed) {
+                $mapping->design_value = $seed->design_value;
+                $mapping->colour_style_value = $seed->colour_style_value;
+            }
+        }
         $mapping->fill([
             'collection_name' => $collection['title'] ?: $card['name'],
             'collection_handle' => $collection['handle'],
@@ -45,7 +88,7 @@ class ShopYourVibeAssignmentService
     }
 
     /**
-     * @param array<int, array{match:string,membership_tag:string,design_value:?string,colour_style_value:?string,row:int}> $rows
+     * @param array<int, array{match:string,design_value:?string,colour_style_value:?string,row:int}> $rows
      * @return array<int, ShopYourVibeCollectionMapping>
      */
     public function importMappings(string $parentGid, array $rows): array
@@ -70,10 +113,7 @@ class ShopYourVibeAssignmentService
             if (isset($used[$mapping->id])) {
                 throw new RuntimeException('Row '.$row['row'].': this collection appears more than once in the file.');
             }
-            if (trim($row['membership_tag']) === '') {
-                throw new RuntimeException('Row '.$row['row'].': Membership Tag is required.');
-            }
-            foreach (['membership_tag', 'design_value', 'colour_style_value'] as $field) {
+            foreach (['design_value', 'colour_style_value'] as $field) {
                 if (mb_strlen((string) ($row[$field] ?? '')) > 255) {
                     throw new RuntimeException('Row '.$row['row'].': values may not exceed 255 characters.');
                 }
@@ -86,13 +126,85 @@ class ShopYourVibeAssignmentService
             return array_map(function (array $item): ShopYourVibeCollectionMapping {
                 [$mapping, $row] = $item;
                 $mapping->update([
-                    'membership_tag' => trim($row['membership_tag']),
                     'design_value' => $this->nullable($row['design_value'] ?? null),
                     'colour_style_value' => $this->nullable($row['colour_style_value'] ?? null),
                 ]);
 
                 return $mapping->refresh();
             }, $resolved);
+        });
+    }
+
+    /** Configure matching vibe collections across every parent collection. */
+    public function importMappingsGlobally(array $rows): array
+    {
+        $mappings = ShopYourVibeCollectionMapping::query()->where('is_active', true)->get();
+        $resolved = [];
+        $usedCollections = [];
+        foreach ($rows as $row) {
+            $match = mb_strtolower(trim($row['match']));
+            $matches = $mappings->filter(fn ($mapping) => in_array($match, [
+                mb_strtolower(trim($mapping->collection_handle)),
+                mb_strtolower(trim($mapping->collection_name)),
+            ], true));
+            if ($matches->isEmpty()) {
+                $collections = \App\Models\ShopifyCollection::query()
+                    ->whereNotNull('shopify_id')
+                    ->where(function ($query) use ($row): void {
+                        $query->whereRaw('LOWER(handle) = ?', [mb_strtolower(trim($row['match']))])
+                            ->orWhereRaw('LOWER(title) = ?', [mb_strtolower(trim($row['match']))]);
+                    })
+                    ->latest('id')
+                    ->get()
+                    ->unique('shopify_id');
+                if ($collections->count() === 1) {
+                    $collection = $collections->first();
+                    $mapping = ShopYourVibeCollectionMapping::firstOrCreate([
+                        'parent_collection_id' => self::GLOBAL_PARENT,
+                        'shopify_collection_id' => $collection->shopify_id,
+                    ], [
+                        'collection_name' => $collection->title,
+                        'collection_handle' => $collection->handle,
+                        'is_active' => true,
+                    ]);
+                    $mappings->push($mapping);
+                    $matches = collect([$mapping]);
+                }
+            }
+            $collectionIds = $matches->pluck('shopify_collection_id')->unique()->values();
+            if ($collectionIds->count() !== 1) {
+                throw new RuntimeException('Row '.$row['row'].': collection ['.$row['match'].'] must match exactly one Shop Your Vibe collection name or handle.');
+            }
+            $collectionId = $collectionIds->first();
+            $signature = mb_strtolower(trim((string) ($row['design_value'] ?? ''))).'|'.mb_strtolower(trim((string) ($row['colour_style_value'] ?? '')));
+            if (isset($usedCollections[$collectionId])) {
+                if ($usedCollections[$collectionId] !== $signature) {
+                    throw new RuntimeException('Row '.$row['row'].': this collection has conflicting Design or Colour Style values in the file.');
+                }
+                continue;
+            }
+            foreach (['design_value', 'colour_style_value'] as $field) {
+                if (mb_strlen((string) ($row[$field] ?? '')) > 255) {
+                    throw new RuntimeException('Row '.$row['row'].': values may not exceed 255 characters.');
+                }
+            }
+            $usedCollections[$collectionId] = $signature;
+            $resolved[] = [$matches, $row];
+        }
+
+        return DB::transaction(function () use ($resolved): array {
+            $updated = [];
+            foreach ($resolved as [$matches, $row]) {
+                foreach ($matches as $mapping) {
+                    $mapping->update([
+                        'design_value' => $this->nullable($row['design_value'] ?? null),
+                        'colour_style_value' => $this->nullable($row['colour_style_value'] ?? null),
+                    ]);
+                    $updated[] = $mapping->refresh();
+                }
+            }
+
+            return $updated;
         });
     }
 
@@ -104,11 +216,7 @@ class ShopYourVibeAssignmentService
             ->update(['is_active' => false]);
     }
 
-    /**
-     * Update only tags owned by Shop Your Vibe. Shopify remains authoritative.
-     * Design and Colour Style are retained as generic mapping metadata until their
-     * Shopify taxonomy/metaobject mappings are configured; they are never guessed as tags.
-     */
+    /** Update only tags and product attributes owned by Shop Your Vibe. */
     public function assign(string $parentGid, string $productGid, array $selectedCollectionGids): array
     {
         $mappings = ShopYourVibeCollectionMapping::query()
@@ -146,6 +254,48 @@ class ShopYourVibeAssignmentService
             }
         }
 
+        $futureTagKeys = $currentByKey->keys()->reject(fn ($key) => collect($remove)->contains(fn ($tag) => mb_strtolower(trim($tag)) === $key));
+        $futureTagKeys = $futureTagKeys->merge(collect($add)->map(fn ($tag) => mb_strtolower(trim($tag))))->unique();
+        $globalMappings = ShopYourVibeCollectionMapping::query()->where('is_active', true)->get();
+        $activeMappings = $globalMappings->filter(fn ($mapping) => filled($mapping->membership_tag)
+            && $futureTagKeys->contains(mb_strtolower(trim($mapping->membership_tag))));
+        $addedTagKeys = collect($add)->map(fn ($tag) => mb_strtolower(trim($tag)));
+        $removedTagKeys = collect($remove)->map(fn ($tag) => mb_strtolower(trim($tag)));
+        $addedMappings = $mappings->filter(fn ($mapping) => filled($mapping->membership_tag)
+            && $addedTagKeys->contains(mb_strtolower(trim($mapping->membership_tag))));
+        $removedMappings = $mappings->filter(fn ($mapping) => filled($mapping->membership_tag)
+            && $removedTagKeys->contains(mb_strtolower(trim($mapping->membership_tag))));
+        $protectedDesigns = $activeMappings->pluck('design_value')->filter()->map(fn ($value) => mb_strtolower(trim($value)));
+        $protectedColours = $activeMappings->pluck('colour_style_value')->filter()->map(fn ($value) => mb_strtolower(trim($value)));
+        $product = Product::query()->where('shopify_id', $productGid)->latest('id')->firstOrFail();
+        $designHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
+        if ($designHeader === null && $addedMappings->pluck('design_value')->filter()->isNotEmpty()) {
+            $collections = $addedMappings->filter(fn ($mapping) => filled($mapping->design_value))
+                ->pluck('collection_name')->unique()->join(', ');
+            $designs = $addedMappings->pluck('design_value')->filter()->unique()->join(', ');
+            $type = filled($product->type) ? $product->type : 'not set';
+
+            throw new RuntimeException(
+                'Cannot apply Design ['.$designs.'] from Shop Your Vibe ['.$collections.'] to product ['.$product->title.'] '
+                .'because its Product Type is ['.$type.']. Change the Product Type to Bracelets, Necklaces, or Earrings, '
+                .'or remove this Shop Your Vibe selection, then try again. No Shopify changes were made.'
+            );
+        }
+        $primaryRow = ShopifyRow::query()->where('import_id', $product->import_id)->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')->latest('id')->first();
+        $before = [
+            'tags' => TagNormalizer::normalizeFromArray($remote['tags']),
+            'product_design' => $designHeader ? (string) $primaryRow?->get($designHeader, '') : '',
+            'colour_style' => (string) $primaryRow?->get(HeaderStore::PATTERN_CATEGORY, ''),
+        ];
+        $this->productUpdater->syncShopYourVibeAttributes(
+            $product,
+            $addedMappings->pluck('design_value')->filter()->unique()->values()->all(),
+            $addedMappings->pluck('colour_style_value')->filter()->unique()->values()->all(),
+            $removedMappings->pluck('design_value')->filter(fn ($value) => ! $protectedDesigns->contains(mb_strtolower(trim($value))))->unique()->values()->all(),
+            $removedMappings->pluck('colour_style_value')->filter(fn ($value) => ! $protectedColours->contains(mb_strtolower(trim($value))))->unique()->values()->all(),
+        );
+
         if ($add !== []) {
             $this->shopify->addProductTags($productGid, $add);
         }
@@ -154,16 +304,54 @@ class ShopYourVibeAssignmentService
         }
 
         $confirmed = $this->shopify->productTags($productGid);
-        DB::transaction(function () use ($productGid, $confirmed): void {
-            $productId = Product::query()->where('shopify_id', $productGid)->latest('id')->value('id');
-            if ($productId) {
-                Product::query()->whereKey($productId)->update([
-                    'tags' => TagNormalizer::normalizeFromArray($confirmed['tags']),
+        $this->reconcileConfirmedState($product, $primaryRow?->fresh(), $designHeader, $before, $confirmed['tags']);
+
+        return $confirmed;
+    }
+
+    private function reconcileConfirmedState(Product $product, ?ShopifyRow $row, ?string $designHeader, array $before, array $confirmedTags): void
+    {
+        $after = [
+            'tags' => TagNormalizer::normalizeFromArray($confirmedTags),
+            'product_design' => $designHeader ? (string) $row?->get($designHeader, '') : '',
+            'colour_style' => (string) $row?->get(HeaderStore::PATTERN_CATEGORY, ''),
+        ];
+
+        DB::transaction(function () use ($product, $row, $before, $after): void {
+            Product::query()->whereKey($product->id)->update(['tags' => $after['tags']]);
+            $drafts = NewProductDraft::query()->where(function ($query) use ($product): void {
+                $query->where('shopify_id', $product->shopify_id)->orWhere('handle', $product->handle);
+            })->get();
+            foreach ($drafts as $draft) {
+                $warnings = collect($draft->shopify_sync_warnings ?? [])->reject(
+                    fn ($warning) => in_array(data_get($warning, 'field'), ['tags', 'product_design', 'colour_style'], true)
+                )->values()->all();
+                NewProductDraft::withoutEvents(fn () => $draft->forceFill([
+                    'tags' => $after['tags'],
+                    'product_design' => $after['product_design'] !== '' ? $after['product_design'] : null,
+                    'colour_style' => $after['colour_style'] !== '' ? $after['colour_style'] : null,
+                    'shopify_sync_warnings' => $warnings !== [] ? $warnings : null,
+                ])->save());
+            }
+            foreach ($after as $field => $newValue) {
+                $oldValue = (string) ($before[$field] ?? '');
+                if ($oldValue === (string) $newValue) {
+                    continue;
+                }
+                ChangeLog::create([
+                    'import_id' => $product->import_id,
+                    'product_id' => $product->id,
+                    'shopify_row_id' => $row?->id,
+                    'changed_by' => auth()->id(),
+                    'source' => 'shop_your_vibe',
+                    'model_type' => Product::class,
+                    'model_id' => $product->id,
+                    'field' => $field,
+                    'old_value' => $oldValue,
+                    'new_value' => (string) $newValue,
                 ]);
             }
         });
-
-        return $confirmed;
     }
 
     private function nullable(mixed $value): ?string

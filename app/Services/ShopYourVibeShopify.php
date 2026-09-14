@@ -161,6 +161,31 @@ GQL, ['id' => $gid, 'after' => $after]);
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
     }
 
+    /** Lightweight collection data used while globally configuring mappings. */
+    public function collectionMapping(string $gid): array
+    {
+        $this->gid($gid, 'Collection');
+        $data = $this->client->graphql(<<<'GQL'
+query VibeCollectionMapping($id: ID!) { collection(id: $id) {
+  id title handle productsCount { count }
+  ruleSet { appliedDisjunctively rules { column relation condition } }
+} }
+GQL, ['id' => $gid]);
+        $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
+        $tagRules = collect(data_get($node, 'ruleSet.rules', []))
+            ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG'
+                && strtoupper((string) ($rule['relation'] ?? '')) === 'EQUALS')
+            ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
+
+        return [
+            'gid' => $gid,
+            'title' => $node['title'],
+            'handle' => $node['handle'],
+            'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
+            'product_count' => (int) data_get($node, 'productsCount.count', 0),
+        ];
+    }
+
     public function parentProducts(string $gid): array
     {
         $this->gid($gid, 'Collection');
