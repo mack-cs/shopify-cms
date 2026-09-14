@@ -99,6 +99,10 @@ class ShopYourVibe extends Page
 
     public array $mappingForm = [];
 
+    public array $mappingUpload = [];
+
+    public bool $uploadingMappings = false;
+
     public ?string $loadError = null;
 
     public static function canAccess(): bool
@@ -208,7 +212,57 @@ class ShopYourVibe extends Page
 
     protected function getForms(): array
     {
-        return ['collectionPickerForm', 'newCollectionForm'];
+        return ['collectionPickerForm', 'newCollectionForm', 'mappingUploadForm'];
+    }
+
+    public function mappingUploadForm(Form $form): Form
+    {
+        return $form->statePath('mappingUpload')->schema([
+            FileUpload::make('file')
+                ->label('Shop Your Vibe mapping CSV')
+                ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                ->maxSize(5120)
+                ->storeFiles(false)
+                ->required(),
+        ]);
+    }
+
+    public function openMappingUpload(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId, 422);
+        $this->activeTab = 'vibes';
+        $this->uploadingMappings = true;
+        $this->mappingUploadForm->fill();
+        $this->dispatch('open-modal', id: 'bulk-vibe-mappings');
+    }
+
+    public function closeMappingUpload(): void
+    {
+        $this->uploadingMappings = false;
+        $this->mappingUpload = [];
+        $this->resetValidation();
+    }
+
+    public function importMappingUpload(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->uploadingMappings, 422);
+        $data = $this->mappingUploadForm->getState();
+        $this->attempt(function () use ($data): void {
+            $rows = $this->readMappingCsv($data['file']);
+            $updated = app(ShopYourVibeAssignmentService::class)->importMappings($this->draft()->collection_gid, $rows);
+            $byId = collect($updated)->keyBy('id');
+            foreach ($this->vibeMappings as &$mapping) {
+                if ($saved = $byId->get($mapping['id'])) {
+                    $mapping = array_replace($mapping, $saved->toArray());
+                }
+            }
+            unset($mapping);
+            $this->closeMappingUpload();
+            $this->dispatch('close-modal', id: 'bulk-vibe-mappings');
+            Notification::make()->title(count($updated).' Shop Your Vibe mappings updated')->success()->send();
+        });
     }
 
     public function newCollectionForm(Form $form): Form
@@ -637,6 +691,74 @@ class ShopYourVibe extends Page
         if ($refreshProducts || $this->parentProducts === []) {
             $this->parentProducts = $shopify->parentProducts($draft->collection_gid);
         }
+    }
+
+    private function readMappingCsv(mixed $file): array
+    {
+        $path = is_object($file) && method_exists($file, 'getRealPath')
+            ? $file->getRealPath()
+            : (is_string($file) ? Storage::disk('local')->path($file) : null);
+        if (! $path || ! is_readable($path)) {
+            throw new \RuntimeException('The uploaded mapping CSV could not be read.');
+        }
+
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            throw new \RuntimeException('The uploaded mapping CSV could not be opened.');
+        }
+        try {
+            $headers = fgetcsv($handle, null, ',', '"', '');
+            if (! is_array($headers)) {
+                throw new \RuntimeException('The mapping CSV is empty.');
+            }
+            $normalized = array_map(function ($header): string {
+                $header = preg_replace('/^\xEF\xBB\xBF/', '', (string) $header);
+
+                return strtolower(trim(preg_replace('/[^a-z0-9]+/i', ' ', $header)));
+            }, $headers);
+            $indexes = array_flip($normalized);
+            $matchIndexes = array_values(array_filter([
+                $indexes['collection handle'] ?? null,
+                $indexes['collection name'] ?? null,
+                $indexes['collection'] ?? null,
+            ], fn ($index) => $index !== null));
+            $tagIndex = $indexes['membership tag'] ?? null;
+            if ($matchIndexes === [] || $tagIndex === null) {
+                throw new \RuntimeException('CSV headers must include Collection Handle (or Collection Name) and Membership Tag.');
+            }
+
+            $rows = [];
+            $rowNumber = 1;
+            while (($values = fgetcsv($handle, null, ',', '"', '')) !== false) {
+                $rowNumber++;
+                if (count(array_filter($values, fn ($value) => trim((string) $value) !== '')) === 0) {
+                    continue;
+                }
+                $match = '';
+                foreach ($matchIndexes as $index) {
+                    $match = trim((string) ($values[$index] ?? ''));
+                    if ($match !== '') {
+                        break;
+                    }
+                }
+                $rows[] = [
+                    'row' => $rowNumber,
+                    'match' => $match,
+                    'membership_tag' => trim((string) ($values[$tagIndex] ?? '')),
+                    'design_value' => isset($indexes['design']) ? trim((string) ($values[$indexes['design']] ?? '')) : null,
+                    'colour_style_value' => isset($indexes['colour style'])
+                        ? trim((string) ($values[$indexes['colour style']] ?? ''))
+                        : (isset($indexes['color style']) ? trim((string) ($values[$indexes['color style']] ?? '')) : null),
+                ];
+            }
+        } finally {
+            fclose($handle);
+        }
+        if ($rows === []) {
+            throw new \RuntimeException('The mapping CSV contains no data rows.');
+        }
+
+        return $rows;
     }
 
     private function deactivateCardMapping(?string $collectionGid): void

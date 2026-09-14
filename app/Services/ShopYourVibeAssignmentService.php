@@ -44,6 +44,58 @@ class ShopYourVibeAssignmentService
         return $mapping->refresh();
     }
 
+    /**
+     * @param array<int, array{match:string,membership_tag:string,design_value:?string,colour_style_value:?string,row:int}> $rows
+     * @return array<int, ShopYourVibeCollectionMapping>
+     */
+    public function importMappings(string $parentGid, array $rows): array
+    {
+        $mappings = ShopYourVibeCollectionMapping::query()
+            ->where('parent_collection_id', $parentGid)
+            ->where('is_active', true)
+            ->get();
+        $resolved = [];
+        $used = [];
+
+        foreach ($rows as $row) {
+            $match = mb_strtolower(trim($row['match']));
+            $matches = $mappings->filter(fn ($mapping) => in_array($match, [
+                mb_strtolower(trim($mapping->collection_handle)),
+                mb_strtolower(trim($mapping->collection_name)),
+            ], true));
+            if ($matches->count() !== 1) {
+                throw new RuntimeException('Row '.$row['row'].': collection ['.$row['match'].'] must match exactly one Shop Your Vibe name or handle.');
+            }
+            $mapping = $matches->first();
+            if (isset($used[$mapping->id])) {
+                throw new RuntimeException('Row '.$row['row'].': this collection appears more than once in the file.');
+            }
+            if (trim($row['membership_tag']) === '') {
+                throw new RuntimeException('Row '.$row['row'].': Membership Tag is required.');
+            }
+            foreach (['membership_tag', 'design_value', 'colour_style_value'] as $field) {
+                if (mb_strlen((string) ($row[$field] ?? '')) > 255) {
+                    throw new RuntimeException('Row '.$row['row'].': values may not exceed 255 characters.');
+                }
+            }
+            $used[$mapping->id] = true;
+            $resolved[] = [$mapping, $row];
+        }
+
+        return DB::transaction(function () use ($resolved): array {
+            return array_map(function (array $item): ShopYourVibeCollectionMapping {
+                [$mapping, $row] = $item;
+                $mapping->update([
+                    'membership_tag' => trim($row['membership_tag']),
+                    'design_value' => $this->nullable($row['design_value'] ?? null),
+                    'colour_style_value' => $this->nullable($row['colour_style_value'] ?? null),
+                ]);
+
+                return $mapping->refresh();
+            }, $resolved);
+        });
+    }
+
     public function deactivateMissing(string $parentGid, array $collectionGids): void
     {
         ShopYourVibeCollectionMapping::query()

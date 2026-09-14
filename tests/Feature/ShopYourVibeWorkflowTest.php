@@ -113,6 +113,33 @@ it('opens product assignments when mappings have no configured membership tag', 
         ->assertSee('Membership tag requires configuration');
 });
 
+it('bulk uploads membership mappings by collection handle', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $file = UploadedFile::fake()->createWithContent('vibe-mappings.csv', implode("\n", [
+        'Collection Handle,Membership Tag,Design,Colour Style',
+        'pearl,gold-bracelets,Gold,Gold',
+        'pastels,pastels-bracelets,Pastels,Pastel',
+    ]));
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->call('openMappingUpload')
+        ->assertSet('activeTab', 'vibes')
+        ->set('mappingUpload.file', $file)
+        ->call('importMappingUpload')
+        ->assertHasNoErrors()
+        ->assertDispatched('close-modal', id: 'bulk-vibe-mappings');
+
+    expect(ShopYourVibeCollectionMapping::where('collection_handle', 'pearl')->first())
+        ->membership_tag->toBe('gold-bracelets')
+        ->design_value->toBe('Gold')
+        ->colour_style_value->toBe('Gold')
+        ->and(ShopYourVibeCollectionMapping::where('collection_handle', 'pastels')->value('membership_tag'))
+        ->toBe('pastels-bracelets');
+});
+
 it('creates new vibe cards as active during the push', function () {
     vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
     expect($this->fake->mutations())->toBe([]);

@@ -162,7 +162,10 @@
                 <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes'])>
                 <div class="flex items-center justify-between gap-3">
                     <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder, or use the arrow buttons. Reordering saves a pending draft.</p></div>
-                    <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled">Add Vibe</x-filament::button>
+                    <div class="flex flex-wrap gap-2">
+                        <x-filament::button color="gray" wire:click="openMappingUpload" wire:loading.attr="disabled">Bulk Upload Mappings</x-filament::button>
+                        <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled">Add Vibe</x-filament::button>
+                    </div>
                 </div>
                 <div data-order-grid class="syv-card-grid"
                     wire:key="vibe-grid-{{ $draft->id }}-{{ $draft->status === 'pushing' ? 'locked' : 'editable' }}"
@@ -345,6 +348,25 @@
             <x-slot name="footer">
                 <x-filament::button wire:click="saveProductAssignments" wire:loading.attr="disabled">Save assignments</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-vibe-assignments' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="bulk-vibe-mappings" width="2xl" heading="Bulk Upload Shop Your Vibe Mappings"
+            x-on:modal-closed.stop="$wire.closeMappingUpload()">
+            @if ($uploadingMappings)
+                @if ($loadError)<p role="alert" class="mb-4 rounded-lg border border-danger-300 bg-danger-50 p-3 text-danger-800">{{ $loadError }}</p>@endif
+                <p class="mb-3 text-sm text-gray-600 dark:text-gray-300">Upload a CSV exported from Google Sheets or Excel. Collections are matched exactly by handle or name. Unmatched or duplicate rows stop the import before anything is changed.</p>
+                <div class="mb-4 overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+                    <table class="w-full text-left text-sm">
+                        <thead><tr><th class="p-2">Collection Handle</th><th class="p-2">Membership Tag</th><th class="p-2">Design</th><th class="p-2">Colour Style</th></tr></thead>
+                        <tbody><tr><td class="p-2">bracelets-gold</td><td class="p-2">gold-bracelets</td><td class="p-2">Gold</td><td class="p-2">Gold</td></tr></tbody>
+                    </table>
+                </div>
+                {{ $this->mappingUploadForm }}
+            @endif
+            <x-slot name="footer">
+                <x-filament::button wire:click="importMappingUpload" wire:loading.attr="disabled">Upload and Apply Mappings</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'bulk-vibe-mappings' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
     </div>
