@@ -37,6 +37,83 @@ class ShopYourVibeAssignmentService
         private readonly ProductShopifyUpdater $productUpdater,
     ) {}
 
+    /** Reconcile only Shop Your Vibe membership tags from live Shopify product tags. */
+    public function backfillMembershipTags(?int $userId = null): array
+    {
+        $mappings = ShopYourVibeCollectionMapping::query()
+            ->where('is_active', true)
+            ->where('parent_collection_id', '!=', self::GLOBAL_PARENT)
+            ->whereNotNull('membership_tag')
+            ->get();
+        $managed = $mappings->pluck('membership_tag')->filter()->mapWithKeys(
+            fn ($tag) => [mb_strtolower(trim((string) $tag)) => trim((string) $tag)]
+        );
+        $seen = [];
+        $updated = 0;
+        $skipped = 0;
+
+        foreach ($mappings->groupBy('parent_collection_id') as $parentGid => $parentMappings) {
+            foreach ($this->shopify->parentProducts($parentGid) as $remote) {
+                $gid = (string) ($remote['id'] ?? '');
+                if ($gid === '' || isset($seen[$gid])) {
+                    continue;
+                }
+                $seen[$gid] = true;
+                $product = Product::query()->where('shopify_id', $gid)->latest('id')->first();
+                if (! $product) {
+                    $skipped++;
+                    continue;
+                }
+
+                $remoteTags = TagNormalizer::parseTokens(
+                    TagNormalizer::normalizeFromArray((array) ($remote['tags'] ?? []))
+                );
+                $remoteManaged = collect($remoteTags)->filter(
+                    fn ($tag) => $managed->has(mb_strtolower(trim((string) $tag)))
+                )->values()->all();
+                $localUnmanaged = collect(TagNormalizer::parseTokens($product->tags))->reject(
+                    fn ($tag) => $managed->has(mb_strtolower(trim((string) $tag)))
+                )->values()->all();
+                $newTags = TagNormalizer::normalizeFromArray(array_merge($localUnmanaged, $remoteManaged));
+                $oldTags = TagNormalizer::normalizeFromArray(TagNormalizer::parseTokens($product->tags));
+                if (TagNormalizer::normalizeForComparison($oldTags) === TagNormalizer::normalizeForComparison($newTags)) {
+                    continue;
+                }
+
+                Product::withoutEvents(fn () => Product::query()->whereKey($product->id)->update(['tags' => $newTags]));
+                $drafts = NewProductDraft::query()->where(function ($query) use ($product): void {
+                    $query->where('shopify_id', $product->shopify_id)->orWhere('handle', $product->handle);
+                })->get();
+                foreach ($drafts as $draft) {
+                    $draftUnmanaged = collect(TagNormalizer::parseTokens($draft->tags))->reject(
+                        fn ($tag) => $managed->has(mb_strtolower(trim((string) $tag)))
+                    )->values()->all();
+                    $warnings = collect($draft->shopify_sync_warnings ?? [])->reject(
+                        fn ($warning) => data_get($warning, 'field') === 'tags'
+                    )->values()->all();
+                    NewProductDraft::withoutEvents(fn () => $draft->forceFill([
+                        'tags' => TagNormalizer::normalizeFromArray(array_merge($draftUnmanaged, $remoteManaged)),
+                        'shopify_sync_warnings' => $warnings !== [] ? $warnings : null,
+                    ])->save());
+                }
+                ChangeLog::create([
+                    'import_id' => $product->import_id,
+                    'product_id' => $product->id,
+                    'changed_by' => $userId,
+                    'source' => 'shop_your_vibe_backfill',
+                    'model_type' => Product::class,
+                    'model_id' => $product->id,
+                    'field' => 'tags',
+                    'old_value' => $oldTags,
+                    'new_value' => $newTags,
+                ]);
+                $updated++;
+            }
+        }
+
+        return ['updated' => $updated, 'skipped' => $skipped, 'checked' => count($seen)];
+    }
+
     /** Discover every configured vibe so a single upload can configure all parents. */
     public function syncAllMappings(): int
     {

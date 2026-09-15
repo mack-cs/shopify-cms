@@ -720,8 +720,11 @@ class ShopYourVibe extends Page
             }
             $collection = $shopify->collection($gid);
             $mapping = $service->syncMapping($draft->collection_gid, $card, $collection);
-            $mappings[] = $mapping->toArray() + ['product_count' => $collection['product_count']];
+            // More than one preview card may link to the same Shopify collection.
+            // Product assignment is collection-based, so show and process it only once.
+            $mappings[$gid] = $mapping->toArray() + ['product_count' => $collection['product_count']];
         }
+        $mappings = array_values($mappings);
         $service->deactivateMissing($draft->collection_gid, array_column($mappings, 'shopify_collection_id'));
         $this->vibeMappings = $mappings;
         if ($refreshProducts || $this->parentProducts === []) {

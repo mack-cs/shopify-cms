@@ -143,6 +143,34 @@ it('clearly explains when a mapped design is incompatible with the product type'
     expect($this->fake->products['gid://shopify/Product/101']['tags'])->not->toContain('gold-bracelets');
 });
 
+it('backfills live Shopify vibe tags into products and drafts without duplicating them', function () {
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1',
+        'shopify_collection_id' => 'gid://shopify/Collection/2',
+        'collection_name' => 'Bracelets Gold',
+        'collection_handle' => 'bracelets-gold',
+        'membership_tag' => 'gold-bracelets',
+    ]);
+    $product = Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail();
+    Product::withoutEvents(fn () => $product->update(['tags' => 'all-products']));
+    NewProductDraft::withoutEvents(fn () => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'tags' => 'all-products',
+        'status' => 'active',
+        'origin' => NewProductDraft::ORIGIN_PRODUCT_MIRROR,
+    ]));
+    $this->fake->products['gid://shopify/Product/101']['tags'] = ['all-products', 'gold-bracelets', 'gold-bracelets'];
+    $this->fake->collections['gid://shopify/Collection/1']['products']['nodes'][0]['tags'] = ['all-products', 'gold-bracelets', 'gold-bracelets'];
+
+    $result = app(ShopYourVibeAssignmentService::class)->backfillMembershipTags($this->user->id);
+
+    expect($result['updated'])->toBe(1)
+        ->and($product->fresh()->tags)->toBe('all-products, gold-bracelets')
+        ->and(NewProductDraft::where('shopify_id', $product->shopify_id)->value('tags'))->toBe('all-products, gold-bracelets');
+});
+
 it('opens product assignments when mappings have no configured membership tag', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
@@ -167,6 +195,23 @@ it('searches parent products by product name or SKU', function () {
         ->set('assignmentProductSearch', 'SKU-102')
         ->assertSee('Product 102')
         ->assertDontSee('Product 101');
+});
+
+it('shows a linked Shopify collection only once when duplicate preview cards reference it', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $draft = ShopYourVibeDraft::where('collection_gid', 'gid://shopify/Collection/1')->firstOrFail();
+    $desired = $draft->desired;
+    $duplicate = $desired['cards'][0];
+    $duplicate['key'] = 'gid://shopify/Metaobject/duplicate';
+    $duplicate['id'] = 'gid://shopify/Metaobject/duplicate';
+    $desired['cards'][] = $duplicate;
+    $draft->update(['desired' => $desired]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->assertCount('vibeMappings', count(collect($desired['cards'])->pluck('collection_gid')->filter()->unique()));
 });
 
 it('requires explicit confirmation before updating vibe assignments in Shopify', function () {
