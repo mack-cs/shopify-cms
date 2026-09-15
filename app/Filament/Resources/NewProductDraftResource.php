@@ -26,6 +26,7 @@ use App\Models\SaleImportBatch;
 use App\Models\SaleImportItem;
 use App\Models\SaleProductUpdate;
 use App\Models\DropdownOption;
+use App\Services\DraftShopYourVibeSelection;
 use App\Models\Tag;
 use App\Models\User;
 use App\Models\Variant;
@@ -532,6 +533,7 @@ class NewProductDraftResource extends Resource
                                         $get('title'),
                                         self::saleStateFromForm($get('is_on_sale'), $get('tags'))
                                     ));
+                                    self::refreshDraftVibeSelection($set, $get);
                                 }),
                             Select::make('vendor')
                                 ->label('Vendor')
@@ -551,7 +553,8 @@ class NewProductDraftResource extends Resource
                                     fn (Get $get): \Closure => self::vendorMatchesCollectionRule(
                                         $get('collection_filter')
                                     ),
-                                ]),
+                                ])
+                                ->afterStateUpdated(fn (callable $set, Get $get) => self::refreshDraftVibeSelection($set, $get)),
                             Select::make('sibling_collection')
                                 ->label('Sibling Collection')
                                 ->placeholder('Select sibling collection')
@@ -1363,6 +1366,32 @@ class NewProductDraftResource extends Resource
                             return 'This product already exists. Image is read-only here and synced product images take priority.';
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::draftImageLocked($get, $record)),
+                    Select::make('shop_your_vibe_collections')
+                        ->label('Shop Your Vibe')->multiple()->searchable()->preload()->live()->dehydrated(false)
+                        ->placeholder('Select Shop Your Vibe collections')
+                        ->helperText('Choose vibes for this collection or vendor. Use Refresh vibes to load the latest Shopify choices. Greyed-out choices need a membership tag configured in Shop Your Vibe.')
+                        ->hintAction(FormAction::make('refreshDraftVibes')
+                            ->label('Refresh vibes')->icon('heroicon-o-arrow-path')
+                            ->action(function (callable $set, Get $get): void {
+                                try {
+                                    app(DraftShopYourVibeSelection::class)->refresh($get('collection_filter'), $get('vendor'));
+                                    $set('shop_your_vibe_collections', app(DraftShopYourVibeSelection::class)->selected($get('tags'), $get('collection_filter'), $get('vendor')));
+                                    Notification::make()->title('Shop Your Vibe choices refreshed')->success()->send();
+                                } catch (\Throwable $e) {
+                                    report($e);
+                                    Notification::make()->title('Could not refresh Shop Your Vibe')->body('Please check the Shopify connection and try again.')->danger()->send();
+                                }
+                            }))
+                        ->options(fn (Get $get) => app(DraftShopYourVibeSelection::class)->options($get('collection_filter'), $get('vendor')))
+                        ->disableOptionWhen(fn ($value, Get $get) => in_array($value, app(DraftShopYourVibeSelection::class)->unavailable($get('collection_filter'), $get('vendor')), true))
+                        ->disabled(fn (Get $get) => blank($get('collection_filter')) && blank($get('vendor')))
+                        ->afterStateHydrated(function (Select $component, Get $get): void {
+                            $component->state(app(DraftShopYourVibeSelection::class)->selected($get('tags'), $get('collection_filter'), $get('vendor')));
+                        })
+                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                            $set('tags', app(DraftShopYourVibeSelection::class)->apply($get('tags'), $state ?? [],
+                                $get('collection_filter'), $get('vendor'), self::collectionTags($get('collection_filter'))));
+                        }),
                     Select::make('colour_style')
                                 ->label('Color Style')
                                 ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
@@ -1885,7 +1914,9 @@ class NewProductDraftResource extends Resource
     ): array {
         $normalized = self::normalizeTagList($currentTags);
         $selectionTags = self::collectionTags($collection, forProductTags: false);
-        $isBundleContext = self::isBundleOrStackState($type, $selectionTags, $title);
+        // An explicit collection overrides the old title/type, which may still describe a stack.
+        $isBundleContext = self::hasBundleOrStackTag(array_merge($selectionTags, [$collection ?? '']));
+        $type = self::categoryMappingForCollection($collection)['type'] ?? $type;
         $collectionTags = $isBundleContext
             ? self::bundleContextCollectionTags($collection)
             : self::collectionTags($collection);
@@ -1893,7 +1924,7 @@ class NewProductDraftResource extends Resource
         $kept = array_values(array_filter(
             $normalized,
             fn (string $tag): bool => !in_array($tag, $collectionPool, true)
-                && ($isBundleContext || !self::hasBundleOrStackTag([$tag]))
+                && !self::hasBundleOrStackTag([$tag])
         ));
 
         return self::defaultedDraftTags(
@@ -1901,6 +1932,16 @@ class NewProductDraftResource extends Resource
             $type,
             $isOnSale
         );
+    }
+
+    private static function refreshDraftVibeSelection(callable $set, Get $get): void
+    {
+        $service = app(DraftShopYourVibeSelection::class);
+        $collection = $get('collection_filter');
+        $vendor = $get('vendor');
+        $selected = $service->selected($get('tags'), $collection, $vendor);
+        $set('shop_your_vibe_collections', $selected);
+        $set('tags', $service->apply($get('tags'), $selected, $collection, $vendor, self::collectionTags($collection)));
     }
 
     private static function categoryMappingForCollection(?string $collection): ?array
@@ -3493,9 +3534,7 @@ class NewProductDraftResource extends Resource
     {
         $collection = $get('collection_filter');
         if ($collection) {
-            $rawTags = $get('tags');
-            $currentTags = self::normalizeTagList($rawTags);
-            $isBundleContext = self::isBundleOrStackState($productType, $currentTags, $get('title'));
+            $isBundleContext = self::hasBundleOrStackTag(array_merge(self::collectionTags($collection, forProductTags: false), [$collection]));
             $tags = $isBundleContext
                 ? self::bundleContextCollectionTags($collection, forProductTags: false)
                 : self::collectionTags($collection, forProductTags: false);

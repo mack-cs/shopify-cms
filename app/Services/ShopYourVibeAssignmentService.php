@@ -15,6 +15,23 @@ class ShopYourVibeAssignmentService
 {
     private const GLOBAL_PARENT = '__global__';
 
+    /** Reuse configuration saved for the same Shopify collection under any parent. */
+    public static function configuredMappings(array $parentGids): \Illuminate\Support\Collection
+    {
+        $all = ShopYourVibeCollectionMapping::where('is_active', true)->latest('id')->get();
+        return $all->whereIn('parent_collection_id', $parentGids)->map(function ($mapping) use ($all) {
+            $resolved = clone $mapping;
+            foreach (['membership_tag', 'design_value', 'colour_style_value'] as $field) {
+                if (blank($resolved->{$field})) {
+                    $source = $all->first(fn ($candidate) => $candidate->shopify_collection_id === $mapping->shopify_collection_id
+                        && filled($candidate->{$field}));
+                    $resolved->{$field} = $source?->{$field};
+                }
+            }
+            return $resolved;
+        })->values();
+    }
+
     public function __construct(
         private readonly ShopYourVibeShopify $shopify,
         private readonly ProductShopifyUpdater $productUpdater,
@@ -52,10 +69,11 @@ class ShopYourVibeAssignmentService
             $seed = ShopYourVibeCollectionMapping::query()
                 ->where('shopify_collection_id', $collection['gid'])
                 ->where('is_active', true)
-                ->where(fn ($query) => $query->whereNotNull('design_value')->orWhereNotNull('colour_style_value'))
+                ->where(fn ($query) => $query->whereNotNull('membership_tag')->orWhereNotNull('design_value')->orWhereNotNull('colour_style_value'))
                 ->latest('id')
                 ->first();
             if ($seed) {
+                $mapping->membership_tag = $seed->membership_tag;
                 $mapping->design_value = $seed->design_value;
                 $mapping->colour_style_value = $seed->colour_style_value;
             }
