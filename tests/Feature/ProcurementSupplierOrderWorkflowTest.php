@@ -258,6 +258,26 @@ it('rejects supplier orders when a sku matches both a draft and an active produc
         ->and($batch->errors['2'][0])->toContain('SKU must match exactly one');
 });
 
+it('treats an active variant and its mirrored draft as one supplier-order SKU', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('MIRROR-PO-1');
+    NewProductDraft::withoutEvents(fn () => NewProductDraft::create([
+        'sku' => 'MIRROR-PO-1',
+        'shopify_id' => $variant->product->shopify_id,
+        'handle' => $variant->product->handle,
+        'title' => $variant->product->title,
+        'status' => 'active',
+        'origin' => NewProductDraft::ORIGIN_PRODUCT_MIRROR,
+    ]));
+
+    $csv = app(SupplierOrderCsvService::class);
+    $batch = $csv->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tMIRROR-PO-1\t3\tPO-MIRROR\t15/09/2026");
+
+    expect($batch->valid_count)->toBe(1)->and($batch->invalid_count)->toBe(0);
+    $csv->confirm($batch->uuid);
+    expect(ProcurementSupplierOrderLine::where('sku', 'MIRROR-PO-1')->value('variant_id'))->toBe($variant->id);
+});
+
 it('previews pasted received orders and stages them for Shopify review', function (): void {
     Bus::fake();
     config(['google_sheets.enabled' => false]);

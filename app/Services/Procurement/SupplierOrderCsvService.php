@@ -301,13 +301,27 @@ final class SupplierOrderCsvService
             $variantQuery->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle());
         }
 
+        $variants = $variantQuery->with('product:id,shopify_id,handle')->get();
         $draftCount = $type === 'order'
             ? NewProductDraft::query()
                 ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
                 ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+                ->get()
+                ->reject(fn (NewProductDraft $draft) => $this->draftMirrorsVariant($draft, $variants))
                 ->count()
             : 0;
 
-        return $variantQuery->count() + $draftCount;
+        return $variants->count() + $draftCount;
+    }
+
+    private function draftMirrorsVariant(NewProductDraft $draft, $variants): bool
+    {
+        return $variants->contains(function (Variant $variant) use ($draft, $variants): bool {
+            $product = $variant->product;
+
+            return (filled($draft->shopify_id) && $draft->shopify_id === $product?->shopify_id)
+                || (filled($draft->handle) && $draft->handle === $product?->handle)
+                || ($draft->origin === NewProductDraft::ORIGIN_PRODUCT_MIRROR && $variants->count() === 1);
+        });
     }
 }
