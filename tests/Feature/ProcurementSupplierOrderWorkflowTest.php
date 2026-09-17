@@ -421,6 +421,21 @@ it('allows several SKUs on one new order CSV', function (): void {
         ->and(ProcurementSupplierOrderLine::query()->whereHas('order', fn ($query) => $query->where('order_number', 'PO-MULTI'))->count())->toBe(2);
 });
 
+it('revalidates an unchanged pasted order after an earlier invalid preview', function (): void {
+    $contents = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nREVALIDATE-1\t3\tPO-REVALIDATE\t15/09/2026";
+    $csv = app(SupplierOrderCsvService::class);
+    $invalid = $csv->previewPastedOrder($contents);
+    expect($invalid->invalid_count)->toBe(1);
+
+    supplierWorkflowVariant('REVALIDATE-1');
+    $valid = $csv->previewPastedOrder($contents);
+
+    expect($valid->id)->toBe($invalid->id)
+        ->and($valid->valid_count)->toBe(1)
+        ->and($valid->invalid_count)->toBe(0)
+        ->and($valid->errors)->toBeNull();
+});
+
 it('rejects duplicate Order ID and SKU lines within one pending-order CSV', function (): void {
     config(['google_sheets.enabled' => false]);
     supplierWorkflowVariant('DUP-LINE-1');
