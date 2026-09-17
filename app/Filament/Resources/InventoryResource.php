@@ -249,11 +249,6 @@ class InventoryResource extends Resource
                     ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->line?->order?->order_number : null)
                     ->placeholder('-')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
-                TextColumn::make('grv_report_supplier')
-                    ->label('Supplier')
-                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->line?->variant?->product?->vendor : null)
-                    ->placeholder('-')
-                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
                 TextColumn::make('grv_report_received_at')
                     ->label('Receipt Date')
                     ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? ($record->received_at ?? $record->created_at)?->format('d/m/Y H:i') : null)
@@ -263,8 +258,8 @@ class InventoryResource extends Resource
                     ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->createdBy?->name : null)
                     ->placeholder('-')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
-                TextColumn::make('grv_report_skus')
-                    ->label('SKUs')
+                TextColumn::make('grv_report_sku_preview')
+                    ->label('SKU Preview')
                     ->state(function (Model $record): string {
                         if (! ($record instanceof ProcurementSupplierReceipt) || blank($record->grv_number)) {
                             return '-';
@@ -275,7 +270,12 @@ class InventoryResource extends Resource
                             ->where('grv_number', $record->grv_number)
                             ->get()
                             ->map(fn (ProcurementSupplierReceipt $receipt): string => ($receipt->line?->sku ?? '-') . ' x ' . $receipt->quantity_received)
-                            ->implode(', ');
+                            ->pipe(function (Collection $items): string {
+                                $preview = $items->take(2)->implode(', ');
+                                $remaining = $items->count() - 2;
+
+                                return $remaining > 0 ? "{$preview} +{$remaining} more" : ($preview ?: '-');
+                            });
                     })
                     ->wrap()
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),

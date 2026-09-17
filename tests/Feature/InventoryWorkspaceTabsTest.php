@@ -151,10 +151,9 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertCanSeeTableRecords([$receipt])
         ->assertTableColumnVisible('grv_report_number')
         ->assertTableColumnVisible('grv_report_order')
-        ->assertTableColumnVisible('grv_report_supplier')
         ->assertTableColumnVisible('grv_report_received_at')
         ->assertTableColumnVisible('grv_report_received_by')
-        ->assertTableColumnVisible('grv_report_skus')
+        ->assertTableColumnVisible('grv_report_sku_preview')
         ->assertTableFilterVisible('grv_report_grv')
         ->assertTableFilterVisible('grv_report_order_id')
         ->assertTableActionVisible('viewGrvReport', $receipt)
@@ -193,6 +192,24 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->toContain($user->name)
         ->toContain('Last Amended By')
         ->toContain($amender->name);
+
+    $grvDetails = view('filament.inventory.grv-report', [
+        'receipt' => $receipt->fresh(['line.order', 'line.variant.product', 'createdBy']),
+        'receipts' => ProcurementSupplierReceipt::query()
+            ->with(['line.order', 'line.variant.product', 'createdBy'])
+            ->where('grv_number', $receipt->grv_number)
+            ->get(),
+    ])->render();
+
+    expect($grvDetails)
+        ->toContain('Order quantity before this receipt')
+        ->toContain('Quantity already received before this GRV')
+        ->toContain('Quantity received in this GRV')
+        ->toContain('Outstanding quantity after this GRV')
+        ->toContain('Receipt status')
+        ->toContain('Ordered Quantity')
+        ->toContain('Previously Received')
+        ->toContain('Outstanding After Receipt');
 });
 
 it('submits a manual physical count as a pending approval without overwriting available', function (): void {

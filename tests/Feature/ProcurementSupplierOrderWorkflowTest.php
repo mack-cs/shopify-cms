@@ -17,6 +17,7 @@ use App\Notifications\PendingSupplierReceiptPushSlackNotification;
 use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
 use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
 use App\Services\Procurement\ProcurementSelectionCsvExporter;
+use App\Services\Procurement\SupplierOrderReportingReconciliationService;
 use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\Procurement\SupplierOrderProjectionService;
 use App\Services\Procurement\SupplierOrderService;
@@ -298,6 +299,41 @@ it('backfills GRV numbers for historical receipts that were created before GRV t
         ->and($batchedB->fresh()->grv_number)->toBe($batchedGrv)
         ->and($standaloneGrv)->toStartWith('GRV-')
         ->and($standaloneGrv)->not->toBe($batchedGrv);
+});
+
+it('reconciles supplier reporting summaries after historical receipts are backfilled', function (): void {
+    $variant = supplierWorkflowVariant('REPORT-RECON');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-REPORT-RECON', 8, '2026-09-20');
+    $line->receipts()->create([
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 8,
+        'idempotency_key' => 'historical-report-recon', 'source' => 'csv', 'status' => 'succeeded',
+        'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://historical-report-recon',
+    ]);
+
+    expect($line->fresh()->status)->toBe('open')
+        ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(8);
+
+    $dryRun = app(SupplierOrderReportingReconciliationService::class)->reconcile(dryRun: true);
+
+    expect($dryRun)->toMatchArray([
+        'lines_checked' => 1,
+        'lines_updated' => 1,
+        'variants_refreshed' => 1,
+    ])
+        ->and($line->fresh()->status)->toBe('open')
+        ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(8);
+
+    $result = app(SupplierOrderReportingReconciliationService::class)->reconcile();
+
+    expect($result)->toMatchArray([
+        'lines_checked' => 1,
+        'lines_updated' => 1,
+        'variants_refreshed' => 1,
+    ])
+        ->and($line->fresh()->status)->toBe('completed')
+        ->and($line->fresh()->completed_at)->not->toBeNull()
+        ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(0)
+        ->and($variant->procurementIncomingStock()->value('number_of_wip_orders'))->toBe(0);
 });
 
 it('recalculates receipt transfers from fresh inventory without an artificial shortage', function (): void {

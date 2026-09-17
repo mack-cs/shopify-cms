@@ -28,6 +28,7 @@ use App\Services\SearchConsoleMetricImportService;
 use App\Services\DuplicateSkuReminderService;
 use App\Services\MaintenanceTaskNotificationService;
 use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
+use App\Services\Procurement\SupplierOrderReportingReconciliationService;
 use App\Services\Procurement\SupplierReceiptService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
@@ -597,6 +598,19 @@ Artisan::command('procurement:backfill-receipt-grvs {--dry-run : Preview the GRV
 
     return self::SUCCESS;
 })->purpose('Backfill GRV numbers for historical supplier receipts that were created before GRV tracking.');
+
+Artisan::command('procurement:reconcile-supplier-reporting {--dry-run : Preview how many order lines and variants would be reconciled}', function (SupplierOrderReportingReconciliationService $reconciliation): int {
+    $result = $reconciliation->reconcile(dryRun: (bool) $this->option('dry-run'));
+    $mode = (bool) $this->option('dry-run') ? 'would reconcile' : 'reconciled';
+
+    $this->info(
+        "Supplier reporting {$mode}: {$result['lines_checked']} line(s) checked, "
+        . "{$result['lines_updated']} line status update(s), "
+        . "{$result['variants_refreshed']} variant summary refresh(es)."
+    );
+
+    return self::SUCCESS;
+})->purpose('Reconcile supplier order line statuses and supplier-order reporting summaries from historical receipts.');
 
 Schedule::command('procurement:remind-pending-receipt-pushes')
     ->everyFiveMinutes()
