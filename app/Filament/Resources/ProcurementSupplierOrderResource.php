@@ -17,7 +17,7 @@ use Filament\Forms;
 final class ProcurementSupplierOrderResource extends Resource
 {
     protected static ?string $model = ProcurementSupplierOrder::class;
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Inventory';
     protected static ?string $navigationLabel = 'Purchase Orders';
     protected static ?string $navigationIcon = 'heroicon-o-truck';
     protected static ?int $navigationSort = 4;

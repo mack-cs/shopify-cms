@@ -135,11 +135,13 @@ final class SupplierOrderService
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()
             ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
-            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->get();
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product:id,shopify_id,handle')->get();
         $drafts = NewProductDraft::query()
             ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
-            ->get();
+            ->get()
+            ->reject(fn (NewProductDraft $draft) => $this->draftMirrorsVariant($draft, $matches))
+            ->values();
         $matchCount = $matches->count() + $drafts->count();
         if ($matchCount !== 1) {
             throw ValidationException::withMessages(['sku' => $matchCount === 0 ? "SKU {$sku} was not found." : "SKU {$sku} is ambiguous."]);
@@ -213,6 +215,17 @@ final class SupplierOrderService
             }
 
             return $locked->fresh(['order', 'receipts']);
+        });
+    }
+
+    private function draftMirrorsVariant(NewProductDraft $draft, $variants): bool
+    {
+        return $variants->contains(function (Variant $variant) use ($draft, $variants): bool {
+            $product = $variant->product;
+
+            return (filled($draft->shopify_id) && $draft->shopify_id === $product?->shopify_id)
+                || (filled($draft->handle) && $draft->handle === $product?->handle)
+                || ($draft->origin === NewProductDraft::ORIGIN_PRODUCT_MIRROR && $variants->count() === 1);
         });
     }
 

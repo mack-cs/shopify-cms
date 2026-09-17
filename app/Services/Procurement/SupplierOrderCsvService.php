@@ -3,12 +3,12 @@
 namespace App\Services\Procurement;
 
 use App\Jobs\ProcessSupplierReceiptJob;
+use App\Jobs\PublishOperationalProcurementRowsJob;
 use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\NewProductDraft;
 use App\Models\Variant;
-use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -16,7 +16,7 @@ use Illuminate\Validation\ValidationException;
 
 final class SupplierOrderCsvService
 {
-    public function __construct(private readonly SupplierOrderService $orders, private readonly SupplierReceiptService $receipts, private readonly ProcurementSheetSyncService $sheets) {}
+    public function __construct(private readonly SupplierOrderService $orders, private readonly SupplierReceiptService $receipts) {}
 
     public function preview(string $path, string $type, ?int $userId = null, ?string $filename = null): ProcurementSupplierImportBatch
     {
@@ -29,7 +29,7 @@ final class SupplierOrderCsvService
         }
         $hash = hash('sha256', $contents);
         $existing = ProcurementSupplierImportBatch::query()->where('type', $type)->where('file_hash', $hash)->first();
-        if ($existing) {
+        if ($existing?->status === 'completed') {
             return $existing;
         }
         $handle = fopen('php://temp', 'r+');
@@ -74,11 +74,15 @@ final class SupplierOrderCsvService
             throw ValidationException::withMessages(['file' => 'The CSV contains no data rows.']);
         }
 
-        return ProcurementSupplierImportBatch::query()->create([
-            'uuid' => (string) Str::uuid(), 'type' => $type, 'original_filename' => $filename,
+        $batch = $existing ?? new ProcurementSupplierImportBatch;
+        $batch->fill([
+            'uuid' => $existing?->uuid ?? (string) Str::uuid(), 'type' => $type, 'original_filename' => $filename,
             'file_hash' => $hash, 'status' => 'previewed', 'preview_rows' => $rows, 'errors' => $errors ?: null,
             'valid_count' => collect($rows)->where('_valid', true)->count(), 'invalid_count' => count($errors), 'created_by' => $userId,
-        ]);
+            'confirmed_at' => null, 'completed_at' => null,
+        ])->save();
+
+        return $batch->fresh();
     }
 
     public function previewPastedOrder(string $contents, ?int $userId = null): ProcurementSupplierImportBatch
@@ -148,12 +152,13 @@ final class SupplierOrderCsvService
 
         $hash = hash('sha256', $contents);
         $existing = ProcurementSupplierImportBatch::query()->where('type', $type)->where('file_hash', $hash)->first();
-        if ($existing) {
+        if ($existing?->status === 'completed') {
             return $existing;
         }
 
-        return ProcurementSupplierImportBatch::query()->create([
-            'uuid' => (string) Str::uuid(),
+        $batch = $existing ?? new ProcurementSupplierImportBatch;
+        $batch->fill([
+            'uuid' => $existing?->uuid ?? (string) Str::uuid(),
             'type' => $type,
             'original_filename' => $type === 'order' ? 'pasted-purchase-order.tsv' : 'pasted-received-orders.tsv',
             'file_hash' => $hash,
@@ -163,7 +168,11 @@ final class SupplierOrderCsvService
             'valid_count' => collect($rows)->where('_valid', true)->count(),
             'invalid_count' => count($errors),
             'created_by' => $userId,
-        ]);
+            'confirmed_at' => null,
+            'completed_at' => null,
+        ])->save();
+
+        return $batch->fresh();
     }
 
     public function confirm(string $uuid, ?int $userId = null, bool $dispatchReceipts = true): ProcurementSupplierImportBatch
@@ -222,7 +231,8 @@ final class SupplierOrderCsvService
         $skus = collect($batch->preview_rows)->pluck('sku')->map(fn ($sku) => strtoupper(trim((string) $sku)))->unique();
         $ids = Variant::query()->active()->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus)->pluck('id')->all();
         if ($ids !== []) {
-            $this->sheets->publishOperational($ids, includeHumanInputs: true);
+            PublishOperationalProcurementRowsJob::dispatch($ids, includeHumanInputs: true)
+                ->onQueue((string) config('procurement.queue', 'procurement'));
         }
     }
 
@@ -301,13 +311,27 @@ final class SupplierOrderCsvService
             $variantQuery->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle());
         }
 
+        $variants = $variantQuery->with('product:id,shopify_id,handle')->get();
         $draftCount = $type === 'order'
             ? NewProductDraft::query()
                 ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
                 ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+                ->get()
+                ->reject(fn (NewProductDraft $draft) => $this->draftMirrorsVariant($draft, $variants))
                 ->count()
             : 0;
 
-        return $variantQuery->count() + $draftCount;
+        return $variants->count() + $draftCount;
+    }
+
+    private function draftMirrorsVariant(NewProductDraft $draft, $variants): bool
+    {
+        return $variants->contains(function (Variant $variant) use ($draft, $variants): bool {
+            $product = $variant->product;
+
+            return (filled($draft->shopify_id) && $draft->shopify_id === $product?->shopify_id)
+                || (filled($draft->handle) && $draft->handle === $product?->handle)
+                || ($draft->origin === NewProductDraft::ORIGIN_PRODUCT_MIRROR && $variants->count() === 1);
+        });
     }
 }

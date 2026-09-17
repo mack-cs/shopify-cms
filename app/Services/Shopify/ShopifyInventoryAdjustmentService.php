@@ -36,6 +36,58 @@ class ShopifyInventoryAdjustmentService
         return $locationId;
     }
 
+    /** @return array{location_id:string,available:int,on_hand:int,committed:int} */
+    public function currentQuantities(Variant $variant, ?string $locationId = null): array
+    {
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        if ($inventoryItemId === '') {
+            throw new \RuntimeException("Variant {$variant->id} has no Shopify inventory item ID.");
+        }
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        $data = $this->client->graphql(<<<'GRAPHQL'
+query ManualStockInventory($id: ID!) {
+  inventoryItem(id: $id) {
+    inventoryLevels(first: 50) { nodes { location { id } quantities(names: ["available", "committed", "on_hand"]) { name quantity } } }
+  }
+}
+GRAPHQL, ['id' => $inventoryItemId]);
+        $level = collect(data_get($data, 'inventoryItem.inventoryLevels.nodes', []))->first(
+            fn ($node) => data_get($node, 'location.id') === $locationId
+        );
+        if (! is_array($level)) {
+            throw new \RuntimeException("Shopify inventory was unavailable at location {$locationId}.");
+        }
+        $quantities = collect($level['quantities'] ?? [])->mapWithKeys(fn ($row) => [$row['name'] => (int) $row['quantity']]);
+
+        return ['location_id' => $locationId, 'available' => (int) $quantities->get('available', 0),
+            'on_hand' => (int) $quantities->get('on_hand', 0), 'committed' => (int) $quantities->get('committed', 0)];
+    }
+
+    /** @return array<string, mixed> */
+    public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null): array
+    {
+        if ($quantity <= 0) throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        if ($inventoryItemId === '' || $locationId === '') throw new \RuntimeException('The inventory item and location are required.');
+        $expectedOnHand ??= $this->currentQuantities($variant, $locationId)['on_hand'];
+        $targetOnHand = $expectedOnHand - $quantity;
+        if ($targetOnHand < 0) throw new \RuntimeException("Cannot deduct {$quantity}; Shopify On Hand is {$expectedOnHand}.");
+        $data = $this->client->graphql(<<<'GRAPHQL'
+mutation DeductManualStock($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+  inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup { createdAt reason referenceDocumentUri changes { name delta quantityAfterChange } }
+    userErrors { code field message }
+  }
+}
+GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceDocumentUri' => $referenceUri,
+            'quantities' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId,
+                'quantity' => $targetOnHand, 'changeFromQuantity' => $expectedOnHand]]],
+        'idempotencyKey' => $idempotencyKey]);
+
+        return $this->confirmedGroup($data, 'inventorySetQuantities');
+    }
+
     public function increaseAvailable(Variant $variant, int $quantity, string $referenceUri, ?string $locationId = null): void
     {
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);

@@ -48,7 +48,7 @@ class InventoryResource extends Resource
 
     protected static ?string $navigationIcon = 'heroicon-o-archive-box';
 
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Inventory';
 
     protected static ?string $navigationLabel = 'Inventory';
 

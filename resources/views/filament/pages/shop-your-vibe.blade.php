@@ -40,9 +40,10 @@
             <div class="flex flex-wrap items-center gap-3">
                 <x-filament::input.wrapper><x-filament::input wire:model.live.debounce.300ms="search" placeholder="Search configured collections" aria-label="Search configured collections" /></x-filament::input.wrapper>
                 <x-filament::button wire:click="openCollectionPicker" wire:loading.attr="disabled">Add Shop Your Vibe</x-filament::button>
+                <x-filament::button color="info" wire:click="openMappingUpload" wire:loading.attr="disabled">Bulk Upload Mappings</x-filament::button>
                 <x-filament::button color="gray" wire:click="loadParents(true)" wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
             </div>
-            <p class="text-sm text-gray-500">Vibe cards and sorting use a reviewable draft. Product vibe assignments update their configured Shopify membership tags immediately after confirmation.</p>
+            <p class="text-sm text-gray-500">Vibe cards and sorting use a reviewable draft. Product assignments update their configured membership tags, Design and Colour Style immediately after confirmation.</p>
             <div class="syv-parent-grid">
                 @forelse ($parents as $parent)
                     <x-filament::section class="syv-parent-card" wire:key="parent-{{ $parent['gid'] }}">
@@ -133,9 +134,12 @@
                 <div @class(['space-y-6', 'hidden' => $activeTab !== 'products'])>
                     <div class="flex items-center justify-between gap-3">
                         <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
+                        <input type="search" wire:model.live.debounce.300ms="assignmentProductSearch"
+                            placeholder="Search product name or SKU" aria-label="Search products by name or SKU"
+                            class="block w-full max-w-sm rounded-lg border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-900" />
                     </div>
                     <div class="syv-card-grid syv-product-grid">
-                        @forelse ($parentProducts as $product)
+                        @forelse ($filteredParentProducts as $product)
                             @php
                                 $productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag)));
                                 $assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag']))));
@@ -155,7 +159,7 @@
                                 <x-filament::button size="xs" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
                             </article>
                         @empty
-                            <p class="text-gray-500">No products belong to this Shopify collection.</p>
+                            <p class="text-gray-500">{{ $assignmentProductSearch !== '' ? 'No products match your search.' : 'No products belong to this Shopify collection.' }}</p>
                         @endforelse
                     </div>
                 </div>
@@ -343,11 +347,47 @@
                         </label>
                     @endforeach
                 </div>
-                <p class="mt-4 text-sm text-gray-500">Saving verifies the live Shopify tags, changes only the membership tags managed here, and preserves every unrelated tag.</p>
+                <p class="mt-4 text-sm text-gray-500">Saving verifies the live Shopify tags and updates the mapped membership tags, Design and Colour Style. Values still required by another assigned vibe are preserved.</p>
             @endif
             <x-slot name="footer">
-                <x-filament::button wire:click="saveProductAssignments" wire:loading.attr="disabled">Save assignments</x-filament::button>
+                <x-filament::button wire:click="reviewProductAssignments" wire:loading.attr="disabled">Save assignments</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-vibe-assignments' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="confirm-vibe-assignments" width="lg" heading="Update Shopify assignments?">
+            @if ($confirmingAssignments && $managedProduct)
+                <p><strong>{{ $managedProduct['title'] }}</strong></p>
+                <p class="mt-3 text-sm text-gray-600 dark:text-gray-300">Clicking <strong>Yes, update Shopify</strong> will immediately add or remove the membership tags and any configured Design and Colour Style values in Shopify.</p>
+                @if ($assignmentAdds->isNotEmpty())
+                    <div class="mt-4">
+                        <strong>Add to:</strong>
+                        <ul class="mt-1 list-inside list-disc space-y-1">
+                            @foreach ($assignmentAddDetails as $change)
+                                <li>
+                                    {{ $change['name'] }}
+                                    <span class="text-sm text-gray-500">— tag: <code>{{ $change['membership_tag'] }}</code></span>
+                                    @if (filled($change['design_value']))
+                                        <span class="text-sm text-gray-500">; Bracelet Design: <code>{{ $change['design_value'] }}</code></span>
+                                    @endif
+                                    @if (filled($change['colour_style_value']))
+                                        <span class="text-sm text-gray-500">; Colour Style: <code>{{ $change['colour_style_value'] }}</code></span>
+                                    @endif
+                                </li>
+                            @endforeach
+                        </ul>
+                    </div>
+                @endif
+                @if ($assignmentRemovals->isNotEmpty())
+                    <div class="mt-4"><strong>Remove from:</strong><ul class="list-inside list-disc">@foreach ($assignmentRemovals as $name)<li>{{ $name }}</li>@endforeach</ul></div>
+                @endif
+                @if ($assignmentAdds->isEmpty() && $assignmentRemovals->isEmpty())
+                    <p class="mt-4 text-sm text-gray-500">No assignment changes were selected.</p>
+                @endif
+            @endif
+            <x-slot name="footer">
+                <x-filament::button color="danger" wire:click="saveProductAssignments" wire:loading.attr="disabled">Yes, update Shopify</x-filament::button>
+                <x-filament::button color="gray" wire:click="cancelProductAssignmentConfirmation">Go back</x-filament::button>
             </x-slot>
         </x-filament::modal>
 
@@ -355,11 +395,11 @@
             x-on:modal-closed.stop="$wire.closeMappingUpload()">
             @if ($uploadingMappings)
                 @if ($loadError)<p role="alert" class="mb-4 rounded-lg border border-danger-300 bg-danger-50 p-3 text-danger-800">{{ $loadError }}</p>@endif
-                <p class="mb-3 text-sm text-gray-600 dark:text-gray-300">Upload a CSV exported from Google Sheets or Excel. Collections are matched exactly by handle or name. Unmatched or duplicate rows stop the import before anything is changed.</p>
+                <p class="mb-3 text-sm text-gray-600 dark:text-gray-300">Upload one CSV for all Shop Your Vibe collections. The existing membership tag detected from Shopify is never changed. Design and Colour Style may be blank; identical repeated rows are ignored.</p>
                 <div class="mb-4 overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
                     <table class="w-full text-left text-sm">
-                        <thead><tr><th class="p-2">Collection Handle</th><th class="p-2">Membership Tag</th><th class="p-2">Design</th><th class="p-2">Colour Style</th></tr></thead>
-                        <tbody><tr><td class="p-2">bracelets-gold</td><td class="p-2">gold-bracelets</td><td class="p-2">Gold</td><td class="p-2">Gold</td></tr></tbody>
+                        <thead><tr><th class="p-2">Handle</th><th class="p-2">Design</th><th class="p-2">Colour Style</th></tr></thead>
+                        <tbody><tr><td class="p-2">bracelets-gold</td><td class="p-2">Beaded</td><td class="p-2">Solid</td></tr></tbody>
                     </table>
                 </div>
                 {{ $this->mappingUploadForm }}

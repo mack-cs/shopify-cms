@@ -18,7 +18,7 @@ final class StackInventoryResource extends Resource
 
     protected static ?string $navigationIcon = 'heroicon-o-squares-plus';
 
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Inventory';
 
     protected static ?string $navigationLabel = 'Stack Inventory';
 
