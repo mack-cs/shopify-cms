@@ -64,24 +64,28 @@ GRAPHQL, ['id' => $inventoryItemId]);
     }
 
     /** @return array<string, mixed> */
-    public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null): array
+    public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null): array
     {
         if ($quantity <= 0) throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
         $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
         if ($inventoryItemId === '' || $locationId === '') throw new \RuntimeException('The inventory item and location are required.');
+        $expectedOnHand ??= $this->currentQuantities($variant, $locationId)['on_hand'];
+        $targetOnHand = $expectedOnHand - $quantity;
+        if ($targetOnHand < 0) throw new \RuntimeException("Cannot deduct {$quantity}; Shopify On Hand is {$expectedOnHand}.");
         $data = $this->client->graphql(<<<'GRAPHQL'
-mutation DeductManualStock($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
-  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+mutation DeductManualStock($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+  inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup { createdAt reason referenceDocumentUri changes { name delta quantityAfterChange } }
-    userErrors { field message }
+    userErrors { code field message }
   }
 }
 GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceDocumentUri' => $referenceUri,
-            'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => -$quantity]]],
+            'quantities' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId,
+                'quantity' => $targetOnHand, 'changeFromQuantity' => $expectedOnHand]]],
         'idempotencyKey' => $idempotencyKey]);
 
-        return $this->confirmedGroup($data, 'inventoryAdjustQuantities');
+        return $this->confirmedGroup($data, 'inventorySetQuantities');
     }
 
     public function increaseAvailable(Variant $variant, int $quantity, string $referenceUri, ?string $locationId = null): void

@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Filament\Resources\ManualStockTransactionResource;
 use App\Services\ManualStockTransactionService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
+use App\Contracts\ShopifyGraphqlGateway;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -140,4 +141,26 @@ it('renders the manual stock transaction detail page with component source array
         ->assertOk()
         ->assertSee('View Product')
         ->assertSee('component 2');
+});
+
+it('deducts physical stock by setting Shopify on hand with compare-and-swap', function (): void {
+    $variant = manualStockProduct(manualStockImport('manual-set-on-hand'), 'Physical Product', 'PHYSICAL1', 801)->variants()->first();
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->withArgs(function (string $query, array $variables): bool {
+        return str_contains($query, 'inventorySetQuantities')
+            && ! str_contains($query, 'inventoryAdjustQuantities')
+            && data_get($variables, 'input.name') === 'on_hand'
+            && data_get($variables, 'input.referenceDocumentUri') === 'gid://la-cms/ManualStockTransaction/1/Impact/1'
+            && data_get($variables, 'input.quantities.0.quantity') === 15
+            && data_get($variables, 'input.quantities.0.changeFromQuantity') === 20
+            && $variables['idempotencyKey'] === 'manual-test-key';
+    })->andReturn(['inventorySetQuantities' => ['inventoryAdjustmentGroup' => [
+        'createdAt' => now()->toIso8601String(), 'changes' => [['name' => 'on_hand', 'delta' => -5, 'quantityAfterChange' => 15]],
+    ], 'userErrors' => []]]);
+
+    $group = (new ShopifyInventoryAdjustmentService($gateway))->decreaseOnHand(
+        $variant, 5, 'gid://la-cms/ManualStockTransaction/1/Impact/1', 'manual-test-key', 'gid://shopify/Location/1', 20
+    );
+
+    expect(data_get($group, 'changes.0.quantityAfterChange'))->toBe(15);
 });

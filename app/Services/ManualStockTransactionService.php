@@ -107,7 +107,11 @@ class ManualStockTransactionService
         $short = [];
         foreach ($pending as $impact) {
             $live = $this->inventory->currentQuantities($impact->variant, $impact->shopify_location_id);
-            $impact->update(['available_before' => $live['available'], 'on_hand_before' => $live['on_hand'], 'shopify_location_id' => $live['location_id']]);
+            $impact->update(array_filter([
+                'available_before' => $impact->attempts === 0 ? $live['available'] : null,
+                'on_hand_before' => $impact->attempts === 0 ? $live['on_hand'] : null,
+                'shopify_location_id' => $live['location_id'],
+            ], fn ($value) => $value !== null));
             if ($live['available'] < $impact->quantity_required) $short[] = "{$impact->sku}: needs {$impact->quantity_required}, {$live['available']} available";
         }
         if ($short) {
@@ -120,7 +124,8 @@ class ManualStockTransactionService
                 $impact->increment('attempts');
                 $impact->update(['status' => 'processing', 'error_message' => null]);
                 $response = $this->inventory->decreaseOnHand($impact->variant, $impact->quantity_required,
-                    "gid://la-cms/ManualStockTransaction/{$transaction->id}/Impact/{$impact->id}", $impact->idempotency_key, $impact->shopify_location_id);
+                    "gid://la-cms/ManualStockTransaction/{$transaction->id}/Impact/{$impact->id}", $impact->idempotency_key,
+                    $impact->shopify_location_id, (int) $impact->on_hand_before);
                 $after = $this->inventory->currentQuantities($impact->variant, $impact->shopify_location_id);
                 $impact->variant->update(['current_available_quantity' => $after['available'], 'current_on_hand_quantity' => $after['on_hand'],
                     'current_committed_quantity' => $after['committed'], 'inventory_last_synced_at' => now(), 'inventory_sync_error' => null]);
