@@ -121,6 +121,11 @@ class Variant extends Model
         return $this->hasMany(ProcurementSupplierOrderLine::class);
     }
 
+    public function inventoryAdjustmentRequestItems(): HasMany
+    {
+        return $this->hasMany(InventoryAdjustmentRequestItem::class);
+    }
+
     public function scopeActive(Builder $query): Builder
     {
         return $query->whereNotIn('sync_state', [

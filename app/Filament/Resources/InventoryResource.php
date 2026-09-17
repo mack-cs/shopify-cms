@@ -6,8 +6,11 @@ use App\Filament\Resources\InventoryResource\Pages;
 use App\Jobs\InventorySyncJob;
 use App\Jobs\ProcessSupplierReceiptJob;
 use App\Models\ProcurementSupplierImportBatch;
+use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierReceipt;
+use App\Models\InventoryAdjustmentRequest;
+use App\Models\InventoryAdjustmentRequestItem;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
@@ -36,6 +39,7 @@ use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -62,10 +66,19 @@ class InventoryResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query): Builder => $query
-                ->inventoryWorkspaceEligible()
-                ->with(['product', 'procurementIncomingStock', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
-            )
+            ->modifyQueryUsing(fn (Builder $query): Builder => $query->getModel() instanceof Variant
+                ? $query
+                    ->inventoryWorkspaceEligible()
+                    ->with([
+                        'product',
+                        'procurementIncomingStock',
+                        'supplierOrderLines.order',
+                        'supplierOrderLines.receipts',
+                        'inventoryAdjustmentRequestItems.request.requester',
+                        'inventoryAdjustmentRequestItems.request.approver',
+                        'inventoryAdjustmentRequestItems.request.reviewedBy',
+                    ])
+                : $query)
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('product.id')
@@ -76,7 +89,8 @@ class InventoryResource extends Resource
                 TextColumn::make('product.title')
                     ->label('Title')
                     ->searchable()
-                    ->wrap(),
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders', 'inventory_adjustments'], true)),
                 TextColumn::make('product.handle')
                     ->label('Handle')
                     ->searchable()
@@ -94,7 +108,8 @@ class InventoryResource extends Resource
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
                 TextColumn::make('sku')
                     ->label('SKU')
-                    ->searchable(),
+                    ->searchable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders', 'inventory_adjustments'], true)),
                 IconColumn::make('inventory_tracked')
                     ->label('Tracked')
                     ->icon(fn (Variant $record): string => match ($record->inventory_tracked) {
@@ -117,7 +132,8 @@ class InventoryResource extends Resource
                             ? (string) ((int) ($record->current_available_quantity ?? $record->inventory_qty))
                             : 'Unknown',
                     })
-                    ->sortable(),
+                    ->sortable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('current_committed_quantity')
                     ->label('Committed')
                     ->state(fn (Variant $record): string => $record->inventory_tracked === false
@@ -125,7 +141,8 @@ class InventoryResource extends Resource
                         : ($record->current_committed_quantity !== null
                             ? (string) ((int) $record->current_committed_quantity)
                             : 'Unknown'))
-                    ->sortable(),
+                    ->sortable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('current_reserved_quantity')
                     ->label('Reserved')
                     ->state(fn (Variant $record): string => $record->inventory_tracked === false
@@ -133,7 +150,8 @@ class InventoryResource extends Resource
                         : ($record->current_reserved_quantity !== null
                             ? (string) ((int) $record->current_reserved_quantity)
                             : 'Unknown'))
-                    ->sortable(),
+                    ->sortable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('current_on_hand_quantity')
                     ->label('On Hand')
                     ->state(fn (Variant $record): string => $record->inventory_tracked === false
@@ -141,7 +159,8 @@ class InventoryResource extends Resource
                         : ($record->current_on_hand_quantity !== null
                             ? (string) ((int) $record->current_on_hand_quantity)
                             : 'Unknown'))
-                    ->sortable(),
+                    ->sortable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('quantity_on_order')
                     ->label('Qty On Order')
                     ->state(fn (Variant $record): int => (int) ($record->procurementIncomingStock?->total_quantity_on_order ?? 0))
@@ -160,6 +179,150 @@ class InventoryResource extends Resource
                             ->pluck('eta_date')->filter()->sort()->first()?->format('d/m/Y');
                     })
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders'),
+                TextColumn::make('supplier_report_order_number')
+                    ->label('Order ID')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierOrder
+                        ? ($record->order_number ?: 'Legacy order')
+                        : '-')
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_created_by')
+                    ->label('Created By')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierOrder
+                        ? ($record->createdBy?->name ?: $record->createdBy?->email ?: '-')
+                        : '-')
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_status')
+                    ->label('Order Status')
+                    ->state(function (Model $record): string {
+                        if (! ($record instanceof ProcurementSupplierOrder)) {
+                            return '-';
+                        }
+                        $lines = $record->lines;
+                        if ($lines->isEmpty()) {
+                            return '-';
+                        }
+
+                        return $lines->contains(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0 && $line->quantity_received > 0)
+                            ? 'Partially received'
+                            : ($lines->contains(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0)
+                                ? 'Open'
+                                : 'Completed');
+                    })
+                    ->badge()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_ordered')
+                    ->label('Ordered')
+                    ->state(fn (Model $record): int => $record instanceof ProcurementSupplierOrder ? $record->lines->sum('quantity_ordered') : 0)
+                    ->numeric()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_received')
+                    ->label('Received')
+                    ->state(fn (Model $record): int => $record instanceof ProcurementSupplierOrder ? $record->lines->sum(fn (ProcurementSupplierOrderLine $line): int => $line->quantity_received) : 0)
+                    ->numeric()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_outstanding')
+                    ->label('Outstanding')
+                    ->state(fn (Model $record): int => $record instanceof ProcurementSupplierOrder ? $record->lines->sum(fn (ProcurementSupplierOrderLine $line): int => $line->quantity_outstanding) : 0)
+                    ->numeric()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_order_date')
+                    ->label('Order Date')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierOrder ? $record->created_at?->format('d/m/Y H:i') : null)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('supplier_report_grvs')
+                    ->label('GRVs')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierOrder
+                        ? ($record->receipts->pluck('grv_number')->filter()->unique()->implode(', ') ?: '-')
+                        : '-')
+                    ->copyable()
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports'),
+                TextColumn::make('grv_report_number')
+                    ->label('GRV Number')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierReceipt ? ($record->grv_number ?: 'GRV pending') : '-')
+                    ->copyable()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('grv_report_order')
+                    ->label('Supplier Order ID')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->line?->order?->order_number : null)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('grv_report_supplier')
+                    ->label('Supplier')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->line?->variant?->product?->vendor : null)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('grv_report_received_at')
+                    ->label('Receipt Date')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? ($record->received_at ?? $record->created_at)?->format('d/m/Y H:i') : null)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('grv_report_received_by')
+                    ->label('Received By')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->createdBy?->name : null)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('grv_report_skus')
+                    ->label('SKUs')
+                    ->state(function (Model $record): string {
+                        if (! ($record instanceof ProcurementSupplierReceipt) || blank($record->grv_number)) {
+                            return '-';
+                        }
+
+                        return ProcurementSupplierReceipt::query()
+                            ->with('line')
+                            ->where('grv_number', $record->grv_number)
+                            ->get()
+                            ->map(fn (ProcurementSupplierReceipt $receipt): string => ($receipt->line?->sku ?? '-') . ' x ' . $receipt->quantity_received)
+                            ->implode(', ');
+                    })
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('adjustment_status')
+                    ->label('Adjustment Status')
+                    ->state(fn (Variant $record): string => self::latestInventoryAdjustmentItem($record)?->request?->status ?? '-')
+                    ->badge()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_requested_change')
+                    ->label('Requested Change')
+                    ->state(function (Variant $record): string {
+                        $item = self::latestInventoryAdjustmentItem($record);
+                        if (! $item instanceof InventoryAdjustmentRequestItem) {
+                            return '-';
+                        }
+
+                        $from = $item->original_inventory_tracked ? ($item->original_on_hand_quantity ?? 'Unknown') : 'Not tracked';
+                        $to = $item->requested_inventory_tracked ? ($item->requested_on_hand_quantity ?? 'Unknown') : 'Not tracked';
+
+                        return "{$from} -> {$to}";
+                    })
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_reason')
+                    ->label('Reason')
+                    ->state(fn (Variant $record): ?string => self::latestInventoryAdjustmentItem($record)?->reason)
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_requester')
+                    ->label('Requested By')
+                    ->state(fn (Variant $record): ?string => self::latestInventoryAdjustmentItem($record)?->request?->requester?->name)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_approver')
+                    ->label('Approver')
+                    ->state(fn (Variant $record): ?string => self::latestInventoryAdjustmentItem($record)?->request?->approver?->name)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_reviewed_by')
+                    ->label('Reviewed By')
+                    ->state(fn (Variant $record): ?string => self::latestInventoryAdjustmentItem($record)?->request?->reviewedBy?->name)
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
+                TextColumn::make('adjustment_submitted_at')
+                    ->label('Submitted')
+                    ->state(fn (Variant $record): ?string => self::latestInventoryAdjustmentItem($record)?->request?->submitted_at?->format('d/m/Y H:i'))
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments'),
                 TextColumn::make('sellable_state')
                     ->label('Sellable')
                     ->state(function (Variant $record): string {
@@ -190,7 +353,8 @@ class InventoryResource extends Resource
                     ->label('From Shopify')
                     ->dateTime()
                     ->sortable()
-                    ->toggleable(),
+                    ->toggleable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('inventory_pushed_at')
                     ->label('To Shopify')
                     ->dateTime()
@@ -219,12 +383,16 @@ class InventoryResource extends Resource
             ->filters([
                 SelectFilter::make('inventory_state')
                     ->label('Inventory State')
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true))
                     ->options([
                         'in_stock' => 'In Stock',
                         'out_of_stock' => 'Out Of Stock',
                         'not_tracked' => 'Not Tracked / Unknown',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
                         return match ($data['value'] ?? null) {
                             'in_stock' => $query->where('inventory_tracked', true)->where('inventory_qty', '>', 0),
                             'out_of_stock' => $query->where('inventory_tracked', true)->where('inventory_qty', '<=', 0),
@@ -242,6 +410,9 @@ class InventoryResource extends Resource
                         'multiple_wip' => 'Multiple WIP Orders',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
                         return match ($data['value'] ?? null) {
                             'any_on_order' => $query->whereHas('procurementIncomingStock', fn (Builder $stockQuery): Builder => $stockQuery
                                 ->where('total_quantity_on_order', '>', 0)),
@@ -261,6 +432,9 @@ class InventoryResource extends Resource
                         'awaiting_shopify' => 'Awaiting Shopify Push',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
                         $value = $data['value'] ?? null;
                         if ($value === 'awaiting_shopify') {
                             return $query->whereHas('supplierOrderLines.receipts', fn (Builder $receiptQuery): Builder => $receiptQuery
@@ -292,22 +466,136 @@ class InventoryResource extends Resource
                             ->helperText('Paste SKUs separated by commas, spaces, or new lines.'),
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
                         $skus = collect(preg_split('/[\s,;]+/', strtoupper((string) ($data['skus'] ?? ''))))
                             ->map(fn ($sku): string => trim((string) $sku))->filter()->unique();
 
                         return $skus->isEmpty() ? $query : $query->whereIn(DB::raw('UPPER(TRIM(sku))'), $skus);
                     })
                     ->indicateUsing(fn (array $data): ?string => filled($data['skus'] ?? null) ? 'SKU list applied' : null),
+                Filter::make('supplier_report_order_id')
+                    ->label('Order ID')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports')
+                    ->form([
+                        Forms\Components\TextInput::make('order_id')->label('Order ID'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof ProcurementSupplierOrder && filled($data['order_id'] ?? null)
+                        ? $query->where('order_number', 'like', '%'.trim((string) $data['order_id']).'%')
+                        : $query),
+                Filter::make('supplier_report_created_by')
+                    ->label('Created By')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports')
+                    ->form([
+                        Forms\Components\TextInput::make('created_by')->label('Created By'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof ProcurementSupplierOrder && filled($data['created_by'] ?? null)
+                        ? $query->whereHas('createdBy', fn (Builder $userQuery): Builder => $userQuery
+                            ->where('name', 'like', '%'.trim((string) $data['created_by']).'%')
+                            ->orWhere('email', 'like', '%'.trim((string) $data['created_by']).'%'))
+                        : $query),
+                SelectFilter::make('supplier_report_status_filter')
+                    ->label('Order Status')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports')
+                    ->options([
+                        'open' => 'Pending/Open',
+                        'partial' => 'Partially Received',
+                        'completed' => 'Completed',
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof ProcurementSupplierOrder)) {
+                            return $query;
+                        }
+                        return match ($data['value'] ?? null) {
+                            'open' => $query->whereHas('lines', fn (Builder $lineQuery): Builder => $lineQuery
+                                ->where('status', 'open')
+                                ->whereDoesntHave('receipts', fn (Builder $receiptQuery): Builder => $receiptQuery->where('status', 'succeeded'))),
+                            'partial' => $query
+                                ->whereHas('lines.receipts', fn (Builder $receiptQuery): Builder => $receiptQuery->where('status', 'succeeded'))
+                                ->whereHas('lines', fn (Builder $lineQuery): Builder => $lineQuery->where('status', 'open')),
+                            'completed' => $query->whereHas('lines')
+                                ->whereDoesntHave('lines', fn (Builder $lineQuery): Builder => $lineQuery->where('status', 'open')),
+                            default => $query,
+                        };
+                    }),
+                Filter::make('supplier_report_date_range')
+                    ->label('Order Date')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports')
+                    ->form([
+                        Forms\Components\DatePicker::make('from')->label('From')->native(false),
+                        Forms\Components\DatePicker::make('until')->label('Until')->native(false),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => ! ($query->getModel() instanceof ProcurementSupplierOrder) ? $query : $query
+                        ->when($data['from'] ?? null, fn (Builder $builder, string $date): Builder => $builder->whereDate('created_at', '>=', $date))
+                        ->when($data['until'] ?? null, fn (Builder $builder, string $date): Builder => $builder->whereDate('created_at', '<=', $date))),
+                Filter::make('supplier_report_grv')
+                    ->label('GRV Number')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'supplier_reports')
+                    ->form([
+                        Forms\Components\TextInput::make('grv_number')->label('GRV Number'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof ProcurementSupplierOrder && filled($data['grv_number'] ?? null)
+                        ? $query->whereHas('receipts', fn (Builder $receiptQuery): Builder => $receiptQuery->where('grv_number', trim((string) $data['grv_number'])))
+                        : $query),
+                Filter::make('grv_report_grv')
+                    ->label('GRV Number')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports')
+                    ->form([
+                        Forms\Components\TextInput::make('grv_number')->label('GRV Number'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof ProcurementSupplierReceipt && filled($data['grv_number'] ?? null)
+                        ? $query->where('grv_number', trim((string) $data['grv_number']))
+                        : $query),
+                Filter::make('grv_report_order_id')
+                    ->label('Order ID')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports')
+                    ->form([
+                        Forms\Components\TextInput::make('order_id')->label('Order ID'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof ProcurementSupplierReceipt && filled($data['order_id'] ?? null)
+                        ? $query->whereHas('line.order', fn (Builder $orderQuery): Builder => $orderQuery->where('order_number', 'like', '%'.trim((string) $data['order_id']).'%'))
+                        : $query),
+                SelectFilter::make('adjustment_status_filter')
+                    ->label('Adjustment Status')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments')
+                    ->options([
+                        InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL => 'Pending Approval',
+                        InventoryAdjustmentRequest::STATUS_APPROVED => 'Approved',
+                        InventoryAdjustmentRequest::STATUS_REJECTED => 'Rejected',
+                        InventoryAdjustmentRequest::STATUS_APPLIED => 'Applied',
+                        InventoryAdjustmentRequest::STATUS_FAILED => 'Failed',
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof Variant && filled($data['value'] ?? null)
+                        ? $query->whereHas('inventoryAdjustmentRequestItems.request', fn (Builder $requestQuery): Builder => $requestQuery->where('status', $data['value']))
+                        : $query),
+                Filter::make('adjustment_user')
+                    ->label('Adjustment User')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments')
+                    ->form([
+                        Forms\Components\TextInput::make('user')->label('Requester/approver/reviewer'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof Variant && filled($data['user'] ?? null)
+                        ? $query->whereHas('inventoryAdjustmentRequestItems.request', fn (Builder $requestQuery): Builder => $requestQuery
+                            ->whereHas('requester', fn (Builder $userQuery): Builder => $userQuery->where('name', 'like', '%'.trim((string) $data['user']).'%'))
+                            ->orWhereHas('approver', fn (Builder $userQuery): Builder => $userQuery->where('name', 'like', '%'.trim((string) $data['user']).'%'))
+                            ->orWhereHas('reviewedBy', fn (Builder $userQuery): Builder => $userQuery->where('name', 'like', '%'.trim((string) $data['user']).'%')))
+                        : $query),
                 Filter::make('pending_push')
                     ->label('Pending Push')
-                    ->query(fn (Builder $query): Builder => $query->where('inventory_local_dirty', true)),
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday')
+                    ->query(fn (Builder $query): Builder => $query->getModel() instanceof Variant ? $query->where('inventory_local_dirty', true) : $query),
                 SelectFilter::make('product_status')
                     ->label('Status')
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true))
                     ->options([
                         'active' => 'Active',
                         'draft' => 'Draft',
                     ])
                     ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
                         $value = strtolower(trim((string) ($data['value'] ?? '')));
                         if ($value === '') {
                             return $query;
@@ -341,28 +629,112 @@ class InventoryResource extends Resource
                 Action::make('receiveSupplierStock')
                     ->label('Receive Stock')->icon('heroicon-o-inbox-arrow-down')->color('success')
                     ->modalWidth(MaxWidth::Medium)
-                    ->visible(fn (Variant $record, $livewire): bool => $livewire->activeTab === 'orders'
+                    ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'orders'
+                        && $record instanceof Variant
                         && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
                         && $record->supplierOrderLines->where('status', 'open')->contains(fn ($line) => $line->quantity_outstanding > 0))
                     ->form([
                         Forms\Components\Select::make('line_id')->label('Supplier Order')->required()
+                            ->live()
                             ->options(fn (Variant $record): array => $record->supplierOrderLines->where('status', 'open')
                                 ->filter(fn ($line) => $line->quantity_outstanding > 0)
                                 ->mapWithKeys(fn ($line): array => [$line->id => (($line->order?->order_number ?: 'Legacy order').' — '.$line->quantity_outstanding.' outstanding')])->all()),
                         Forms\Components\TextInput::make('quantity_received')->label('Quantity Received')->integer()->minValue(1)->required(),
+                        Forms\Components\Placeholder::make('out_of_sequence_warning')
+                            ->label('Out-of-sequence warning')
+                            ->content(function (Forms\Get $get): string {
+                                $lineId = (int) ($get('line_id') ?? 0);
+                                if ($lineId <= 0) {
+                                    return 'Select a supplier order to check receipt sequence.';
+                                }
+
+                                $line = ProcurementSupplierOrderLine::query()->with('order')->find($lineId);
+                                if (! $line instanceof ProcurementSupplierOrderLine) {
+                                    return '-';
+                                }
+
+                                $warnings = app(SupplierReceiptService::class)->outOfSequenceWarningsForLine($line);
+                                if ($warnings->isEmpty()) {
+                                    return 'No earlier pending supplier orders were found for this SKU.';
+                                }
+
+                                return app(SupplierReceiptService::class)->warningMessage($line, $warnings);
+                            }),
+                        Forms\Components\Checkbox::make('confirm_out_of_sequence')
+                            ->label('Confirm this receipt is correct if an earlier order exists'),
+                        Forms\Components\Textarea::make('out_of_sequence_reason')
+                            ->label('Out-of-sequence reason')
+                            ->rows(3)
+                            ->helperText('Required when this receipt is for a later ETA while an earlier order for the same SKU is still pending.'),
                         Forms\Components\Hidden::make('idempotency_key')->default(fn (): string => (string) Str::uuid()),
                     ])
                     ->action(function (Variant $record, array $data): void {
                         $line = ProcurementSupplierOrderLine::query()->where('variant_id', $record->id)->findOrFail($data['line_id']);
-                        app(SupplierReceiptService::class)->create($line, $data['quantity_received'], $data['idempotency_key'], Auth::id(), dispatch: false);
+                        $warnings = app(SupplierReceiptService::class)->outOfSequenceWarningsForLine($line);
+                        if ($warnings->isNotEmpty() && ! (bool) ($data['confirm_out_of_sequence'] ?? false)) {
+                            throw \Illuminate\Validation\ValidationException::withMessages([
+                                'confirm_out_of_sequence' => 'Confirm that this out-of-sequence receipt is correct before continuing.',
+                            ]);
+                        }
+                        app(SupplierReceiptService::class)->create(
+                            $line,
+                            $data['quantity_received'],
+                            $data['idempotency_key'],
+                            Auth::id(),
+                            dispatch: false,
+                            outOfSequenceReason: (string) ($data['out_of_sequence_reason'] ?? ''),
+                            outOfSequenceConfirmedBy: Auth::id(),
+                        );
                         Notification::make()->title('Receipt staged')->body('Review it with the Awaiting Shopify Push filter, then push the selected row.')->success()->send();
                     }),
                 Action::make('viewSupplierOrders')
                     ->label('Order Details')->icon('heroicon-o-eye')->color('gray')
-                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'orders')
+                    ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'orders' && $record instanceof Variant)
                     ->modalHeading(fn (Variant $record): string => 'Supplier orders — '.($record->sku ?: "Variant {$record->id}"))
                     ->modalContent(fn (Variant $record) => view('filament.inventory.supplier-orders', ['variant' => $record->load(['supplierOrderLines.order', 'supplierOrderLines.receipts'])]))
                     ->modalSubmitAction(false)->modalCancelActionLabel('Close'),
+                Action::make('viewSupplierOrderReport')
+                    ->label('Order Details')
+                    ->icon('heroicon-o-eye')
+                    ->color('gray')
+                    ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'supplier_reports' && $record instanceof ProcurementSupplierOrder)
+                    ->modalHeading(fn (ProcurementSupplierOrder $record): string => 'Supplier order - '.($record->order_number ?: "Order {$record->id}"))
+                    ->modalContent(fn (ProcurementSupplierOrder $record) => view('filament.inventory.supplier-order-report', [
+                        'order' => $record->load(['createdBy', 'amendments.amendedBy', 'lines.variant.product', 'lines.draft', 'lines.receipts']),
+                    ]))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close'),
+                Action::make('viewGrvReport')
+                    ->label('GRV Details')
+                    ->icon('heroicon-o-eye')
+                    ->color('gray')
+                    ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'grv_reports' && $record instanceof ProcurementSupplierReceipt)
+                    ->modalHeading(fn (ProcurementSupplierReceipt $record): string => 'GRV - '.($record->grv_number ?: "Receipt {$record->id}"))
+                    ->modalContent(fn (ProcurementSupplierReceipt $record) => view('filament.inventory.grv-report', [
+                        'receipt' => $record->load(['line.order', 'line.variant.product', 'createdBy']),
+                        'receipts' => ProcurementSupplierReceipt::query()
+                            ->with(['line.order', 'line.variant.product', 'createdBy'])
+                            ->where('grv_number', $record->grv_number)
+                            ->orderBy('id')
+                            ->get(),
+                    ]))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close'),
+                Action::make('viewInventoryAdjustments')
+                    ->label('Adjustment Details')
+                    ->icon('heroicon-o-clipboard-document-check')
+                    ->color('gray')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'inventory_adjustments')
+                    ->modalHeading(fn (Variant $record): string => 'Inventory adjustments - '.($record->sku ?: "Variant {$record->id}"))
+                    ->modalContent(fn (Variant $record) => view('filament.inventory.adjustments', [
+                        'variant' => $record->load([
+                            'inventoryAdjustmentRequestItems.request.requester',
+                            'inventoryAdjustmentRequestItems.request.approver',
+                            'inventoryAdjustmentRequestItems.request.reviewedBy',
+                        ]),
+                    ]))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close'),
                 Action::make('editInventory')
                     ->label('Update Inventory')
                     ->icon('heroicon-o-pencil-square')
@@ -456,7 +828,8 @@ class InventoryResource extends Resource
                 Action::make('refreshFromShopify')
                     ->label('Read From Shopify')
                     ->icon('heroicon-o-arrow-path')
-                    ->visible(fn (): bool => app(InventoryAccessService::class)->canAccess(Auth::user()))
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)
+                        && app(InventoryAccessService::class)->canAccess(Auth::user()))
                     ->requiresConfirmation()
                     ->modalHeading('Read Inventory From Shopify')
                     ->modalDescription('This will read the latest inventory and tracking state from Shopify for the selected variant.')
@@ -617,7 +990,8 @@ class InventoryResource extends Resource
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('refreshFromShopify')
                         ->label('Read From Shopify')
-                        ->visible(fn (): bool => app(InventoryAccessService::class)->canAccess(Auth::user()))
+                        ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)
+                            && app(InventoryAccessService::class)->canAccess(Auth::user()))
                         ->requiresConfirmation()
                         ->modalHeading('Read Inventory From Shopify')
                         ->modalDescription('This will read the latest inventory and tracking state from Shopify for all selected variants.')
@@ -661,6 +1035,13 @@ class InventoryResource extends Resource
         return [
             'index' => Pages\ListInventories::route('/'),
         ];
+    }
+
+    private static function latestInventoryAdjustmentItem(Variant $record): ?InventoryAdjustmentRequestItem
+    {
+        return $record->inventoryAdjustmentRequestItems
+            ->sortByDesc(fn (InventoryAdjustmentRequestItem $item): string => (string) ($item->request?->submitted_at ?? $item->created_at))
+            ->first();
     }
 
     public static function canViewAny(): bool

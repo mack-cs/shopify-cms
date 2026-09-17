@@ -2,6 +2,7 @@
 
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Jobs\ProcessSupplierReceiptJob;
+use App\Mail\PendingSupplierReceiptPushReminderMail;
 use App\Models\Import;
 use App\Models\ProcurementPrediction;
 use App\Models\ProcurementPredictionRun;
@@ -12,6 +13,8 @@ use App\Models\ProcurementSupplierReceipt;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
+use App\Notifications\PendingSupplierReceiptPushSlackNotification;
+use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
 use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
 use App\Services\Procurement\ProcurementSelectionCsvExporter;
 use App\Services\Procurement\SupplierOrderCsvService;
@@ -21,7 +24,10 @@ use App\Services\Procurement\SupplierOrderSummaryService;
 use App\Services\Procurement\SupplierReceiptService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -62,6 +68,147 @@ it('supports partial receipts and prevents duplicate or excessive receipt reques
 
     expect(fn () => $service->create($line, 7, 'receipt-key-2', dispatch: false))
         ->toThrow(ValidationException::class, 'Only 6 unit(s) remain outstanding.');
+});
+
+it('requires an audit reason when receiving a later ETA supplier order before an earlier pending order', function (): void {
+    $user = User::factory()->create();
+    $variant = supplierWorkflowVariant('SEQ-SINGLE');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-SEQ-EARLY', 5, '2026-09-20');
+    $later = app(SupplierOrderService::class)->createForVariant($variant, 'PO-SEQ-LATE', 7, '2026-10-10', allowExistingOrder: false);
+    $service = app(SupplierReceiptService::class);
+
+    expect(fn () => $service->create($later, 2, 'seq-single-blocked', $user->id, dispatch: false))
+        ->toThrow(ValidationException::class, 'There is an earlier pending supplier order for this SKU');
+
+    $receipt = $service->create(
+        $later,
+        2,
+        'seq-single-confirmed',
+        $user->id,
+        dispatch: false,
+        outOfSequenceReason: 'Supplier delivered the later PO first.',
+        outOfSequenceConfirmedBy: $user->id,
+    );
+
+    expect($receipt->out_of_sequence_confirmed_by)->toBe($user->id)
+        ->and($receipt->out_of_sequence_reason)->toBe('Supplier delivered the later PO first.')
+        ->and($receipt->out_of_sequence_audit['received_order_number'])->toBe('PO-SEQ-LATE')
+        ->and($receipt->out_of_sequence_audit['earlier_orders'][0]['order_number'])->toBe('PO-SEQ-EARLY')
+        ->and($receipt->out_of_sequence_audit['earlier_orders'][0]['eta'])->toBe('2026-09-20')
+        ->and($receipt->out_of_sequence_audit['received_eta'])->toBe('2026-10-10');
+});
+
+it('requires bulk receipt confirmation when pasted receipts receive later ETA orders first', function (): void {
+    $user = User::factory()->create();
+    $variant = supplierWorkflowVariant('SEQ-BULK');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-BULK-EARLY', 5, '2026-09-20');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-BULK-LATE', 7, '2026-10-10', allowExistingOrder: false);
+    $csv = app(SupplierOrderCsvService::class);
+
+    $preview = $csv->previewPastedReceipt("PO-BULK-LATE\tSEQ-BULK\t3", $user->id);
+    $warnings = $csv->outOfSequenceWarnings($preview);
+
+    expect($warnings)->toHaveCount(1)
+        ->and($warnings->first()['earlier_order_number'])->toBe('PO-BULK-EARLY');
+
+    expect(fn () => $csv->confirm($preview->uuid, $user->id, dispatchReceipts: false))
+        ->toThrow(ValidationException::class, 'Confirm the out-of-sequence receipt warning');
+
+    $csv->confirm($preview->uuid, $user->id, dispatchReceipts: false, outOfSequenceReason: 'Container arrived out of ETA order.');
+    $receipt = ProcurementSupplierReceipt::query()->firstOrFail();
+
+    expect($receipt->out_of_sequence_confirmed_by)->toBe($user->id)
+        ->and($receipt->out_of_sequence_reason)->toBe('Container arrived out of ETA order.')
+        ->and($receipt->out_of_sequence_audit['received_order_number'])->toBe('PO-BULK-LATE')
+        ->and($receipt->out_of_sequence_audit['earlier_orders'][0]['order_number'])->toBe('PO-BULK-EARLY');
+});
+
+it('emails the receipt creator and posts to inventory Slack when a pending receipt is not pushed after thirty minutes', function (): void {
+    Mail::fake();
+    Notification::fake();
+    config([
+        'services.slack.channels.inventory' => '#inventory-updates',
+        'procurement.pending_receipt_push_reminder_minutes' => 30,
+    ]);
+
+    $user = User::factory()->create([
+        'email' => 'receiver@example.com',
+        'slack_user_id' => 'U0RECEIVER',
+        'slack_notifications_enabled' => true,
+    ]);
+    $variant = supplierWorkflowVariant('PENDING-PUSH');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-PENDING-PUSH', 4, '2026-10-10', $user->id);
+    $receipt = app(SupplierReceiptService::class)->create($line, 2, 'pending-push-reminder', $user->id, dispatch: false);
+    $receipt->forceFill(['created_at' => now()->subMinutes(31), 'updated_at' => now()->subMinutes(31)])->save();
+
+    $result = app(PendingSupplierReceiptPushReminderService::class)->sendDueReminders();
+
+    expect($result)->toMatchArray([
+        'pending_count' => 1,
+        'email_sent' => 1,
+        'slack_sent' => true,
+        'errors' => [],
+    ]);
+
+    Mail::assertSent(
+        PendingSupplierReceiptPushReminderMail::class,
+        fn (PendingSupplierReceiptPushReminderMail $mail): bool => $mail->hasTo('receiver@example.com')
+            && $mail->receipt->id === $receipt->id
+    );
+
+    Notification::assertSentOnDemand(
+        PendingSupplierReceiptPushSlackNotification::class,
+        function (
+            PendingSupplierReceiptPushSlackNotification $notification,
+            array $channels,
+            AnonymousNotifiable $notifiable
+        ): bool {
+            $payload = $notification->toSlack($notifiable)->toArray();
+            $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+            return $channels === ['slack']
+                && $notifiable->routeNotificationFor('slack') === '#inventory-updates'
+                && is_string($json)
+                && str_contains($json, 'PENDING-PUSH')
+                && str_contains($json, 'PO-PENDING-PUSH')
+                && str_contains($json, 'GRV-000001');
+        }
+    );
+
+    expect($receipt->fresh()->pending_push_reminded_at)->not->toBeNull();
+
+    Mail::fake();
+    Notification::fake();
+
+    $second = app(PendingSupplierReceiptPushReminderService::class)->sendDueReminders();
+
+    expect($second['pending_count'])->toBe(0);
+    Mail::assertNothingSent();
+    Notification::assertNothingSent();
+});
+
+it('does not remind for supplier receipts before the thirty minute window or after Shopify push starts', function (): void {
+    Mail::fake();
+    Notification::fake();
+    config([
+        'services.slack.channels.inventory' => '#inventory-updates',
+        'procurement.pending_receipt_push_reminder_minutes' => 30,
+    ]);
+
+    $user = User::factory()->create(['email' => 'receiver@example.com']);
+    $variant = supplierWorkflowVariant('NO-PENDING-REMINDER');
+    $youngLine = app(SupplierOrderService::class)->createForVariant($variant, 'PO-YOUNG-RECEIPT', 4, '2026-10-10', $user->id);
+    app(SupplierReceiptService::class)->create($youngLine, 1, 'young-pending-receipt', $user->id, dispatch: false);
+    $pushedVariant = supplierWorkflowVariant('NO-PENDING-PUSHED');
+    $pushedLine = app(SupplierOrderService::class)->createForVariant($pushedVariant, 'PO-PUSHED-RECEIPT', 4, '2026-10-11', $user->id);
+    $pushed = app(SupplierReceiptService::class)->create($pushedLine, 1, 'pushed-receipt', $user->id, dispatch: false);
+    $pushed->forceFill(['status' => 'processing', 'created_at' => now()->subMinutes(45), 'updated_at' => now()->subMinutes(45)])->save();
+
+    $result = app(PendingSupplierReceiptPushReminderService::class)->sendDueReminders();
+
+    expect($result['pending_count'])->toBe(0);
+    Mail::assertNothingSent();
+    Notification::assertNothingSent();
 });
 
 it('allows pending supplier order lines to be amended and records the audit trail', function (): void {
@@ -336,6 +483,41 @@ it('previews pasted received orders and stages them for Shopify review', functio
     expect(ProcurementSupplierReceipt::query()->value('status'))->toBe('pending')
         ->and(ProcurementSupplierReceipt::query()->value('quantity_received'))->toBe(4);
     Bus::assertNotDispatched(ProcessSupplierReceiptJob::class);
+});
+
+it('uses one GRV number for all lines in one received-order batch', function (): void {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $first = supplierWorkflowVariant('GRV-BATCH-1');
+    $second = supplierWorkflowVariant('GRV-BATCH-2');
+    app(SupplierOrderService::class)->createForVariant($first, 'PO-GRV-BATCH', 10, '07/09/2026');
+    app(SupplierOrderService::class)->createForVariant($second, 'PO-GRV-BATCH', 12, '07/09/2026', allowExistingOrder: true);
+
+    $csv = app(SupplierOrderCsvService::class);
+    $batch = $csv->previewPastedReceipt("Order ID\tSKU\tQuantity Received\nPO-GRV-BATCH\tGRV-BATCH-1\t4\nPO-GRV-BATCH\tGRV-BATCH-2\t5");
+    $csv->confirm($batch->uuid, dispatchReceipts: false);
+
+    $receipts = ProcurementSupplierReceipt::query()->orderBy('id')->get();
+
+    expect($receipts)->toHaveCount(2)
+        ->and($receipts->pluck('grv_number')->unique()->values()->all())->toBe(['GRV-000001'])
+        ->and($receipts->pluck('quantity_received')->all())->toBe([4, 5]);
+});
+
+it('uses separate GRV numbers for separate received-order batches', function (): void {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $variant = supplierWorkflowVariant('GRV-STAGED');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-GRV-STAGED', 10, '07/09/2026');
+    $csv = app(SupplierOrderCsvService::class);
+
+    $first = $csv->previewPastedReceipt("Order ID\tSKU\tQuantity Received\nPO-GRV-STAGED\tGRV-STAGED\t4");
+    $csv->confirm($first->uuid, dispatchReceipts: false);
+    $second = $csv->previewPastedReceipt("Order ID\tSKU\tQuantity Received\nPO-GRV-STAGED\tGRV-STAGED\t3");
+    $csv->confirm($second->uuid, dispatchReceipts: false);
+
+    expect(ProcurementSupplierReceipt::query()->pluck('grv_number')->unique()->values()->all())
+        ->toBe(['GRV-000001', 'GRV-000002']);
 });
 
 it('rejects invalid pasted received orders without staging any receipts', function (): void {

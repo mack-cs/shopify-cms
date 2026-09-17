@@ -175,7 +175,7 @@ final class SupplierOrderCsvService
         return $batch->fresh();
     }
 
-    public function confirm(string $uuid, ?int $userId = null, bool $dispatchReceipts = true): ProcurementSupplierImportBatch
+    public function confirm(string $uuid, ?int $userId = null, bool $dispatchReceipts = true, ?string $outOfSequenceReason = null): ProcurementSupplierImportBatch
     {
         $batch = ProcurementSupplierImportBatch::query()->where('uuid', $uuid)->firstOrFail();
         if ($batch->status === 'completed') {
@@ -188,8 +188,11 @@ final class SupplierOrderCsvService
         if ($batch->invalid_count > 0) {
             throw ValidationException::withMessages(['batch_uuid' => 'Fix the invalid preview rows before confirming this import.']);
         }
+        if ($batch->type === 'receipt' && $this->outOfSequenceWarnings($batch)->isNotEmpty() && trim((string) $outOfSequenceReason) === '') {
+            throw ValidationException::withMessages(['out_of_sequence_reason' => 'Confirm the out-of-sequence receipt warning and provide a reason before continuing.']);
+        }
         $receiptIds = [];
-        DB::transaction(function () use ($batch, $userId, &$receiptIds): void {
+        DB::transaction(function () use ($batch, $userId, $outOfSequenceReason, &$receiptIds): void {
             $locked = ProcurementSupplierImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
             if ($locked->status === 'completed') {
                 return;
@@ -204,11 +207,12 @@ final class SupplierOrderCsvService
                 }
             }
             $locked->update(['status' => 'processing', 'confirmed_at' => now()]);
+            $grvNumber = $locked->type === 'receipt' ? $this->receipts->nextGrvNumber() : null;
             foreach ($locked->preview_rows as $index => $row) {
                 if ($locked->type === 'order') {
                     $this->orders->createFromRow($row, $userId, 'csv');
                 } else {
-                    $receipt = $this->receipts->createFromRow($row, "csv:{$locked->uuid}:".($index + 1), $userId, $locked->id, false);
+                    $receipt = $this->receipts->createFromRowWithGrv($row, "csv:{$locked->uuid}:".($index + 1), $userId, $locked->id, false, $grvNumber, $outOfSequenceReason);
                     $receiptIds[] = $receipt->id;
                 }
             }
@@ -224,6 +228,59 @@ final class SupplierOrderCsvService
         }
 
         return $batch->fresh();
+    }
+
+    public function outOfSequenceWarnings(ProcurementSupplierImportBatch $batch): \Illuminate\Support\Collection
+    {
+        if ($batch->type !== 'receipt') {
+            return collect();
+        }
+
+        return collect($batch->preview_rows)
+            ->filter(fn (array $row): bool => (bool) ($row['_valid'] ?? false))
+            ->flatMap(function (array $row): array {
+                $line = $this->receiptLineForRow($row);
+                if (! $line instanceof ProcurementSupplierOrderLine) {
+                    return [];
+                }
+
+                return $this->receipts->outOfSequenceWarningsForLine($line)
+                    ->map(fn (array $warning): array => [
+                        'sku' => $line->sku,
+                        'receiving_order_line_id' => $line->id,
+                        'receiving_order_number' => $line->order?->order_number ?: 'Legacy order',
+                        'receiving_eta' => $line->eta_date?->toDateString(),
+                        'earlier_order_number' => $warning['order_number'] ?? 'Legacy order',
+                        'earlier_eta' => $warning['eta'] ?? null,
+                        'earlier_quantity_outstanding' => $warning['quantity_outstanding'] ?? null,
+                    ])
+                    ->all();
+            })
+            ->unique(fn (array $warning): string => implode('|', [
+                $warning['sku'] ?? '',
+                $warning['receiving_order_line_id'] ?? '',
+                $warning['earlier_order_number'] ?? '',
+                $warning['earlier_eta'] ?? '',
+            ]))
+            ->values();
+    }
+
+    private function receiptLineForRow(array $row): ?ProcurementSupplierOrderLine
+    {
+        $order = trim((string) ($row['order_id'] ?? ''));
+        $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
+        if ($order === '' || $sku === '') {
+            return null;
+        }
+
+        $lines = ProcurementSupplierOrderLine::query()
+            ->with('order')
+            ->where('status', 'open')
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+            ->whereHas('order', fn ($query) => $query->where('order_number', $order))
+            ->get();
+
+        return $lines->count() === 1 ? $lines->first() : null;
     }
 
     private function publishOrderRows(ProcurementSupplierImportBatch $batch): void

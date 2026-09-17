@@ -15,4 +15,5 @@ return [
     'process_timeout_seconds' => (int) env('PROCUREMENT_PROCESS_TIMEOUT_SECONDS', 7200),
     'queue' => env('PROCUREMENT_QUEUE', 'procurement'),
     'movement_source_version' => env('PROCUREMENT_MOVEMENT_SOURCE_VERSION', 'product-movement-v2'),
+    'pending_receipt_push_reminder_minutes' => (int) env('PROCUREMENT_PENDING_RECEIPT_PUSH_REMINDER_MINUTES', 30),
 ];

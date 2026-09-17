@@ -7,6 +7,8 @@ use App\Filament\Resources\InventoryResource\Widgets\InventoryRunBanner;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementSupplierImportBatch;
+use App\Models\ProcurementSupplierOrder;
+use App\Models\ProcurementSupplierReceipt;
 use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
@@ -20,7 +22,9 @@ use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Filament\Support\Enums\MaxWidth;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -62,7 +66,15 @@ class ListInventories extends ListRecords
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->modalDescription('Upload received quantities. Valid rows are staged for review and will not change Shopify until selected and pushed.')
-                ->form([FileUpload::make('file')->label('Supplier receipts CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
+                ->form([
+                    FileUpload::make('file')->label('Supplier receipts CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel']),
+                    \Filament\Forms\Components\Checkbox::make('confirm_out_of_sequence')
+                        ->label('Confirm any out-of-sequence receipt warnings'),
+                    Textarea::make('out_of_sequence_reason')
+                        ->label('Out-of-sequence reason')
+                        ->rows(3)
+                        ->helperText('Required when the receipt is for a later ETA while an earlier order for the same SKU is still pending.'),
+                ])
                 ->action(function (array $data, SupplierOrderCsvService $csv): void {
                     try {
                         $path = Storage::disk('local')->path((string) $data['file']);
@@ -72,7 +84,19 @@ class ListInventories extends ListRecords
 
                             return;
                         }
-                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false);
+                        $warnings = $csv->outOfSequenceWarnings($batch);
+                        if ($warnings->isNotEmpty()
+                            && (! (bool) ($data['confirm_out_of_sequence'] ?? false) || blank($data['out_of_sequence_reason'] ?? null))) {
+                            Notification::make()
+                                ->title('Out-of-sequence receipt confirmation required')
+                                ->body($this->outOfSequenceWarningBody($warnings))
+                                ->warning()
+                                ->persistent()
+                                ->send();
+
+                            return;
+                        }
+                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false, outOfSequenceReason: (string) ($data['out_of_sequence_reason'] ?? ''));
                         Notification::make()->title('Received quantities staged')
                             ->body("{$batch->valid_count} row(s) are awaiting review. Filter by Awaiting Shopify Push, select approved rows, then use Push Received To Shopify.")
                             ->success()->persistent()->send();
@@ -135,6 +159,12 @@ class ListInventories extends ListRecords
                         ->helperText("Order ID\tSKU\tQuantity Received")
                         ->rows(12)
                         ->required(),
+                    \Filament\Forms\Components\Checkbox::make('confirm_out_of_sequence')
+                        ->label('Confirm any out-of-sequence receipt warnings'),
+                    Textarea::make('out_of_sequence_reason')
+                        ->label('Out-of-sequence reason')
+                        ->rows(3)
+                        ->helperText('Required when the receipt is for a later ETA while an earlier order for the same SKU is still pending.'),
                 ])
                 ->action(function (array $data, SupplierOrderCsvService $csv): void {
                     try {
@@ -151,7 +181,20 @@ class ListInventories extends ListRecords
                             return;
                         }
 
-                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false);
+                        $warnings = $csv->outOfSequenceWarnings($batch);
+                        if ($warnings->isNotEmpty()
+                            && (! (bool) ($data['confirm_out_of_sequence'] ?? false) || blank($data['out_of_sequence_reason'] ?? null))) {
+                            Notification::make()
+                                ->title('Out-of-sequence receipt confirmation required')
+                                ->body($this->outOfSequenceWarningBody($warnings))
+                                ->warning()
+                                ->persistent()
+                                ->send();
+
+                            return;
+                        }
+
+                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false, outOfSequenceReason: (string) ($data['out_of_sequence_reason'] ?? ''));
                         Notification::make()
                             ->title('Received quantities staged')
                             ->body("{$batch->valid_count} row(s) are awaiting review. Filter by Awaiting Shopify Push, select approved rows, then use Push Received To Shopify.")
@@ -278,6 +321,23 @@ class ListInventories extends ListRecords
         ];
     }
 
+    protected function getTableQuery(): ?Builder
+    {
+        return match ($this->activeTab) {
+            'supplier_reports' => ProcurementSupplierOrder::query()
+                ->with(['createdBy', 'amendments.amendedBy', 'lines.variant.product', 'lines.draft', 'lines.receipts', 'receipts'])
+                ->withCount('lines'),
+            'grv_reports' => ProcurementSupplierReceipt::query()
+                ->with(['line.order', 'line.variant.product', 'createdBy'])
+                ->whereNotNull('grv_number')
+                ->whereIn('id', ProcurementSupplierReceipt::query()
+                    ->selectRaw('MIN(id)')
+                    ->whereNotNull('grv_number')
+                    ->groupBy('grv_number')),
+            default => parent::getTableQuery(),
+        };
+    }
+
     private function supplierPreviewBody(ProcurementSupplierImportBatch $batch): string
     {
         $lines = collect($batch->preview_rows)->take(10)->map(function (array $row) use ($batch): string {
@@ -297,6 +357,22 @@ class ListInventories extends ListRecords
         return "{$batch->valid_count} valid, {$batch->invalid_count} invalid.\n{$lines}\n{$next}";
     }
 
+    private function outOfSequenceWarningBody(\Illuminate\Support\Collection $warnings): string
+    {
+        $lines = $warnings->take(10)->map(function (array $warning): string {
+            $earlierEta = filled($warning['earlier_eta'] ?? null)
+                ? date('d F Y', strtotime((string) $warning['earlier_eta']))
+                : 'an earlier date';
+            $receivingEta = filled($warning['receiving_eta'] ?? null)
+                ? date('d F Y', strtotime((string) $warning['receiving_eta']))
+                : 'no ETA';
+
+            return "SKU {$warning['sku']}: earlier order {$warning['earlier_order_number']} has ETA {$earlierEta}; receiving {$warning['receiving_order_number']} with ETA {$receivingEta}.";
+        })->implode("\n");
+
+        return "There are earlier pending supplier orders for one or more SKUs. Confirm that the receipt is correct and provide a reason before continuing.\n{$lines}";
+    }
+
     public function getTabs(): array
     {
         return [
@@ -314,6 +390,25 @@ class ListInventories extends ListRecords
                         ->where('total_quantity_on_order', '>', 0))
                     ->count())
                 ->badgeColor('info'),
+            'supplier_reports' => Tab::make('Supplier Reporting')
+                ->icon('heroicon-o-document-chart-bar')
+                ->badge((string) ProcurementSupplierOrder::query()->count())
+                ->badgeColor('gray'),
+            'grv_reports' => Tab::make('GRV Receipts')
+                ->icon('heroicon-o-receipt-percent')
+                ->badge((string) ProcurementSupplierReceipt::query()
+                    ->whereNotNull('grv_number')
+                    ->distinct('grv_number')
+                    ->count('grv_number'))
+                ->badgeColor('success'),
+            'inventory_adjustments' => Tab::make('Inventory Adjustments')
+                ->icon('heroicon-o-clipboard-document-check')
+                ->modifyQueryUsing(fn ($query) => $query->whereHas('inventoryAdjustmentRequestItems'))
+                ->badge((string) Variant::query()
+                    ->inventoryWorkspaceEligible()
+                    ->whereHas('inventoryAdjustmentRequestItems')
+                    ->count())
+                ->badgeColor('warning'),
         ];
     }
 }

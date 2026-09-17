@@ -27,6 +27,7 @@ use App\Services\SearchConsoleCsvImporter;
 use App\Services\SearchConsoleMetricImportService;
 use App\Services\DuplicateSkuReminderService;
 use App\Services\MaintenanceTaskNotificationService;
+use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -561,6 +562,29 @@ Schedule::command('sku:audit-duplicates')
     ->withoutOverlapping()
     ->onOneServer()
     ->name('daily-duplicate-sku-audit');
+
+Artisan::command('procurement:remind-pending-receipt-pushes', function (PendingSupplierReceiptPushReminderService $reminders): int {
+    $result = $reminders->sendDueReminders();
+
+    $this->info(
+        "Pending receipt push reminders: {$result['pending_count']} due. "
+        . "Emails sent: {$result['email_sent']}. "
+        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+    );
+
+    foreach ($result['errors'] as $error) {
+        $this->error($error);
+    }
+
+    return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
+})->purpose('Remind receipt creators and the inventory Slack channel about supplier receipts pending Shopify push.');
+
+Schedule::command('procurement:remind-pending-receipt-pushes')
+    ->everyFiveMinutes()
+    ->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('pending-supplier-receipt-push-reminders');
 
 Schedule::job(new ReconcileProductImageBackupsJob())
     ->dailyAt('02:00')
