@@ -6,6 +6,7 @@ use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\Variant;
 use App\Models\User;
+use App\Filament\Resources\ManualStockTransactionResource;
 use App\Services\ManualStockTransactionService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -126,4 +127,17 @@ it('records a Shopify failure per impact without marking the transaction complet
     expect($result->status)->toBe('partially_failed')
         ->and($result->impacts->where('status', 'completed'))->toHaveCount(1)
         ->and($result->impacts->where('status', 'failed'))->toHaveCount(1);
+});
+
+it('renders the manual stock transaction detail page with component source arrays', function (): void {
+    $user = User::factory()->create();
+    $product = manualStockProduct(manualStockImport('manual-view'), 'View Product', 'VIEW1', 701);
+    $service = new ManualStockTransactionService(Mockery::mock(ShopifyInventoryAdjustmentService::class));
+    $transaction = $service->process($service->prepare(historicalTransaction([[$product, 2]])), $user->id);
+
+    $this->withoutMiddleware()->actingAs($user)
+        ->get(ManualStockTransactionResource::getUrl('view', ['record' => $transaction]))
+        ->assertOk()
+        ->assertSee('View Product')
+        ->assertSee('component 2');
 });

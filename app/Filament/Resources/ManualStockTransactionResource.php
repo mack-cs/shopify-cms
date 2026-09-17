@@ -109,7 +109,12 @@ class ManualStockTransactionResource extends Resource
                 TextEntry::make('product_title'), TextEntry::make('sku'), TextEntry::make('quantity_required')->label('Deduct'),
                 TextEntry::make('available_before'), TextEntry::make('on_hand_before'), TextEntry::make('available_after'), TextEntry::make('on_hand_after'),
                 TextEntry::make('status')->badge(), TextEntry::make('error_message')->color('danger')->columnSpanFull(),
-                TextEntry::make('sources')->label('Ordered product source(s)')->formatStateUsing(fn ($state) => collect($state)->map(fn ($s) => ($s['product'] ?? 'Product').' x '.($s['ordered_quantity'] ?? '?').' -> component '.($s['component_quantity_total'] ?? '?'))->implode("\n"))->columnSpanFull(),
+                TextEntry::make('sources_summary')->label('Ordered product source(s)')
+                    ->state(fn ($record): string => collect($record->sources ?? [])->map(
+                        fn ($source): string => ($source['product'] ?? 'Product').' x '.($source['ordered_quantity'] ?? '?')
+                            .' -> component '.($source['component_quantity_total'] ?? '?')
+                    )->implode("\n"))
+                    ->columnSpanFull(),
             ])->columns(4),
         ]);
     }
