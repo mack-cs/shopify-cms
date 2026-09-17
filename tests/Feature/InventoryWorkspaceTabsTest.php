@@ -191,7 +191,9 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->toContain('Created By')
         ->toContain($user->name)
         ->toContain('Last Amended By')
-        ->toContain($amender->name);
+        ->toContain($amender->name)
+        ->toContain('Export CSV')
+        ->toContain(route('inventory.supplier-orders.export', $order));
 
     $grvDetails = view('filament.inventory.grv-report', [
         'receipt' => $receipt->fresh(['line.order', 'line.variant.product', 'createdBy']),

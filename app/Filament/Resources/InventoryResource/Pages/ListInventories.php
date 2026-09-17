@@ -8,7 +8,6 @@ use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
-use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierReceipt;
 use App\Models\Variant;
 use App\Services\AsyncJobStateService;
@@ -393,7 +392,7 @@ class ListInventories extends ListRecords
                 ->badgeColor('info'),
             'supplier_reports' => Tab::make('Supplier Reporting')
                 ->icon('heroicon-o-document-chart-bar')
-                ->badge((string) ProcurementSupplierOrderLine::query()->count())
+                ->badge((string) ProcurementSupplierOrder::query()->count())
                 ->badgeColor('gray'),
             'grv_reports' => Tab::make('GRV Receipts')
                 ->icon('heroicon-o-receipt-percent')

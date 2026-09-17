@@ -336,6 +336,27 @@ it('reconciles supplier reporting summaries after historical receipts are backfi
         ->and($variant->procurementIncomingStock()->value('number_of_wip_orders'))->toBe(0);
 });
 
+it('exports supplier order report details as CSV', function (): void {
+    $user = User::factory()->create(['name' => 'CSV User']);
+    $variant = supplierWorkflowVariant('ORDER-CSV');
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-ORDER-CSV', 8, '2026-09-20', $user->id);
+    app(SupplierReceiptService::class)->create($line, 3, 'order-csv-receipt', $user->id, dispatch: false);
+    $order = ProcurementSupplierOrder::query()->where('order_number', 'PO-ORDER-CSV')->firstOrFail();
+
+    $response = $this->actingAs($user)->get(route('inventory.supplier-orders.export', $order));
+
+    $response->assertOk();
+    expect($response->headers->get('content-type'))->toContain('text/csv');
+
+    $csv = $response->streamedContent();
+    expect($csv)
+        ->toContain('Order ID')
+        ->toContain('PO-ORDER-CSV')
+        ->toContain('ORDER-CSV')
+        ->toContain('CSV User')
+        ->toContain('GRV-');
+});
+
 it('recalculates receipt transfers from fresh inventory without an artificial shortage', function (): void {
     $this->travelTo('2026-09-01 00:00:00');
     $variant = supplierWorkflowVariant('RECEIPT-TRANSFER');

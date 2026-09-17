@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\ProductImageBackupController;
+use App\Http\Controllers\SupplierOrderReportExportController;
 use App\Http\Controllers\ShopifyInventoryLevelWebhookController;
 use App\Http\Controllers\ShopifyFulfillmentWebhookController;
 use App\Http\Controllers\ShopifyProductUpdateWebhookController;
@@ -11,6 +12,10 @@ use Illuminate\Support\Facades\Route;
 Route::get('/product-image-backups/{image}/{filename?}', ProductImageBackupController::class)
     ->where('filename', '.*')
     ->name('product-image-backups.show');
+
+Route::get('/inventory/supplier-orders/{order}/export', SupplierOrderReportExportController::class)
+    ->middleware(['auth'])
+    ->name('inventory.supplier-orders.export');
 
 Route::post('/webhooks/shopify/inventory-levels-update', ShopifyInventoryLevelWebhookController::class)
     ->withoutMiddleware([ValidateCsrfToken::class])

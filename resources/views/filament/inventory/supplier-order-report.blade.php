@@ -23,6 +23,14 @@
         <div class="mt-1 text-gray-600 dark:text-gray-300">
             GRVs: {{ $grvs->isNotEmpty() ? $grvs->implode(', ') : '-' }}
         </div>
+        <div class="mt-3">
+            <a
+                href="{{ route('inventory.supplier-orders.export', $order) }}"
+                class="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+            >
+                Export CSV
+            </a>
+        </div>
     </div>
 
     <div class="overflow-x-auto">
