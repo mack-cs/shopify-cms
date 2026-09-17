@@ -97,16 +97,19 @@ class ManualStockTransactionResource extends Resource
             Section::make('Transaction')->schema([
                 TextEntry::make('transaction_type')->formatStateUsing(fn ($state) => ManualStockTransaction::TYPES[$state] ?? $state),
                 TextEntry::make('recipient_name'), TextEntry::make('reference_number'), TextEntry::make('transaction_date')->date(),
-                TextEntry::make('status')->badge(), TextEntry::make('inventory_update_status')->badge(), TextEntry::make('is_historical')->boolean(),
+                TextEntry::make('status')->badge(), TextEntry::make('inventory_update_status')->badge(),
+                TextEntry::make('is_historical')->label('Historical / backfill')->formatStateUsing(fn ($state): string => $state ? 'Yes' : 'No')->badge()->color(fn ($state): string => $state ? 'warning' : 'gray'),
                 TextEntry::make('creator.name'), TextEntry::make('processor.name'), TextEntry::make('created_at')->dateTime(), TextEntry::make('processed_at')->dateTime(),
                 TextEntry::make('notes')->columnSpanFull(), TextEntry::make('last_error')->color('danger')->columnSpanFull(),
             ])->columns(4),
-            RepeatableEntry::make('items')->label('Ordered products')->schema([TextEntry::make('product_title'), TextEntry::make('sku'), TextEntry::make('quantity'), TextEntry::make('is_stack')->boolean(), TextEntry::make('processing_result')->columnSpanFull()])->columns(4),
+            RepeatableEntry::make('items')->label('Ordered products')->schema([TextEntry::make('product_title'), TextEntry::make('sku'), TextEntry::make('quantity'),
+                TextEntry::make('is_stack')->label('Stack product')->formatStateUsing(fn ($state): string => $state ? 'Yes' : 'No')->badge()->color(fn ($state): string => $state ? 'info' : 'gray'),
+                TextEntry::make('processing_result')->columnSpanFull()])->columns(4),
             RepeatableEntry::make('impacts')->label('Shopify inventory impact / component movement ledger')->schema([
                 TextEntry::make('product_title'), TextEntry::make('sku'), TextEntry::make('quantity_required')->label('Deduct'),
                 TextEntry::make('available_before'), TextEntry::make('on_hand_before'), TextEntry::make('available_after'), TextEntry::make('on_hand_after'),
                 TextEntry::make('status')->badge(), TextEntry::make('error_message')->color('danger')->columnSpanFull(),
-                TextEntry::make('sources')->label('Ordered product source(s)')->formatStateUsing(fn ($state) => collect($state)->map(fn ($s) => ($s['product'] ?? 'Product').' × '.($s['ordered_quantity'] ?? '?').' → component '.($s['component_quantity_total'] ?? '?'))->implode("\n"))->columnSpanFull(),
+                TextEntry::make('sources')->label('Ordered product source(s)')->formatStateUsing(fn ($state) => collect($state)->map(fn ($s) => ($s['product'] ?? 'Product').' x '.($s['ordered_quantity'] ?? '?').' -> component '.($s['component_quantity_total'] ?? '?'))->implode("\n"))->columnSpanFull(),
             ])->columns(4),
         ]);
     }
