@@ -20,7 +20,7 @@ class ShopifyInventorySnapshotResource extends Resource
     protected static ?string $model = ShopifyInventorySnapshot::class;
     protected static ?string $navigationIcon = 'heroicon-o-circle-stack';
     protected static ?string $navigationGroup = 'Shopify Sync';
-    protected static ?string $navigationLabel = 'Inventory';
+    protected static ?string $navigationLabel = 'Shopify Inventory Snapshots';
     protected static ?int $navigationSort = 3;
 
     public static function form(Form $form): Form
