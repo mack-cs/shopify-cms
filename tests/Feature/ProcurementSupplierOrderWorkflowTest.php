@@ -251,6 +251,55 @@ it('can receive an amended quantity and assigns unique GRV numbers', function ()
         ->and(ProcurementSupplierReceipt::query()->where('grv_number', $second->grv_number)->first()->quantity_received)->toBe(7);
 });
 
+it('backfills GRV numbers for historical receipts that were created before GRV tracking', function (): void {
+    $variant = supplierWorkflowVariant('GRV-BACKFILL');
+    $first = app(SupplierOrderService::class)->createForVariant($variant, 'PO-GRV-BACKFILL-A', 10, '2026-09-20');
+    $second = app(SupplierOrderService::class)->createForVariant($variant, 'PO-GRV-BACKFILL-B', 10, '2026-09-21', allowExistingOrder: false);
+
+    $batch = \App\Models\ProcurementSupplierImportBatch::query()->create([
+        'uuid' => (string) Str::uuid(),
+        'type' => 'receipt',
+        'file_hash' => 'historical-grv-backfill',
+        'status' => 'completed',
+        'preview_rows' => [],
+        'valid_count' => 0,
+        'invalid_count' => 0,
+    ]);
+    $batchedA = $first->receipts()->create([
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 4,
+        'idempotency_key' => 'historical-batched-a', 'source' => 'csv', 'status' => 'succeeded',
+        'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://historical-batched-a',
+        'import_batch_id' => $batch->id,
+    ]);
+    $batchedB = $second->receipts()->create([
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 3,
+        'idempotency_key' => 'historical-batched-b', 'source' => 'csv', 'status' => 'succeeded',
+        'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://historical-batched-b',
+        'import_batch_id' => $batch->id,
+    ]);
+    $standalone = $second->receipts()->create([
+        'uuid' => (string) Str::uuid(), 'quantity_received' => 2,
+        'idempotency_key' => 'historical-standalone', 'source' => 'cms', 'status' => 'succeeded',
+        'post_process_status' => 'completed', 'shopify_reference_uri' => 'test://historical-standalone',
+    ]);
+
+    $dryRun = app(SupplierReceiptService::class)->backfillMissingGrvNumbers(dryRun: true);
+    expect($dryRun['receipt_count'])->toBe(3)
+        ->and($dryRun['grv_count'])->toBe(2)
+        ->and(ProcurementSupplierReceipt::query()->whereNull('grv_number')->count())->toBe(3);
+
+    $result = app(SupplierReceiptService::class)->backfillMissingGrvNumbers();
+    $batchedGrv = $batchedA->fresh()->grv_number;
+    $standaloneGrv = $standalone->fresh()->grv_number;
+
+    expect($result['receipt_count'])->toBe(3)
+        ->and($result['grv_count'])->toBe(2)
+        ->and($batchedGrv)->toStartWith('GRV-')
+        ->and($batchedB->fresh()->grv_number)->toBe($batchedGrv)
+        ->and($standaloneGrv)->toStartWith('GRV-')
+        ->and($standaloneGrv)->not->toBe($batchedGrv);
+});
+
 it('recalculates receipt transfers from fresh inventory without an artificial shortage', function (): void {
     $this->travelTo('2026-09-01 00:00:00');
     $variant = supplierWorkflowVariant('RECEIPT-TRANSFER');

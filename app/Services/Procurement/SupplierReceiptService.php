@@ -83,6 +83,85 @@ final class SupplierReceiptService
         return 'GRV-'.str_pad((string) $number, 6, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * @return array{receipt_count:int,grv_count:int,groups:array<int, array{group:string,grv_number:string,receipt_ids:array<int,int>}>}
+     */
+    public function backfillMissingGrvNumbers(bool $dryRun = false): array
+    {
+        if ($dryRun) {
+            $receipts = ProcurementSupplierReceipt::query()
+                ->whereNull('grv_number')
+                ->whereIn('status', ['pending', 'processing', 'succeeded', 'manual_review'])
+                ->orderBy('import_batch_id')
+                ->orderBy('created_at')
+                ->orderBy('id')
+                ->get();
+            $nextNumber = (int) (DB::table('procurement_grv_sequences')->value('next_number') ?? 1);
+            $assigned = $receipts
+                ->groupBy(fn (ProcurementSupplierReceipt $receipt): string => $receipt->import_batch_id !== null
+                    ? 'batch:'.$receipt->import_batch_id
+                    : 'receipt:'.$receipt->id)
+                ->values()
+                ->map(function (Collection $groupReceipts) use (&$nextNumber): array {
+                    return [
+                        'group' => $groupReceipts->first()->import_batch_id !== null
+                            ? 'batch:'.$groupReceipts->first()->import_batch_id
+                            : 'receipt:'.$groupReceipts->first()->id,
+                        'grv_number' => 'GRV-'.str_pad((string) $nextNumber++, 6, '0', STR_PAD_LEFT),
+                        'receipt_ids' => $groupReceipts->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
+                    ];
+                })
+                ->all();
+
+            return [
+                'receipt_count' => $receipts->count(),
+                'grv_count' => count($assigned),
+                'groups' => $assigned,
+            ];
+        }
+
+        return DB::transaction(function () use ($dryRun): array {
+            $receipts = ProcurementSupplierReceipt::query()
+                ->whereNull('grv_number')
+                ->whereIn('status', ['pending', 'processing', 'succeeded', 'manual_review'])
+                ->orderBy('import_batch_id')
+                ->orderBy('created_at')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            $groups = $receipts
+                ->groupBy(fn (ProcurementSupplierReceipt $receipt): string => $receipt->import_batch_id !== null
+                    ? 'batch:'.$receipt->import_batch_id
+                    : 'receipt:'.$receipt->id);
+
+            $assigned = [];
+            foreach ($groups as $group => $groupReceipts) {
+                $grvNumber = $this->nextGrvNumber();
+                $ids = $groupReceipts->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
+
+                if (! $dryRun) {
+                    ProcurementSupplierReceipt::query()
+                        ->whereIn('id', $ids)
+                        ->whereNull('grv_number')
+                        ->update(['grv_number' => $grvNumber]);
+                }
+
+                $assigned[] = [
+                    'group' => (string) $group,
+                    'grv_number' => $grvNumber,
+                    'receipt_ids' => $ids,
+                ];
+            }
+
+            return [
+                'receipt_count' => $receipts->count(),
+                'grv_count' => count($assigned),
+                'groups' => $assigned,
+            ];
+        });
+    }
+
     public function createFromRow(array $row, string $idempotencyKey, ?int $userId = null, ?int $batchId = null, bool $dispatch = true, ?string $outOfSequenceReason = null): ProcurementSupplierReceipt
     {
         return $this->createFromRowWithGrv($row, $idempotencyKey, $userId, $batchId, $dispatch, outOfSequenceReason: $outOfSequenceReason);

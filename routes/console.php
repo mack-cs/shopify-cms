@@ -28,6 +28,7 @@ use App\Services\SearchConsoleMetricImportService;
 use App\Services\DuplicateSkuReminderService;
 use App\Services\MaintenanceTaskNotificationService;
 use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
+use App\Services\Procurement\SupplierReceiptService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -578,6 +579,24 @@ Artisan::command('procurement:remind-pending-receipt-pushes', function (PendingS
 
     return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
 })->purpose('Remind receipt creators and the inventory Slack channel about supplier receipts pending Shopify push.');
+
+Artisan::command('procurement:backfill-receipt-grvs {--dry-run : Preview the GRVs that would be assigned without updating receipts}', function (SupplierReceiptService $receipts): int {
+    $result = $receipts->backfillMissingGrvNumbers((bool) $this->option('dry-run'));
+    $mode = (bool) $this->option('dry-run') ? 'would assign' : 'assigned';
+
+    $this->info("GRV backfill {$mode} {$result['grv_count']} GRV(s) across {$result['receipt_count']} receipt(s).");
+
+    foreach (array_slice($result['groups'], 0, 20) as $group) {
+        $this->line("{$group['grv_number']} -> {$group['group']} receipt(s): ".implode(', ', $group['receipt_ids']));
+    }
+
+    if (count($result['groups']) > 20) {
+        $remaining = count($result['groups']) - 20;
+        $this->line("...and {$remaining} more group(s).");
+    }
+
+    return self::SUCCESS;
+})->purpose('Backfill GRV numbers for historical supplier receipts that were created before GRV tracking.');
 
 Schedule::command('procurement:remind-pending-receipt-pushes')
     ->everyFiveMinutes()
