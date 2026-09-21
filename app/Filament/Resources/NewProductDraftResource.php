@@ -50,6 +50,7 @@ use App\Services\ComplementaryProductAuditService;
 use App\Services\ProductPartialApprovalService;
 use App\Services\SaleTagService;
 use App\Services\SaleProductUpdateImporter;
+use App\Services\PrepopulationRuleService;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Actions;
@@ -526,13 +527,20 @@ class NewProductDraftResource extends Resource
                                         $set('google_product_category', $classification['google_product_category']);
                                     }
 
-                                    $set('tags', self::tagsForCollectionSelection(
+                                    $tags = self::tagsForCollectionSelection(
                                         $get('tags'),
                                         is_string($state) ? $state : null,
                                         $resolvedType,
                                         $get('title'),
                                         self::saleStateFromForm($get('is_on_sale'), $get('tags'))
-                                    ));
+                                    );
+                                    $set('tags', $tags);
+                                    self::applyCollectionPrepopulation(
+                                        $set,
+                                        is_string($state) ? $state : null,
+                                        $tags,
+                                        $resolvedType
+                                    );
                                     self::refreshDraftVibeSelection($set, $get);
                                 }),
                             Select::make('vendor')
@@ -1391,6 +1399,7 @@ class NewProductDraftResource extends Resource
                         ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                             $set('tags', app(DraftShopYourVibeSelection::class)->apply($get('tags'), $state ?? [],
                                 $get('collection_filter'), $get('vendor'), self::collectionTags($get('collection_filter'))));
+                            self::applyShopYourVibePrepopulation($set, $get, is_array($state) ? $state : []);
                         }),
                     Select::make('colour_style')
                                 ->label('Color Style')
@@ -1941,7 +1950,59 @@ class NewProductDraftResource extends Resource
         $vendor = $get('vendor');
         $selected = $service->selected($get('tags'), $collection, $vendor);
         $set('shop_your_vibe_collections', $selected);
-        $set('tags', $service->apply($get('tags'), $selected, $collection, $vendor, self::collectionTags($collection)));
+    }
+
+    private static function applyCollectionPrepopulation(callable $set, ?string $collection, mixed $tags, mixed $type): void
+    {
+        $service = app(PrepopulationRuleService::class);
+        $rule = $service->ruleForCollection($collection);
+        if ($rule === null) {
+            return;
+        }
+
+        self::applyPrepopulationUpdates($set, $service->applyCollectionRuleReplacingManagedTags($rule, $tags, is_string($type) ? $type : null));
+    }
+
+    /** @param array<int, mixed> $selected */
+    private static function applyShopYourVibePrepopulation(callable $set, Get $get, array $selected): void
+    {
+        if ($selected === []) {
+            return;
+        }
+
+        $vibes = app(DraftShopYourVibeSelection::class)
+            ->mappings($get('collection_filter'), $get('vendor'))
+            ->whereIn('shopify_collection_id', $selected);
+        $service = app(PrepopulationRuleService::class);
+        $tags = $get('tags');
+        $type = $get('type');
+
+        foreach ($vibes as $vibe) {
+            $rule = $service->shopYourVibeRuleForHandle($vibe->collection_handle ?? null)
+                ?? $service->shopYourVibeRuleForHandle($vibe->collection_name ?? null);
+            if ($rule === null) {
+                continue;
+            }
+
+            $updates = $service->applyRule($rule, $tags, is_string($type) ? $type : null);
+            self::applyPrepopulationUpdates($set, $updates);
+            $tags = $updates['tags'] ?? $tags;
+            $type = $updates['type'] ?? $type;
+        }
+    }
+
+    /** @param array<string, mixed> $updates */
+    private static function applyPrepopulationUpdates(callable $set, array $updates): void
+    {
+        foreach (['vendor', 'type', 'product_category', 'google_product_category', 'status', 'colour_style', 'product_design'] as $field) {
+            if (array_key_exists($field, $updates)) {
+                $set($field, $updates[$field]);
+            }
+        }
+
+        if (array_key_exists('tags', $updates)) {
+            $set('tags', $updates['tags']);
+        }
     }
 
     private static function categoryMappingForCollection(?string $collection): ?array
