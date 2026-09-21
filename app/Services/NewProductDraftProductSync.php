@@ -8,24 +8,20 @@ use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
-use App\Services\HeaderStore;
-use App\Services\Normalizer;
 use Illuminate\Support\Collection;
 
 final class NewProductDraftProductSync
 {
     public function __construct(
         private readonly ProductSeoTracker $seoTracker
-    ) {
-    }
+    ) {}
 
     public function syncToExistingProduct(
         NewProductDraft $draft,
         bool $ensureApprovalReset = true,
         ?array $attributes = null
-    ): bool
-    {
-        if (!$draft->handle && !$draft->shopify_id) {
+    ): bool {
+        if (! $draft->handle && ! $draft->shopify_id) {
             return false;
         }
 
@@ -35,7 +31,7 @@ final class NewProductDraftProductSync
 
         $product = $this->findExistingProduct($draft);
 
-        if (!$product) {
+        if (! $product) {
             return false;
         }
 
@@ -43,7 +39,7 @@ final class NewProductDraftProductSync
         $attributes = $this->normalizeAttributes($attributes);
         $data = $this->mapDraftToProduct($draft, $attributes);
 
-        if (!empty($data)) {
+        if (! empty($data)) {
             $product->fill($data)->save();
         }
         $this->syncVariantFromDraft($product, $draft, $attributes);
@@ -66,7 +62,7 @@ final class NewProductDraftProductSync
     }
 
     /**
-     * @param Collection<int, NewProductDraft>|null $drafts
+     * @param  Collection<int, NewProductDraft>|null  $drafts
      * @return array{updated:int, created:int, skipped_unapproved:int, skipped_missing_handle:int, skipped_missing_import:int, skipped_blocked:int}
      */
     public function syncApprovedDrafts(?Collection $drafts = null): array
@@ -90,22 +86,25 @@ final class NewProductDraftProductSync
             ->get();
 
         foreach ($drafts as $draft) {
-            if (!$draft instanceof NewProductDraft) {
+            if (! $draft instanceof NewProductDraft) {
                 continue;
             }
 
             if ($draft->isBlockedFromShopifyMissing()) {
                 $skippedBlocked++;
+
                 continue;
             }
 
-            if (!$draft->handle && !$draft->shopify_id) {
+            if (! $draft->handle && ! $draft->shopify_id) {
                 $skippedMissingHandle++;
+
                 continue;
             }
 
-            if (!$draft->isApprovedByTwo()) {
+            if (! $draft->isApprovedByTwo()) {
                 $skippedUnapproved++;
+
                 continue;
             }
 
@@ -116,17 +115,20 @@ final class NewProductDraftProductSync
             if ($product) {
                 $this->syncToExistingProduct($draft, ensureApprovalReset: false);
                 $updated++;
+
                 continue;
             }
 
-            if (!$draft->handle) {
+            if (! $draft->handle) {
                 $skippedMissingHandle++;
+
                 continue;
             }
 
             $import = Import::where('is_current', true)->first();
-            if (!$import) {
+            if (! $import) {
                 $skippedMissingImport++;
+
                 continue;
             }
 
@@ -200,7 +202,7 @@ final class NewProductDraftProductSync
 
         $selected = [];
         foreach ($attributes as $attribute) {
-            if (!array_key_exists($attribute, $data)) {
+            if (! array_key_exists($attribute, $data)) {
                 continue;
             }
 
@@ -213,13 +215,14 @@ final class NewProductDraftProductSync
     private function syncVariantFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
     {
         $variant = Variant::where('product_id', $product->id)->orderBy('id')->first();
-        if (!$variant) {
+        if (! $variant) {
             return;
         }
 
         $updates = [];
         if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
             $updates['sku'] = $draft->sku;
+            $updates['barcode'] = $draft->sku;
         }
         if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)) {
             $updates['price'] = $draft->variant_price;
@@ -230,11 +233,17 @@ final class NewProductDraftProductSync
         if ($this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty)) {
             $updates['inventory_qty'] = $draft->variant_inventory_qty;
         }
+        if ($this->shouldSyncDraftAttribute('variant_weight', $attributes, $draft->variant_weight)) {
+            $updates['weight'] = $draft->variant_weight;
+        }
+        if ($this->shouldSyncDraftAttribute('variant_weight_unit', $attributes, $draft->variant_weight_unit)) {
+            $updates['weight_unit'] = $draft->variant_weight_unit;
+        }
         if ($this->shouldSyncDraftAttribute('variant_inventory_policy', $attributes, $draft->variant_inventory_policy)) {
             $updates['inventory_policy'] = $draft->variant_inventory_policy;
         }
 
-        if (!empty($updates)) {
+        if (! empty($updates)) {
             $variant->update($updates);
         }
     }
@@ -243,8 +252,10 @@ final class NewProductDraftProductSync
     {
         $syncMaterialCost = $this->shouldSyncDraftAttribute('material_cost', $attributes, $draft->material_cost);
         $syncInventory = $this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty);
+        $syncWeight = $this->shouldSyncDraftAttribute('variant_weight', $attributes, $draft->variant_weight);
+        $syncWeightUnit = $this->shouldSyncDraftAttribute('variant_weight_unit', $attributes, $draft->variant_weight_unit);
 
-        if (!$syncMaterialCost && !$syncInventory) {
+        if (! $syncMaterialCost && ! $syncInventory && ! $syncWeight && ! $syncWeightUnit) {
             return;
         }
 
@@ -253,7 +264,7 @@ final class NewProductDraftProductSync
             ->where('row_type', 'product_primary')
             ->first();
 
-        if (!$row) {
+        if (! $row) {
             return;
         }
 
@@ -262,6 +273,12 @@ final class NewProductDraftProductSync
         }
         if ($syncInventory) {
             $row->set(HeaderStore::VARIANT_INVENTORY_QTY, (string) $draft->variant_inventory_qty);
+        }
+        if ($syncWeight) {
+            $row->set(HeaderStore::VARIANT_GRAMS, (string) $draft->variant_weight);
+        }
+        if ($syncWeightUnit) {
+            $row->set(HeaderStore::VARIANT_WEIGHT_UNIT, (string) $draft->variant_weight_unit);
         }
         $row->save();
     }
@@ -273,11 +290,16 @@ final class NewProductDraftProductSync
             ->where('row_type', 'product_primary')
             ->first();
 
-        if (!$row) {
+        if (! $row) {
             return;
         }
 
         $updates = [];
+
+        if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
+            $updates[HeaderStore::VARIANT_SKU] = trim((string) ($draft->sku ?? ''));
+            $updates[HeaderStore::VARIANT_BARCODE] = trim((string) ($draft->sku ?? ''));
+        }
 
         $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes);
         $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes);
@@ -302,14 +324,16 @@ final class NewProductDraftProductSync
             $updates[HeaderStore::PATTERN_CATEGORY] = trim((string) ($draft->colour_style ?? ''));
         }
         $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::SIBLINGS, $draft->siblings, 'siblings', $attributes);
         if (
             $this->shouldSyncDraftAttribute('siblings_collection_name', $attributes, $draft->title)
             || $this->shouldSyncDraftAttribute('title', $attributes, $draft->title)
         ) {
             $updates[HeaderStore::SIBLINGS_COLLECTION_NAME] = trim((string) ($draft->title ?? ''));
         }
-        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $draft->sibling_collection, 'sibling_collection', $attributes);
+        $siblingCollection = $draft->sibling_collection === NewProductDraft::NO_SIBLING_COLLECTION
+            ? ''
+            : $draft->sibling_collection;
+        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $siblingCollection, 'sibling_collection', $attributes);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
         if ($this->shouldSyncDraftAttribute('seo_deindex', $attributes, $draft->seo_deindex)) {
@@ -318,12 +342,12 @@ final class NewProductDraftProductSync
 
         if ($this->shouldSyncDraftAttribute('payload', $attributes, $draft->payload)) {
             foreach ($this->extraDraftPayloadHeaders($product) as $header) {
-                if (!array_key_exists($header, $updates)) {
+                if (! array_key_exists($header, $updates)) {
                     $updates[$header] = '';
                 }
             }
             foreach ($this->payloadRowUpdates($draft, $product) as $header => $value) {
-                if (!array_key_exists($header, $updates)) {
+                if (! array_key_exists($header, $updates)) {
                     $updates[$header] = $value;
                 }
             }
@@ -363,15 +387,6 @@ final class NewProductDraftProductSync
             $attributes
         );
 
-        $this->syncDraftMetafieldSnapshot(
-            $product,
-            'siblings',
-            'shopify--discovery--product_recommendation',
-            'related_products',
-            'list.product_reference',
-            $draft->siblings,
-            $attributes
-        );
     }
 
     private function syncDraftMetafieldSnapshot(
@@ -383,7 +398,7 @@ final class NewProductDraftProductSync
         mixed $value,
         ?array $attributes = null
     ): void {
-        if (!$this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
+        if (! $this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
             return;
         }
 
@@ -407,9 +422,8 @@ final class NewProductDraftProductSync
         mixed $value,
         string $attribute,
         ?array $attributes = null
-    ): void
-    {
-        if (!$this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
+    ): void {
+        if (! $this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
             return;
         }
 
@@ -434,7 +448,7 @@ final class NewProductDraftProductSync
 
         $updates = [];
         foreach ($payload as $header => $value) {
-            if (!is_string($header) || !isset($allowed[$header])) {
+            if (! is_string($header) || ! isset($allowed[$header])) {
                 continue;
             }
 
@@ -465,7 +479,7 @@ final class NewProductDraftProductSync
     private function payloadAllowedHeaders(Product $product): array
     {
         $headers = $product->import?->headers ?? [];
-        if (!empty($headers)) {
+        if (! empty($headers)) {
             return array_values(array_filter(array_map(
                 static fn (mixed $header): string => trim((string) $header),
                 $headers
@@ -485,7 +499,7 @@ final class NewProductDraftProductSync
     }
 
     /**
-     * @param array<int, mixed>|null $attributes
+     * @param  array<int, mixed>|null  $attributes
      * @return array<int, string>|null
      */
     private function normalizeAttributes(?array $attributes): ?array
@@ -496,7 +510,7 @@ final class NewProductDraftProductSync
 
         $normalized = [];
         foreach ($attributes as $attribute) {
-            if (!is_string($attribute)) {
+            if (! is_string($attribute)) {
                 continue;
             }
 

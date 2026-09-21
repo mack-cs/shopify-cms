@@ -44,6 +44,10 @@ return new class extends Migration
 
     private function ensureStoragePathLength(): void
     {
+        if (DB::connection()->getDriverName() !== 'mysql') {
+            return;
+        }
+
         $column = DB::selectOne("
             SELECT CHARACTER_MAXIMUM_LENGTH AS max_length
             FROM information_schema.COLUMNS
@@ -63,23 +67,23 @@ return new class extends Migration
 
     private function ensureIndex(string $table, string $indexName, array $columns): void
     {
-        $exists = DB::select('SHOW INDEX FROM `' . $table . '` WHERE Key_name = ?', [$indexName]);
-        if (!empty($exists)) {
+        if (Schema::hasIndex($table, $indexName)) {
             return;
         }
 
-        $cols = implode(',', array_map(fn ($col) => "`{$col}`", $columns));
-        DB::statement("CREATE INDEX `{$indexName}` ON `{$table}` ({$cols})");
+        Schema::table($table, function (Blueprint $blueprint) use ($columns, $indexName): void {
+            $blueprint->index($columns, $indexName);
+        });
     }
 
     private function ensureUniqueIndex(string $table, string $indexName, array $columns): void
     {
-        $exists = DB::select('SHOW INDEX FROM `' . $table . '` WHERE Key_name = ?', [$indexName]);
-        if (!empty($exists)) {
+        if (Schema::hasIndex($table, $indexName)) {
             return;
         }
 
-        $cols = implode(',', array_map(fn ($col) => "`{$col}`", $columns));
-        DB::statement("CREATE UNIQUE INDEX `{$indexName}` ON `{$table}` ({$cols})");
+        Schema::table($table, function (Blueprint $blueprint) use ($columns, $indexName): void {
+            $blueprint->unique($columns, $indexName);
+        });
     }
 };

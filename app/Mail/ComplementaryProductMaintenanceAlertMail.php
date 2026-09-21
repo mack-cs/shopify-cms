@@ -29,7 +29,7 @@ class ComplementaryProductMaintenanceAlertMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Complementary product issues need attention',
+            subject: 'Weekly complementary product issues needing attention',
         );
     }
 

@@ -7,12 +7,72 @@ use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
-use App\Services\HeaderStore;
 
 final class NewProductDraftSeeder
 {
+    /**
+     * Draft attributes that can be safely copied into an existing blank product,
+     * variant, Shopify row, or mirrored metafield during reconciliation.
+     *
+     * @var array<int, string>
+     */
+    private const PRODUCT_BACKFILL_ATTRIBUTES = [
+        'title',
+        'body_html',
+        'vendor',
+        'tags',
+        'type',
+        'product_category',
+        'google_product_category',
+        'status',
+        'published',
+        'color_string',
+        'uvp_short_paragraph',
+        'batch',
+        'sku',
+        'variant_price',
+        'variant_compare_at_price',
+        'variant_inventory_qty',
+        'variant_weight',
+        'variant_weight_unit',
+        'material_cost',
+        'jewelry_material',
+        'product_materials',
+        'materials_and_dimensions',
+        'product_design',
+        'metal',
+        'colour_style',
+        'size',
+        'siblings_collection_name',
+        'sibling_collection',
+        'complementary_products',
+        'seo_deindex',
+        'payload',
+    ];
+
+    /** @var array<int, string> */
+    private const PRODUCT_MODEL_BACKFILL_ATTRIBUTES = [
+        'title',
+        'body_html',
+        'vendor',
+        'tags',
+        'type',
+        'product_category',
+        'google_product_category',
+        'status',
+        'published',
+        'color_string',
+        'uvp_short_paragraph',
+        'seo_deindex',
+        'batch',
+    ];
+
     /** @var array<string, int>|null */
     private ?array $productReferenceMap = null;
+
+    public function __construct(
+        private readonly NewProductDraftProductSync $productSync
+    ) {}
 
     /**
      * @return array{created:int, updated:int, skipped:int}
@@ -34,16 +94,32 @@ final class NewProductDraftSeeder
 
                     $draft = $this->resolveExistingDraftForProduct($product);
 
-                    if (!$draft) {
+                    if (! $draft) {
                         NewProductDraft::create($data);
                         $created++;
+
                         continue;
                     }
 
+                    $productBackfills = $this->productBackfillsFromDraft($draft, $data);
                     $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
-                    if (!empty($changes)) {
+                    if (! empty($changes)) {
                         $draft->fill($changes)->save();
+                    }
+
+                    $draft = $draft->fresh() ?? $draft;
+                    $productModelBackfilled = $this->backfillBlankProductModelFields($product, $draft);
+
+                    if (! empty($productBackfills)) {
+                        $this->productSync->syncToExistingProduct(
+                            $draft,
+                            ensureApprovalReset: false,
+                            attributes: $productBackfills
+                        );
+                    }
+
+                    if (! empty($changes) || $productModelBackfilled || ! empty($productBackfills)) {
                         $updated++;
                     } else {
                         $skipped++;
@@ -64,14 +140,26 @@ final class NewProductDraftSeeder
 
         $draft = $this->resolveExistingDraftForProduct($product);
 
-        if (!$draft) {
+        if (! $draft) {
             return NewProductDraft::create($data);
         }
 
+        $productBackfills = $this->productBackfillsFromDraft($draft, $data);
         $changes = $this->reconcileDraftWithImportedData($draft, $data);
 
-        if (!empty($changes)) {
+        if (! empty($changes)) {
             $draft->fill($changes)->save();
+        }
+
+        $draft = $draft->fresh() ?? $draft;
+        $this->backfillBlankProductModelFields($product, $draft);
+
+        if (! empty($productBackfills)) {
+            $this->productSync->syncToExistingProduct(
+                $draft,
+                ensureApprovalReset: false,
+                attributes: $productBackfills
+            );
         }
 
         return $draft->fresh() ?? $draft;
@@ -120,7 +208,70 @@ final class NewProductDraftSeeder
     }
 
     /**
-     * @param array<string, mixed> $data
+     * Return draft fields whose corresponding imported Shopify value is blank.
+     * Populated Shopify values remain in the normal comparison/warning flow.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, string>
+     */
+    private function productBackfillsFromDraft(NewProductDraft $draft, array $data): array
+    {
+        $backfills = [];
+
+        foreach (self::PRODUCT_BACKFILL_ATTRIBUTES as $attribute) {
+            if (! array_key_exists($attribute, $data)) {
+                continue;
+            }
+
+            $incomingValue = $this->normalizeStoredIncomingValue($attribute, $data[$attribute]);
+            $draftValue = $draft->getAttribute($attribute);
+
+            if ($this->isEmptyValue($draftValue)) {
+                continue;
+            }
+
+            if (! $this->isEmptyValue($incomingValue)
+                && ! $this->isImportedNewProductPlaceholder($draft, $attribute, $incomingValue)) {
+                continue;
+            }
+
+            $backfills[] = $attribute;
+        }
+
+        return $backfills;
+    }
+
+    /**
+     * Fill the actual Product columns independently from row/metafield fallbacks.
+     * This is important for fields such as UVP, whose imported row value may be
+     * available even while the Product column shown in the CMS is still blank.
+     */
+    private function backfillBlankProductModelFields(Product $product, NewProductDraft $draft): bool
+    {
+        $updates = [];
+
+        foreach (self::PRODUCT_MODEL_BACKFILL_ATTRIBUTES as $attribute) {
+            $productValue = $product->getAttribute($attribute);
+            $draftValue = $draft->getAttribute($attribute);
+
+            if (! $this->isEmptyValue($productValue) || $this->isEmptyValue($draftValue)) {
+                continue;
+            }
+
+            $updates[$attribute] = $draftValue;
+        }
+
+        if ($updates === []) {
+            return false;
+        }
+
+        $product->fill($updates)->save();
+
+        return true;
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
     private function reconcileDraftWithImportedData(NewProductDraft $draft, array $data): array
@@ -138,12 +289,14 @@ final class NewProductDraftSeeder
                 continue;
             }
 
+            $incomingValue = $this->normalizeStoredIncomingValue($key, $incomingValue);
             $currentValue = $draft->getAttribute($key);
 
             if (in_array($key, $identityFields, true)) {
-                if (!$this->valuesMatch($key, $currentValue, $incomingValue)) {
+                if (! $this->valuesMatch($key, $currentValue, $incomingValue)) {
                     $changes[$key] = $incomingValue;
                 }
+
                 continue;
             }
 
@@ -155,7 +308,8 @@ final class NewProductDraftSeeder
                 $normalizedIncomingStatus = strtolower(trim((string) $incomingValue));
 
                 if ($normalizedIncomingStatus !== '' && $normalizedIncomingStatus !== 'draft') {
-                    if (!$this->valuesMatch($key, $currentValue, $incomingValue)) {
+                    if (! $this->valuesMatch($key, $currentValue, $incomingValue)
+                        || $this->shouldStoreNormalizedMatchingValue($key, $currentValue, $incomingValue)) {
                         $changes[$key] = $incomingValue;
                     }
 
@@ -165,6 +319,7 @@ final class NewProductDraftSeeder
 
             if ($this->isEmptyValue($currentValue)) {
                 $changes[$key] = $incomingValue;
+
                 continue;
             }
 
@@ -172,7 +327,19 @@ final class NewProductDraftSeeder
                 continue;
             }
 
-            if ($supportsWarnings && !$this->valuesMatch($key, $currentValue, $incomingValue)) {
+            if ($this->valuesMatch($key, $currentValue, $incomingValue)) {
+                if ($this->shouldStoreNormalizedMatchingValue($key, $currentValue, $incomingValue)) {
+                    $changes[$key] = $incomingValue;
+                }
+
+                continue;
+            }
+
+            if ($this->isImportedNewProductPlaceholder($draft, $key, $incomingValue)) {
+                continue;
+            }
+
+            if ($supportsWarnings) {
                 $warnings[] = $this->warningPayload($key, $currentValue, $incomingValue);
             }
         }
@@ -185,8 +352,39 @@ final class NewProductDraftSeeder
         return $changes;
     }
 
+    private function isImportedNewProductPlaceholder(
+        NewProductDraft $draft,
+        string $field,
+        mixed $incomingValue
+    ): bool {
+        if ($draft->origin !== NewProductDraft::ORIGIN_DRAFT_TOOL) {
+            return false;
+        }
+
+        $normalized = trim((string) ($incomingValue ?? ''));
+        if ($normalized === '') {
+            return in_array($field, [
+                'sku',
+                'variant_price',
+                'variant_compare_at_price',
+                'variant_inventory_qty',
+                'variant_weight',
+                'variant_weight_unit',
+            ], true);
+        }
+
+        return in_array($field, [
+            'variant_price',
+            'variant_compare_at_price',
+            'variant_inventory_qty',
+            'variant_weight',
+        ], true)
+            && is_numeric($normalized)
+            && (float) $normalized <= 0;
+    }
+
     /**
-     * @param array<int, array{0:string,1:string}> $metafieldLookups
+     * @param  array<int, array{0:string,1:string}>  $metafieldLookups
      */
     private function valueFromRowOrMetafield(
         Product $product,
@@ -257,27 +455,24 @@ final class NewProductDraftSeeder
             $data['material_cost'] = $row->get(HeaderStore::MATERIAL_COST, null);
         }
         $data['jewelry_material'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::JEWELRY_MATERIAL, [
-                ['shopify', 'jewelry-material'],
-            ]);
+            ['shopify', 'jewelry-material'],
+        ]);
         $data['product_materials'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_MATERIALS, [
-                ['custom', 'product_materials'],
-            ]);
+            ['custom', 'product_materials'],
+        ]);
         $data['materials_and_dimensions'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::MATERIALS_AND_DIMENSIONS, [
-                ['custom', 'materials_and_dimensions'],
-            ]);
+            ['custom', 'materials_and_dimensions'],
+        ]);
         $data['product_design'] = $this->designValueFromRowOrMetafield($product, $row);
         $data['metal'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PRODUCT_METALS, [
-                ['custom', 'product_metals'],
-            ]);
+            ['custom', 'product_metals'],
+        ]);
         $data['colour_style'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::PATTERN_CATEGORY, [
-                ['custom', 'pattern_category'],
-            ]);
+            ['custom', 'pattern_category'],
+        ]);
         $data['size'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIZE, [
-                ['custom', 'size'],
-            ]);
-        $data['siblings'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS, [
-                ['shopify--discovery--product_recommendation', 'related_products'],
-            ]);
+            ['custom', 'size'],
+        ]);
         $data['siblings_collection_name'] = trim((string) ($product->title ?? '')) !== ''
             ? trim((string) $product->title)
             : $this->valueFromRowOrMetafield($product, $row, HeaderStore::SIBLINGS_COLLECTION_NAME, [
@@ -308,6 +503,12 @@ final class NewProductDraftSeeder
         $data['variant_inventory_qty'] = $variant?->inventory_tracked === false
             ? null
             : ($variant?->inventory_qty !== null ? (int) $variant->inventory_qty : null);
+        if ($variant?->weight !== null) {
+            $data['variant_weight'] = $variant->weight;
+        }
+        if (filled($variant?->weight_unit)) {
+            $data['variant_weight_unit'] = $variant->weight_unit;
+        }
 
         return $data;
     }
@@ -323,7 +524,7 @@ final class NewProductDraftSeeder
             return null;
         }
 
-        if (!str_starts_with($trimmed, 'gid://shopify/Collection/')) {
+        if (! str_starts_with($trimmed, 'gid://shopify/Collection/')) {
             return $trimmed;
         }
 
@@ -337,6 +538,7 @@ final class NewProductDraftSeeder
         }
 
         $handle = trim((string) ($collection?->handle ?? ''));
+
         return $handle !== '' ? $handle : $trimmed;
     }
 
@@ -401,14 +603,14 @@ final class NewProductDraftSeeder
      */
     private function extraPayloadFromRow(Product $product, ?ShopifyRow $row): ?array
     {
-        if (!$row) {
+        if (! $row) {
             return null;
         }
 
         $payload = [];
         foreach (HeaderStore::extraProductHeadersForDraftWorkflow($product->import?->headers ?? []) as $header) {
             $value = $row->get($header, null);
-            if (!is_string($value)) {
+            if (! is_string($value)) {
                 continue;
             }
 
@@ -446,6 +648,8 @@ final class NewProductDraftSeeder
             'variant_price' => 'Price',
             'variant_compare_at_price' => 'Compare-at price',
             'variant_inventory_qty' => 'Inventory',
+            'variant_weight' => 'Weight',
+            'variant_weight_unit' => 'Weight unit',
             'material_cost' => 'Material cost',
             'jewelry_material' => 'Jewelry material',
             'product_materials' => 'Product materials',
@@ -478,7 +682,7 @@ final class NewProductDraftSeeder
      */
     private function normalizeArrayValue(mixed $value): ?array
     {
-        if (!is_array($value)) {
+        if (! is_array($value)) {
             return null;
         }
 
@@ -505,6 +709,7 @@ final class NewProductDraftSeeder
 
         if (is_array($value)) {
             $normalized = $this->normalizeArrayValue($value);
+
             return $normalized === null ? '' : (json_encode($normalized) ?: '');
         }
 
@@ -518,14 +723,56 @@ final class NewProductDraftSeeder
         return match ($field) {
             'body_html' => $this->normalizeRichTextForComparison($string),
             'uvp_short_paragraph' => $this->normalizeRichTextForComparison($string),
+            'tags' => TagNormalizer::normalizeForComparison($string),
             'product_category' => strtolower($this->normalizeCategoryDisplayValue($string)),
             'sibling_collection' => strtolower($this->normalizeSiblingCollectionDisplayValue($string)),
             'variant_price',
             'variant_compare_at_price',
             'material_cost' => $this->normalizeDecimalComparableValue($string, 2),
             'variant_inventory_qty' => $this->normalizeIntegerComparableValue($string),
+            'variant_weight' => $this->normalizeDecimalComparableValue($string, 3),
+            'variant_weight_unit' => strtolower($string),
+            'published',
+            'seo_deindex',
+            'is_on_sale' => $this->normalizeBooleanComparableValue($string),
+            'status' => $this->normalizeStatusComparableValue($string),
             default => $string,
         };
+    }
+
+    private function normalizeStoredIncomingValue(string $field, mixed $value): mixed
+    {
+        return match ($field) {
+            'published',
+            'seo_deindex' => $this->normalizeBooleanComparableValue($this->stringifyValue($value)),
+            'status' => $this->normalizeStatusComparableValue($this->stringifyValue($value)),
+            default => $value,
+        };
+    }
+
+    private function normalizeBooleanComparableValue(string $value): string
+    {
+        $normalized = strtolower(trim($value));
+
+        return match ($normalized) {
+            '1', 'true', 'yes', 'y', 'on' => 'true',
+            '0', 'false', 'no', 'n', 'off' => 'false',
+            default => $normalized,
+        };
+    }
+
+    private function normalizeStatusComparableValue(string $value): string
+    {
+        return strtolower(trim($value));
+    }
+
+    private function shouldStoreNormalizedMatchingValue(string $field, mixed $currentValue, mixed $incomingValue): bool
+    {
+        if (! in_array($field, ['published', 'seo_deindex', 'status'], true)) {
+            return false;
+        }
+
+        return $this->stringifyValue($currentValue) !== $this->stringifyValue($incomingValue);
     }
 
     private function normalizeDecimalComparableValue(string $value, int $precision): string
@@ -535,7 +782,7 @@ final class NewProductDraftSeeder
             return '';
         }
 
-        if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
+        if (str_contains($normalized, ',') && ! str_contains($normalized, '.')) {
             $normalized = str_replace(',', '.', $normalized);
         } else {
             $normalized = str_replace(',', '', $normalized);
@@ -566,6 +813,10 @@ final class NewProductDraftSeeder
             'product_category' => $this->normalizeCategoryDisplayValue($string),
             'sibling_collection' => $this->normalizeSiblingCollectionDisplayValue($string),
             'complementary_products' => $this->normalizeComplementaryProductsDisplayValue($value),
+            'published',
+            'seo_deindex',
+            'is_on_sale' => $this->normalizeBooleanComparableValue($string),
+            'status' => $this->normalizeStatusComparableValue($string),
             default => $string,
         };
     }
@@ -597,6 +848,7 @@ final class NewProductDraftSeeder
                 $title = trim((string) ($titlesById[$productId] ?? ''));
                 if ($title !== '') {
                     $display[] = $title;
+
                     continue;
                 }
             }
@@ -627,7 +879,7 @@ final class NewProductDraftSeeder
             return '';
         }
 
-        if (!str_starts_with($trimmed, 'gid://shopify/Collection/')) {
+        if (! str_starts_with($trimmed, 'gid://shopify/Collection/')) {
             return $trimmed;
         }
 
@@ -679,7 +931,7 @@ final class NewProductDraftSeeder
         }
 
         foreach ($shopifyRefs as $reference) {
-            if (!in_array($reference, $draftRefs, true)) {
+            if (! in_array($reference, $draftRefs, true)) {
                 return false;
             }
         }
@@ -688,14 +940,14 @@ final class NewProductDraftSeeder
     }
 
     /**
-     * @param array<int, string> $references
+     * @param  array<int, string>  $references
      */
     private function hasInactiveComplementaryProducts(array $references): bool
     {
         $ids = [];
 
         foreach ($references as $reference) {
-            if (!str_starts_with($reference, 'id:')) {
+            if (! str_starts_with($reference, 'id:')) {
                 continue;
             }
 
@@ -736,13 +988,14 @@ final class NewProductDraftSeeder
         foreach ($tokens as $token) {
             $productId = $this->resolveProductIdFromReferenceToken($token);
             if ($productId !== null) {
-                $resolved[] = 'id:' . $productId;
+                $resolved[] = 'id:'.$productId;
+
                 continue;
             }
 
             $normalized = $this->normalizeProductReferenceToken($token);
             if ($normalized !== '') {
-                $resolved[] = 'raw:' . $normalized;
+                $resolved[] = 'raw:'.$normalized;
             }
         }
 
@@ -803,7 +1056,7 @@ final class NewProductDraftSeeder
                         trim((string) ($product->title ?? '')),
                     ] as $value) {
                         $normalized = $this->normalizeProductReferenceToken($value);
-                        if ($normalized !== '' && !isset($map[$normalized])) {
+                        if ($normalized !== '' && ! isset($map[$normalized])) {
                             $map[$normalized] = (int) $product->id;
                         }
                     }
@@ -821,11 +1074,11 @@ final class NewProductDraftSeeder
         }
 
         if (preg_match('#gid://shopify/Product/([0-9]+)#i', $trimmed, $matches)) {
-            return 'gid://shopify/product/' . $matches[1];
+            return 'gid://shopify/product/'.$matches[1];
         }
 
         if (preg_match('#/products/([0-9]+)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {
-            return 'gid://shopify/product/' . $matches[1];
+            return 'gid://shopify/product/'.$matches[1];
         }
 
         if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $trimmed, $matches)) {

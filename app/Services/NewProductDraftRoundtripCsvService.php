@@ -34,8 +34,8 @@ final class NewProductDraftRoundtripCsvService
     }
 
     /**
-     * @param iterable<int, NewProductDraft> $records
-     * @param array<int, string> $selectedColumns
+     * @param  iterable<int, NewProductDraft>  $records
+     * @param  array<int, string>  $selectedColumns
      * @return array{disk:string,path:string,row_count:int,column_count:int,skipped_without_handle:int}
      */
     public function exportDrafts(iterable $records, array $selectedColumns): array
@@ -74,7 +74,7 @@ final class NewProductDraftRoundtripCsvService
             ->get()
             ->keyBy('handle');
 
-        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer = Writer::createFromFileObject(new SplTempFileObject);
         $writer->insertOne($headers);
 
         foreach ($drafts as $draft) {
@@ -126,6 +126,8 @@ final class NewProductDraftRoundtripCsvService
             'variant_price' => trim((string) ($draft->variant_price ?? '')),
             'variant_compare_at_price' => trim((string) ($draft->variant_compare_at_price ?? '')),
             'variant_inventory_qty' => trim((string) ($draft->variant_inventory_qty ?? '')),
+            'variant_weight' => trim((string) ($draft->variant_weight ?? '')),
+            'variant_weight_unit' => trim((string) ($draft->variant_weight_unit ?? '')),
             'material_cost' => trim((string) ($draft->material_cost ?? '')),
             'jewelry_material' => trim((string) ($draft->jewelry_material ?? '')),
             'product_materials' => trim((string) ($draft->product_materials ?? '')),
@@ -134,7 +136,6 @@ final class NewProductDraftRoundtripCsvService
             'metal' => trim((string) ($draft->metal ?? '')),
             'colour_style' => trim((string) ($draft->colour_style ?? '')),
             'size' => trim((string) ($draft->size ?? '')),
-            'siblings' => $this->productReferencesAsHandles($draft->siblings),
             'siblings_collection_name' => trim((string) ($draft->siblings_collection_name ?? '')),
             'sibling_collection' => trim((string) ($draft->sibling_collection ?? '')),
             'uvp_short_paragraph' => trim((string) ($draft->uvp_short_paragraph ?? '')),
@@ -173,6 +174,8 @@ final class NewProductDraftRoundtripCsvService
             'variant_price' => ['label' => 'Price'],
             'variant_compare_at_price' => ['label' => 'Compare-at Price'],
             'variant_inventory_qty' => ['label' => 'Inventory'],
+            'variant_weight' => ['label' => 'Weight'],
+            'variant_weight_unit' => ['label' => 'Weight Unit'],
             'material_cost' => ['label' => 'Material Cost'],
             'jewelry_material' => ['label' => 'Jewelry Material'],
             'product_materials' => ['label' => 'Product Materials'],
@@ -181,7 +184,6 @@ final class NewProductDraftRoundtripCsvService
             'metal' => ['label' => 'Metal'],
             'colour_style' => ['label' => 'Color Style'],
             'size' => ['label' => 'Size'],
-            'siblings' => ['label' => 'Siblings'],
             'siblings_collection_name' => ['label' => 'Siblings Collection Name'],
             'sibling_collection' => ['label' => 'Sibling Collection'],
             'uvp_short_paragraph' => ['label' => 'UVP Short Paragraph'],

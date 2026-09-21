@@ -1,0 +1,280 @@
+<?php
+
+use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
+use App\Filament\Pages\ImportShopifyProductImages;
+use App\Filament\Resources\ProductResource;
+use App\Filament\Resources\ShopifyImageImportBatchResource;
+use App\Models\Image;
+use App\Models\ImageAsset;
+use App\Models\Import;
+use App\Models\NewProductDraft;
+use App\Models\Product;
+use App\Models\ShopifyImageImportBatch;
+use App\Models\ShopifyImageImportItem;
+use App\Models\User;
+use App\Models\Variant;
+use App\Services\ShopifyImageImportService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Spatie\Permission\Models\Role;
+
+uses(RefreshDatabase::class);
+
+it('normalizes date and incoming folder inputs to the incoming S3 prefix', function (): void {
+    $service = app(ShopifyImageImportService::class);
+
+    expect($service->normalizePrefix('2026-07-06'))->toBe('incoming/2026-07-06')
+        ->and($service->normalizePrefix('/incoming/2026-07-06/'))->toBe('incoming/2026-07-06');
+});
+
+it('imports only direct image files in the normalized S3 folder and records the batch', function (): void {
+    Storage::fake('shopify_product_images');
+    Storage::fake('public');
+    config()->set('shopify_image_import.disk', 'shopify_product_images');
+    Http::preventStrayRequests();
+
+    $bytes = 'fake-png-body';
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/LRB0001.png', $bytes);
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/readme.txt', 'ignore me');
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/nested/LRB0002.png', 'ignore nested');
+
+    $asset = createImportTestAsset($bytes, 'png', 'LRB0001.png');
+    $product = createImageImportProduct('LRB0001');
+
+    $image = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/1001',
+        'image_asset_id' => $asset->id,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'src' => 'https://cdn.shopify.com/s/files/old.png',
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'position' => 1,
+        'approved_filename' => 'LRB0001.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    $duplicate = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/MediaImage/1002',
+        'image_asset_id' => $asset->id,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'src' => 'https://cdn.shopify.com/s/files/duplicate.png',
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'position' => 1,
+        'approved_filename' => 'duplicate.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    $batch = ShopifyImageImportBatch::create([
+        's3_prefix' => '2026-07-06',
+        'status' => ShopifyImageImportBatch::STATUS_PENDING,
+    ]);
+
+    $result = app(ShopifyImageImportService::class)->runBatch($batch);
+
+    $batch->refresh();
+    $product->refresh();
+    $image->refresh();
+    $duplicate->refresh();
+
+    expect($result['total_files'])->toBe(1)
+        ->and($result['matched_count'])->toBe(1)
+        ->and($result['updated_count'])->toBe(1)
+        ->and($result['failed_count'])->toBe(0)
+        ->and($batch->s3_prefix)->toBe('incoming/2026-07-06')
+        ->and($product->image_import_batch_id)->toBe($batch->id)
+        ->and($product->image_import_status)->toBe('updated')
+        ->and($image->src)->toBe(route('product-image-backups.show', [
+            'image' => $image,
+            'filename' => 'lrb0001-1.png',
+        ]))
+        ->and($image->approved_filename)->toBe('lrb0001-1.png')
+        ->and($image->needs_shopify_image_sync)->toBeTrue()
+        ->and($duplicate->sync_state)->toBe(Image::SYNC_STATE_LOCAL_DELETED)
+        ->and($duplicate->is_duplicate_hidden)->toBeTrue()
+        ->and($duplicate->local_dirty)->toBeTrue()
+        ->and($product->images()->where('position', 1)->count())->toBe(1);
+
+    $item = ShopifyImageImportItem::query()->firstOrFail();
+
+    expect($item->sku)->toBe('LRB0001')
+        ->and($item->s3_key)->toBe('incoming/2026-07-06/LRB0001.png')
+        ->and($item->status)->toBe(ShopifyImageImportItem::STATUS_UPDATED);
+});
+
+it('targets parent stacks for rebuild when an imported component image changes', function (): void {
+    Storage::fake('shopify_product_images');
+    Storage::fake('public');
+    config()->set('shopify_image_import.disk', 'shopify_product_images');
+    Http::preventStrayRequests();
+
+    $bytes = 'updated-component-png-body';
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/COMP001.png', $bytes);
+
+    $asset = createImportTestAsset($bytes, 'png', 'COMP001.png');
+    $component = createImageImportProduct('COMP001', [
+        'handle' => 'component-one',
+    ]);
+
+    $stack = createImageImportProduct('STACK001', [
+        'handle' => 'stack-one',
+        'type' => 'Bundle',
+        'is_bundle' => true,
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'STACK001',
+        'shopify_id' => $stack->shopify_id,
+        'handle' => $stack->handle,
+        'title' => $stack->title,
+        'type' => 'Bundle',
+        'tags' => 'bundles',
+        'status' => 'active',
+        'bundle_product_ids' => [$component->id],
+    ]));
+
+    Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $component->id,
+        'shopify_id' => 'gid://shopify/MediaImage/2001',
+        'image_asset_id' => $asset->id,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'position' => 1,
+        'approved_filename' => 'COMP001.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+
+    $batch = ShopifyImageImportBatch::create([
+        's3_prefix' => '2026-07-06',
+        'status' => ShopifyImageImportBatch::STATUS_PENDING,
+    ]);
+
+    $result = app(ShopifyImageImportService::class)->runBatch($batch);
+
+    expect($result['updated_count'])->toBe(1)
+        ->and($result['affected_stack_product_ids'])->toBe([$stack->id])
+        ->and(app(ShopifyImageImportService::class)->stackProductIdsForUpdatedComponents([$component->id]))->toBe([$stack->id]);
+});
+
+it('filters products updated in the latest completed image import batch', function (): void {
+    $older = ShopifyImageImportBatch::create([
+        's3_prefix' => 'incoming/2026-07-05',
+        'status' => ShopifyImageImportBatch::STATUS_COMPLETED,
+        'completed_at' => now()->subDay(),
+    ]);
+
+    $latest = ShopifyImageImportBatch::create([
+        's3_prefix' => 'incoming/2026-07-06',
+        'status' => ShopifyImageImportBatch::STATUS_COMPLETED,
+        'completed_at' => now(),
+    ]);
+
+    $olderProduct = createImageImportProduct('OLD-SKU', [
+        'handle' => 'old-import-product',
+        'image_import_batch_id' => $older->id,
+        'image_import_status' => 'updated',
+    ]);
+
+    $latestProduct = createImageImportProduct('NEW-SKU', [
+        'handle' => 'latest-import-product',
+        'image_import_batch_id' => $latest->id,
+        'image_import_status' => 'updated',
+    ]);
+
+    $failedLatestProduct = createImageImportProduct('FAIL-SKU', [
+        'handle' => 'latest-failed-product',
+        'image_import_batch_id' => $latest->id,
+        'image_import_status' => 'failed',
+    ]);
+
+    $ids = ProductResource::applyLatestImageImportFilter(Product::query())
+        ->pluck('id')
+        ->all();
+
+    expect($ids)->toContain($latestProduct->id)
+        ->not->toContain($olderProduct->id)
+        ->not->toContain($failedLatestProduct->id);
+});
+
+it('allows the image import workflow and results only with the assigned permission', function (): void {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $user = User::factory()->create();
+    $user->assignRole(RolesEnum::Admin->value);
+
+    $this->actingAs($user);
+
+    expect(ImportShopifyProductImages::canAccess())->toBeFalse()
+        ->and(ShopifyImageImportBatchResource::canViewAny())->toBeFalse();
+
+    $user->givePermissionTo(PermissionEnum::ShopifyImageImportAccess->value);
+
+    expect(ImportShopifyProductImages::canAccess())->toBeTrue()
+        ->and(ShopifyImageImportBatchResource::canViewAny())->toBeTrue();
+});
+
+function createImageImportProduct(string $sku, array $productOverrides = []): Product
+{
+    $user = User::factory()->create();
+
+    $import = Import::create([
+        'filename' => 'image-import-test.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+    ]);
+
+    $product = Product::withoutEvents(fn (): Product => Product::create(array_merge([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/' . abs(crc32($sku)),
+        'handle' => strtolower(str_replace('_', '-', $sku)),
+        'title' => $sku,
+        'type' => 'Bracelets',
+        'status' => 'active',
+    ], $productOverrides)));
+
+    Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'sku' => $sku,
+        'sync_state' => Variant::SYNC_STATE_SYNCED,
+        'local_dirty' => false,
+    ]));
+
+    return $product;
+}
+
+function createImportTestAsset(string $bytes, string $extension, string $filename): ImageAsset
+{
+    $sha256 = hash('sha256', $bytes);
+    $path = 'product-image-assets/' . substr($sha256, 0, 2) . '/' . substr($sha256, 2, 2) . "/{$sha256}.{$extension}";
+
+    Storage::disk('public')->put($path, $bytes);
+
+    return ImageAsset::create([
+        'sha256' => $sha256,
+        'storage_disk' => 'public',
+        'storage_path' => $path,
+        'original_filename' => $filename,
+        'source_url' => 's3://leigh-product-images/incoming/2026-07-06/' . $filename,
+        'mime_type' => 'image/png',
+        'extension' => $extension,
+        'file_size' => strlen($bytes),
+        'downloaded_at' => now(),
+        'last_verified_at' => now(),
+        'status' => ImageAsset::STATUS_AVAILABLE,
+    ]);
+}

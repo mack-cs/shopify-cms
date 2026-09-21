@@ -1,11 +1,11 @@
 <?php
 
+use App\Models\CollectionApprovalRequest;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\ShopifyCollection;
-use App\Models\CollectionApprovalRequest;
 use App\Models\User;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\ShopifyCollectionSeoImporter;
@@ -17,7 +17,17 @@ it('skips draft csv updates when the linked product is pending partial approval'
     $user = User::factory()->create();
     $this->be($user);
 
+    $import = Import::create([
+        'filename' => 'approval-locked-draft-import.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
     $product = Product::create([
+        'import_id' => $import->id,
         'title' => 'Kudu Sage Bracelet',
         'handle' => 'kudu-sage-bracelet',
         'shopify_id' => 'gid://shopify/Product/1001',

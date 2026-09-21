@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Variant;
 use App\Services\AdminNotification;
+use App\Services\InventoryAdjustmentApprovalService;
 use App\Services\ProductInventorySyncService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -30,7 +31,7 @@ class InventorySyncJob implements ShouldQueue
     ) {
     }
 
-    public function handle(ProductInventorySyncService $service): void
+    public function handle(ProductInventorySyncService $service, InventoryAdjustmentApprovalService $approvals): void
     {
         $variants = Variant::query()
             ->whereIn('id', array_values(array_unique(array_map('intval', $this->variantIds))))
@@ -43,6 +44,13 @@ class InventorySyncJob implements ShouldQueue
         $result = $this->mode === 'refresh'
             ? $service->refreshVariants($variants, $this->userId)
             : $service->syncVariants($variants, $this->userId, $this->syncBatchId);
+
+        if ($this->mode !== 'refresh' && $this->syncBatchId !== null) {
+            $approvals->markAppliedBySyncBatch(
+                $this->syncBatchId,
+                json_encode($result, JSON_THROW_ON_ERROR),
+            );
+        }
 
         if (!$this->userId) {
             return;

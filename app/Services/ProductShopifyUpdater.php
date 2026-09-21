@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\SaleProductUpdate;
 use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
@@ -87,7 +88,189 @@ final class ProductShopifyUpdater
         private readonly ShopifyApiClient $client,
         private readonly ProductHandleService $handleService,
         private readonly ProductPartialApprovalService $partialApprovalService,
+        private readonly SaleTagService $saleTags,
+        private readonly ComplementaryProductAuditService $complementaryProducts,
     ) {}
+
+    /**
+     * Apply only the Design and Colour Style values owned by Shop Your Vibe.
+     * Values not present in the mapping catalogue are preserved.
+     */
+    public function syncShopYourVibeAttributes(
+        Product $product,
+        array $designsToAdd,
+        array $colourStylesToAdd,
+        array $designsToRemove,
+        array $colourStylesToRemove
+    ): void {
+        $designsToAdd = $this->nonBlankUniqueLabels($designsToAdd);
+        $colourStylesToAdd = $this->nonBlankUniqueLabels($colourStylesToAdd);
+        $designsToRemove = $this->nonBlankUniqueLabels($designsToRemove);
+        $colourStylesToRemove = $this->nonBlankUniqueLabels($colourStylesToRemove);
+        if ($designsToAdd === [] && $colourStylesToAdd === [] && $designsToRemove === [] && $colourStylesToRemove === []) {
+            return;
+        }
+
+        $productId = trim((string) $product->shopify_id);
+        if ($productId === '') {
+            throw new \RuntimeException('The product has no Shopify ID.');
+        }
+
+        $primaryRow = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+        if (! $primaryRow) {
+            throw new \RuntimeException('The latest Shopify product data is unavailable. Refresh the product import and retry.');
+        }
+
+        $designHeader = HeaderStore::designHeaderForTypeAndTags($product->type, $product->tags);
+        if ($designsToAdd !== [] && $designHeader === null) {
+            throw new \RuntimeException('A Design mapping cannot be applied because this product has no supported jewellery type.');
+        }
+
+        $updates = [];
+        if ($designHeader !== null && ($designsToAdd !== [] || $designsToRemove !== [])) {
+            $updates[$designHeader] = $this->mergeChangedLabels(
+                (string) $primaryRow->get($designHeader, ''),
+                $designsToRemove,
+                $designsToAdd
+            );
+        }
+        if ($colourStylesToAdd !== [] || $colourStylesToRemove !== []) {
+            $updates[HeaderStore::PATTERN_CATEGORY] = $this->mergeChangedLabels(
+                (string) $primaryRow->get(HeaderStore::PATTERN_CATEGORY, ''),
+                $colourStylesToRemove,
+                $colourStylesToAdd
+            );
+        }
+        if ($updates === []) {
+            return;
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $categoryId = trim((string) (data_get($details, 'category.id') ?: data_get($details, 'productCategory.productTaxonomyNode.id', '')));
+        $categoryName = trim((string) (data_get($details, 'category.name') ?: data_get($details, 'productCategory.productTaxonomyNode.fullName', '')));
+        $raw = $this->productMetafieldRawValues($product, null, $productId);
+        $payload = collect($updates)->map(fn (array $values) => json_encode(array_values($values)))->all();
+        $warnings = $this->updateMetafields(
+            $product,
+            $productId,
+            $payload,
+            $raw,
+            $categoryId !== '' ? $categoryId : null,
+            $categoryName !== '' ? $categoryName : null
+        );
+        if ($warnings !== []) {
+            throw new \RuntimeException(collect($warnings)->pluck('warning')->join('; '));
+        }
+
+        foreach ($updates as $header => $values) {
+            $primaryRow->set($header, implode('; ', $values));
+        }
+        $primaryRow->save();
+    }
+
+    /** @return array<int, string> */
+    private function mergeChangedLabels(string $current, array $remove, array $add): array
+    {
+        $tokens = $this->referenceTokensFromRaw($current);
+        $removeKeys = collect($remove)->mapWithKeys(fn ($value) => [mb_strtolower(trim((string) $value)) => true]);
+        $kept = array_values(array_filter($tokens, fn ($value) => ! $removeKeys->has(mb_strtolower(trim($value)))));
+
+        return collect(array_merge($kept, $add))
+            ->map(fn ($value) => trim((string) $value))->filter()->unique(fn ($value) => mb_strtolower($value))->values()->all();
+    }
+
+    /** @return array<int, string> */
+    private function nonBlankUniqueLabels(array $values): array
+    {
+        return collect($values)->map(fn ($value) => trim((string) $value))->filter()
+            ->unique(fn ($value) => mb_strtolower($value))->values()->all();
+    }
+
+    /**
+     * @return array{product_id:int,shopify_product_id:string,variant_id:int|null,shopify_variant_id:string,tags:array<int,string>,price:string,compare_at_price:string}
+     */
+    public function syncSaleProductUpdate(SaleProductUpdate $saleUpdate): array
+    {
+        $saleUpdate->loadMissing(['product', 'variant']);
+
+        $product = $saleUpdate->product;
+        if (!$product instanceof Product) {
+            throw new \RuntimeException('Sale update has no linked product.');
+        }
+
+        $productId = $this->resolveProductId($product);
+        if ($productId === null) {
+            throw new \RuntimeException('Product has no Shopify ID and could not be resolved by handle.');
+        }
+
+        $tags = $this->saleTags->apply(
+            (string) ($saleUpdate->prepared_tags ?: $product->tags),
+            true,
+            $product->type,
+        );
+
+        $productData = $this->client->graphql($this->productUpdateMutation(), [
+            'input' => [
+                'id' => $productId,
+                'tags' => $tags,
+            ],
+        ]);
+
+        $productErrors = data_get($productData, 'productUpdate.userErrors', []);
+        if (is_array($productErrors) && $productErrors !== []) {
+            $messages = $this->formatUserErrors($productErrors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the sale tag update.');
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $shopifyVariantId = $this->shopifyVariantIdForSaleUpdate($saleUpdate, $details);
+        if ($shopifyVariantId === null) {
+            throw new \RuntimeException('Could not resolve Shopify variant for sale SKU ' . $saleUpdate->sku . '.');
+        }
+
+        $price = number_format((float) $saleUpdate->sale_price, 2, '.', '');
+        $compareAt = number_format((float) $saleUpdate->compare_at_price, 2, '.', '');
+        $variantInput = [
+            'id' => $shopifyVariantId,
+            'price' => $price,
+            'compareAtPrice' => $compareAt,
+        ];
+
+        $variantData = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+            'productId' => $productId,
+            'variants' => [$variantInput],
+        ]);
+
+        $variantErrors = data_get($variantData, 'productVariantsBulkUpdate.userErrors', []);
+        if (is_array($variantErrors) && $variantErrors !== []) {
+            $messages = $this->formatUserErrors($variantErrors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the sale variant price update.');
+        }
+
+        logger()->info('Shopify sale product update completed', [
+            'sale_product_update_id' => $saleUpdate->id,
+            'product_id' => $product->id,
+            'shopify_product_id' => $productId,
+            'variant_id' => $saleUpdate->variant_id,
+            'shopify_variant_id' => $shopifyVariantId,
+            'sku' => $saleUpdate->sku,
+        ]);
+
+        return [
+            'product_id' => (int) $product->id,
+            'shopify_product_id' => $productId,
+            'variant_id' => $saleUpdate->variant_id ? (int) $saleUpdate->variant_id : null,
+            'shopify_variant_id' => $shopifyVariantId,
+            'tags' => $tags,
+            'price' => $price,
+            'compare_at_price' => $compareAt,
+        ];
+    }
 
     /**
      * @param Collection<int, Product> $products
@@ -159,6 +342,17 @@ final class ProductShopifyUpdater
                 logger()->warning('Shopify product sync skipped: blocked by Shopify missing draft', [
                     'product_id' => $product->id,
                     'handle' => $product->handle,
+                ]);
+                continue;
+            }
+
+            if ($product->isApprovedByTwo()
+                && !$this->complementaryProducts->hasRequiredMinimumForProduct($product)) {
+                $skippedBlocked++;
+                logger()->warning('Shopify product sync skipped: missing required complementary products', [
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'minimum' => ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT,
                 ]);
                 continue;
             }
@@ -339,6 +533,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_BRACELET_DESIGN,
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
+            self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -601,6 +796,64 @@ final class ProductShopifyUpdater
                 'product_id' => $product->id,
                 'handle' => $product->handle,
                 'image_ids' => $selectedImageIds,
+                'message' => $e->getMessage(),
+            ]);
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array{
+     *   synced:int,
+     *   skipped_missing_handle:int,
+     *   skipped_blocked:int,
+     *   failed:int,
+     *   warnings:array<int, array{product_id:int, warning:string}>,
+     *   failures:array<int, array{product_id:int, reason:string, details:string|null}>
+     * }
+     */
+    public function syncProductImagesForImport(Product $product): array
+    {
+        $result = [
+            'synced' => 0,
+            'skipped_missing_handle' => 0,
+            'skipped_blocked' => 0,
+            'failed' => 0,
+            'warnings' => [],
+            'failures' => [],
+        ];
+
+        if (!$product->handle) {
+            $result['skipped_missing_handle'] = 1;
+            return $result;
+        }
+
+        if ($this->isBlockedByShopifyMissingDraft($product)) {
+            $result['skipped_blocked'] = 1;
+            return $result;
+        }
+
+        try {
+            $productId = $this->resolveProductId($product);
+            if (!$productId) {
+                throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+            }
+
+            $details = $this->productDetails($product, null, $productId);
+            $result['warnings'] = $this->updateImages($product, $productId, [], $details);
+            $result['synced'] = 1;
+        } catch (\Throwable $e) {
+            $result['failed'] = 1;
+            $result['failures'][] = [
+                'product_id' => $product->id,
+                'reason' => 'exception',
+                'details' => $e->getMessage(),
+            ];
+
+            logger()->error('Shopify import image sync failed.', [
+                'product_id' => $product->id,
+                'handle' => $product->handle,
                 'message' => $e->getMessage(),
             ]);
         }
@@ -1201,6 +1454,10 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         $indexMap = [];
 
         foreach ($rowData as $header => $value) {
+            if ($header === HeaderStore::SIBLINGS) {
+                continue;
+            }
+
             $identifier = $this->metafieldIdentifierFromHeader((string) $header);
             if (!$identifier) {
                 continue;
@@ -1484,6 +1741,8 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
         $locationId = null;
         $variantInputs = [];
+        $inventoryTrackingUpdated = [];
+        $trackInventory = $this->productShouldTrackInventory($product);
 
         foreach ($variantSources as $rowIndex => $variantSource) {
             $rowData = $variantSource['row'];
@@ -1521,6 +1780,20 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
             $variantId = $variantNode['id'] ?? null;
             $inventoryItemId = data_get($variantNode, 'inventoryItem.id');
+
+            if ($variantId && !$inventoryItemId) {
+                throw new \RuntimeException("Shopify variant {$variantId} has no inventory item, so inventory tracking could not be configured.");
+            }
+
+            if ($inventoryItemId && !isset($inventoryTrackingUpdated[$inventoryItemId])) {
+                $this->updateInventoryTrackingForItem(
+                    $product,
+                    $localVariant,
+                    (string) $inventoryItemId,
+                    $trackInventory
+                );
+                $inventoryTrackingUpdated[$inventoryItemId] = true;
+            }
 
             if ($variantId) {
                 $input = ['id' => $variantId];
@@ -1653,7 +1926,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             $inventoryQty = $this->normalizeNumeric(
                 $this->valueFromRow($rowData, HeaderStore::VARIANT_INVENTORY_QTY, $localVariant?->inventory_qty)
             );
-            if ($inventoryItemId && $inventoryQty !== null) {
+            if ($trackInventory && $inventoryItemId && $inventoryQty !== null) {
                 $locationId = $locationId ?? $this->firstLocationId();
                 if ($locationId) {
                     $data = $this->client->graphql($this->inventorySetMutation(), [
@@ -1733,6 +2006,125 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         return data_get($data, 'locations.nodes.0.id');
     }
 
+    private function updateInventoryTrackingForItem(
+        Product $product,
+        ?Variant $localVariant,
+        string $inventoryItemId,
+        bool $tracked
+    ): void {
+        $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
+            'id' => $inventoryItemId,
+            'input' => ['tracked' => $tracked],
+        ]);
+        $payload = $data['inventoryItemUpdate'] ?? null;
+        if (!is_array($payload)) {
+            throw new \RuntimeException('Shopify did not return an inventory tracking update result.');
+        }
+
+        $errors = $payload['userErrors'] ?? [];
+        if (is_array($errors) && $errors !== []) {
+            $messages = $this->formatUserErrors($errors, 'inventoryItemUpdate');
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the inventory tracking update.');
+        }
+
+        $confirmed = data_get($payload, 'inventoryItem.tracked');
+        if (!is_bool($confirmed) || $confirmed !== $tracked) {
+            throw new \RuntimeException('Shopify did not confirm the required inventory tracking state.');
+        }
+
+        if ($localVariant instanceof Variant && $localVariant->inventory_tracked !== $tracked) {
+            Variant::withoutEvents(function () use ($localVariant, $tracked): void {
+                $localVariant->forceFill([
+                    'inventory_tracked' => $tracked,
+                    'inventory_sync_error' => null,
+                    'inventory_last_synced_at' => now(),
+                ])->save();
+            });
+        }
+
+        logger()->info('Shopify inventory tracking state confirmed', [
+            'product_id' => $product->id,
+            'handle' => $product->handle,
+            'inventory_item_id' => $inventoryItemId,
+            'tracked' => $tracked,
+        ]);
+    }
+
+    private function productShouldTrackInventory(Product $product): bool
+    {
+        foreach ([$product->tags, $product->type, $product->title] as $value) {
+            if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
+                return false;
+            }
+        }
+
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($shopifyId === '' && $handle === '') {
+            return true;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where(function ($query) use ($product): void {
+                $shopifyId = trim((string) ($product->shopify_id ?? ''));
+                $handle = trim((string) ($product->handle ?? ''));
+
+                if ($shopifyId !== '') {
+                    $query->where('shopify_id', $shopifyId);
+                }
+                if ($handle !== '') {
+                    $shopifyId !== '' ? $query->orWhere('handle', $handle) : $query->where('handle', $handle);
+                }
+            })
+            ->first(['bundle_product_ids', 'tags', 'type', 'title']);
+
+        if ($draft instanceof NewProductDraft) {
+            if (is_array($draft->bundle_product_ids) && $draft->bundle_product_ids !== []) {
+                return false;
+            }
+
+            foreach ([$draft->tags, $draft->type, $draft->title] as $value) {
+                if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private function shopifyVariantIdForSaleUpdate(SaleProductUpdate $saleUpdate, array $details): ?string
+    {
+        $localVariantId = trim((string) ($saleUpdate->variant?->shopify_id ?? ''));
+        if ($localVariantId !== '') {
+            return $localVariantId;
+        }
+
+        $targetSku = strtolower(trim((string) $saleUpdate->sku));
+        if ($targetSku === '') {
+            return null;
+        }
+
+        $nodes = data_get($details, 'variants.nodes', []);
+        if (!is_array($nodes)) {
+            return null;
+        }
+
+        foreach ($nodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            $sku = strtolower(trim((string) ($node['sku'] ?? '')));
+            $id = trim((string) ($node['id'] ?? ''));
+            if ($sku === $targetSku && $id !== '') {
+                return $id;
+            }
+        }
+
+        return null;
+    }
+
     private function productByHandleQuery(): string
     {
         return <<<'GQL'
@@ -1793,10 +2185,10 @@ query ProductByHandleDetails($handle: String!) {
         }
       }
     }
-    media(first: 50) {
+    media(first: 250) {
       nodes {
+        id
         ... on MediaImage {
-          id
           image {
             url
           }
@@ -1860,10 +2252,10 @@ query ProductByIdDetails($id: ID!) {
         }
       }
     }
-    media(first: 50) {
+    media(first: 250) {
       nodes {
+        id
         ... on MediaImage {
-          id
           image {
             url
           }
@@ -2039,19 +2431,11 @@ GQL;
     private function inventoryItemUpdateMutation(): string
     {
         return <<<'GQL'
-mutation InventoryItemUpdate($inventoryItemId: ID!, $cost: Decimal!) {
-  inventoryItemUpdate(
-    id: $inventoryItemId,
-    input: {
-      cost: $cost
-    }
-  ) {
+mutation InventoryTrackingUpdate($id: ID!, $input: InventoryItemInput!) {
+  inventoryItemUpdate(id: $id, input: $input) {
     inventoryItem {
       id
-      unitCost {
-        amount
-        currencyCode
-      }
+      tracked
     }
     userErrors {
       field
@@ -2100,7 +2484,7 @@ GQL;
     {
         return <<<'GQL'
 query MetafieldDefinition($namespace: String!, $key: String!) {
-  metafieldDefinition(ownerType: PRODUCT, namespace: $namespace, key: $key) {
+  metafieldDefinition(identifier: {ownerType: PRODUCT, namespace: $namespace, key: $key}) {
     validations {
       name
       value
@@ -3861,21 +4245,6 @@ GQL;
                     'previous_media_mode' => trim((string) ($previousMatch['mode'] ?? '')) ?: null,
                 ];
             })
-            ->filter(function (array $row) use (&$warnings, $product): bool {
-                if ($row['sync_url'] !== null) {
-                    return true;
-                }
-
-                /** @var Image $image */
-                $image = $row['image'];
-
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
-                ];
-
-                return false;
-            })
             ->sortBy(fn (array $row): string => sprintf(
                 '%010d-%010d',
                 $row['position'] ?? 2147483647,
@@ -3892,7 +4261,7 @@ GQL;
             $syncUrl = $desiredImage['sync_url'];
             $match = null;
 
-            if ($desiredImage['requires_republish']) {
+            if ($desiredImage['requires_republish'] && $syncUrl !== null) {
                 return $desiredImage;
             }
 
@@ -3909,12 +4278,43 @@ GQL;
                 if ($matchedId !== '') {
                     $matchedExistingIds[] = $matchedId;
                     $desiredImage['matched_media_id'] = $matchedId;
-                    $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
+                    if (!$desiredImage['requires_republish']) {
+                        $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
+                    }
                 }
             }
 
             return $desiredImage;
         });
+
+        $desiredImages = $desiredImages
+            ->filter(function (array $row) use (&$warnings, $product): bool {
+                /** @var Image $image */
+                $image = $row['image'];
+
+                if ($row['matched_media_id'] !== null) {
+                    if ($row['requires_republish'] && $row['sync_url'] === null) {
+                        $warnings[] = [
+                            'product_id' => $product->id,
+                            'warning' => "Matched existing Shopify media for image {$image->id}, but it could not be republished because it has no usable sync source URL.",
+                        ];
+                    }
+
+                    return true;
+                }
+
+                if ($row['sync_url'] !== null) {
+                    return true;
+                }
+
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
+                ];
+
+                return false;
+            })
+            ->values();
 
         if (!$selectedSync) {
             // Non-destructive cleanup: remove product references for shared media files,
@@ -4063,16 +4463,28 @@ GQL;
         array $existingEntriesById,
         array $existingEntriesByUrl,
     ): ?array {
-        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
-            return $existingEntriesById[$shopifyId];
-        }
-
+        $urlMatch = null;
         if ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
-            return $existingEntriesByUrl[$currentUrl];
+            $urlMatch = $existingEntriesByUrl[$currentUrl];
+        } elseif ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
+            $urlMatch = $existingEntriesByUrl[$syncUrl];
         }
 
-        if ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
-            return $existingEntriesByUrl[$syncUrl];
+        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
+            $idMatch = $existingEntriesById[$shopifyId];
+            if (
+                $urlMatch !== null
+                && ($idMatch['mode'] ?? null) === 'legacy_image'
+                && ($urlMatch['mode'] ?? null) !== 'legacy_image'
+            ) {
+                return $urlMatch;
+            }
+
+            return $idMatch;
+        }
+
+        if ($urlMatch !== null) {
+            return $urlMatch;
         }
 
         return null;
@@ -4294,7 +4706,7 @@ GQL;
     {
         $warnings = [];
 
-        if ($desiredImages->count() <= 1) {
+        if ($desiredImages->isEmpty()) {
             return $warnings;
         }
 
@@ -4341,21 +4753,26 @@ GQL;
             $desiredMediaIds[] = $mediaId;
         }
 
-        if (count($desiredMediaIds) <= 1) {
+        $desiredMediaIds = array_values(array_unique($desiredMediaIds));
+
+        if (empty($desiredMediaIds)) {
             return $warnings;
         }
 
-        $currentDesiredOrder = array_values(array_filter(
-            $currentMediaIds,
-            fn (string $id): bool => in_array($id, $desiredMediaIds, true)
+        $desiredOrder = array_values(array_merge(
+            $desiredMediaIds,
+            array_values(array_filter(
+                $currentMediaIds,
+                fn (string $id): bool => !in_array($id, $desiredMediaIds, true)
+            ))
         ));
 
-        if ($currentDesiredOrder === $desiredMediaIds) {
+        if ($desiredOrder === $currentMediaIds) {
             return $warnings;
         }
 
         $moves = [];
-        foreach ($desiredMediaIds as $position => $mediaId) {
+        foreach ($desiredOrder as $position => $mediaId) {
             $moves[] = [
                 'id' => $mediaId,
                 'newPosition' => (string) $position,

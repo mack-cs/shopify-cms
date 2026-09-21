@@ -10,6 +10,7 @@ use App\Services\SiteAudit\SiteAuditRunnerService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
@@ -42,6 +43,13 @@ class CheckSiteAuditUrlJob implements ShouldQueue
         try {
             $response = Http::timeout((int) config('site-audit.check_timeout_seconds', 15))
                 ->connectTimeout((int) config('site-audit.check_connect_timeout_seconds', 10))
+                ->retry(
+                    max(1, (int) config('site-audit.rate_limit_retry_attempts', 2)),
+                    max(0, (int) config('site-audit.rate_limit_retry_delay_ms', 10000)),
+                    fn (Throwable $exception): bool => $exception instanceof RequestException
+                        && $exception->response?->status() === 429,
+                    throw: false,
+                )
                 ->withHeaders([
                     'User-Agent' => (string) config('site-audit.user_agent'),
                 ])
@@ -70,7 +78,7 @@ class CheckSiteAuditUrlJob implements ShouldQueue
                 'last_checked_at' => now(),
             ]);
 
-            $this->recordProgress($run, $result !== SiteAuditResult::RESULT_OK);
+            $this->recordProgress($run, in_array($result, SiteAuditResult::ISSUE_RESULTS, true));
         } catch (Throwable $exception) {
             $result = $this->classifyException($exception);
             $responseTimeMs = $this->elapsedMilliseconds($started);
@@ -110,6 +118,10 @@ class CheckSiteAuditUrlJob implements ShouldQueue
 
         if ($statusCode === 404 || $statusCode === 410) {
             return SiteAuditResult::RESULT_BROKEN;
+        }
+
+        if ($statusCode === 429) {
+            return SiteAuditResult::RESULT_RATE_LIMITED;
         }
 
         if ($statusCode >= 500) {

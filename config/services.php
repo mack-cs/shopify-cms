@@ -38,7 +38,9 @@ return [
             'assignments' => env('SLACK_ASSIGNMENT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
             'partial_approvals' => env('SLACK_PARTIAL_APPROVAL_CHANNEL') ?: env('SLACK_ASSIGNMENT_CHANNEL') ?: env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
             'audits' => env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL')),
+            'inventory' => env('SLACK_INVENTORY_UPDATES_CHANNEL', env('SLACK_INVENTORY_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
             'reminders' => env('SLACK_REMINDER_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
+            'duplicate_skus' => env('SLACK_DUPLICATE_SKU_CHANNEL', env('SLACK_AUDIT_CHANNEL', env('SLACK_BOT_USER_DEFAULT_CHANNEL'))),
         ],
 
         'lookup_users_by_email' => env('SLACK_LOOKUP_USERS_BY_EMAIL', false),
@@ -46,14 +48,41 @@ return [
         'reminder_timezone' => env('SLACK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
         'reminder_times' => array_values(array_filter(array_map(
             'trim',
-            explode(',', env('SLACK_REMINDER_TIMES', '09:00,13:00,16:00'))
+            explode(',', env('SLACK_REMINDER_TIMES', '09:00'))
         ))),
+        'task_reminder_time' => env('SLACK_TASK_REMINDER_TIME', '09:00'),
+        'task_reminder_timezone' => env('SLACK_TASK_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
+        'missing_alt_recipient_email' => env('MISSING_ALT_RECIPIENT_EMAIL', 'nick@leighavenue.co.za'),
+        'missing_alt_recipient_user_id' => env('MISSING_ALT_RECIPIENT_SLACK_ID', 'U0B5DM894DS'),
+        'url_404_recipient_emails' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('URL_404_RECIPIENT_EMAILS', 'mack@mackscs.com,freddy@leighavenue.co.za'))
+        ))),
+        'url_404_recipient_user_ids' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('URL_404_RECIPIENT_SLACK_IDS', 'U0B5A3AA5MG,U0B581CAM54'))
+        ))),
+        'complementary_report_to' => env('COMPLEMENTARY_REPORT_TO', 'leanne@leighavenue.co.za'),
+        'complementary_report_cc' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('COMPLEMENTARY_REPORT_CC', 'nick@leighavenue.co.za,doron@leighavenue.co.za,caitlin@leighavenue.co.za'))
+        ))),
+        'maintenance_report_time' => env('MAINTENANCE_REPORT_TIME', '09:00'),
+        'maintenance_report_timezone' => env('MAINTENANCE_REPORT_TIMEZONE', 'Africa/Johannesburg'),
+        'duplicate_sku_recipient_email' => env('DUPLICATE_SKU_RECIPIENT_EMAIL', 'nick@leighavenue.co.za'),
+        'duplicate_sku_recipient_user_id' => env('DUPLICATE_SKU_RECIPIENT_SLACK_ID', 'U0B5DM894DS'),
+        'duplicate_sku_reminder_time' => env('DUPLICATE_SKU_REMINDER_TIME', '08:00'),
+        'duplicate_sku_reminder_timezone' => env('DUPLICATE_SKU_REMINDER_TIMEZONE', 'Africa/Johannesburg'),
     ],
 
     'shopify' => [
         'shop' => env('SHOPIFY_SHOP'),
+        'storefront_url' => env('SHOPIFY_STOREFRONT_URL', 'https://leighavenue.co.za'),
         'admin_access_token' => env('SHOPIFY_ADMIN_ACCESS_TOKEN'),
         'api_version' => env('SHOPIFY_API_VERSION', '2026-01'),
+        'inventory_location_id' => env('SHOPIFY_INVENTORY_LOCATION_ID'),
+        'webhook_secret' => env('SHOPIFY_WEBHOOK_SECRET', env('SHOPIFY_API_SECRET', env('SHOPIFY_API_SECRET_KEY'))),
+        'verify_webhooks' => filter_var(env('SHOPIFY_WEBHOOK_VERIFY', false), FILTER_VALIDATE_BOOLEAN),
         'secret_id' => env('AWS_SHOPIFY_SECRET_ID', 'prod/leighavenue/shopify'),
         'secret_cache_key' => env('AWS_SHOPIFY_SECRET_CACHE_KEY', 'shopify.admin_access_token'),
         'secret_cache_ttl' => env('AWS_SHOPIFY_SECRET_CACHE_TTL', 900),

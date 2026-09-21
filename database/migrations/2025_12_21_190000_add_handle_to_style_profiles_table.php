@@ -17,8 +17,9 @@ return new class extends Migration
 
         if (Schema::hasColumn('style_profiles', 'handle')) {
             DB::table('style_profiles')
-                ->join('products', 'style_profiles.product_id', '=', 'products.id')
-                ->update(['style_profiles.handle' => DB::raw('products.handle')]);
+                ->update([
+                    'handle' => DB::raw('(select products.handle from products where products.id = style_profiles.product_id)'),
+                ]);
         }
 
         $this->ensureIndex('style_profiles', 'style_profiles_product_id_index', ['product_id']);
@@ -41,12 +42,12 @@ return new class extends Migration
 
     private function ensureIndex(string $table, string $indexName, array $columns): void
     {
-        $exists = DB::select('SHOW INDEX FROM ' . $table . ' WHERE Key_name = ?', [$indexName]);
-        if (!empty($exists)) {
+        if (Schema::hasIndex($table, $indexName)) {
             return;
         }
 
-        $cols = implode(',', array_map(fn ($col) => "`{$col}`", $columns));
-        DB::statement("CREATE INDEX `{$indexName}` ON `{$table}` ({$cols})");
+        Schema::table($table, function (Blueprint $blueprint) use ($columns, $indexName): void {
+            $blueprint->index($columns, $indexName);
+        });
     }
 };

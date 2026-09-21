@@ -15,6 +15,7 @@ use App\Models\Image;
 use App\Models\Import;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\ShopifyAudit;
+use App\Models\ShopifyImageImportBatch;
 use App\Models\ShopifyRow;
 use App\Models\RequiredField;
 use App\Models\Setting;
@@ -65,6 +66,7 @@ use App\Services\HeaderStore;
 use App\Services\AdminNotification;
 use App\Services\CategoryTypeMap;
 use App\Services\DeletionRequestWorkflowService;
+use App\Services\DuplicateSkuDeletionRequestService;
 use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Services\NewProductDraftSeeder;
@@ -72,6 +74,7 @@ use App\Services\DropdownCollectionCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductSeoTracker;
+use App\Services\SkuListFilterService;
 use App\Services\ComplementaryProductAuditService;
 use App\Models\Tag;
 use App\Models\Color;
@@ -564,7 +567,10 @@ class ProductResource extends Resource
                                     $component->state(self::collectionFromTags($record->tags));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                                    $collectionTags = self::collectionTags($state);
+                                    $collectionTags = self::collectionTagsForBundleState(
+                                        $state,
+                                        filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+                                    );
                                     if ($collectionTags === []) {
                                         return;
                                     }
@@ -862,6 +868,26 @@ class ProductResource extends Resource
                             ->helperText('Internal use only.'),
                              Toggle::make('is_bundle')
                                     ->label('Bundle')
+                                    ->reactive()
+                                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                        $collection = self::stateFromGet($get, 'collection_filter');
+                                        $collectionTags = self::collectionTagsForBundleState(
+                                            $collection,
+                                            filter_var($state, FILTER_VALIDATE_BOOLEAN)
+                                        );
+                                        if ($collectionTags === []) {
+                                            return;
+                                        }
+
+                                        $currentTags = self::normalizeTagList(self::stateFromGet($get, 'tags'));
+                                        $collectionPool = self::allCollectionTags();
+                                        $keptTags = array_values(array_filter(
+                                            $currentTags,
+                                            fn (string $tag): bool => !in_array($tag, $collectionPool, true)
+                                        ));
+
+                                        $set('tags', array_values(array_unique(array_merge($keptTags, $collectionTags))));
+                                    })
                                     ->helperText('Internal use only'),
                         ])->columnSpanFull(),
 
@@ -1180,6 +1206,28 @@ class ProductResource extends Resource
                 ->placeholder('-')
                 ->sortable(query: fn (Builder $query, string $direction): Builder => $query->orderBy('sync_batch_id', $direction))
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_import_batch_id')
+                ->label('Image Import')
+                ->state(fn (Product $record): string => self::imageImportBatchLabel($record->image_import_batch_id))
+                ->placeholder('-')
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_import_status')
+                ->label('Image Import Status')
+                ->badge()
+                ->formatStateUsing(fn (?string $state): string => str_replace('_', ' ', (string) $state))
+                ->color(fn (?string $state): string => match ($state) {
+                    'updated' => 'success',
+                    'failed',
+                    'stack_rebuild_failed' => 'danger',
+                    default => 'gray',
+                })
+                ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_imported_at')
+                ->label('Image Imported')
+                ->dateTime()
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('last_synced_at')
                 ->label('Last Synced')
                 ->dateTime()
@@ -1202,6 +1250,22 @@ class ProductResource extends Resource
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
+            Filter::make('sku_list')
+                ->label('SKUs')
+                ->form([
+                    Textarea::make('skus')
+                        ->label('SKUs')
+                        ->rows(4)
+                        ->placeholder("LAP001\nLAP002\nLAP003")
+                        ->helperText('Paste one or more SKUs separated by spaces, commas, semicolons, or new lines.'),
+                ])
+                ->indicateUsing(function (array $data): array {
+                    $count = count(app(SkuListFilterService::class)->parse($data['skus'] ?? null));
+
+                    return $count > 0 ? ["SKUs: {$count} selected"] : [];
+                })
+                ->query(fn (Builder $query, array $data): Builder => app(SkuListFilterService::class)
+                    ->applyToProducts($query, $data['skus'] ?? null)),
              Filter::make('recently_edited_today')
                 ->label('Recently Edited Today')
                 ->indicator('Recently Edited Today')
@@ -1319,6 +1383,18 @@ class ProductResource extends Resource
                 ->query(fn (Builder $query): Builder => $query->whereHas('deletionRequests', function (Builder $deletionQuery): void {
                     $deletionQuery->whereIn('status', ['pending', 'processing']);
                 })),
+            SelectFilter::make('batch')
+                ->label('Batch')
+                ->options(fn () => Product::query()
+                    ->whereNotNull('batch')
+                    ->where('batch', '!=', '')
+                    ->distinct()
+                    ->orderByDesc('batch')
+                    ->pluck('batch', 'batch')
+                    ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Batch'))
+                ->searchable()
+                ->preload(),
             Filter::make('updated_at')
                 ->form([
                     DateTimePicker::make('updated_from'),
@@ -1385,6 +1461,63 @@ class ProductResource extends Resource
                 ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Sync Batch'))
                 ->searchable()
                 ->preload(),
+            Filter::make('images_updated_latest_import')
+                ->label('Images updated in latest import')
+                ->indicator('Images updated in latest import')
+                ->query(fn (Builder $query): Builder => self::applyLatestImageImportFilter($query)),
+            SelectFilter::make('image_import_batch_id')
+                ->label('Image Import Batch')
+                ->options(fn () => ShopifyImageImportBatch::query()
+                    ->latest('completed_at')
+                    ->latest('id')
+                    ->limit(50)
+                    ->get(['id', 's3_prefix', 'completed_at', 'created_at'])
+                    ->mapWithKeys(fn (ShopifyImageImportBatch $batch): array => [
+                        (string) $batch->id => self::imageImportBatchLabel($batch->id, $batch),
+                    ])
+                    ->all())
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators($data, 'Image Import Batch'))
+                ->searchable()
+                ->preload(),
+            SelectFilter::make('image_import_status')
+                ->label('Image Import Status')
+                ->options([
+                    'updated' => 'Updated',
+                    'failed' => 'Failed',
+                    'stack_rebuild_failed' => 'Stack Rebuild Failed',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Image Import Status',
+                    [
+                        'updated' => 'Updated',
+                        'failed' => 'Failed',
+                        'stack_rebuild_failed' => 'Stack Rebuild Failed',
+                    ]
+                )),
+            Filter::make('image_imported_at')
+                ->form([
+                    DateTimePicker::make('imported_from'),
+                    DateTimePicker::make('imported_until'),
+                ])
+                ->indicateUsing(fn (array $data): array => self::dateTimeRangeIndicators(
+                    $data,
+                    'imported_from',
+                    'imported_until',
+                    'Image Imported From',
+                    'Image Imported Until'
+                ))
+                ->query(function (Builder $query, array $data): Builder {
+                    return $query
+                        ->when(
+                            $data['imported_from'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->where('image_imported_at', '>=', $date),
+                        )
+                        ->when(
+                            $data['imported_until'] ?? null,
+                            fn (Builder $query, $date): Builder => $query->where('image_imported_at', '<=', $date),
+                        );
+                }),
             Filter::make('last_synced_at')
                 ->form([
                     DateTimePicker::make('synced_from'),
@@ -1615,12 +1748,7 @@ class ProductResource extends Resource
             Filter::make('missing_image_alt_text')
                 ->label('Missing Image Alt Text')
                 ->indicator('Missing Image Alt Text')
-                ->query(fn (Builder $query): Builder => $query->whereHas('images', function (Builder $imageQuery): void {
-                    $imageQuery->where(function (Builder $altQuery): void {
-                        $altQuery->whereNull('alt_text')
-                            ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
-                    });
-                })),
+                ->query(fn (Builder $query): Builder => $query->missingImageAltText()),
             TernaryFilter::make('variant_clash')
                 ->label('Variant Clash')
                 ->placeholder('All')
@@ -1886,6 +2014,54 @@ class ProductResource extends Resource
                 }),
         ])->bulkActions([
             BulkActionGroup::make([
+                BulkAction::make('requestDeleteArchivedDuplicates')
+                    ->label('Request Delete Archived Duplicates')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn (): bool => static::canDeleteAny())
+                    ->requiresConfirmation()
+                    ->modalHeading('Request deletion for archived duplicate-SKU products?')
+                    ->modalDescription('Only selected archived products that currently share a SKU with another product will be submitted. This creates approval requests; it does not delete anything immediately.')
+                    ->form([
+                        Select::make('target_approver_id')
+                            ->label('Send approval request to')
+                            ->options(fn (): array => app(DeletionRequestWorkflowService::class)
+                                ->eligibleApproversQuery(new Product(), (int) Auth::id())
+                                ->pluck('name', 'id')
+                                ->all())
+                            ->searchable()
+                            ->preload()
+                            ->required()
+                            ->helperText('This person will be mentioned in Slack and will see the requests in their Assigned to me queue.'),
+                        Textarea::make('reason')
+                            ->label('Reason')
+                            ->default('Archived product shares a SKU with another product.')
+                            ->rows(3)
+                            ->maxLength(1000),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        $summary = app(DuplicateSkuDeletionRequestService::class)
+                            ->requestArchivedDuplicates(
+                                $records,
+                                (int) Auth::id(),
+                                (int) $data['target_approver_id'],
+                                $data['reason'] ?? null,
+                            );
+
+                        $body = "Requested: {$summary['requested']}. "
+                            . "Skipped not archived/duplicate: {$summary['skipped_ineligible']}. "
+                            . "Skipped with open request: {$summary['skipped_existing']}. "
+                            . "Failed: {$summary['failed']}. "
+                            . 'Slack: ' . ($summary['slack_sent'] ? 'sent.' : 'not sent.');
+
+                        self::sendNotification(
+                            Notification::make()
+                                ->title('Archived duplicate deletion requests processed')
+                                ->body($body)
+                                ->status($summary['requested'] > 0 ? 'warning' : 'info')
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkApprove')
                     ->label('Bulk Approve')
                     ->icon('heroicon-o-check-badge')
@@ -1894,10 +2070,17 @@ class ProductResource extends Resource
                     ->requiresConfirmation()
                     ->action(function (Collection $records): void {
                         $errorCount = $records->filter(fn (Product $record) => $record->has_errors)->count();
+                        $complementaryProducts = app(ComplementaryProductAuditService::class);
+                        $complementaryCount = 0;
                         $approvedCount = 0;
                         $skippedCount = 0;
 
                         foreach ($records as $record) {
+                            if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+                                $complementaryCount++;
+                                continue;
+                            }
+
                             if ($record->has_errors) {
                                 continue;
                             }
@@ -1940,6 +2123,10 @@ class ProductResource extends Resource
                         }
                         if ($errorCount > 0) {
                             $parts[] = "Errors on {$errorCount}; fix before approval.";
+                        }
+                        if ($complementaryCount > 0) {
+                            $minimum = ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT;
+                            $parts[] = "Missing at least {$minimum} complementary products on {$complementaryCount}.";
                         }
 
                         self::sendNotification(Notification::make()
@@ -2237,6 +2424,38 @@ class ProductResource extends Resource
                         );
                     })
                     ->deselectRecordsAfterCompletion(),
+                BulkAction::make('bulkDeleteDuplicateImagesForever')
+                    ->label('Delete Duplicate Images Forever')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->modalHeading('Permanently delete duplicate images?')
+                    ->modalDescription('This keeps one active image per duplicate position and permanently deletes extra duplicate, hidden, local-deleted, and remote-deleted duplicate image rows from the CMS for the selected products.')
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->action(function (Collection $records): void {
+                        $productsProcessed = 0;
+                        $imagesDeleted = 0;
+
+                        foreach ($records as $product) {
+                            if (!$product instanceof Product) {
+                                continue;
+                            }
+
+                            $deletedForProduct = self::deleteDuplicateImagesForProductForever($product);
+
+                            if ($deletedForProduct > 0) {
+                                $productsProcessed++;
+                                $imagesDeleted += $deletedForProduct;
+                            }
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Duplicate images permanently deleted')
+                            ->body("Processed {$productsProcessed} product(s). Deleted {$imagesDeleted} duplicate image row(s).")
+                            ->status($imagesDeleted > 0 ? 'success' : 'warning')
+                        );
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkBackupImages')
                     ->label('Queue Image Backup')
                     ->icon('heroicon-o-arrow-down-tray')
@@ -2272,25 +2491,12 @@ class ProductResource extends Resource
 
     private static function removeDuplicateImagesForProduct(Product $product): int
     {
-        $groups = $product->images()
-            ->whereNotNull('position')
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->orderBy('position')
-            ->orderBy('id')
-            ->get()
-            ->groupBy('position');
+        $groups = self::duplicateImagePositionGroups($product);
 
         $removed = 0;
 
         foreach ($groups as $images) {
-            if ($images->count() <= 1) {
-                continue;
-            }
-
-            $primary = $images->first();
+            $primary = self::preferredDuplicateImageToKeep($images);
             $imagesToRemove = $images->slice(1);
 
             foreach ($imagesToRemove as $image) {
@@ -2313,6 +2519,146 @@ class ProductResource extends Resource
         return $removed;
     }
 
+    private static function deleteDuplicateImagesForProductForever(Product $product): int
+    {
+        $imagesToDelete = self::duplicateImagesForPermanentDeletion($product);
+        $deleted = 0;
+
+        foreach ($imagesToDelete as $image) {
+            if (!$image instanceof Image) {
+                continue;
+            }
+
+            self::permanentlyDeleteImageRecord($image);
+            $deleted++;
+        }
+
+        if ($deleted > 0) {
+            $product->touch();
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int|string, \Illuminate\Support\Collection<int, Image>>
+     */
+    private static function duplicateImagePositionGroups(Product $product): Collection
+    {
+        return $product->images()
+            ->whereNotNull('position')
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function (Builder $query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->groupBy('position')
+            ->filter(fn (Collection $images): bool => $images->count() > 1)
+            ->map(fn (Collection $images): Collection => $images->sortBy(function (Image $image): array {
+                return [
+                    $image->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
+                    $image->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
+                    blank($image->shopify_id) ? 1 : 0,
+                    (int) $image->id,
+                ];
+            })->values());
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, Image>
+     */
+    private static function duplicateImagesForPermanentDeletion(Product $product): Collection
+    {
+        $deleteIds = [];
+
+        $allImages = $product->allImages()
+            ->whereNotNull('position')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+
+        $allImages
+            ->groupBy('position')
+            ->filter(fn (Collection $images): bool => $images->count() > 1)
+            ->each(function (Collection $images) use (&$deleteIds): void {
+                $activeImages = $images
+                    ->filter(fn (Image $image): bool => self::isActiveVisibleImage($image))
+                    ->values();
+
+                $primary = $activeImages->isNotEmpty()
+                    ? self::preferredDuplicateImageToKeep($activeImages)
+                    : null;
+
+                foreach ($images as $image) {
+                    if (!$image instanceof Image || ($primary instanceof Image && $image->is($primary))) {
+                        continue;
+                    }
+
+                    $deleteIds[(int) $image->id] = (int) $image->id;
+                }
+            });
+
+        $product->allImages()
+            ->where(function (Builder $query): void {
+                $query->where('is_duplicate_hidden', true)
+                    ->orWhereNotNull('duplicate_of_image_id');
+            })
+            ->get()
+            ->each(function (Image $image) use (&$deleteIds): void {
+                $deleteIds[(int) $image->id] = (int) $image->id;
+            });
+
+        if ($deleteIds === []) {
+            return collect();
+        }
+
+        return Image::query()
+            ->whereIn('id', array_values($deleteIds))
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+    }
+
+    private static function preferredDuplicateImageToKeep(Collection $images): ?Image
+    {
+        $first = $images->first();
+
+        return $first instanceof Image ? $first : null;
+    }
+
+    private static function isActiveVisibleImage(Image $image): bool
+    {
+        return !in_array($image->sync_state, [
+            Image::SYNC_STATE_LOCAL_DELETED,
+            Image::SYNC_STATE_REMOTE_DELETED,
+        ], true)
+            && !(bool) ($image->is_duplicate_hidden ?? false);
+    }
+
+    private static function permanentlyDeleteImageRecord(Image $image): void
+    {
+        $imageId = (int) $image->id;
+        if ($imageId <= 0) {
+            return;
+        }
+
+        Variant::query()
+            ->where('image_id', $imageId)
+            ->update(['image_id' => null]);
+
+        Image::query()
+            ->where('duplicate_of_image_id', $imageId)
+            ->update(['duplicate_of_image_id' => null]);
+
+        $image->delete();
+    }
+
     public static function getRelations(): array
     {
         return [
@@ -2325,6 +2671,16 @@ class ProductResource extends Resource
 
     public static function approveRecord(Product $record): void
     {
+        $complementaryProducts = app(ComplementaryProductAuditService::class);
+        if (!$complementaryProducts->hasRequiredMinimumForProduct($record)) {
+            self::sendNotification(Notification::make()
+                ->title('Approval blocked')
+                ->body('Select at least ' . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ' complementary products before approval.')
+                ->warning()
+            );
+            return;
+        }
+
         if ($record->has_errors) {
             self::sendNotification(Notification::make()
                 ->title('Approval blocked')
@@ -3957,13 +4313,13 @@ class ProductResource extends Resource
         $tags = self::filterTags($get, $vendor, $type);
         $options = self::dropdownOptionsForHeader($header, $vendor, $type, $tags);
         $known = array_fill_keys(array_map(
-            static fn (string $value): string => strtolower(trim($value)),
+            static fn (string $value): string => DropdownOption::canonicalValue($header, $value),
             array_keys($options)
         ), true);
 
         $invalid = [];
         foreach ($values as $value) {
-            $key = strtolower(trim($value));
+            $key = DropdownOption::canonicalValue($header, $value);
             if ($key === '' || isset($known[$key])) {
                 continue;
             }
@@ -4364,6 +4720,33 @@ class ProductResource extends Resource
         return strtoupper(substr(str_replace('-', '', $value), 0, 8));
     }
 
+    public static function applyLatestImageImportFilter(Builder $query): Builder
+    {
+        $latestBatchId = ShopifyImageImportBatch::latestCompletedId();
+        if ($latestBatchId === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query
+            ->where('image_import_batch_id', $latestBatchId)
+            ->where('image_import_status', 'updated');
+    }
+
+    private static function imageImportBatchLabel(mixed $batchId, ?ShopifyImageImportBatch $batch = null): string
+    {
+        $id = (int) ($batchId ?? 0);
+        if ($id <= 0) {
+            return '-';
+        }
+
+        $batch ??= ShopifyImageImportBatch::query()->find($id);
+        $prefix = trim((string) ($batch?->s3_prefix ?? ''));
+        $date = $batch?->completed_at ?? $batch?->created_at;
+        $dateLabel = $date?->format('Y-m-d H:i');
+
+        return trim('#' . $id . ($prefix !== '' ? " {$prefix}" : '') . ($dateLabel ? " ({$dateLabel})" : ''));
+    }
+
     private static function normalizeTagList(mixed $value): array
     {
         if (is_array($value)) {
@@ -4384,7 +4767,10 @@ class ProductResource extends Resource
     {
         $collection = self::stateFromGet($get, 'collection_filter');
         if ($collection) {
-            $tags = self::collectionTags($collection);
+            $tags = self::collectionTagsForBundleState(
+                $collection,
+                filter_var(self::stateFromGet($get, 'is_bundle'), FILTER_VALIDATE_BOOLEAN)
+            );
             if (!empty($tags)) {
                 return $tags;
             }
@@ -4403,6 +4789,48 @@ class ProductResource extends Resource
         }
 
         return TagNormalizer::parseTokens(is_string($rawTags) ? $rawTags : '');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function collectionTagsForBundleState(mixed $collection, bool $isBundle): array
+    {
+        $collectionName = is_string($collection) ? trim($collection) : '';
+        if ($collectionName === '') {
+            return [];
+        }
+
+        $tags = self::collectionTags($collectionName);
+        if (!$isBundle && !TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            return $tags;
+        }
+
+        if (TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            $secondary = TagNormalizer::normalizeToken((string) ($tags[1] ?? ''));
+
+            return array_values(array_filter(['bundles', $secondary]));
+        }
+
+        $primary = TagNormalizer::normalizeToken((string) ($tags[0] ?? ''));
+        if ($primary === null) {
+            return $tags;
+        }
+
+        foreach (self::collectionContexts() as $context) {
+            $candidatePrimary = TagNormalizer::normalizeToken((string) ($context['tag_primary'] ?? ''));
+            $candidateSecondary = TagNormalizer::normalizeToken((string) ($context['tag_secondary'] ?? ''));
+
+            if (
+                $candidatePrimary === $primary
+                && $candidateSecondary !== null
+                && TagNormalizer::containsBundleOrStackTag($candidateSecondary)
+            ) {
+                return array_values(array_filter(['bundles', $candidateSecondary]));
+            }
+        }
+
+        return $tags;
     }
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder

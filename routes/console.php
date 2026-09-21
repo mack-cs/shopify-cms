@@ -3,24 +3,404 @@
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Jobs\Shopify\RunDailyShopifyPipeline;
+use App\Jobs\Shopify\RunHistoricalShopifyOrdersImport;
+use App\Jobs\Shopify\RunShopifyOrdersBackfill;
+use App\Jobs\Shopify\StartShopifyInventoryBulkExport;
+use App\Models\ShopifySyncRun;
+use App\Models\ShopifyStackOrderEvent;
 use App\Models\NewProductDraftAssignment;
+use App\Models\PrepopulationRule;
 use App\Models\ShopifyAudit;
 use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
+use App\Services\Shopify\StackOrderReservationService;
 use App\Services\ComplementaryProductMaintenanceService;
+use App\Services\StackBundleSellabilityService;
+use App\Services\StackSellabilityShopifyPushService;
+use App\Services\StackSellabilitySlackNotifier;
 use App\Services\SiteAudit\SitemapDiscoveryService;
 use App\Services\SiteAudit\SiteAuditRunnerService;
+use App\Services\GoogleSearchConsoleClient;
+use App\Services\SearchConsoleCsvImporter;
+use App\Services\SearchConsoleMetricImportService;
+use App\Services\DuplicateSkuReminderService;
+use App\Services\DropdownCollectionMatrixExporter;
+use App\Services\MaintenanceTaskNotificationService;
+use App\Services\PrepopulationRuleImportService;
+use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
+use App\Services\Procurement\SupplierOrderReportingReconciliationService;
+use App\Services\Procurement\SupplierReceiptService;
 use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Schedule;
+use League\Csv\Reader;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command(
+    'dropdowns:export-collection-matrix
+    {--output= : Output path. Defaults to storage/app/public/exports/dropdown-collection-matrix.csv}',
+    function (DropdownCollectionMatrixExporter $exporter): int {
+        $output = trim((string) ($this->option('output') ?? ''));
+        $output = $output !== ''
+            ? $output
+            : storage_path('app/public/exports/dropdown-collection-matrix.csv');
+
+        $directory = dirname($output);
+        if (! is_dir($directory) && ! mkdir($directory, 0775, true) && ! is_dir($directory)) {
+            $this->error("Could not create output directory: {$directory}");
+
+            return self::FAILURE;
+        }
+
+        $csv = $exporter->exportToString();
+        if ($csv === '') {
+            $this->error('No dropdown seed file was found.');
+
+            return self::FAILURE;
+        }
+
+        file_put_contents($output, $csv);
+        $this->info("Dropdown collection matrix exported to {$output}");
+
+        return self::SUCCESS;
+    }
+)->purpose('Export dropdown collection configuration as one row per collection.');
+
+Artisan::command(
+    'prepopulation:import-rules
+    {file : Path to Codex_Prepopulation_Rules_FINAL.csv}',
+    function (string $file, PrepopulationRuleImportService $importer): int {
+        if (! is_file($file)) {
+            $this->error("Rules file not found: {$file}");
+
+            return self::FAILURE;
+        }
+
+        $count = $importer->import($file);
+        $this->info("Imported {$count} prepopulation rule(s).");
+
+        return self::SUCCESS;
+    }
+)->purpose('Import product prepopulation architecture rules.');
+
+Artisan::command(
+    'prepopulation:audit-tags
+    {file : Path to Codex_Prepopulation_Tags_Audit_FINAL.csv}',
+    function (string $file): int {
+        if (! is_file($file)) {
+            $this->error("Audit file not found: {$file}");
+
+            return self::FAILURE;
+        }
+
+        $csv = Reader::createFromPath($file);
+        $csv->setHeaderOffset(0);
+        $missing = [];
+        foreach ($csv->getRecords() as $row) {
+            $handle = trim((string) ($row['Handle'] ?? ''));
+            if (str_starts_with($handle, '—')) {
+                $handle = PrepopulationRule::HANDLE_GLOBAL_DEFAULTS;
+            }
+            $behavior = trim((string) ($row['Behavior'] ?? ''));
+            $action = strtoupper(trim((string) ($row['Action'] ?? '')));
+            $tag = trim((string) ($row['Tag'] ?? ''));
+            if ($handle === '' || $behavior === '' || $tag === '') {
+                continue;
+            }
+
+            $rule = PrepopulationRule::query()->where('behavior', $behavior)->where('handle', $handle)->first();
+            $tags = $action === 'REMOVE' ? ($rule?->remove_tags ?? []) : ($rule?->add_tags ?? []);
+            $represented = collect($tags)->contains(fn (string $value): bool => strtolower(trim($value)) === strtolower($tag));
+            if (! $represented) {
+                $missing[] = "{$behavior}:{$handle}:{$action}:{$tag}";
+            }
+        }
+
+        if ($missing !== []) {
+            foreach (array_slice($missing, 0, 25) as $line) {
+                $this->line($line);
+            }
+            $this->error(count($missing).' audit tag action(s) are missing from imported prepopulation rules.');
+
+            return self::FAILURE;
+        }
+
+        $this->info('All audit tag actions are represented in imported prepopulation rules.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Verify prepopulation rule tags against the exploded tag audit CSV.');
+
+Artisan::command(
+    'seo:import-search-console-csv
+    {file : CSV export path from Google Search Console}
+    {--type=query : Import dimension: query, page, or site}
+    {--label= : Period label, for example Jan 2026 or Apr-Jun 2026}
+    {--start= : Optional YYYY-MM-DD period start}
+    {--end= : Optional YYYY-MM-DD period end}',
+    function (string $file): int {
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page'], true)) {
+            $this->error('--type must be site, query, or page.');
+
+            return self::FAILURE;
+        }
+
+        $start = trim((string) ($this->option('start') ?? '')) ?: null;
+        $end = trim((string) ($this->option('end') ?? '')) ?: null;
+        foreach (['start' => $start, 'end' => $end] as $name => $date) {
+            if ($date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                $this->error("--{$name} must be formatted as YYYY-MM-DD.");
+
+                return self::FAILURE;
+            }
+        }
+
+        $label = trim((string) ($this->option('label') ?? ''));
+        if ($label === '') {
+            $label = $start && $end
+                ? Carbon::parse($start)->format('M Y') . ' - ' . Carbon::parse($end)->format('M Y')
+                : pathinfo($file, PATHINFO_FILENAME);
+        }
+
+        $result = app(SearchConsoleCsvImporter::class)->import($file, $type, $label, $start, $end);
+
+        $this->info("Imported Search Console CSV into SEO period #{$result['period_id']} ({$label}).");
+        $this->line("Rows: {$result['total']}; imported: {$result['imported']}; skipped: {$result['skipped']}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Import a Google Search Console CSV export into SEO dashboard metrics.');
+
+Artisan::command(
+    'seo:pull-search-console
+    {--type=site : Import dimension: site, query, page, or all}
+    {--current-month : Import from the first day of the current month through yesterday}
+    {--start= : Optional YYYY-MM-DD period start. Defaults to previous full month}
+    {--end= : Optional YYYY-MM-DD period end. Defaults to previous full month}
+    {--label= : Period label. Defaults to the imported month/date range}
+    {--row-limit= : API page size. Defaults to SEARCH_CONSOLE_ROW_LIMIT}
+    {--max-rows= : Maximum rows per dimension. Defaults to SEARCH_CONSOLE_MAX_ROWS}',
+    function (): int {
+        $timezone = (string) config('search_console.timezone', 'Africa/Johannesburg');
+        $now = now($timezone);
+        $defaultMonth = $now->copy()->subMonthNoOverflow();
+        $currentMonth = (bool) $this->option('current-month');
+        $start = trim((string) ($this->option('start') ?? ''));
+        $end = trim((string) ($this->option('end') ?? ''));
+
+        if ($currentMonth && $start === '' && $end === '') {
+            $start = $now->copy()->startOfMonth()->toDateString();
+            $end = $now->copy()->subDay()->toDateString();
+        } else {
+            $start = $start !== '' ? $start : $defaultMonth->copy()->startOfMonth()->toDateString();
+            $end = $end !== '' ? $end : $defaultMonth->copy()->endOfMonth()->toDateString();
+        }
+
+        foreach (['start' => $start, 'end' => $end] as $name => $date) {
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                $this->error("--{$name} must be formatted as YYYY-MM-DD.");
+
+                return self::FAILURE;
+            }
+        }
+
+        if (Carbon::parse($start)->gt(Carbon::parse($end))) {
+            if ($currentMonth) {
+                $this->warn('No finalized Search Console days are available for the current month yet.');
+
+                return self::SUCCESS;
+            }
+
+            $this->error('--start must be before or equal to --end.');
+
+            return self::FAILURE;
+        }
+
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+            $this->error('--type must be site, query, page, or all.');
+
+            return self::FAILURE;
+        }
+
+        $label = trim((string) ($this->option('label') ?? ''));
+        if ($label === '') {
+            $startDate = Carbon::parse($start);
+            $endDate = Carbon::parse($end);
+            $label = $startDate->isSameMonth($endDate)
+                ? $startDate->format('M Y')
+                : $startDate->format('Y-m-d') . ' to ' . $endDate->format('Y-m-d');
+        }
+
+        $rowLimit = (int) ($this->option('row-limit') ?: config('search_console.row_limit', 25000));
+        $maxRows = (int) ($this->option('max-rows') ?: config('search_console.max_rows', 100000));
+        $dimensions = $type === 'all' ? ['site', 'query', 'page'] : [$type];
+        $client = app(GoogleSearchConsoleClient::class);
+        $importer = app(SearchConsoleMetricImportService::class);
+
+        foreach ($dimensions as $dimension) {
+            $this->info("Pulling {$dimension} Search Console rows for {$start} to {$end}...");
+
+            $rows = $client->searchAnalyticsRows($start, $end, $dimension, $rowLimit, $maxRows);
+            $result = $importer->importRows($rows, $dimension, $label, $start, $end);
+
+            $this->line("{$dimension}: {$result['imported']} imported, {$result['skipped']} skipped, period #{$result['period_id']}.");
+        }
+
+        return self::SUCCESS;
+    }
+)->purpose('Pull Google Search Console Search Analytics data into SEO dashboard metrics.');
+
+Artisan::command(
+    'seo:backfill-search-console
+    {--type=site : Import dimension: site, query, page, or all}
+    {--from=2023-12 : First month to import, YYYY-MM or YYYY-MM-DD}
+    {--to= : Last month to import, YYYY-MM or YYYY-MM-DD. Defaults to previous full month}
+    {--include-current : Include the current partial month when --to is omitted}
+    {--row-limit= : API page size. Defaults to SEARCH_CONSOLE_ROW_LIMIT}
+    {--max-rows= : Maximum rows per dimension. Defaults to SEARCH_CONSOLE_MAX_ROWS}
+    {--stop-on-error : Stop the backfill at the first failed month/dimension}',
+    function (): int {
+        $timezone = (string) config('search_console.timezone', 'Africa/Johannesburg');
+        $now = now($timezone);
+        $parseMonth = function (string $value, string $optionName) use ($timezone): ?Carbon {
+            $value = trim($value);
+            if (preg_match('/^\d{4}-\d{2}$/', $value) === 1) {
+                return Carbon::createFromFormat('Y-m-d', $value . '-01', $timezone)->startOfMonth();
+            }
+
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1) {
+                return Carbon::parse($value, $timezone)->startOfMonth();
+            }
+
+            $this->error("--{$optionName} must be formatted as YYYY-MM or YYYY-MM-DD.");
+
+            return null;
+        };
+
+        $fromMonth = $parseMonth((string) ($this->option('from') ?: '2023-12'), 'from');
+        if (!$fromMonth instanceof Carbon) {
+            return self::FAILURE;
+        }
+
+        $toOption = trim((string) ($this->option('to') ?? ''));
+        $toMonth = $toOption !== ''
+            ? $parseMonth($toOption, 'to')
+            : ((bool) $this->option('include-current')
+                ? $now->copy()->startOfMonth()
+                : $now->copy()->subMonthNoOverflow()->startOfMonth());
+
+        if (!$toMonth instanceof Carbon) {
+            return self::FAILURE;
+        }
+
+        if ($fromMonth->gt($toMonth)) {
+            $this->error('--from must be before or equal to --to.');
+
+            return self::FAILURE;
+        }
+
+        $type = strtolower(trim((string) $this->option('type')));
+        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+            $this->error('--type must be site, query, page, or all.');
+
+            return self::FAILURE;
+        }
+
+        $rowLimit = (int) ($this->option('row-limit') ?: config('search_console.row_limit', 25000));
+        $maxRows = (int) ($this->option('max-rows') ?: config('search_console.max_rows', 100000));
+        $dimensions = $type === 'all' ? ['site', 'query', 'page'] : [$type];
+        $client = app(GoogleSearchConsoleClient::class);
+        $importer = app(SearchConsoleMetricImportService::class);
+        $stopOnError = (bool) $this->option('stop-on-error');
+
+        $summary = [
+            'months' => 0,
+            'dimensions' => 0,
+            'imported' => 0,
+            'skipped_empty' => 0,
+            'failed' => 0,
+        ];
+
+        for ($month = $fromMonth->copy(); $month->lte($toMonth); $month->addMonthNoOverflow()) {
+            $startDate = $month->copy()->startOfMonth();
+            $endDate = $month->copy()->endOfMonth();
+            if ($month->isSameMonth($now)) {
+                $endDate = $now->copy()->subDay()->endOfDay();
+            }
+
+            if ($endDate->lt($startDate)) {
+                $this->warn("Skipping {$month->format('M Y')}: no finalized days are available yet.");
+                continue;
+            }
+
+            $label = $month->format('M Y');
+            $start = $startDate->toDateString();
+            $end = $endDate->toDateString();
+            $summary['months']++;
+
+            foreach ($dimensions as $dimension) {
+                $summary['dimensions']++;
+                $this->info("Pulling {$dimension} Search Console rows for {$label} ({$start} to {$end})...");
+
+                try {
+                    $rows = $client->searchAnalyticsRows($start, $end, $dimension, $rowLimit, $maxRows);
+                } catch (\Throwable $exception) {
+                    $summary['failed']++;
+                    $this->error("{$label} {$dimension} failed: {$exception->getMessage()}");
+
+                    if ($stopOnError) {
+                        return self::FAILURE;
+                    }
+
+                    continue;
+                }
+
+                if ($rows === []) {
+                    $summary['skipped_empty']++;
+                    $this->warn("{$label} {$dimension}: no rows returned; skipped.");
+                    continue;
+                }
+
+                $result = $importer->importRows($rows, $dimension, $label, $start, $end);
+                $summary['imported'] += $result['imported'];
+
+                $this->line("{$label} {$dimension}: {$result['imported']} imported, {$result['skipped']} skipped, period #{$result['period_id']}.");
+            }
+        }
+
+        $this->info(
+            "Search Console backfill complete. Months: {$summary['months']}; dimension pulls: {$summary['dimensions']}; " .
+            "rows imported: {$summary['imported']}; empty skipped: {$summary['skipped_empty']}; failed: {$summary['failed']}."
+        );
+
+        return $summary['failed'] > 0 ? self::FAILURE : self::SUCCESS;
+    }
+)->purpose('Backfill Google Search Console Search Analytics into monthly SEO dashboard periods.');
+
+if (config('search_console.auto_import_enabled')) {
+    Schedule::command('seo:pull-search-console --type=site --current-month')
+        ->dailyAt('04:00')
+        ->timezone((string) config('search_console.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->name('daily-current-month-search-console-seo-import');
+
+    Schedule::command('seo:pull-search-console --type=site')
+        ->monthlyOn(2, '03:00')
+        ->timezone((string) config('search_console.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->name('monthly-search-console-seo-import');
+}
 
 Artisan::command('slack:pending-work-reminder', function (): int {
     $channel = trim((string) config('services.slack.channels.reminders'));
@@ -64,13 +444,279 @@ Artisan::command('slack:assignment-complete {assignment_id}', function (string $
     return self::SUCCESS;
 })->purpose('Mark a Slack assignment completed so reminders stop including it.');
 
-foreach (config('services.slack.reminder_times', []) as $time) {
-    Schedule::command('slack:pending-work-reminder')
-        ->dailyAt($time)
-        ->timezone(config('services.slack.reminder_timezone', 'Africa/Johannesburg'))
-        ->withoutOverlapping()
-        ->name('slack-pending-work-reminder-' . str_replace(':', '', (string) $time));
+Artisan::command('notifications:send-daily-task-reminders', function (MaintenanceTaskNotificationService $notifications): int {
+    $result = $notifications->sendDailySlackReminders();
+
+    $this->info(
+        "Daily task reminders complete: {$result['missing_alt']} missing-alt products; "
+        . "{$result['url_404']} URLs returning 404; {$result['slack_messages']} Slack messages sent."
+    );
+
+    return self::SUCCESS;
+})->purpose('Send one focused daily Slack reminder directly to each maintenance task owner.');
+
+Artisan::command('notifications:send-weekly-complementary-report', function (ComplementaryProductMaintenanceService $maintenance): int {
+    $result = $maintenance->sendWeeklyReport();
+
+    $this->info("Weekly complementary report complete: {$result['flagged']} flagged; {$result['notified']} emailed.");
+
+    return self::SUCCESS;
+})->purpose('Email the weekly complementary-products action report to Leanne and copy the administrators.');
+
+Artisan::command('notifications:send-monthly-maintenance-reports', function (MaintenanceTaskNotificationService $notifications): int {
+    $result = $notifications->sendMonthlyReports();
+
+    $this->info(
+        "Monthly maintenance emails complete: {$result['missing_alt']} missing-alt products for Nicky; "
+        . "{$result['url_404']} 404 URLs for Mack and Freddy. The same-time daily task run sends each owner one Slack reminder."
+    );
+
+    return self::SUCCESS;
+})->purpose('Email monthly owner reports: missing alt text to Nicky and 404-only URLs to Mack and Freddy.');
+
+Artisan::command('shopify:register-stack-fulfillment-webhooks', function (ShopifyApiClient $client): int {
+    $baseUrl = rtrim((string) config('app.url'), '/');
+    $existing = $client->graphql(<<<'GRAPHQL'
+query StackFulfillmentWebhooks {
+  webhookSubscriptions(first: 250) {
+    nodes { id topic uri }
+  }
 }
+GRAPHQL);
+
+    $subscriptions = collect(data_get($existing, 'webhookSubscriptions.nodes', []));
+    $topics = [
+        'ORDERS_CREATE' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'ORDERS_UPDATED' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'ORDERS_CANCELLED' => $baseUrl.route('webhooks.shopify.stack-orders', absolute: false),
+        'FULFILLMENTS_CREATE' => $baseUrl.route('webhooks.shopify.fulfillments', absolute: false),
+        'FULFILLMENTS_UPDATE' => $baseUrl.route('webhooks.shopify.fulfillments', absolute: false),
+    ];
+    foreach ($topics as $topic => $uri) {
+        $alreadyRegistered = $subscriptions->contains(
+            fn (array $subscription): bool => ($subscription['topic'] ?? null) === $topic
+                && rtrim((string) ($subscription['uri'] ?? ''), '/') === rtrim($uri, '/')
+        );
+        if ($alreadyRegistered) {
+            $this->line("{$topic} is already registered at {$uri}.");
+            continue;
+        }
+
+        $result = $client->graphql(<<<'GRAPHQL'
+mutation RegisterStackFulfillmentWebhook($topic: WebhookSubscriptionTopic!, $subscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $subscription) {
+    webhookSubscription { id topic uri }
+    userErrors { field message }
+  }
+}
+GRAPHQL, [
+            'topic' => $topic,
+            'subscription' => ['uri' => $uri],
+        ]);
+        $errors = data_get($result, 'webhookSubscriptionCreate.userErrors', []);
+        if ($errors !== []) {
+            $this->error("{$topic} failed: " . collect($errors)->pluck('message')->implode('; '));
+
+            return self::FAILURE;
+        }
+
+        $this->info("Registered {$topic} at {$uri}.");
+    }
+
+    return self::SUCCESS;
+})->purpose('Register order and fulfillment webhooks used for Stack component inventory reservations.');
+
+Artisan::command('shopify:reconcile-stack-reservations', function (
+    ShopifyApiClient $client,
+    StackOrderReservationService $service,
+): int {
+    $cursor = null;
+    $orders = 0;
+    $reservations = 0;
+    do {
+        $data = $client->graphql(<<<'GRAPHQL'
+query OpenOrdersForStackReservation($after: String) {
+  orders(first: 50, after: $after, query: "status:open", sortKey: UPDATED_AT) {
+    nodes {
+      id name cancelledAt updatedAt
+      lineItems(first: 250) {
+        nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+GRAPHQL, ['after' => $cursor]);
+
+        foreach ((array) data_get($data, 'orders.nodes', []) as $order) {
+            if (! is_array($order) || data_get($order, 'cancelledAt') !== null) {
+                continue;
+            }
+            $lineNodes = (array) data_get($order, 'lineItems.nodes', []);
+            $lineCursor = data_get($order, 'lineItems.pageInfo.endCursor');
+            while ((bool) data_get($order, 'lineItems.pageInfo.hasNextPage', false) && is_string($lineCursor) && $lineCursor !== '') {
+                $more = $client->graphql(<<<'GRAPHQL'
+query MoreOpenOrderLines($orderId: ID!, $after: String!) {
+  order(id: $orderId) {
+    lineItems(first: 250, after: $after) {
+      nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
+                $lineNodes = array_merge($lineNodes, (array) data_get($more, 'order.lineItems.nodes', []));
+                $order['lineItems']['pageInfo'] = data_get($more, 'order.lineItems.pageInfo', []);
+                $lineCursor = data_get($more, 'order.lineItems.pageInfo.endCursor');
+            }
+            $lines = collect($lineNodes)->map(function (array $line): array {
+                $current = max(0, (int) ($line['currentQuantity'] ?? $line['quantity'] ?? 0));
+                $unfulfilled = max(0, min($current, (int) ($line['unfulfilledQuantity'] ?? $current)));
+
+                return [
+                    'admin_graphql_api_id' => $line['id'] ?? null,
+                    'variant_id' => data_get($line, 'variant.id'),
+                    'sku' => $line['sku'] ?? null,
+                    'quantity' => $current,
+                    'current_quantity' => $current,
+                    '_stack_baseline_fulfilled_quantity' => $current - $unfulfilled,
+                ];
+            })->all();
+            $orderId = trim((string) ($order['id'] ?? ''));
+            if ($orderId === '') {
+                continue;
+            }
+            $event = ShopifyStackOrderEvent::query()->firstOrCreate(
+                ['webhook_id' => 'backfill-'.sha1($orderId)],
+                [
+                    'topic' => 'orders/updated',
+                    'shopify_order_id' => $orderId,
+                    'shopify_order_name' => trim((string) ($order['name'] ?? '')) ?: null,
+                    'shopify_updated_at' => $order['updatedAt'] ?? null,
+                    'payload' => ['admin_graphql_api_id' => $orderId, 'name' => $order['name'] ?? null, 'line_items' => $lines],
+                ],
+            );
+            if ($event->status !== ShopifyStackOrderEvent::STATUS_COMPLETED) {
+                $summary = $service->process($event);
+                $reservations += $summary['reserved'];
+            }
+            $orders++;
+        }
+
+        $hasNextPage = (bool) data_get($data, 'orders.pageInfo.hasNextPage', false);
+        $cursor = data_get($data, 'orders.pageInfo.endCursor');
+    } while ($hasNextPage && is_string($cursor) && $cursor !== '');
+
+    $this->info("Reconciled {$orders} open orders; {$reservations} Stack component reservation movements completed.");
+
+    return self::SUCCESS;
+})->purpose('Backfill current open Shopify Stack orders into the component reservation ledger.');
+
+Schedule::command('notifications:send-daily-task-reminders')
+    ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))
+    ->timezone((string) config('services.slack.task_reminder_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-owner-task-reminders');
+
+Schedule::command('notifications:send-weekly-complementary-report')
+    ->fridays()
+    ->at((string) config('services.slack.maintenance_report_time', '09:00'))
+    ->timezone((string) config('services.slack.maintenance_report_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('weekly-complementary-products-email');
+
+Schedule::command('notifications:send-monthly-maintenance-reports')
+    ->monthlyOn(1, (string) config('services.slack.maintenance_report_time', '09:00'))
+    ->timezone((string) config('services.slack.maintenance_report_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('monthly-maintenance-owner-emails');
+
+Artisan::command('sku:audit-duplicates', function (DuplicateSkuReminderService $reminders): int {
+    $result = $reminders->sendDailyReminder();
+
+    if ($result['conflict_count'] === 0) {
+        $this->info('No duplicate SKUs were found across products. No reminder was sent.');
+
+        return self::SUCCESS;
+    }
+
+    $this->info(
+        "Found {$result['conflict_count']} duplicate SKU(s) across {$result['product_count']} products. "
+        . 'Email: ' . ($result['email_sent'] ? 'sent' : 'not sent') . '. '
+        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+    );
+
+    foreach ($result['errors'] as $error) {
+        $this->error($error);
+    }
+
+    return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
+})->purpose('Detect SKUs used by multiple products and remind the responsible person by email and Slack.');
+
+Schedule::command('sku:audit-duplicates')
+    ->dailyAt((string) config('services.slack.duplicate_sku_reminder_time', '08:00'))
+    ->timezone((string) config('services.slack.duplicate_sku_reminder_timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-duplicate-sku-audit');
+
+Artisan::command('procurement:remind-pending-receipt-pushes', function (PendingSupplierReceiptPushReminderService $reminders): int {
+    $result = $reminders->sendDueReminders();
+
+    $this->info(
+        "Pending receipt push reminders: {$result['pending_count']} due. "
+        . "Emails sent: {$result['email_sent']}. "
+        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+    );
+
+    foreach ($result['errors'] as $error) {
+        $this->error($error);
+    }
+
+    return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
+})->purpose('Remind receipt creators and the inventory Slack channel about supplier receipts pending Shopify push.');
+
+Artisan::command('procurement:backfill-receipt-grvs {--dry-run : Preview the GRVs that would be assigned without updating receipts}', function (SupplierReceiptService $receipts): int {
+    $result = $receipts->backfillMissingGrvNumbers((bool) $this->option('dry-run'));
+    $mode = (bool) $this->option('dry-run') ? 'would assign' : 'assigned';
+
+    $this->info("GRV backfill {$mode} {$result['grv_count']} GRV(s) across {$result['receipt_count']} receipt(s).");
+
+    foreach (array_slice($result['groups'], 0, 20) as $group) {
+        $this->line("{$group['grv_number']} -> {$group['group']} receipt(s): ".implode(', ', $group['receipt_ids']));
+    }
+
+    if (count($result['groups']) > 20) {
+        $remaining = count($result['groups']) - 20;
+        $this->line("...and {$remaining} more group(s).");
+    }
+
+    return self::SUCCESS;
+})->purpose('Backfill GRV numbers for historical supplier receipts that were created before GRV tracking.');
+
+Artisan::command('procurement:reconcile-supplier-reporting {--dry-run : Preview how many order lines and variants would be reconciled}', function (SupplierOrderReportingReconciliationService $reconciliation): int {
+    $result = $reconciliation->reconcile(dryRun: (bool) $this->option('dry-run'));
+    $mode = (bool) $this->option('dry-run') ? 'would reconcile' : 'reconciled';
+
+    $this->info(
+        "Supplier reporting {$mode}: {$result['lines_checked']} line(s) checked, "
+        . "{$result['lines_updated']} line status update(s), "
+        . "{$result['variants_refreshed']} variant summary refresh(es)."
+    );
+
+    return self::SUCCESS;
+})->purpose('Reconcile supplier order line statuses and supplier-order reporting summaries from historical receipts.');
+
+Schedule::command('procurement:remind-pending-receipt-pushes')
+    ->everyFiveMinutes()
+    ->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('pending-supplier-receipt-push-reminders');
 
 Schedule::job(new ReconcileProductImageBackupsJob())
     ->dailyAt('02:00')
@@ -83,6 +729,135 @@ Schedule::call(function (): void {
     ->name('daily-shopify-inventory-refresh')
     ->dailyAt('04:00')
     ->withoutOverlapping();
+
+Artisan::command(
+    'shopify:run-daily-pipeline
+    {--date= : Optional YYYY-MM-DD business date. Defaults to yesterday in Africa/Johannesburg}
+    {--scheduled : Mark the run as scheduler-created instead of manual}',
+    function (): int {
+        $date = trim((string) ($this->option('date') ?? ''));
+        if ($date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            $this->error('--date must be formatted as YYYY-MM-DD.');
+
+            return self::FAILURE;
+        }
+
+        $mode = (bool) $this->option('scheduled')
+            ? ShopifySyncRun::RUN_MODE_SCHEDULED
+            : ShopifySyncRun::RUN_MODE_MANUAL;
+
+        RunDailyShopifyPipeline::dispatch($date !== '' ? $date : null, $mode);
+
+        $this->info('Shopify daily pipeline queued.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue the daily Shopify orders and inventory bulk-sync pipeline.');
+
+Schedule::command('shopify:run-daily-pipeline --scheduled')
+    ->dailyAt('02:00')
+    ->timezone('Africa/Johannesburg')
+    ->withoutOverlapping()
+    ->name('shopify-daily-orders-inventory-pipeline');
+
+Schedule::command('product-movement:generate --months=6')
+    ->fridays()
+    ->at('00:00')
+    ->timezone((string) config('product_movement.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('weekly-product-movement-report');
+
+if (config('procurement.product_movement_daily') && config('procurement.pipeline_daily')) {
+    Schedule::command('procurement:run')
+        ->dailyAt((string) config('procurement.daily_time', '06:30'))
+        ->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
+        ->withoutOverlapping()
+        ->onOneServer()
+        ->name('daily-procurement-prediction-pipeline');
+}
+
+Artisan::command(
+    'shopify:orders-import-history
+    {--force : Skip confirmation for the one-time full historical import}',
+    function (): int {
+        if (!$this->option('force') && !$this->confirm('Queue a full unfiltered Shopify orders historical import?')) {
+            $this->warn('Aborted.');
+
+            return self::SUCCESS;
+        }
+
+        RunHistoricalShopifyOrdersImport::dispatch();
+        $this->info('Historical Shopify orders import queued.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a full unfiltered Shopify orders bulk import.');
+
+Artisan::command(
+    'shopify:orders-backfill
+    {business_date : Business date as YYYY-MM-DD}
+    {--lookback= : Complete business-day lookback. Defaults to config/shopify_sync.php}
+    {--force : Allow queueing even when another run already exists for the same date}
+    {--capture-current-inventory : Also capture a late current inventory snapshot}',
+    function (string $business_date): int {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $business_date)) {
+            $this->error('business_date must be formatted as YYYY-MM-DD.');
+
+            return self::FAILURE;
+        }
+
+        $lookback = $this->option('lookback');
+        $lookbackDays = $lookback === null || $lookback === '' ? null : max(1, (int) $lookback);
+        $exists = ShopifySyncRun::query()
+            ->where('dataset', ShopifySyncRun::DATASET_ORDERS)
+            ->whereDate('business_date', $business_date)
+            ->whereIn('status', [
+                ShopifySyncRun::STATUS_PENDING,
+                ShopifySyncRun::STATUS_STARTING,
+                ShopifySyncRun::STATUS_RUNNING,
+                ShopifySyncRun::STATUS_DOWNLOADING,
+                ShopifySyncRun::STATUS_PROCESSING,
+            ])
+            ->exists();
+
+        if ($exists && !$this->option('force')) {
+            $this->error("An orders sync is already active for {$business_date}. Use --force to queue another run intentionally.");
+
+            return self::FAILURE;
+        }
+
+        RunShopifyOrdersBackfill::dispatch(
+            $business_date,
+            $lookbackDays,
+            (bool) $this->option('capture-current-inventory'),
+        );
+
+        $this->info("Shopify orders backfill queued for {$business_date}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a deterministic Shopify orders backfill for a business date.');
+
+Artisan::command(
+    'shopify:inventory-snapshot',
+    function (): int {
+        $run = ShopifySyncRun::query()->create([
+            'dataset' => ShopifySyncRun::DATASET_INVENTORY,
+            'sync_type' => ShopifySyncRun::SYNC_TYPE_SNAPSHOT,
+            'run_mode' => ShopifySyncRun::RUN_MODE_MANUAL,
+            'business_date' => now((string) config('shopify_sync.timezone', 'Africa/Johannesburg'))->toDateString(),
+            'business_timezone' => (string) config('shopify_sync.timezone', 'Africa/Johannesburg'),
+            'status' => ShopifySyncRun::STATUS_PENDING,
+        ]);
+
+        StartShopifyInventoryBulkExport::dispatch($run->id);
+
+        $this->info("Shopify inventory snapshot queued as sync run #{$run->id}.");
+
+        return self::SUCCESS;
+    }
+)->purpose('Queue a current Shopify inventory bulk snapshot.');
 
 Schedule::call(function (): void {
     app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::COMPLEMENTARY_RECONCILIATION);
@@ -243,6 +1018,66 @@ Artisan::command(
         return self::SUCCESS;
     }
 )->purpose('Read current inventory and product status from Shopify into local variants/products without pushing local changes to Shopify.');
+
+Artisan::command(
+    'inventory:enforce-stack-sellability
+    {--dry-run : Show what would be changed without updating drafts or variants}
+    {--test-only : Only allow stacks containing the test token to be changed}
+    {--test-token=test : Token used by --test-only when matching title, handle, or SKU}
+    {--require-test-components : With --test-only, also skip stacks unless all associated products contain the test token}
+    {--refresh-components : Read associated component inventory from Shopify before enforcing}
+    {--user-id= : Optional user ID recorded on inventory history snapshots}',
+    function (): int {
+        $dryRun = (bool) $this->option('dry-run');
+        $refreshComponents = (bool) $this->option('refresh-components');
+        $userId = (int) ($this->option('user-id') ?? 0);
+
+        if ($dryRun && $refreshComponents) {
+            $this->error('--refresh-components writes current Shopify inventory into local component records. Use either --dry-run or --refresh-components, not both.');
+
+            return self::FAILURE;
+        }
+
+        $effectiveUserId = $userId > 0 ? $userId : null;
+        $summary = app(StackBundleSellabilityService::class)->enforce(
+            $effectiveUserId,
+            $dryRun,
+            [
+                'test_only' => (bool) $this->option('test-only'),
+                'test_token' => (string) ($this->option('test-token') ?? 'test'),
+                'require_test_components' => (bool) $this->option('require-test-components'),
+                'refresh_components' => $refreshComponents,
+            ],
+        );
+
+        if (!$dryRun) {
+            $summary['source'] = 'Manual stack sellability enforcement';
+            $summary = app(StackSellabilityShopifyPushService::class)->queuePushForChangedStacks($summary, $effectiveUserId);
+            app(StackSellabilitySlackNotifier::class)->notifyIfChanged($summary);
+        }
+
+        $this->info($dryRun ? 'Stack sellability dry run complete.' : 'Stack sellability enforcement complete.');
+        $this->line("Checked drafts: {$summary['checked']}");
+        $this->line("With associations: {$summary['with_associations']}");
+        $this->line("All components sellable: {$summary['all_components_sellable']}");
+        $this->line("Missing components: {$summary['missing_components']}");
+        $this->line("Forced unsellable: {$summary['forced_unsellable']}");
+        $this->line("Already unsellable: {$summary['already_unsellable']}");
+        $this->line("Restored sellable/untracked: {$summary['restored_sellable']}");
+        $this->line("Already sellable/untracked: {$summary['already_sellable']}");
+        $this->line("Missing stack product: {$summary['missing_stack_product']}");
+        $this->line("Skipped non-test stacks: {$summary['skipped_non_test_stack']}");
+        $this->line("Skipped non-test/missing components: {$summary['skipped_non_test_components']}");
+        $this->line("Skipped locked stacks: {$summary['skipped_locked_stacks']}");
+        $this->line("Shopify component variants refreshed: {$summary['shopify_component_refreshes']}");
+        $this->line("Shopify component refresh failures: {$summary['shopify_component_refresh_failures']}");
+        $this->line("Stacks skipped after refresh failure: {$summary['shopify_refresh_failed_stacks']}");
+        $this->line('Shopify push queued products: ' . (int) ($summary['shopify_push_queued_products'] ?? 0));
+        $this->line('Shopify push queued variants: ' . (int) ($summary['shopify_push_queued_variants'] ?? 0));
+
+        return self::SUCCESS;
+    }
+)->purpose('Force stack/bundle draft and variant stock from associated component sellability, then queue Shopify pushes for changed stacks.');
 
 Artisan::command(
     'shopify:reconcile-complementary-products

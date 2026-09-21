@@ -172,6 +172,50 @@ it('does not mark locally dirty variants as conflicted when imported money decim
         ->and($variant->local_dirty)->toBeTrue();
 });
 
+it('does not mark a locally dirty variant as conflicted when its barcode and the imported shopify barcode are blank', function (): void {
+    $import = createShopifyImport();
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'handle' => 'variant-blank-barcode',
+        'title' => 'Variant Blank Barcode',
+        'product_category' => 'Apparel & Accessories > Jewelry > Bracelets',
+        'type' => 'Bracelets',
+    ]));
+
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/5003',
+        'sync_state' => Variant::SYNC_STATE_CONFLICT,
+        'local_dirty' => true,
+        'sku' => 'SKU-5003',
+        'barcode' => null,
+        'price' => '19.90',
+        'compare_at_price' => '29.00',
+        'weight' => '1.500',
+        'weight_unit' => 'g',
+        'inventory_tracked' => true,
+        'inventory_qty' => 5,
+        'position' => 1,
+    ]));
+
+    createPrimaryShopifyRow($import, 'variant-blank-barcode', 1);
+    createVariantShopifyRow($import, 'variant-blank-barcode', 2, [
+        HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID => 'gid://shopify/ProductVariant/5003',
+        HeaderStore::VARIANT_SKU => 'SKU-5003',
+        HeaderStore::VARIANT_BARCODE => '',
+        HeaderStore::VARIANT_PRICE => '19.90',
+        HeaderStore::VARIANT_COMPARE_AT => '29.00',
+        HeaderStore::VARIANT_GRAMS => '1.500',
+        HeaderStore::VARIANT_WEIGHT_UNIT => 'g',
+        HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED => 'true',
+        HeaderStore::VARIANT_INVENTORY_QTY => '5',
+    ]);
+
+    app(Normalizer::class)->buildNormalizedTables($import);
+
+    expect($variant->fresh()->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_UPDATED);
+});
+
 it('still marks locally dirty variants as conflicted when imported money values differ', function (): void {
     $import = createShopifyImport();
     $product = Product::withoutEvents(fn (): Product => Product::create([

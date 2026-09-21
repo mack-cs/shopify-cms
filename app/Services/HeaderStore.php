@@ -64,8 +64,16 @@ final class HeaderStore
     public const NECKLACE_DESIGN = 'Necklace design (product.metafields.shopify.necklace-design)';
     public const EARRING_DESIGN = 'Earring design (product.metafields.shopify.earring-design)';
     public const INTERNAL_VARIANT_SHOPIFY_ID = '__shopify_variant_id';
+    public const INTERNAL_VARIANT_INVENTORY_ITEM_ID = '__shopify_variant_inventory_item_id';
     public const INTERNAL_VARIANT_INVENTORY_TRACKED = '__shopify_variant_inventory_tracked';
     public const INTERNAL_IMAGE_SHOPIFY_ID = '__shopify_image_id';
+
+    private const INTERNAL_HEADERS = [
+        self::INTERNAL_VARIANT_SHOPIFY_ID,
+        self::INTERNAL_VARIANT_INVENTORY_ITEM_ID,
+        self::INTERNAL_VARIANT_INVENTORY_TRACKED,
+        self::INTERNAL_IMAGE_SHOPIFY_ID,
+    ];
 
     public static function productHeaders(): array
     {
@@ -146,6 +154,7 @@ final class HeaderStore
         return array_values(array_filter(
             $headers,
             fn (string $header) => !in_array($header, $known, true)
+                && !in_array($header, self::INTERNAL_HEADERS, true)
         ));
     }
 

@@ -5,20 +5,29 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Variant extends Model
 {
     public const SYNC_STATE_SYNCED = 'synced';
+
     public const SYNC_STATE_LOCAL_NEW = 'local_new';
+
     public const SYNC_STATE_LOCAL_UPDATED = 'local_updated';
+
     public const SYNC_STATE_LOCAL_DELETED = 'local_deleted';
+
     public const SYNC_STATE_REMOTE_DELETED = 'remote_deleted';
+
     public const SYNC_STATE_CONFLICT = 'conflict';
 
     protected $fillable = [
         'product_id',
         'image_id',
         'shopify_id',
+        'shopify_inventory_item_id',
+        'shopify_available_for_sale',
         'sync_state',
         'local_dirty',
         'last_shopify_seen_at',
@@ -38,6 +47,16 @@ class Variant extends Model
         'compare_at_price',
 
         'inventory_qty',
+        'current_inventory_quantity',
+        'current_available_quantity',
+        'current_on_hand_quantity',
+        'current_committed_quantity',
+        'current_incoming_quantity',
+        'current_reserved_quantity',
+        'current_damaged_quantity',
+        'current_quality_control_quantity',
+        'current_safety_stock_quantity',
+        'inventory_location_count',
         'inventory_policy',
         'inventory_tracked',
         'inventory_last_synced_at',
@@ -55,7 +74,6 @@ class Variant extends Model
         'position',
     ];
 
-
     protected $casts = [
         'price' => 'decimal:2',
         'compare_at_price' => 'decimal:2',
@@ -64,10 +82,21 @@ class Variant extends Model
         'requires_shipping' => 'boolean',
         'taxable' => 'boolean',
         'inventory_tracked' => 'boolean',
+        'shopify_available_for_sale' => 'boolean',
         'inventory_local_dirty' => 'boolean',
         'local_dirty' => 'boolean',
         'last_shopify_seen_at' => 'datetime',
         'last_synced_at' => 'datetime',
+        'current_inventory_quantity' => 'integer',
+        'current_available_quantity' => 'integer',
+        'current_on_hand_quantity' => 'integer',
+        'current_committed_quantity' => 'integer',
+        'current_incoming_quantity' => 'integer',
+        'current_reserved_quantity' => 'integer',
+        'current_damaged_quantity' => 'integer',
+        'current_quality_control_quantity' => 'integer',
+        'current_safety_stock_quantity' => 'integer',
+        'inventory_location_count' => 'integer',
         'inventory_last_synced_at' => 'datetime',
         'inventory_pushed_at' => 'datetime',
     ];
@@ -82,11 +111,31 @@ class Variant extends Model
         return $this->belongsTo(Image::class);
     }
 
+    public function procurementIncomingStock(): HasOne
+    {
+        return $this->hasOne(ProcurementIncomingStock::class);
+    }
+
+    public function supplierOrderLines(): HasMany
+    {
+        return $this->hasMany(ProcurementSupplierOrderLine::class);
+    }
+
+    public function inventoryAdjustmentRequestItems(): HasMany
+    {
+        return $this->hasMany(InventoryAdjustmentRequestItem::class);
+    }
+
     public function scopeActive(Builder $query): Builder
     {
         return $query->whereNotIn('sync_state', [
             self::SYNC_STATE_LOCAL_DELETED,
             self::SYNC_STATE_REMOTE_DELETED,
         ]);
+    }
+
+    public function scopeInventoryWorkspaceEligible(Builder $query): Builder
+    {
+        return $query->whereHas('product', fn (Builder $product): Builder => $product->activeStatus());
     }
 }

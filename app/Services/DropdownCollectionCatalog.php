@@ -60,6 +60,70 @@ final class DropdownCollectionCatalog
         return array_values($contexts);
     }
 
+    /**
+     * @return array<string, string>
+     */
+    public function collectionOptions(): array
+    {
+        $options = [];
+
+        foreach ($this->contexts() as $context) {
+            $collectionStyle = $this->normalizeValue($context['collection_style'] ?? null);
+            if ($collectionStyle !== null) {
+                $options[$collectionStyle] = $collectionStyle;
+            }
+        }
+
+        natcasesort($options);
+
+        return $options;
+    }
+
+    /**
+     * @return array{collection_style:string,tag_primary:string,tag_secondary:?string}|null
+     */
+    public function contextForCollection(?string $collectionStyle): ?array
+    {
+        $collectionStyle = $this->normalizeValue($collectionStyle);
+        if ($collectionStyle === null) {
+            return null;
+        }
+
+        foreach ($this->contexts() as $context) {
+            if (strcasecmp($context['collection_style'], $collectionStyle) === 0) {
+                return $context;
+            }
+        }
+
+        return null;
+    }
+
+    /** @param array<int, string> $tags */
+    public function collectionForTags(array $tags): ?string
+    {
+        $normalizedTags = collect($tags)
+            ->map(fn ($tag): ?string => TagNormalizer::normalizeToken((string) $tag))
+            ->filter()
+            ->map(fn (string $tag): string => strtolower($tag))
+            ->unique()
+            ->all();
+
+        foreach ($this->contexts() as $context) {
+            $primary = strtolower((string) ($context['tag_primary'] ?? ''));
+            $secondary = strtolower((string) ($context['tag_secondary'] ?? ''));
+            if ($primary === '' || ! in_array($primary, $normalizedTags, true)) {
+                continue;
+            }
+            if ($secondary !== '' && ! in_array($secondary, $normalizedTags, true)) {
+                continue;
+            }
+
+            return $context['collection_style'];
+        }
+
+        return null;
+    }
+
     public function vendorForCollection(?string $collectionStyle): ?string
     {
         if (!is_string($collectionStyle) || trim($collectionStyle) === '') {
@@ -71,7 +135,7 @@ final class DropdownCollectionCatalog
                 continue;
             }
 
-            return $this->humanizeVendorTag($context['tag_primary'] ?? null);
+            return $this->humanizeVendorTag($this->vendorTagForContext($context));
         }
 
         return null;
@@ -86,7 +150,7 @@ final class DropdownCollectionCatalog
 
         foreach ($this->contexts() as $context) {
             $collectionStyle = $this->normalizeValue($context['collection_style'] ?? null);
-            $vendor = $this->humanizeVendorTag($context['tag_primary'] ?? null);
+            $vendor = $this->humanizeVendorTag($this->vendorTagForContext($context));
             if ($collectionStyle === null || $vendor === null) {
                 continue;
             }
@@ -123,6 +187,19 @@ final class DropdownCollectionCatalog
 
         $trimmed = trim((string) $value);
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    /**
+     * @param array{collection_style?:string,tag_primary?:string|null,tag_secondary?:string|null} $context
+     */
+    private function vendorTagForContext(array $context): mixed
+    {
+        $secondary = $context['tag_secondary'] ?? null;
+        if (TagNormalizer::containsBundleOrStackTag(is_string($secondary) ? $secondary : null)) {
+            return $secondary;
+        }
+
+        return $context['tag_primary'] ?? null;
     }
 
     private function humanizeVendorTag(mixed $value): ?string

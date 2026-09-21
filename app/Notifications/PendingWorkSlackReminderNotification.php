@@ -15,6 +15,7 @@ use App\Models\ShopifyAudit;
 use App\Models\User;
 use App\Services\ComplementaryProductAuditService;
 use App\Services\SlackUserResolver;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\Slack\SlackMessage;
 use Illuminate\Support\Facades\DB;
@@ -72,6 +73,20 @@ class PendingWorkSlackReminderNotification extends Notification
             })
             ->count();
 
+        $missingAltTextCount = Product::query()
+            ->activeMissingImageAltText()
+            ->count();
+
+        $missingAltTextProducts = Product::query()
+            ->activeMissingImageAltText()
+            ->withCount([
+                'images as missing_image_alt_text_count' => fn (Builder $query): Builder => Product::applyMissingImageAltTextImageFilter($query),
+            ])
+            ->orderByDesc('missing_image_alt_text_count')
+            ->orderBy('title')
+            ->limit(10)
+            ->get();
+
         $siteAuditSummary = $this->siteAuditSummary($resolver);
 
         $failedJobCount = Schema::hasTable('failed_jobs')
@@ -85,6 +100,11 @@ class PendingWorkSlackReminderNotification extends Notification
 
         $complementaryGapLines = $complementaryGaps
             ->map(fn (ShopifyAudit $audit): string => $this->complementaryGapLine($audit, $resolver))
+            ->filter()
+            ->implode("\n");
+
+        $missingAltTextLines = $missingAltTextProducts
+            ->map(fn (Product $product): string => $this->missingAltTextLine($product, $resolver))
             ->filter()
             ->implode("\n");
 
@@ -118,6 +138,10 @@ class PendingWorkSlackReminderNotification extends Notification
                     [
                         'type' => 'mrkdwn',
                         'text' => "*Image errors:*\n{$imageErrorCount}",
+                    ],
+                    [
+                        'type' => 'mrkdwn',
+                        'text' => "*Missing alt text:*\n{$missingAltTextCount}",
                     ],
                     [
                         'type' => 'mrkdwn',
@@ -160,6 +184,30 @@ class PendingWorkSlackReminderNotification extends Notification
                         [
                             'type' => 'mrkdwn',
                             'text' => "Showing the first {$complementaryGaps->count()} complementary gap(s); open audits for {$remaining} more.",
+                        ],
+                    ],
+                ];
+            }
+        }
+
+        if ($missingAltTextLines !== '') {
+            $blocks[] = [
+                'type' => 'section',
+                'text' => [
+                    'type' => 'mrkdwn',
+                    'text' => "*Active products missing image alt text:*\n" . Str::limit($missingAltTextLines, 2800),
+                ],
+            ];
+
+            if ($missingAltTextCount > $missingAltTextProducts->count()) {
+                $remaining = $missingAltTextCount - $missingAltTextProducts->count();
+
+                $blocks[] = [
+                    'type' => 'context',
+                    'elements' => [
+                        [
+                            'type' => 'mrkdwn',
+                            'text' => "Showing the first {$missingAltTextProducts->count()} active product(s) missing image alt text; open products for {$remaining} more.",
                         ],
                     ],
                 ];
@@ -266,6 +314,18 @@ class PendingWorkSlackReminderNotification extends Notification
         return "- {$label} ({$handle}) - " . implode('; ', $parts);
     }
 
+    private function missingAltTextLine(Product $product, SlackUserResolver $resolver): string
+    {
+        $title = $resolver->escape($product->title ?: 'Product #' . $product->id);
+        $handle = $resolver->escape($product->handle ?: 'no-handle');
+        $productUrl = $this->absoluteUrl(ProductResource::getUrl('edit', ['record' => $product]));
+        $count = (int) ($product->missing_image_alt_text_count ?? 0);
+
+        return "- <{$productUrl}|{$title}> ({$handle}) - {$count} active "
+            . Str::plural('image', $count)
+            . ' missing alt text';
+    }
+
     /**
      * @return array{field: string, details: string}
      */
@@ -304,8 +364,21 @@ class PendingWorkSlackReminderNotification extends Notification
 
         $okCount = (int) ($counts[SiteAuditResult::RESULT_OK] ?? 0);
         $redirectCount = (int) ($counts[SiteAuditResult::RESULT_REDIRECT] ?? 0);
-        $problemCount = collect(SiteAuditResult::ISSUE_RESULTS)
-            ->sum(fn (string $result): int => (int) ($counts[$result] ?? 0));
+        $problemCount = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->where(function (Builder $notRateLimitedQuery): void {
+                $notRateLimitedQuery->whereNull('status_code')
+                    ->orWhere('status_code', '!=', 429);
+            })
+            ->count();
+        $rateLimitedCount = SiteAuditResult::query()
+            ->where('site_audit_run_id', $run->id)
+            ->where(function (Builder $rateLimitedQuery): void {
+                $rateLimitedQuery->where('result', SiteAuditResult::RESULT_RATE_LIMITED)
+                    ->orWhere('status_code', 429);
+            })
+            ->count();
         $slowThreshold = (int) config('site-audit.slow_threshold_ms', 3000);
         $slowCount = SiteAuditResult::query()
             ->where('site_audit_run_id', $run->id)
@@ -319,17 +392,24 @@ class PendingWorkSlackReminderNotification extends Notification
         if ($slowCount > 0) {
             $field .= ", {$slowCount} slow";
         }
+        if ($rateLimitedCount > 0) {
+            $field .= ", {$rateLimitedCount} rate-limited";
+        }
 
         $completedAt = $run->completed_at?->format('Y-m-d H:i') ?? 'unknown time';
         $details = [
             "Run #{$run->id} completed {$completedAt}.",
-            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; slow >= {$slowThreshold}ms: {$slowCount}.",
+            "Total {$run->total_urls}; checked {$run->checked_urls}; OK {$okCount}; redirects {$redirectCount}; problem URLs {$problemCount}; rate-limited {$rateLimitedCount}; slow >= {$slowThreshold}ms: {$slowCount}.",
         ];
 
         $problemLines = SiteAuditResult::query()
             ->with('siteAuditUrl')
             ->where('site_audit_run_id', $run->id)
             ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->where(function (Builder $notRateLimitedQuery): void {
+                $notRateLimitedQuery->whereNull('status_code')
+                    ->orWhere('status_code', '!=', 429);
+            })
             ->orderBy('result')
             ->orderByDesc('response_time_ms')
             ->limit(5)

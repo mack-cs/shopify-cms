@@ -1,0 +1,19 @@
+<?php
+
+return [
+    'default_lead_time_days' => (int) env('PROCUREMENT_DEFAULT_LEAD_TIME_DAYS', 56),
+    'attention_horizon_days' => (int) env('PROCUREMENT_ATTENTION_HORIZON_DAYS', 21),
+    'order_now_threshold' => (int) env('PROCUREMENT_ORDER_NOW_THRESHOLD', 30),
+    'stock_gap_grace_days' => (int) env('PROCUREMENT_STOCK_GAP_GRACE_DAYS', 0),
+    'product_movement_daily' => (bool) env('PROCUREMENT_PRODUCT_MOVEMENT_DAILY', true),
+    'pipeline_daily' => (bool) env('PROCUREMENT_PIPELINE_DAILY', true),
+    'daily_time' => env('PROCUREMENT_DAILY_TIME', '06:30'),
+    'timezone' => env('PROCUREMENT_TIMEZONE', 'Africa/Johannesburg'),
+    'movement_months' => (int) env('PROCUREMENT_MOVEMENT_MONTHS', 6),
+    'python_executable' => env('PROCUREMENT_PYTHON_EXECUTABLE', 'python'),
+    'pipeline_path' => env('PROCUREMENT_PIPELINE_PATH', 'D:\\python_projects\\leigh_ml_procurement_v1_with_incoming_stock'),
+    'process_timeout_seconds' => (int) env('PROCUREMENT_PROCESS_TIMEOUT_SECONDS', 7200),
+    'queue' => env('PROCUREMENT_QUEUE', 'procurement'),
+    'movement_source_version' => env('PROCUREMENT_MOVEMENT_SOURCE_VERSION', 'product-movement-v2'),
+    'pending_receipt_push_reminder_minutes' => (int) env('PROCUREMENT_PENDING_RECEIPT_PUSH_REMINDER_MINUTES', 30),
+];

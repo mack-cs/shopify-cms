@@ -99,6 +99,10 @@ final class SiteAuditContextService
             return "The public URL returned HTTP {$statusCode}, which indicates a Shopify/server-side error.";
         }
 
+        if ($result === SiteAuditResult::RESULT_RATE_LIMITED) {
+            return 'Shopify returned HTTP 429 Too Many Requests. The audit could not confirm whether this URL is healthy; recheck it after the request rate has cooled down.';
+        }
+
         if ($result === SiteAuditResult::RESULT_FAILED) {
             return $statusCode
                 ? "The public URL returned unexpected HTTP {$statusCode}."

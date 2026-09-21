@@ -20,7 +20,11 @@ class ListBrokenSiteAuditResults extends ListSiteAuditResults
 
         return $query
             ->where('site_audit_run_id', $run->id)
-            ->whereIn('result', SiteAuditResult::ISSUE_RESULTS);
+            ->whereIn('result', SiteAuditResult::ISSUE_RESULTS)
+            ->where(function (Builder $notRateLimitedQuery): void {
+                $notRateLimitedQuery->whereNull('status_code')
+                    ->orWhere('status_code', '!=', 429);
+            });
     }
 
     public function getHeading(): string

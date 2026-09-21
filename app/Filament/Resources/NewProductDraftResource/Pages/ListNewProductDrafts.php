@@ -9,7 +9,9 @@ use App\Filament\Resources\NewProductDraftResource\Widgets\ShopifyMissingDraftBa
 use App\Filament\Resources\NewProductDraftResource\Widgets\QuickCreateNewProductDraft;
 use App\Models\NewProductDraft;
 use App\Models\Status;
+use App\Jobs\RecalculateDropdownOptionProductsJob;
 use App\Services\LocalCatalogResetService;
+use App\Services\StackComponentCsvExporter;
 use Filament\Actions;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
@@ -75,6 +77,25 @@ class ListNewProductDrafts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('refreshProductValidation')
+                ->label('Refresh Validation')
+                ->icon('heroicon-o-arrow-path')
+                ->color('gray')
+                ->action(function (): void {
+                    RecalculateDropdownOptionProductsJob::dispatchSync(null, null);
+                    $this->resetTable();
+
+                    Notification::make()
+                        ->title('Product validation refreshed')
+                        ->success()
+                        ->send();
+                }),
+            Actions\Action::make('exportStackComponents')
+                ->label('Export Stacks & Components')
+                ->icon('heroicon-o-link')
+                ->color('info')
+                ->tooltip('Download every product draft stack and all of its linked component products as CSV.')
+                ->action(fn (StackComponentCsvExporter $exporter) => $exporter->download()),
             Actions\Action::make('resetLocalCatalog')
                 ->label('Reset Local Catalog')
                 ->icon('heroicon-o-trash')
@@ -164,11 +185,11 @@ class ListNewProductDrafts extends ListRecords
                 ));
         }
 
-        if ($reportCounts['missing_siblings'] > 0) {
-            $tabs['missing_siblings'] = Tab::make('No Siblings')
-                ->badge((string) $reportCounts['missing_siblings'])
-                ->badgeColor('warning')
-                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyMissingSiblingsReportFilter(
+        if ($reportCounts['on_sale'] > 0) {
+            $tabs['on_sale'] = Tab::make('On Sale')
+                ->badge((string) $reportCounts['on_sale'])
+                ->badgeColor('success')
+                ->modifyQueryUsing(fn (Builder $query) => NewProductDraftResource::applyOnSaleTagFilter(
                     self::applyHeaderReportScope($query)
                 ));
         }
@@ -218,7 +239,7 @@ class ListNewProductDrafts extends ListRecords
             'shopify_clash' => self::applyShopifyClashFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
-            'missing_siblings' => NewProductDraftResource::applyMissingSiblingsReportFilter(
+            'on_sale' => NewProductDraftResource::applyOnSaleTagFilter(
                 self::applyHeaderReportScope(NewProductDraft::query())
             )->count(),
             'missing_complementary' => NewProductDraftResource::applyMissingComplementaryProductsReportFilter(

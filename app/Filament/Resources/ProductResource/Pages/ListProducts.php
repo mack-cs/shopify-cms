@@ -4,11 +4,11 @@ namespace App\Filament\Resources\ProductResource\Pages;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
-use App\Filament\Resources\ProductResource\Widgets\ComplementaryShortageBanner;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
-use App\Filament\Resources\ProductResource\Widgets\PendingProductSyncBanner;
 use App\Models\Import;
 use App\Models\Product;
+use App\Services\DuplicateSkuCsvExporter;
+use App\Services\DuplicateSkuAuditService;
 use App\Services\LocalCatalogResetService;
 use Filament\Notifications\Notification;
 use Filament\Actions;
@@ -32,6 +32,12 @@ class ListProducts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('exportDuplicateSkus')
+                ->label('Export Duplicate SKUs')
+                ->icon('heroicon-o-arrow-down-tray')
+                ->color('warning')
+                ->tooltip('Download every product and variant sharing a SKU with another product.')
+                ->action(fn (DuplicateSkuCsvExporter $exporter) => $exporter->download()),
             Actions\Action::make('resetLocalCatalog')
                 ->label('Reset Local Catalog')
                 ->icon('heroicon-o-trash')
@@ -60,8 +66,6 @@ class ListProducts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
-            ComplementaryShortageBanner::class,
-            PendingProductSyncBanner::class,
             ProductStatusStats::class,
         ];
     }
@@ -84,15 +88,25 @@ class ListProducts extends ListRecords
     public function getTabs(): array
     {
         $reportCounts = $this->reportTabCounts();
+        $statusCounts = $this->statusTabCounts();
+        $archivedDuplicateIds = app(DuplicateSkuAuditService::class)->conflictingProductIds('archived');
         $tabs = [
             'all' => Tab::make('All'),
-            'active' => Tab::make('Active')
-                ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', ['active'])),
-            'draft' => Tab::make('Draft')
-                ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', ['draft'])),
-            'archived' => Tab::make('Archived')
-                ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', ['archived'])),
         ];
+
+        foreach (['active' => 'Active', 'draft' => 'Draft', 'archived' => 'Archived'] as $key => $label) {
+            if (($statusCounts[$key] ?? 0) <= 0) {
+                continue;
+            }
+
+            $tabs[$key] = Tab::make($label)
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
+        }
+
+        $tabs['archived_duplicate_skus'] = Tab::make('Archived Duplicate SKUs')
+            ->badge((string) count($archivedDuplicateIds))
+            ->badgeColor($archivedDuplicateIds === [] ? 'gray' : 'danger')
+            ->modifyQueryUsing(fn (Builder $query): Builder => $query->whereKey($archivedDuplicateIds));
 
         $extraStatuses = Product::query()
             ->whereNotNull('status')
@@ -109,34 +123,42 @@ class ListProducts extends ListRecords
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereRaw('LOWER(status) = ?', [$key]));
         }
 
-        $tabs['partially_approved'] = Tab::make('Partially Approved')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
-                ->whereHas('partialApprovalRequests', function (Builder $sub): void {
-                    $sub->whereColumn('approval_version', 'products.approval_version')
-                        ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
-                })
-                ->whereRaw(
-                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
-                ));
+        if ($reportCounts['partially_approved'] > 0) {
+            $tabs['partially_approved'] = Tab::make('Partially Approved')
+                ->badge((string) $reportCounts['partially_approved'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => self::applyPartiallyApprovedFilter($query));
+        }
 
-        $tabs['approved'] = Tab::make('Approved')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
-                ->whereRaw(
-                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
-                ));
+        if ($reportCounts['approved'] > 0) {
+            $tabs['approved'] = Tab::make('Approved')
+                ->badge((string) $reportCounts['approved'])
+                ->badgeColor('success')
+                ->modifyQueryUsing(fn (Builder $query) => self::applyApprovedFilter($query));
+        }
 
-        $tabs['synced'] = Tab::make('Synced')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
-                ->whereNotNull('last_synced_at')
-                ->whereColumn('updated_at', '<=', 'last_synced_at'));
+        if ($reportCounts['synced'] > 0) {
+            $tabs['synced'] = Tab::make('Synced')
+                ->badge((string) $reportCounts['synced'])
+                ->badgeColor('success')
+                ->modifyQueryUsing(fn (Builder $query) => self::applySyncedFilter($query));
+        }
 
-        $tabs['pending_approval'] = Tab::make('Pending Approval')
-            ->modifyQueryUsing(fn (Builder $query) => self::applyWorkflowStatusScope($query)
-                ->whereRaw(
-                    '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
-                ));
+        if ($reportCounts['pending_approval'] > 0) {
+            $tabs['pending_approval'] = Tab::make('Pending Approval')
+                ->badge((string) $reportCounts['pending_approval'])
+                ->badgeColor('warning')
+                ->modifyQueryUsing(fn (Builder $query) => self::applyPendingApprovalFilter($query));
+        }
 
-           if ($reportCounts['needs_title_update'] > 0) {
+        if ($reportCounts['missing_image_alt_text'] > 0) {
+            $tabs['missing_image_alt_text'] = Tab::make('No Alt Text')
+                ->badge((string) $reportCounts['missing_image_alt_text'])
+                ->badgeColor('danger')
+                ->modifyQueryUsing(fn (Builder $query) => $query->activeMissingImageAltText());
+        }
+
+        if ($reportCounts['needs_title_update'] > 0) {
             $tabs['needs_title_update'] = Tab::make('Needs Title')
                 ->badge((string) $reportCounts['needs_title_update'])
                 ->badgeColor('warning')
@@ -161,6 +183,11 @@ class ListProducts extends ListRecords
     private function reportTabCounts(): array
     {
         return [
+            'partially_approved' => self::applyPartiallyApprovedFilter(Product::query())->count(),
+            'approved' => self::applyApprovedFilter(Product::query())->count(),
+            'synced' => self::applySyncedFilter(Product::query())->count(),
+            'pending_approval' => self::applyPendingApprovalFilter(Product::query())->count(),
+            'missing_image_alt_text' => Product::query()->activeMissingImageAltText()->count(),
             'needs_title_update' => ProductResource::applyNeedsTitleUpdateFilter(
                 self::applyHeaderReportScope(Product::query())
             )->count(),
@@ -168,6 +195,18 @@ class ListProducts extends ListRecords
                 self::applyHeaderReportScope(Product::query())
             )->count(),
         ];
+    }
+
+    private function statusTabCounts(): array
+    {
+        return Product::query()
+            ->whereNotNull('status')
+            ->where('status', '!=', '')
+            ->selectRaw('LOWER(status) as status_key, COUNT(*) as total')
+            ->groupByRaw('LOWER(status)')
+            ->pluck('total', 'status_key')
+            ->map(fn ($total): int => (int) $total)
+            ->all();
     }
 
     private static function applyHeaderReportScope(Builder $query): Builder
@@ -180,6 +219,41 @@ class ListProducts extends ListRecords
     private static function applyWorkflowStatusScope(Builder $query): Builder
     {
         return $query->whereIn(\DB::raw('LOWER(status)'), ['active', 'draft']);
+    }
+
+    private static function applyPartiallyApprovedFilter(Builder $query): Builder
+    {
+        return self::applyWorkflowStatusScope($query)
+            ->whereHas('partialApprovalRequests', function (Builder $sub): void {
+                $sub->whereColumn('approval_version', 'products.approval_version')
+                    ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
+            })
+            ->whereRaw(
+                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
+            );
+    }
+
+    private static function applyApprovedFilter(Builder $query): Builder
+    {
+        return self::applyWorkflowStatusScope($query)
+            ->whereRaw(
+                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) >= 2'
+            );
+    }
+
+    private static function applySyncedFilter(Builder $query): Builder
+    {
+        return self::applyWorkflowStatusScope($query)
+            ->whereNotNull('last_synced_at')
+            ->whereColumn('updated_at', '<=', 'last_synced_at');
+    }
+
+    private static function applyPendingApprovalFilter(Builder $query): Builder
+    {
+        return self::applyWorkflowStatusScope($query)
+            ->whereRaw(
+                '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) = 1'
+            );
     }
 
     private function isSyncRunning(): bool

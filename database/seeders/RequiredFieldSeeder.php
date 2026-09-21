@@ -71,6 +71,7 @@ class RequiredFieldSeeder extends Seeder
             ['source' => 'row', 'attribute' => HeaderStore::JEWELRY_MATERIAL],
             ['source' => 'row', 'attribute' => HeaderStore::COST_PER_ITEM],
             ['source' => 'row', 'attribute' => HeaderStore::SEO_DEINDEX],
+            ['source' => 'row', 'attribute' => HeaderStore::COMPLEMENTARY_PRODUCTS],
         ];
 
         $requiredLookup = [];
@@ -140,6 +141,21 @@ class RequiredFieldSeeder extends Seeder
                 'row',
                 $header,
                 $header,
+                $requiredLookup,
+                $bulkEditableLookup,
+                $quickEditLookup
+            );
+        }
+
+        if (!collect($rows)->contains(
+            fn (array $row): bool => $row['source'] === 'row'
+                && $row['attribute'] === HeaderStore::COMPLEMENTARY_PRODUCTS
+        )) {
+            $rows[] = $this->makeRow(
+                'extra',
+                'row',
+                HeaderStore::COMPLEMENTARY_PRODUCTS,
+                'Complementary products',
                 $requiredLookup,
                 $bulkEditableLookup,
                 $quickEditLookup

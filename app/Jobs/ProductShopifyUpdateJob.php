@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Product;
 use App\Services\AdminNotification;
+use App\Services\ProductImageBackupService;
 use App\Services\ProductShopifyUpdater;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -28,13 +29,18 @@ class ProductShopifyUpdateJob implements ShouldQueue
         public ?string $syncBatchId = null,
     ) {}
 
-    public function handle(ProductShopifyUpdater $updater): void
+    public function handle(ProductShopifyUpdater $updater, ProductImageBackupService $backupService): void
     {
         $products = Product::query()
             ->whereIn('id', $this->productIds)
             ->get();
 
         $syncBatchId = $this->syncBatchId ?: (string) Str::uuid();
+        $backupResult = null;
+        if ($this->shouldPrepareImageBackups()) {
+            $backupResult = $backupService->backupProducts($products);
+        }
+
         $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields, $syncBatchId, $this->userId);
 
         if ($this->userId) {
@@ -62,6 +68,21 @@ class ProductShopifyUpdateJob implements ShouldQueue
             if ($result['updated'] > 0) {
                 $parts[] = "Updated {$result['updated']}.";
                 $parts[] = 'Sync batch ' . substr(str_replace('-', '', $syncBatchId), 0, 8) . '.';
+            }
+            if ($backupResult !== null) {
+                $parts[] = "Image backups processed {$backupResult['processed']}.";
+                if ($backupResult['backed_up'] > 0) {
+                    $parts[] = "Backed up {$backupResult['backed_up']}.";
+                }
+                if ($backupResult['reused'] > 0) {
+                    $parts[] = "Reused backups {$backupResult['reused']}.";
+                }
+                if ($backupResult['missing_source'] > 0) {
+                    $parts[] = "Missing image source {$backupResult['missing_source']}.";
+                }
+                if ($backupResult['failed'] > 0) {
+                    $parts[] = "Image backup failures {$backupResult['failed']}.";
+                }
             }
             if ($result['skipped_not_approved'] > 0) {
                 $parts[] = "Skipped {$result['skipped_not_approved']} not approved.";
@@ -100,5 +121,11 @@ class ProductShopifyUpdateJob implements ShouldQueue
                 $this->userId
             );
         }
+    }
+
+    private function shouldPrepareImageBackups(): bool
+    {
+        return $this->scopes === null
+            || in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $this->scopes, true);
     }
 }

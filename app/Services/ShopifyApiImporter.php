@@ -224,6 +224,7 @@ query Products($first: Int!, $after: String) {
           barcode
           selectedOptions { name value }
           inventoryItem {
+            id
             tracked
             unitCost { amount currencyCode }
             measurement {
@@ -640,6 +641,7 @@ GQL;
     private function applyVariantFields(array &$row, array $variant, array $headers): void
     {
         $row[HeaderStore::INTERNAL_VARIANT_SHOPIFY_ID] = data_get($variant, 'id');
+        $row[HeaderStore::INTERNAL_VARIANT_INVENTORY_ITEM_ID] = data_get($variant, 'inventoryItem.id');
         $row[HeaderStore::INTERNAL_VARIANT_INVENTORY_TRACKED] = data_get($variant, 'inventoryItem.tracked');
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_SKU, data_get($variant, 'sku'));
         $this->setIfHeaderExists($row, $headers, HeaderStore::VARIANT_PRICE, data_get($variant, 'price'));

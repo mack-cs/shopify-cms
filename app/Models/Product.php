@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -13,13 +14,14 @@ use App\Services\CategoryTypeMap;
 class Product extends Model
 {
     protected $fillable = [
-        'import_id','shopify_id','handle','approved_handle','title','body_html','vendor','tags',
+        'import_id','shopify_id','shopify_created_at','handle','approved_handle','title','body_html','vendor','tags',
         'type','published',
         'product_category','google_product_category','status',
         'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
         'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
         'first_handle_auto_lock_completed_at','first_handle_auto_lock_approval_version',
         'batch','sync_batch_id','last_synced_at','is_bundle','you_save',
+        'image_import_batch_id','image_imported_at','image_import_status',
         'has_errors','error_fields',
     ];
 
@@ -29,6 +31,8 @@ class Product extends Model
         'has_errors' => 'boolean',
         'error_fields' => 'array',
         'last_synced_at' => 'datetime',
+        'shopify_created_at' => 'datetime',
+        'image_imported_at' => 'datetime',
         'seo_updated_at' => 'datetime',
         'first_image_auto_rename_completed_at' => 'datetime',
         'first_handle_auto_lock_completed_at' => 'datetime',
@@ -79,6 +83,11 @@ class Product extends Model
         return $this->belongsTo(Import::class);
     }
 
+    public function imageImportBatch(): BelongsTo
+    {
+        return $this->belongsTo(ShopifyImageImportBatch::class, 'image_import_batch_id');
+    }
+
     public function seoUpdatedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'seo_updated_by');
@@ -99,6 +108,36 @@ class Product extends Model
         return $this->hasMany(Image::class)->active();
     }
 
+    public function scopeActiveStatus(Builder $query): Builder
+    {
+        return $query->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['active']);
+    }
+
+    public function scopeNonBundle(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $product): Builder => $product
+            ->where('is_bundle', false)
+            ->orWhereNull('is_bundle'));
+    }
+
+    public function scopeMissingImageAltText(Builder $query): Builder
+    {
+        return $query->whereHas('images', fn (Builder $imageQuery): Builder => self::applyMissingImageAltTextImageFilter($imageQuery));
+    }
+
+    public function scopeActiveMissingImageAltText(Builder $query): Builder
+    {
+        return $query->activeStatus()->missingImageAltText();
+    }
+
+    public static function applyMissingImageAltTextImageFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $altQuery): void {
+            $altQuery->whereNull('alt_text')
+                ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
+        });
+    }
+
     public function allImages(): HasMany
     {
         return $this->hasMany(Image::class);
@@ -112,6 +151,16 @@ class Product extends Model
     public function partialApprovalRequests(): HasMany
     {
         return $this->hasMany(ProductPartialApprovalRequest::class);
+    }
+
+    public function saleProductUpdates(): HasMany
+    {
+        return $this->hasMany(SaleProductUpdate::class);
+    }
+
+    public function latestSaleProductUpdate(): HasOne
+    {
+        return $this->hasOne(SaleProductUpdate::class)->latestOfMany();
     }
 
     public function shopifyAudits(): HasMany

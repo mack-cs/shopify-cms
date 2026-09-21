@@ -69,6 +69,14 @@ final class TagNormalizer
         return $tokens;
     }
 
+    public static function normalizeForComparison(?string $value): string
+    {
+        $tokens = self::parseTokens($value);
+        sort($tokens, SORT_STRING);
+
+        return implode("\n", $tokens);
+    }
+
     public static function normalizeToken(string $value): ?string
     {
         $trimmed = trim($value);
@@ -83,5 +91,25 @@ final class TagNormalizer
         $normalized = trim($normalized, '-');
 
         return $normalized === '' ? null : $normalized;
+    }
+
+    public static function containsBundleOrStackTag(?string $value): bool
+    {
+        foreach (self::parseTokens($value) as $tag) {
+            if (in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)) {
+                return true;
+            }
+
+            if (
+                str_ends_with($tag, '-bundle')
+                || str_ends_with($tag, '-bundles')
+                || str_ends_with($tag, '-stack')
+                || str_ends_with($tag, '-stacks')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -5,9 +5,7 @@ namespace App\Services;
 use App\Mail\ComplementaryProductMaintenanceAlertMail;
 use App\Models\Product;
 use App\Models\ShopifyAudit;
-use App\Notifications\PendingWorkSlackReminderNotification;
 use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Notification as NotificationFacade;
 
 class ComplementaryProductMaintenanceService
 {
@@ -32,12 +30,11 @@ class ComplementaryProductMaintenanceService
         $healthy = 0;
         $flagged = 0;
         $notified = 0;
-        $alerts = [];
 
         Product::query()
             ->select(['id', 'import_id', 'handle', 'shopify_id', 'title', 'status', 'last_synced_at', 'updated_at'])
             ->whereIn(\DB::raw('LOWER(COALESCE(status, ""))'), ['active', 'draft'])
-            ->chunkById(200, function ($products) use (&$checked, &$recorded, &$healthy, &$flagged, &$alerts): void {
+            ->chunkById(200, function ($products) use (&$checked, &$recorded, &$healthy, &$flagged): void {
                 foreach ($products as $product) {
                     if (!$product instanceof Product) {
                         continue;
@@ -52,59 +49,11 @@ class ComplementaryProductMaintenanceService
 
                     if ($needsAttention) {
                         $flagged++;
-                        $alerts[] = [
-                            'product' => $product,
-                            'local_total' => (int) ($audit->local_saved_count ?? 0),
-                            'local_eligible' => (int) ($audit->local_valid_count ?? 0),
-                            'shopify_current' => (int) ($audit->shopify_current_count ?? 0),
-                            'shopify_eligible' => (int) ($audit->shopify_valid_count ?? 0),
-                            'local_ineligible' => $analysis['local_ineligible'] ?? [],
-                            'shopify_ineligible' => $analysis['shopify_ineligible'] ?? [],
-                        ];
                     } else {
                         $healthy++;
                     }
                 }
             });
-
-        if ($alerts !== []) {
-            $channel = trim((string) config('services.slack.channels.audits'));
-
-            if ($channel !== '') {
-                NotificationFacade::route('slack', $channel)
-                    ->notify(new PendingWorkSlackReminderNotification());
-
-                $notified = count($alerts);
-
-                ShopifyAudit::query()
-                    ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                    ->where('needs_attention', true)
-                    ->update([
-                        'last_notified_at' => now(),
-                    ]);
-            } else {
-                $recipientEmails = $this->recipientEmails();
-                if ($recipientEmails === []) {
-                    return [
-                        'checked' => $checked,
-                        'recorded' => $recorded,
-                        'healthy' => $healthy,
-                        'flagged' => $flagged,
-                        'notified' => $notified,
-                    ];
-                }
-
-                Mail::to($recipientEmails)->send(new ComplementaryProductMaintenanceAlertMail($alerts));
-                $notified = count($alerts);
-
-                ShopifyAudit::query()
-                    ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                    ->where('needs_attention', true)
-                    ->update([
-                        'last_notified_at' => now(),
-                    ]);
-            }
-        }
 
         return [
             'checked' => $checked,
@@ -113,6 +62,52 @@ class ComplementaryProductMaintenanceService
             'flagged' => $flagged,
             'notified' => $notified,
         ];
+    }
+
+    /**
+     * Run the live audit and email the weekly action report to Leanne.
+     *
+     * @return array{checked:int,recorded:int,healthy:int,flagged:int,notified:int}
+     */
+    public function sendWeeklyReport(): array
+    {
+        $summary = $this->runDailyCheck();
+
+        $alerts = ShopifyAudit::query()
+            ->with('product')
+            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+            ->where('needs_attention', true)
+            ->get()
+            ->map(fn (ShopifyAudit $audit): array => [
+                'product' => $audit->product,
+                'local_total' => (int) ($audit->local_saved_count ?? 0),
+                'local_eligible' => (int) ($audit->local_valid_count ?? 0),
+                'shopify_current' => (int) ($audit->shopify_current_count ?? 0),
+                'shopify_eligible' => (int) ($audit->shopify_valid_count ?? 0),
+                'local_ineligible' => (array) data_get($audit->details, 'local_ineligible', []),
+                'shopify_ineligible' => (array) data_get($audit->details, 'shopify_ineligible', []),
+            ])
+            ->filter(fn (array $alert): bool => $alert['product'] instanceof Product)
+            ->values()
+            ->all();
+
+        $to = trim((string) config('services.slack.complementary_report_to'));
+        if ($alerts === [] || $to === '') {
+            return $summary;
+        }
+
+        Mail::to($to)
+            ->cc((array) config('services.slack.complementary_report_cc', []))
+            ->send(new ComplementaryProductMaintenanceAlertMail($alerts));
+
+        ShopifyAudit::query()
+            ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+            ->where('needs_attention', true)
+            ->update(['last_notified_at' => now()]);
+
+        $summary['notified'] = count($alerts);
+
+        return $summary;
     }
 
     public function recordAuditForProduct(Product $product): ShopifyAudit
@@ -153,11 +148,4 @@ class ComplementaryProductMaintenanceService
         );
     }
 
-    /**
-     * @return array<int, string>
-     */
-    private function recipientEmails(): array
-    {
-        return ['shonaymack@mackscs.com'];
-    }
 }

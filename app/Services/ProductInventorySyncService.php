@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Product;
+use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
 use App\Models\ChangeLog;
 use Illuminate\Support\Collection;
@@ -116,6 +117,40 @@ final class ProductInventorySyncService
     }
 
     /**
+     * @return array{
+     *   synced:int,
+     *   refreshed:int,
+     *   failed:int,
+     *   warnings:array<int, string>,
+     *   failures:array<int, string>
+     * }
+     */
+    public function refreshProduct(Product $product, ?int $userId = null): array
+    {
+        $variants = $product->variants()->orderBy('id')->get();
+
+        try {
+            $this->refreshProductVariants($product, $variants, $userId);
+
+            return [
+                'synced' => 0,
+                'refreshed' => max(1, $variants->count()),
+                'failed' => 0,
+                'warnings' => [],
+                'failures' => [],
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'synced' => 0,
+                'refreshed' => 0,
+                'failed' => max(1, $variants->count()),
+                'warnings' => [],
+                'failures' => ["Product {$product->id}: {$e->getMessage()}"],
+            ];
+        }
+    }
+
+    /**
      * @param Collection<int, Variant> $variants
      * @param array<int, string> $warnings
      */
@@ -159,7 +194,11 @@ final class ProductInventorySyncService
             $this->updateShopifyInventoryTracking($inventoryItemId, $variant->inventory_tracked);
 
             if ($variant->inventory_tracked !== false) {
-                $this->updateShopifyInventoryQuantity($inventoryItemId, (int) ($variant->inventory_qty ?? 0), (string) ($remoteVariant['id'] ?? ''));
+                $this->updateShopifyOnHandQuantity(
+                    $inventoryItemId,
+                    (int) ($variant->current_on_hand_quantity ?? $variant->inventory_qty ?? 0),
+                    (string) ($remoteVariant['id'] ?? '')
+                );
             }
 
             $this->markInventorySynced($variant, $syncBatchId);
@@ -194,10 +233,19 @@ final class ProductInventorySyncService
     {
         $details = $this->shopifyProductInventoryDetails($product);
         $remoteStatus = strtolower(trim((string) ($details['status'] ?? '')));
+        $remoteCreatedAt = trim((string) ($details['createdAt'] ?? ''));
 
-        InventoryOperationContext::run(function () use ($product, $variants, $details, $remoteStatus, $userId): void {
+        InventoryOperationContext::run(function () use ($product, $variants, $details, $remoteStatus, $remoteCreatedAt, $userId): void {
+            $productChanged = false;
             if ($remoteStatus !== '' && $remoteStatus !== strtolower(trim((string) ($product->status ?? '')))) {
                 $product->status = $remoteStatus;
+                $productChanged = true;
+            }
+            if ($remoteCreatedAt !== '' && $product->shopify_created_at?->toIso8601String() !== $remoteCreatedAt) {
+                $product->shopify_created_at = $remoteCreatedAt;
+                $productChanged = true;
+            }
+            if ($productChanged) {
                 $product->save();
             }
 
@@ -215,12 +263,25 @@ final class ProductInventorySyncService
                     continue;
                 }
 
+                $tracked = data_get($remoteVariant, 'inventoryItem.tracked');
+                $quantities = $this->inventoryQuantities($remoteVariant);
+                $available = $tracked === false
+                    ? null
+                    : ($quantities['available'] ?? $this->normalizeRemoteInventoryQuantity(data_get($remoteVariant, 'inventoryQuantity')));
+
                 $updates = [
                     'shopify_id' => trim((string) ($remoteVariant['id'] ?? '')) ?: $variant->shopify_id,
-                    'inventory_tracked' => data_get($remoteVariant, 'inventoryItem.tracked'),
-                    'inventory_qty' => data_get($remoteVariant, 'inventoryItem.tracked') === false
-                        ? null
-                        : $this->normalizeRemoteInventoryQuantity(data_get($remoteVariant, 'inventoryQuantity')),
+                    'shopify_inventory_item_id' => $this->normalizeShopifyInventoryItemId(data_get($remoteVariant, 'inventoryItem.id')),
+                    'shopify_available_for_sale' => data_get($remoteVariant, 'availableForSale'),
+                    'price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'price')),
+                    'compare_at_price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'compareAtPrice')),
+                    'inventory_tracked' => $tracked,
+                    'inventory_qty' => $available,
+                    'current_inventory_quantity' => $available,
+                    'current_available_quantity' => $available,
+                    'current_on_hand_quantity' => $tracked === false ? null : ($quantities['on_hand'] ?? null),
+                    'current_committed_quantity' => $tracked === false ? null : ($quantities['committed'] ?? null),
+                    'inventory_location_count' => $tracked === false ? 0 : $this->inventoryLocationCount($remoteVariant),
                     'inventory_local_dirty' => false,
                     'inventory_sync_error' => null,
                     'inventory_last_synced_at' => now(),
@@ -231,6 +292,15 @@ final class ProductInventorySyncService
         });
 
         app(InventoryDraftMirrorService::class)->syncProduct($product->fresh(['variants']));
+        $freshProduct = $product->fresh(['variants']);
+
+        if ($freshProduct instanceof Product) {
+            app(ProductInventoryHistoryRecorder::class)->record(
+                $freshProduct,
+                $userId,
+                ProductInventorySnapshot::SOURCE_SHOPIFY_REFRESH,
+            );
+        }
     }
 
     private function shopifyProductInventoryDetails(Product $product): array
@@ -302,7 +372,7 @@ final class ProductInventorySyncService
         }
     }
 
-    private function updateShopifyInventoryQuantity(string $inventoryItemId, int $quantity, string $variantId): void
+    private function updateShopifyOnHandQuantity(string $inventoryItemId, int $quantity, string $variantId): void
     {
         $locationId = $this->firstLocationId();
         if ($locationId === null) {
@@ -311,7 +381,7 @@ final class ProductInventorySyncService
 
         $data = $this->client->graphql($this->inventorySetMutation(), [
             'input' => [
-                'name' => 'available',
+                'name' => 'on_hand',
                 'reason' => 'correction',
                 'ignoreCompareQuantity' => true,
                 'referenceDocumentUri' => 'logistics://shopify-editor/inventory/' . rawurlencode($variantId),
@@ -445,6 +515,45 @@ final class ProductInventorySyncService
         return (int) $value;
     }
 
+    /** @return array<string,int> */
+    private function inventoryQuantities(array $remoteVariant): array
+    {
+        $totals = [];
+        foreach ((array) data_get($remoteVariant, 'inventoryItem.inventoryLevels.nodes', []) as $level) {
+            foreach ((array) data_get($level, 'quantities', []) as $quantity) {
+                $name = trim((string) ($quantity['name'] ?? ''));
+                $value = $this->normalizeRemoteInventoryQuantity($quantity['quantity'] ?? null);
+                if ($name !== '' && $value !== null) {
+                    $totals[$name] = ($totals[$name] ?? 0) + $value;
+                }
+            }
+        }
+
+        return $totals;
+    }
+
+    private function inventoryLocationCount(array $remoteVariant): int
+    {
+        return collect((array) data_get($remoteVariant, 'inventoryItem.inventoryLevels.nodes', []))
+            ->pluck('location.id')->filter()->unique()->count();
+    }
+
+    private function normalizeRemoteMoney(mixed $value): ?string
+    {
+        if ($value === null || !is_numeric((string) $value)) {
+            return null;
+        }
+
+        return number_format((float) $value, 2, '.', '');
+    }
+
+    private function normalizeShopifyInventoryItemId(mixed $value): ?string
+    {
+        $id = trim((string) ($value ?? ''));
+
+        return $id !== '' ? $id : null;
+    }
+
     private function stringifyValue(mixed $value): string
     {
         if (is_bool($value)) {
@@ -495,14 +604,24 @@ query ProductInventoryById($id: ID!) {
   product(id: $id) {
     id
     status
+    createdAt
     variants(first: 250) {
       nodes {
         id
         sku
+        availableForSale
+        price
+        compareAtPrice
         inventoryQuantity
         inventoryItem {
           id
           tracked
+          inventoryLevels(first: 250) {
+            nodes {
+              location { id }
+              quantities(names: ["available", "committed", "on_hand"]) { name quantity }
+            }
+          }
         }
       }
     }
@@ -518,14 +637,24 @@ query ProductInventoryByHandle($handle: String!) {
   productByHandle(handle: $handle) {
     id
     status
+    createdAt
     variants(first: 250) {
       nodes {
         id
         sku
+        availableForSale
+        price
+        compareAtPrice
         inventoryQuantity
         inventoryItem {
           id
           tracked
+          inventoryLevels(first: 250) {
+            nodes {
+              location { id }
+              quantities(names: ["available", "committed", "on_hand"]) { name quantity }
+            }
+          }
         }
       }
     }

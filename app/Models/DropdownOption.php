@@ -39,6 +39,18 @@ class DropdownOption extends Model
         $normalizedTags = self::normalizeTags($tags);
         if (!empty($normalizedTags)) {
             $query->where(function ($tagQuery) use ($normalizedTags): void {
+                $bundleTags = array_values(array_filter(
+                    $normalizedTags,
+                    static fn (string $tag): bool => TagNormalizer::containsBundleOrStackTag($tag)
+                        && !in_array($tag, ['bundle', 'bundles', 'stack', 'stacks'], true)
+                ));
+
+                if ($bundleTags !== []) {
+                    $tagQuery->whereIn('collection_tag_secondary', $bundleTags);
+
+                    return;
+                }
+
                 $tagQuery->where(function ($match) use ($normalizedTags): void {
                     $match->whereIn('collection_tag_primary', $normalizedTags)
                         ->whereIn('collection_tag_secondary', $normalizedTags);
@@ -90,6 +102,28 @@ class DropdownOption extends Model
             ->select('header')
             ->distinct()
             ->pluck('header');
+    }
+
+    public static function canonicalValue(string $header, mixed $value): string
+    {
+        $value = html_entity_decode((string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        if ($header === HeaderStore::MATERIALS_AND_DIMENSIONS) {
+            $value = preg_replace('/<\s*br\s*\/?>/iu', "\n", $value) ?? $value;
+            $value = preg_replace('/<\s*\/\s*li\s*>/iu', "\n", $value) ?? $value;
+            $value = strip_tags($value);
+            $lines = preg_split('/\R/u', $value) ?: [$value];
+            $lines = array_map(
+                static fn (string $line): string => preg_replace('/^\s*[\x{2022}\x{00B7}\-*]+\s*/u', '', $line) ?? $line,
+                $lines
+            );
+            $value = implode("\n", $lines);
+        }
+
+        $value = str_replace(["\u{00A0}", "\r\n", "\r"], [' ', "\n", "\n"], $value);
+        $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
+
+        return mb_strtolower($value, 'UTF-8');
     }
 
     private static function normalizeFilter(?string $value): ?string
