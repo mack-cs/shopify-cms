@@ -192,6 +192,7 @@ final class ProductInventorySyncService
             }
 
             $this->updateShopifyInventoryTracking($inventoryItemId, $variant->inventory_tracked);
+            $this->updateShopifyInventoryPolicy($productId, (string) ($remoteVariant['id'] ?? ''), $variant->inventory_policy);
 
             if ($variant->inventory_tracked !== false) {
                 $this->updateShopifyOnHandQuantity(
@@ -275,6 +276,7 @@ final class ProductInventorySyncService
                     'shopify_available_for_sale' => data_get($remoteVariant, 'availableForSale'),
                     'price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'price')),
                     'compare_at_price' => $this->normalizeRemoteMoney(data_get($remoteVariant, 'compareAtPrice')),
+                    'inventory_policy' => strtolower((string) data_get($remoteVariant, 'inventoryPolicy')) === 'continue' ? 'continue' : 'deny',
                     'inventory_tracked' => $tracked,
                     'inventory_qty' => $available,
                     'current_inventory_quantity' => $available,
@@ -369,6 +371,29 @@ final class ProductInventorySyncService
         $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
         if (is_array($errors) && !empty($errors)) {
             throw new \RuntimeException($this->formatUserErrors($errors, 'inventoryItemUpdate'));
+        }
+    }
+
+    private function updateShopifyInventoryPolicy(string $productId, string $variantId, ?string $policy): void
+    {
+        $productId = trim($productId);
+        $variantId = trim($variantId);
+        $policy = strtolower(trim((string) $policy));
+
+        if ($productId === '' || $variantId === '' || ! in_array($policy, ['continue', 'deny'], true)) {
+            return;
+        }
+
+        $data = $this->client->graphql($this->variantInventoryPolicyMutation(), [
+            'productId' => $productId,
+            'variants' => [[
+                'id' => $variantId,
+                'inventoryPolicy' => strtoupper($policy),
+            ]],
+        ]);
+        $errors = data_get($data, 'productVariantsBulkUpdate.userErrors', []);
+        if (is_array($errors) && ! empty($errors)) {
+            throw new \RuntimeException($this->formatUserErrors($errors, 'productVariantsBulkUpdate'));
         }
     }
 
@@ -613,6 +638,7 @@ query ProductInventoryById($id: ID!) {
         price
         compareAtPrice
         inventoryQuantity
+        inventoryPolicy
         inventoryItem {
           id
           tracked
@@ -646,6 +672,7 @@ query ProductInventoryByHandle($handle: String!) {
         price
         compareAtPrice
         inventoryQuantity
+        inventoryPolicy
         inventoryItem {
           id
           tracked
@@ -709,6 +736,18 @@ GQL;
 mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
   inventorySetQuantities(input: $input) {
     userErrors { field message code }
+  }
+}
+GQL;
+    }
+
+    private function variantInventoryPolicyMutation(): string
+    {
+        return <<<'GQL'
+mutation VariantInventoryPolicyUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id inventoryPolicy }
+    userErrors { field message }
   }
 }
 GQL;

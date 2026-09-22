@@ -85,7 +85,7 @@ class VariantObserver
         }
 
         return count(array_diff($meaningful, [
-            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked', 'inventory_sync_error',
+            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked', 'inventory_policy', 'inventory_sync_error',
         ])) === 0;
     }
 
@@ -180,7 +180,7 @@ class VariantObserver
     private function hasInventoryDirtyFields(array $contentDirty): bool
     {
         return array_intersect($contentDirty, [
-            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked',
+            'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked', 'inventory_policy',
         ]) !== [];
     }
 }
