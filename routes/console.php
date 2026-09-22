@@ -10,6 +10,7 @@ use App\Jobs\Shopify\StartShopifyInventoryBulkExport;
 use App\Models\ShopifySyncRun;
 use App\Models\ShopifyStackOrderEvent;
 use App\Models\NewProductDraftAssignment;
+use App\Models\PrepopulationRule;
 use App\Models\ShopifyAudit;
 use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
@@ -26,7 +27,9 @@ use App\Services\GoogleSearchConsoleClient;
 use App\Services\SearchConsoleCsvImporter;
 use App\Services\SearchConsoleMetricImportService;
 use App\Services\DuplicateSkuReminderService;
+use App\Services\DropdownCollectionMatrixExporter;
 use App\Services\MaintenanceTaskNotificationService;
+use App\Services\PrepopulationRuleImportService;
 use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
 use App\Services\Procurement\SupplierOrderReportingReconciliationService;
 use App\Services\Procurement\SupplierReceiptService;
@@ -36,10 +39,106 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Schedule;
+use League\Csv\Reader;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command(
+    'dropdowns:export-collection-matrix
+    {--output= : Output path. Defaults to storage/app/public/exports/dropdown-collection-matrix.csv}',
+    function (DropdownCollectionMatrixExporter $exporter): int {
+        $output = trim((string) ($this->option('output') ?? ''));
+        $output = $output !== ''
+            ? $output
+            : storage_path('app/public/exports/dropdown-collection-matrix.csv');
+
+        $directory = dirname($output);
+        if (! is_dir($directory) && ! mkdir($directory, 0775, true) && ! is_dir($directory)) {
+            $this->error("Could not create output directory: {$directory}");
+
+            return self::FAILURE;
+        }
+
+        $csv = $exporter->exportToString();
+        if ($csv === '') {
+            $this->error('No dropdown seed file was found.');
+
+            return self::FAILURE;
+        }
+
+        file_put_contents($output, $csv);
+        $this->info("Dropdown collection matrix exported to {$output}");
+
+        return self::SUCCESS;
+    }
+)->purpose('Export dropdown collection configuration as one row per collection.');
+
+Artisan::command(
+    'prepopulation:import-rules
+    {file : Path to Codex_Prepopulation_Rules_FINAL.csv}',
+    function (string $file, PrepopulationRuleImportService $importer): int {
+        if (! is_file($file)) {
+            $this->error("Rules file not found: {$file}");
+
+            return self::FAILURE;
+        }
+
+        $count = $importer->import($file);
+        $this->info("Imported {$count} prepopulation rule(s).");
+
+        return self::SUCCESS;
+    }
+)->purpose('Import product prepopulation architecture rules.');
+
+Artisan::command(
+    'prepopulation:audit-tags
+    {file : Path to Codex_Prepopulation_Tags_Audit_FINAL.csv}',
+    function (string $file): int {
+        if (! is_file($file)) {
+            $this->error("Audit file not found: {$file}");
+
+            return self::FAILURE;
+        }
+
+        $csv = Reader::createFromPath($file);
+        $csv->setHeaderOffset(0);
+        $missing = [];
+        foreach ($csv->getRecords() as $row) {
+            $handle = trim((string) ($row['Handle'] ?? ''));
+            if (str_starts_with($handle, '—')) {
+                $handle = PrepopulationRule::HANDLE_GLOBAL_DEFAULTS;
+            }
+            $behavior = trim((string) ($row['Behavior'] ?? ''));
+            $action = strtoupper(trim((string) ($row['Action'] ?? '')));
+            $tag = trim((string) ($row['Tag'] ?? ''));
+            if ($handle === '' || $behavior === '' || $tag === '') {
+                continue;
+            }
+
+            $rule = PrepopulationRule::query()->where('behavior', $behavior)->where('handle', $handle)->first();
+            $tags = $action === 'REMOVE' ? ($rule?->remove_tags ?? []) : ($rule?->add_tags ?? []);
+            $represented = collect($tags)->contains(fn (string $value): bool => strtolower(trim($value)) === strtolower($tag));
+            if (! $represented) {
+                $missing[] = "{$behavior}:{$handle}:{$action}:{$tag}";
+            }
+        }
+
+        if ($missing !== []) {
+            foreach (array_slice($missing, 0, 25) as $line) {
+                $this->line($line);
+            }
+            $this->error(count($missing).' audit tag action(s) are missing from imported prepopulation rules.');
+
+            return self::FAILURE;
+        }
+
+        $this->info('All audit tag actions are represented in imported prepopulation rules.');
+
+        return self::SUCCESS;
+    }
+)->purpose('Verify prepopulation rule tags against the exploded tag audit CSV.');
 
 Artisan::command(
     'seo:import-search-console-csv
