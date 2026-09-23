@@ -607,13 +607,6 @@ class ShopYourVibe extends Page
         });
     }
 
-    public function removeProductAssignment(string $productGid, string $collectionGid): void
-    {
-        $this->openProductAssignments($productGid);
-        $this->selectedVibes = array_values(array_filter($this->selectedVibes, fn ($gid) => $gid !== $collectionGid));
-        $this->reviewProductAssignments();
-    }
-
     public function findImages(bool $more = false): void
     {
         $this->guard();

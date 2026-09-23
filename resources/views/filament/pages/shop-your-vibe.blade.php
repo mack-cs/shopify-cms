@@ -170,11 +170,11 @@
                         @foreach ($filteredParentProducts as $product)
                             @php($productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag))))
                             @php($assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag'])))))
-                            <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                                 @if ($parentCanSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
+                                @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                 <div class="syv-product-image-wrap">
                                     @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
-                                    @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                 </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
@@ -189,7 +189,7 @@
                                     </div>
                                 </div>
                                 <div class="flex flex-wrap gap-2 syv-vibe-actions">
-                                    <button type="button" class="rounded-md bg-primary-600 px-2 py-1 text-xs font-semibold text-white" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</button>
+                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
                                 </div>
                             </article>
                         @endforeach
@@ -296,22 +296,20 @@
                                     wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed">
                                 @endif
                                     @foreach ($collection['products'] as $product)
-                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                                             @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
+                                            @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                             <div class="syv-product-image-wrap">
                                                 @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
-                                                @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                             </div>
                                             <h5 class="mt-2 font-medium">{{ $product['title'] }}</h5>
                                             @if ($product['sku'])<p class="mb-2 text-xs text-gray-500">SKU: {{ $product['sku'] }}</p>@endif
                                             <div class="mt-2 flex gap-2">
                                                 @if ($collection['membership_supported'])
                                                     <x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
-                                                @elseif (filled(collect($vibeMappings)->firstWhere('shopify_collection_id', $collection['gid'])['membership_tag'] ?? null))
-                                                    <x-filament::button size="xs" color="danger" wire:click="removeProductAssignment({{ \Illuminate\Support\Js::from($product['id']) }}, {{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="Remove this product from {{ $collection['title'] }}? Only its configured Shopify membership tag will be removed.">Remove from this Vibe</x-filament::button>
                                                 @endif
                                                 @if (collect($parentProducts)->contains('id', $product['id']))
-                                                    <x-filament::button size="xs" color="gray" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
                                                 @endif
                                             </div>
                                         </article>
