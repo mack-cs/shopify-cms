@@ -16,6 +16,9 @@ final class NewProductDraftCsvImporter
     /** @var array<string, string>|null */
     private ?array $productReferenceLookup = null;
 
+    /** @var array<string, string>|null */
+    private ?array $csvProductReferenceLookup = null;
+
     /**
      * @return array{
      *   total:int,
@@ -34,6 +37,8 @@ final class NewProductDraftCsvImporter
      *   invalid_seo_count:int,
      *   invalid_seo_rows:int,
      *   seo_corrections:array<int,string>,
+     *   prepopulation_applied:int,
+     *   prepopulation_unmatched:int,
      *   pricing_batch:?string
      * }
      */
@@ -57,6 +62,11 @@ final class NewProductDraftCsvImporter
             'body html' => 'body_html',
             'vendor' => 'vendor',
             'tags' => 'tags',
+            'collection' => 'collection_prepopulation',
+            'collection tag' => 'collection_prepopulation',
+            'collection tags' => 'collection_prepopulation',
+            'collection handle' => 'collection_prepopulation',
+            'prepopulation collection' => 'collection_prepopulation',
             'product type' => 'type',
             'type' => 'type',
             'product category' => 'product_category',
@@ -101,6 +111,9 @@ final class NewProductDraftCsvImporter
             'complementary products finish the set and get one free' => 'complementary_products',
             'complementary products handles' => 'complementary_products',
             'complementary product handles' => 'complementary_products',
+            'complementary product skus' => 'complementary_product_skus',
+            'complementary products skus' => 'complementary_product_skus',
+            'complementary skus' => 'complementary_product_skus',
         ];
 
         $seoDraftMap = [
@@ -138,6 +151,8 @@ final class NewProductDraftCsvImporter
         $invalidSeoCount = 0;
         $invalidSeoRows = [];
         $seoCorrections = [];
+        $prepopulationApplied = 0;
+        $prepopulationUnmatched = 0;
         $pricingFields = ['variant_price', 'variant_compare_at_price', 'material_cost'];
         $pricingImport = false;
 
@@ -150,6 +165,7 @@ final class NewProductDraftCsvImporter
         }
 
         $pricingBatch = $pricingImport ? 'pricing_'.now()->format('Y_m_d_His') : null;
+        $this->csvProductReferenceLookup = $this->csvProductReferenceLookup($csv, $draftMap);
 
         DB::transaction(function () use (
             $csv,
@@ -170,6 +186,8 @@ final class NewProductDraftCsvImporter
             &$invalidSeoCount,
             &$invalidSeoRows,
             &$seoCorrections,
+            &$prepopulationApplied,
+            &$prepopulationUnmatched,
             $pricingBatch
         ): void {
             foreach ($csv->getRecords() as $row) {
@@ -211,8 +229,15 @@ final class NewProductDraftCsvImporter
                 }
 
                 $data = $this->applyImportedTypeCategoryMapping($data);
+                [$data, $appliedCollectionRule] = $this->applyCollectionPrepopulation($data);
+                if ($appliedCollectionRule === true) {
+                    $prepopulationApplied++;
+                } elseif ($appliedCollectionRule === false) {
+                    $prepopulationUnmatched++;
+                }
 
                 unset($data['draft_id']);
+                unset($data['collection_prepopulation']);
 
                 $handle = $data['handle'] ?? null;
                 $shopifyId = $data['shopify_id'] ?? null;
@@ -250,11 +275,15 @@ final class NewProductDraftCsvImporter
                     continue;
                 }
 
-                if (array_key_exists('complementary_products', $data)) {
-                    [$data['complementary_products'], $resolvedCount, $unresolvedCount] = $this->normalizeProductReferenceField($data['complementary_products']);
+                if (array_key_exists('complementary_products', $data) || array_key_exists('complementary_product_skus', $data)) {
+                    [$data['complementary_products'], $resolvedCount, $unresolvedCount] = $this->normalizeProductReferenceField(
+                        $data['complementary_products'] ?? null,
+                        $data['complementary_product_skus'] ?? null
+                    );
                     $resolvedProductReferences += $resolvedCount;
                     $unresolvedProductReferences += $unresolvedCount;
                 }
+                unset($data['complementary_product_skus']);
 
                 if ($this->failsProductReferenceRules($data)) {
                     $skippedReferenceValidation++;
@@ -399,8 +428,52 @@ final class NewProductDraftCsvImporter
             'invalid_seo_count' => $invalidSeoCount,
             'invalid_seo_rows' => count($invalidSeoRows),
             'seo_corrections' => $seoCorrections,
+            'prepopulation_applied' => $prepopulationApplied,
+            'prepopulation_unmatched' => $prepopulationUnmatched,
             'pricing_batch' => $pricingBatch,
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array{0: array<string, mixed>, 1: ?bool}
+     */
+    private function applyCollectionPrepopulation(array $data): array
+    {
+        $collection = trim((string) ($data['collection_prepopulation'] ?? ''));
+        if ($collection === '') {
+            return [$data, null];
+        }
+
+        $service = app(PrepopulationRuleService::class);
+        $rule = $service->ruleForCollection($collection);
+        if ($rule === null) {
+            return [$data, false];
+        }
+
+        $explicit = array_flip(array_keys($data));
+        $updates = $service->applyCollectionRuleReplacingManagedTags(
+            $rule,
+            $data['tags'] ?? null,
+            is_string($data['type'] ?? null) ? $data['type'] : null
+        );
+
+        foreach ($updates as $field => $value) {
+            if ($field === 'tags') {
+                $data['tags'] = TagNormalizer::normalizeFromArray(
+                    is_array($value) ? $value : TagNormalizer::parseTokens((string) $value)
+                );
+                continue;
+            }
+
+            if (isset($explicit[$field])) {
+                continue;
+            }
+
+            $data[$field] = $value;
+        }
+
+        return [$data, true];
     }
 
     private function findDraftForImport(?string $sku, ?string $shopifyId, ?string $handle): ?NewProductDraft
@@ -515,10 +588,11 @@ final class NewProductDraftCsvImporter
     /**
      * @return array{0:?string,1:int,2:int}
      */
-    private function normalizeProductReferenceField(?string $value): array
+    private function normalizeProductReferenceField(?string $value, ?string $skuValue = null): array
     {
         $tokens = $this->parseProductReferenceTokens($value);
-        if ($tokens === []) {
+        $skuTokens = $this->parseProductReferenceTokens($skuValue);
+        if ($tokens === [] && $skuTokens === []) {
             return [null, 0, 0];
         }
 
@@ -528,6 +602,21 @@ final class NewProductDraftCsvImporter
 
         foreach ($tokens as $token) {
             $resolved = $this->resolveProductReferenceToken($token);
+            if ($resolved !== null) {
+                if ($resolved !== trim($token)) {
+                    $resolvedCount++;
+                }
+                $normalizedTokens[] = $resolved;
+
+                continue;
+            }
+
+            $normalizedTokens[] = trim($token);
+            $unresolvedCount++;
+        }
+
+        foreach ($skuTokens as $token) {
+            $resolved = $this->resolveProductReferenceSku($token);
             if ($resolved !== null) {
                 if ($resolved !== trim($token)) {
                     $resolvedCount++;
@@ -622,6 +711,23 @@ final class NewProductDraftCsvImporter
         return $lookup[$normalized] ?? null;
     }
 
+    private function resolveProductReferenceSku(string $sku): ?string
+    {
+        $normalized = $this->normalizeReferenceToken($sku);
+        if ($normalized === '') {
+            return null;
+        }
+
+        $csvLookup = $this->csvProductReferenceLookup ?? [];
+        if (isset($csvLookup[$normalized])) {
+            return $csvLookup[$normalized];
+        }
+
+        $lookup = $this->productReferenceLookup();
+
+        return $lookup[$normalized] ?? null;
+    }
+
     /**
      * @return array<string, string>
      */
@@ -656,7 +762,132 @@ final class NewProductDraftCsvImporter
                 }
             });
 
+        Variant::query()
+            ->with(['product:id,shopify_id,handle'])
+            ->whereNotNull('sku')
+            ->where('sku', '!=', '')
+            ->chunkById(500, function ($variants) use (&$lookup): void {
+                $resolved = [];
+                $duplicates = [];
+
+                foreach ($variants as $variant) {
+                    $sku = $this->normalizeReferenceToken((string) ($variant->sku ?? ''));
+                    if ($sku === '') {
+                        continue;
+                    }
+
+                    $reference = trim((string) ($variant->product?->shopify_id ?? ''))
+                        ?: trim((string) ($variant->product?->handle ?? ''));
+                    if ($reference === '') {
+                        continue;
+                    }
+
+                    if (isset($resolved[$sku]) && $resolved[$sku] !== $reference) {
+                        $duplicates[$sku] = true;
+                        continue;
+                    }
+
+                    $resolved[$sku] = $reference;
+                }
+
+                foreach ($resolved as $sku => $reference) {
+                    if (isset($duplicates[$sku]) || isset($lookup[$sku])) {
+                        continue;
+                    }
+
+                    $lookup[$sku] = $reference;
+                }
+            });
+
+        NewProductDraft::query()
+            ->select(['id', 'sku', 'shopify_id', 'handle'])
+            ->whereNotNull('sku')
+            ->where('sku', '!=', '')
+            ->chunkById(500, function ($drafts) use (&$lookup): void {
+                $resolved = [];
+                $duplicates = [];
+
+                foreach ($drafts as $draft) {
+                    $sku = $this->normalizeReferenceToken((string) ($draft->sku ?? ''));
+                    if ($sku === '') {
+                        continue;
+                    }
+
+                    $reference = trim((string) ($draft->shopify_id ?? ''))
+                        ?: trim((string) ($draft->handle ?? ''));
+                    if ($reference === '') {
+                        continue;
+                    }
+
+                    if (isset($resolved[$sku]) && $resolved[$sku] !== $reference) {
+                        $duplicates[$sku] = true;
+                        continue;
+                    }
+
+                    $resolved[$sku] = $reference;
+                }
+
+                foreach ($resolved as $sku => $reference) {
+                    if (isset($duplicates[$sku]) || isset($lookup[$sku])) {
+                        continue;
+                    }
+
+                    $lookup[$sku] = $reference;
+                }
+            });
+
         $this->productReferenceLookup = $lookup;
+
+        return $lookup;
+    }
+
+    /**
+     * @param  array<string, string>  $draftMap
+     * @return array<string, string>
+     */
+    private function csvProductReferenceLookup(Reader $csv, array $draftMap): array
+    {
+        $lookup = [];
+        $duplicates = [];
+
+        foreach ($csv->getRecords() as $row) {
+            $data = [];
+            foreach ($row as $header => $value) {
+                $field = $draftMap[$this->normalizeHeader((string) $header)] ?? null;
+                if (! in_array($field, ['sku', 'shopify_id', 'handle'], true)) {
+                    continue;
+                }
+
+                $value = trim((string) $value);
+                if ($value === '') {
+                    continue;
+                }
+
+                $data[$field] = $value;
+            }
+
+            $sku = $this->normalizeReferenceToken((string) ($data['sku'] ?? ''));
+            if ($sku === '') {
+                continue;
+            }
+
+            $reference = trim((string) ($data['shopify_id'] ?? ''))
+                ?: trim((string) ($data['handle'] ?? ''));
+            if ($reference === '') {
+                continue;
+            }
+
+            if (isset($lookup[$sku]) && $lookup[$sku] !== $reference) {
+                $duplicates[$sku] = true;
+                continue;
+            }
+
+            $lookup[$sku] = $reference;
+        }
+
+        foreach (array_keys($duplicates) as $sku) {
+            unset($lookup[$sku]);
+        }
 
         return $lookup;
     }
