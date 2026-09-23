@@ -144,19 +144,40 @@
                             class="block w-full max-w-sm rounded-lg border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-900" />
                     </div>
                     @php($parentCollection = $draft->desired['collections'][$draft->collection_gid] ?? null)
-                    @php($parentCanSort = $draft->status !== 'pushing' && ($parentCollection['manual_supported'] ?? false) && (($parentCollection['sort'] ?? null) === 'MANUAL' || ($parentCollection['enable_manual'] ?? false)))
-                    @if ($parentCollection)
+                    @php($parentSort = $parentCollection['sort'] ?? null)
+                    @php($parentSortLabel = $parentSort ? str_replace('_', ' ', ucwords(strtolower($parentSort), '_')) : 'Unknown')
+                    @php($parentIsAutomated = $parentCollection && ! ($parentCollection['membership_supported'] ?? true))
+                    @php($parentManualSupported = $parentCollection && (($parentCollection['manual_supported'] ?? true) !== false || $parentSort !== 'UNSUPPORTED'))
+                    @php($parentCanSort = $draft->status !== 'pushing' && $parentManualSupported)
+                    <div class="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-900">
                         <div class="flex flex-wrap items-center gap-2">
-                            <span class="text-sm text-gray-500">Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($parentCollection['sort']), '_')) }}</span>
-                            @if ($parentCanSort)
-                                <span class="text-xs font-semibold text-success-700">Manual sorting: ON</span>
-                            @elseif ($parentCollection['manual_supported'] ?? false)
-                                <button type="button" wire:click="enableManual({{ \Illuminate\Support\Js::from($draft->collection_gid) }})" wire:confirm="This will change the Shopify collection sorting mode to Manual when you push changes. Continue?" class="rounded-md border border-gray-300 px-2 py-1 text-xs font-semibold text-gray-700">Enable Manual Sorting</button>
+                            <span class="font-semibold text-gray-900 dark:text-white">Main collection sorting:</span>
+                            @if ($parentCollection)
+                                <span class="text-gray-600 dark:text-gray-300">Current Shopify sort: {{ $parentSortLabel }}</span>
+                                <x-filament::badge :color="$parentIsAutomated ? 'gray' : 'info'">{{ $parentIsAutomated ? 'Automated collection' : 'Manual membership collection' }}</x-filament::badge>
                             @else
-                                <span class="text-xs font-semibold text-gray-500">Manual sorting not supported</span>
+                                <span class="text-gray-600 dark:text-gray-300">Sorting data is not loaded for this draft.</span>
+                            @endif
+                            @if ($parentCanSort)
+                                @if ($parentSort === 'MANUAL')
+                                    <x-filament::badge color="success">Sortable manually</x-filament::badge>
+                                @elseif ($parentCollection['enable_manual'] ?? false)
+                                    <x-filament::badge color="warning">Manual sorting requested</x-filament::badge>
+                                @else
+                                    <x-filament::badge color="warning">Dragging will request Manual sorting</x-filament::badge>
+                                @endif
+                            @elseif ($parentCollection)
+                                <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
                             @endif
                         </div>
-                    @endif
+                        @if ($parentCanSort)
+                            <p class="mt-1 text-xs text-gray-500">Drag handles appear on product cards below. Pushing changes will send this order to Shopify.</p>
+                        @elseif (! $parentCollection)
+                            <p class="mt-1 text-xs text-gray-500">Refresh from Shopify to reload the main collection sort mode before sorting products.</p>
+                        @else
+                            <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so drag handles are hidden.</p>
+                        @endif
+                    </div>
                     @if ($parentCanSort)
                     <div data-order-grid class="syv-card-grid syv-product-grid"
                         wire:key="parent-products-{{ $draft->id }}-sortable-{{ md5($draft->collection_gid) }}"
@@ -270,7 +291,8 @@
                             @else
                                 <h4 class="font-semibold">{{ $collection['title'] }}</h4>
                                 @if (str_starts_with($collection['gid'], 'new:'))<p class="text-sm text-gray-500">New collection - will be created and published when you push. Add and sort its products below.</p>@else<p>Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($collection['sort']), '_')) }}</p>@endif
-                                @if (!$collection['manual_supported'])
+                                @php($collectionManualSupported = ($collection['manual_supported'] ?? true) !== false || ($collection['sort'] ?? null) !== 'UNSUPPORTED')
+                                @if (!$collectionManualSupported)
                                     <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
                                 @elseif ($collection['sort'] === 'MANUAL')
                                     <x-filament::badge color="success">Manual sorting: ON</x-filament::badge>
@@ -285,7 +307,7 @@
                                 @else
                                     <p class="syv-membership-note">Remove takes a product out of this linked Shopify collection when you push changes. It does not delete the product. This can also affect the live storefront.</p>
                                 @endif
-                                @php($canSort = $draft->status !== 'pushing' && $collection['manual_supported'] && ($collection['sort'] === 'MANUAL' || $collection['enable_manual']))
+                                @php($canSort = $draft->status !== 'pushing' && $collectionManualSupported)
                                 @if ($canSort)
                                 <div data-order-grid class="syv-card-grid syv-product-grid"
                                     wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable"

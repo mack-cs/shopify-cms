@@ -511,7 +511,9 @@ it('stages new vibes locally with stable handles and no remote objects', functio
 
 it('stages removal as detachment without deleting the metaobject', function () {
     vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11']);
-    expect($this->draft->pending)->toBeTrue()->and($this->fake->mutations())->toBe([]);
+    expect($this->draft->pending)->toBeTrue()
+        ->and($this->draft->desired['collections'])->toHaveKey('gid://shopify/Collection/1')
+        ->and($this->fake->mutations())->toBe([]);
     vibePush($this);
     expect($this->draft->pending)->toBeFalse()->and($this->fake->references)->toBe(['gid://shopify/Metaobject/12'])
         ->and($this->fake->cards)->toHaveKey('gid://shopify/Metaobject/11');
@@ -547,14 +549,17 @@ it('keeps failed pushes pending and preserves successful metaobject creation for
     expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeCreate')))->toHaveCount(1);
 });
 
-it('detects manual sorting off and rejects drag without implicitly enabling it', function () {
+it('requests manual sorting when supported products are reordered', function () {
     $this->fake->collections['gid://shopify/Collection/2']['sortOrder'] = 'BEST_SELLING';
     vibeLoadProducts($this);
     $this->fake->calls = [];
     expect($this->draft->desired['collections']['gid://shopify/Collection/2']['sort'])->toBe('BEST_SELLING');
-    expect(fn () => vibeEdit($this, 'reorder_products', ['collection_gid' => 'gid://shopify/Collection/2', 'ids' => ['gid://shopify/Product/103', 'gid://shopify/Product/102', 'gid://shopify/Product/101']]))
-        ->toThrow(RuntimeException::class, 'Explicitly enable');
-    expect($this->fake->calls)->toBe([])->and($this->draft->fresh()->pending)->toBeFalse();
+    vibeEdit($this, 'reorder_products', ['collection_gid' => 'gid://shopify/Collection/2', 'ids' => ['gid://shopify/Product/103', 'gid://shopify/Product/102', 'gid://shopify/Product/101']]);
+    expect($this->fake->calls)->toBe([])
+        ->and($this->draft->fresh()->pending)->toBeTrue()
+        ->and($this->draft->fresh()->desired['collections']['gid://shopify/Collection/2']['enable_manual'])->toBeTrue()
+        ->and(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/2']['products'], 'id'))
+        ->toBe(['gid://shopify/Product/103', 'gid://shopify/Product/102', 'gid://shopify/Product/101']);
 });
 
 it('requires explicit confirmation to enable manual sorting and defers it until push', function () {
@@ -863,7 +868,52 @@ it('sorts parent collection products locally and shows stock badges on product c
         ->and($this->fake->calls)->toBe([]);
 });
 
-it('only mounts the product sortable grid after manual sorting is explicitly requested', function () {
+it('keeps main collection products sortable when an existing draft has stale manual support data', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $state = $this->draft->desired;
+    $state['collections']['gid://shopify/Collection/1']['sort'] = 'BEST_SELLING';
+    $state['collections']['gid://shopify/Collection/1']['manual_supported'] = false;
+    $this->draft->update(['desired' => $state, 'snapshot' => $state, 'revision' => $this->draft->revision + 1]);
+    $this->draft->refresh();
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
+    expect($parentGrid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($page->html())->toContain('x-sortable-handle');
+
+    $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103'];
+    $this->fake->calls = [];
+    $page->call('reorderProducts', 'gid://shopify/Collection/1', $ids)->assertHasNoErrors();
+    $this->draft->refresh();
+    expect($this->draft->desired['collections']['gid://shopify/Collection/1']['enable_manual'])->toBeTrue()
+        ->and($this->draft->desired['collections']['gid://shopify/Collection/1']['manual_supported'])->toBeTrue()
+        ->and(array_column($this->draft->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))->toBe($ids)
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('keeps the main collection sortable after a vibe is removed', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11']);
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
+    expect($this->draft->fresh()->desired['collections'])->toHaveKey('gid://shopify/Collection/1')
+        ->and($parentGrid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($page->html())->toContain('Main collection sorting:')
+        ->and($page->html())->toContain('x-sortable-handle');
+});
+
+it('mounts the product sortable grid whenever manual sorting is supported', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
@@ -873,16 +923,13 @@ it('only mounts the product sortable grid after manual sorting is explicitly req
     @$html->loadHTML($page->html());
     $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
         ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'vibe-products-'.md5('gid://shopify/Collection/2')));
-    expect($grid->hasAttribute('x-sortable'))->toBeFalse();
-    $oldKey = $grid->getAttribute('wire:key');
-    $this->fake->calls = [];
-    $page->call('enableManual', 'gid://shopify/Collection/2');
-    @$html->loadHTML($page->html());
-    $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
-        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'vibe-products-'.md5('gid://shopify/Collection/2')));
     expect($grid->hasAttribute('x-sortable'))->toBeTrue()
-        ->and($grid->getAttribute('wire:key'))->not->toBe($oldKey)
-        ->and($this->fake->calls)->toBe([]);
+        ->and($grid->getAttribute('x-on:end.stop'))->toContain("saveOrder($".'el, \'products\'');
+    $this->fake->calls = [];
+    $page->call('reorderProducts', 'gid://shopify/Collection/2', ['gid://shopify/Product/103', 'gid://shopify/Product/102', 'gid://shopify/Product/101']);
+    $draft = ShopYourVibeDraft::where('collection_gid', 'gid://shopify/Collection/1')->firstOrFail();
+    expect($this->fake->calls)->toBe([])
+        ->and($draft->desired['collections']['gid://shopify/Collection/2']['enable_manual'] ?? null)->toBeTrue();
 });
 
 it('opens a searchable collection modal and closes it after selecting a parent', function () {

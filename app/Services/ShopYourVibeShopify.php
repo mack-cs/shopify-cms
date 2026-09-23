@@ -154,7 +154,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
 
         return ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'sort' => $node['sortOrder'],
-            'manual_supported' => in_array($node['sortOrder'], ['MANUAL', 'BEST_SELLING', 'ALPHA_ASC', 'ALPHA_DESC', 'PRICE_ASC', 'PRICE_DESC', 'CREATED', 'CREATED_DESC'], true),
+            'manual_supported' => $node['sortOrder'] !== 'UNSUPPORTED',
             'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false,
             'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
