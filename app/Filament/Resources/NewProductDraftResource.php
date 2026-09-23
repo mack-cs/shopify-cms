@@ -4099,6 +4099,14 @@ class NewProductDraftResource extends Resource
                             ? ''
                             : ", Pricing batch: {$result['pricing_batch']}";
 
+                        $prepopulationPart = '';
+                        if (($result['prepopulation_applied'] ?? 0) > 0 || ($result['prepopulation_unmatched'] ?? 0) > 0) {
+                            $prepopulationPart = ", Collection prepopulation: " . ($result['prepopulation_applied'] ?? 0);
+                            if (($result['prepopulation_unmatched'] ?? 0) > 0) {
+                                $prepopulationPart .= ", Unmatched collection tags: {$result['prepopulation_unmatched']}";
+                            }
+                        }
+
                         $seoCorrectionPart = '';
                         if (($result['invalid_seo_count'] ?? 0) > 0) {
                             $corrections = array_slice($result['seo_corrections'] ?? [], 0, 5);
@@ -4121,6 +4129,7 @@ class NewProductDraftResource extends Resource
                                 $pendingApprovalPart .
                                 $protectedConflictPart .
                                 $pricingBatchPart .
+                                $prepopulationPart .
                                 $seoCorrectionPart
                             )
                             ->status(
@@ -8524,15 +8533,15 @@ class NewProductDraftResource extends Resource
                 }
             ));
             if (!empty($headers)) {
-                $withHandle = array_merge(['Handle', 'SKU'], $headers);
+                $withHandle = array_merge(['SKU', 'Collection Tag'], $headers);
                 return array_values(array_unique($withHandle));
             }
         }
 
         return [
-            'Handle',
             'SKU',
             'Title',
+            'Collection Tag',
             'Description',
             'Product Image (Add location)',
             'Lifestyle Image (Add location)',
@@ -8553,7 +8562,11 @@ class NewProductDraftResource extends Resource
             'Siblings Option Name',
             'Sibling Collection',
             'UVP Short Paragraph',
+            'SEO Title',
+            'SEO Description',
+            'Draft Image Alt Text',
             'Complementary products (Finish the Set, And Get One Free)',
+            'Complementary Product SKUs',
         ];
     }
 

@@ -2,6 +2,7 @@
 
 use App\Models\Import;
 use App\Models\NewProductDraft;
+use App\Models\PrepopulationRule;
 use App\Models\Product;
 use App\Models\StyleProfile;
 use App\Models\User;
@@ -87,6 +88,118 @@ it('creates a sku-only draft from csv and reuses the sku for later details', fun
         ->and($draft)->not->toBeNull()
         ->and($draft->title)->toBeNull()
         ->and($draft->variant_price)->toBe('130.00');
+
+    @unlink($path);
+});
+
+it('prepopulates draft fields from an imported collection tag', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'livi-road-bracelets',
+        'collection_name' => 'Livi Road Bracelets',
+        'add_tags' => [
+            'all-products',
+            'all-products-collections',
+            'livi-road',
+            'bracelets',
+            'bracelet',
+            'livi-road-bracelets',
+        ],
+        'remove_tags' => ['exclude-from-the-sale'],
+        'auto_vendor' => 'Livi Road',
+        'auto_type' => 'Bracelets',
+        'auto_product_category' => 'gid://shopify/TaxonomyCategory/aa-6-3',
+        'auto_google_product_category' => '191',
+        'auto_status' => 'draft',
+        'auto_design' => 'beaded',
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-collection-tag-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Collection Tag,Tags,Price\n"
+        ."COLL-001,Livi Road Test Bracelet,livi-road-bracelets,\"manual-tag, exclude-from-the-sale\",125\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'COLL-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['prepopulation_applied'])->toBe(1)
+        ->and($result['prepopulation_unmatched'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->vendor)->toBe('Livi Road')
+        ->and($draft->type)->toBe('Bracelets')
+        ->and($draft->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-3')
+        ->and($draft->google_product_category)->toBe('191')
+        ->and($draft->status)->toBe('draft')
+        ->and($draft->product_design)->toBe('beaded')
+        ->and($draft->colour_style)->toBe('solid')
+        ->and($draft->variant_price)->toBe('125.00')
+        ->and(App\Services\TagNormalizer::parseTokens($draft->tags))->toContain(
+            'manual-tag',
+            'livi-road',
+            'bracelets',
+            'bracelet',
+            'livi-road-bracelets'
+        );
+
+    @unlink($path);
+});
+
+it('resolves complementary product skus to existing product references', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Complementary Existing Necklace',
+        'handle' => 'complementary-existing-necklace',
+        'shopify_id' => 'gid://shopify/Product/555001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'COMP-EXISTING-001',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-complementary-sku-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Complementary Product SKUs\n"
+        ."MAIN-001,Main Bracelet,COMP-EXISTING-001\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'MAIN-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['resolved_product_references'])->toBe(1)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->complementary_products)->toBe('gid://shopify/Product/555001');
+
+    @unlink($path);
+});
+
+it('resolves complementary product skus to handles from the same csv import', function (): void {
+    $path = tempnam(sys_get_temp_dir(), 'draft-complementary-same-file-import-');
+    file_put_contents(
+        $path,
+        "Handle,SKU,Title,Complementary Product SKUs\n"
+        ."new-main-bracelet,NEW-MAIN-001,New Main Bracelet,NEW-COMP-001\n"
+        ."new-comp-necklace,NEW-COMP-001,New Complementary Necklace,\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'NEW-MAIN-001')->first();
+
+    expect($result['created'])->toBe(2)
+        ->and($result['resolved_product_references'])->toBe(1)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->complementary_products)->toBe('new-comp-necklace');
 
     @unlink($path);
 });
