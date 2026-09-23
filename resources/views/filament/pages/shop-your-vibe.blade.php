@@ -6,8 +6,8 @@
 
 <x-filament-panels::page>
     <div x-data="{
-        formDirty: false, savingOrder: false,
-        pending() { return this.formDirty || this.$el.dataset.pending === 'true'; },
+        formDirty: false, savingOrder: false, localPending: false,
+        pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
         async saveOrder(grid, type, gid = null, ids = null) {
             if (this.savingOrder || grid.closest('fieldset')?.disabled) return;
             const order = ids ?? Array.from(grid.children).map(el => el.dataset.orderKey).filter(Boolean);
@@ -17,6 +17,8 @@
             try {
                 if (type === 'cards') await this.$wire.reorderCards(order);
                 else await this.$wire.reorderProducts(gid, order);
+                this.localPending = true;
+                this.$el.dataset.pending = 'true';
             } finally {
                 this.savingOrder = false;
                 grids.forEach(item => item.sortable?.option('disabled', !!item.closest('fieldset')?.disabled));
@@ -32,7 +34,7 @@
         }
     }"
         data-pending="{{ $draft?->pending ? 'true' : 'false' }}"
-        x-on:vibe-form-saved.window="formDirty = false"
+        x-on:vibe-form-saved.window="formDirty = false; localPending = false"
         x-on:beforeunload.window="if (pending()) { $event.preventDefault(); $event.returnValue = ''; }"
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
         class="syv-workflow space-y-6"
@@ -96,6 +98,10 @@
             <div x-show="formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                 Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
+            <div x-show="localPending && !formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
+                <strong>Pending changes - not pushed to Shopify</strong>
+                <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
+            </div>
             @if ($draft->pending)
                 <div role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                     <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
@@ -111,9 +117,9 @@
             <fieldset @disabled($draft->status === 'pushing') class="space-y-6 disabled:opacity-60">
                 <p x-show="savingOrder" x-cloak role="status" class="syv-order-status">Saving order to draft - not pushed to Shopify...</p>
                 <div class="flex flex-wrap gap-3">
-                    <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty" :disabled="!$draft->pending" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                    <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty || !pending()" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
-                    <x-filament::button color="gray" wire:click="refreshDraft({{ $draft->pending ? 'true' : 'false' }})" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
+                    <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
                 </div>
                 @if ($confirmingPush)
                     <x-filament::section heading="Ready to push">

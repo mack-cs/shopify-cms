@@ -11,6 +11,7 @@ use App\Models\ProductMovementReportRun;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
+use App\Models\Variant;
 use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
@@ -513,11 +514,13 @@ class ShopYourVibe extends Page
     public function reorderProducts(string $gid, array $ids): void
     {
         $this->change('reorder_products', ['collection_gid' => $gid, 'ids' => $ids]);
-        if ($gid === $this->draft()?->collection_gid) {
-            $this->parentProducts = $this->decorateProductCards(
-                $this->draft()->desired['collections'][$gid]['products'] ?? []
-            );
+        if ($this->loadError) {
+            return;
         }
+        if ($gid === $this->draft()?->collection_gid) {
+            $this->parentProducts = $this->reorderLocalProducts($this->parentProducts, $ids);
+        }
+        $this->skipRender();
     }
 
     public function enableManual(string $gid): void
@@ -770,15 +773,16 @@ class ShopYourVibe extends Page
     private function decorateProductCards(array $products): array
     {
         $movementBySku = $this->movementClassificationsBySku($products);
+        $variantInventoryBySku = $this->variantInventoryBySku($products);
         $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
 
-        return collect($products)->map(function (array $product) use ($movementBySku, $threshold): array {
+        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $threshold): array {
             $inventoryTracked = $product['inventory_tracked'] ?? null;
             $quantity = $product['inventory_quantity'] ?? null;
             if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
-                $variant = \App\Models\Variant::query()->where('sku', $product['sku'])->latest('id')->first();
-                $inventoryTracked ??= $variant?->inventory_tracked;
-                $quantity ??= $variant?->inventory_qty;
+                $variant = $variantInventoryBySku[trim((string) $product['sku'])] ?? null;
+                $inventoryTracked ??= $variant['inventory_tracked'] ?? null;
+                $quantity ??= $variant['inventory_qty'] ?? null;
             }
 
             $tracked = $inventoryTracked === true || $inventoryTracked === 1 || $inventoryTracked === 'true';
@@ -793,6 +797,38 @@ class ShopYourVibe extends Page
 
             return $product;
         })->all();
+    }
+
+    private function variantInventoryBySku(array $products): array
+    {
+        $skus = collect($products)->pluck('sku')->filter()->map(fn ($sku) => trim((string) $sku))->unique()->values();
+        if ($skus->isEmpty()) {
+            return [];
+        }
+
+        return Variant::query()
+            ->whereIn('sku', $skus)
+            ->orderByDesc('id')
+            ->get(['sku', 'inventory_tracked', 'inventory_qty'])
+            ->unique('sku')
+            ->mapWithKeys(fn (Variant $variant): array => [
+                trim((string) $variant->sku) => [
+                    'inventory_tracked' => $variant->inventory_tracked,
+                    'inventory_qty' => $variant->inventory_qty,
+                ],
+            ])
+            ->all();
+    }
+
+    private function reorderLocalProducts(array $products, array $ids): array
+    {
+        $byId = collect($products)->keyBy('id');
+
+        return collect($ids)
+            ->map(fn (string $id) => $byId->get($id))
+            ->filter()
+            ->values()
+            ->all();
     }
 
     private function movementClassificationsBySku(array $products): array
