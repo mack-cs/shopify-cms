@@ -725,7 +725,10 @@ class ShopYourVibe extends Page
             if (! $gid || str_starts_with($gid, 'new:')) {
                 continue;
             }
-            $collection = $shopify->collection($gid);
+            if (isset($mappings[$gid])) {
+                continue;
+            }
+            $collection = $this->mappingCollectionSummary($draft, $gid, $card);
             $mapping = $service->syncMapping($draft->collection_gid, $card, $collection);
             // More than one preview card may link to the same Shopify collection.
             // Product assignment is collection-based, so show and process it only once.
@@ -740,6 +743,35 @@ class ShopYourVibe extends Page
                     ?? $shopify->parentProducts($draft->collection_gid)
             );
         }
+    }
+
+    private function mappingCollectionSummary(ShopYourVibeDraft $draft, string $gid, array $card): array
+    {
+        $collection = $draft->desired['collections'][$gid]
+            ?? $draft->snapshot['collections'][$gid]
+            ?? null;
+        if (is_array($collection)) {
+            return [
+                'gid' => $gid,
+                'title' => $collection['title'] ?? $card['name'],
+                'handle' => $collection['handle'] ?? basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+                'detected_membership_tag' => $collection['detected_membership_tag'] ?? null,
+                'product_count' => (int) ($collection['product_count'] ?? count($collection['products'] ?? [])),
+            ];
+        }
+
+        $local = ShopifyCollection::query()
+            ->where('shopify_id', $gid)
+            ->latest('id')
+            ->first();
+
+        return [
+            'gid' => $gid,
+            'title' => $local?->title ?: $card['name'],
+            'handle' => $local?->handle ?: basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+            'detected_membership_tag' => null,
+            'product_count' => 0,
+        ];
     }
 
     private function decorateProductCards(array $products): array

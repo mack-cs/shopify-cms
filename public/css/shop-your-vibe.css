@@ -36,6 +36,8 @@
 .syv-drag-handle:active { cursor: grabbing; }
 .syv-drag-handle:disabled { cursor: wait; opacity: .5; }
 .syv-card-grid > .fi-sortable-ghost { opacity: .3; outline: 2px dashed #d97706; outline-offset: -2px; }
+.syv-tabs { position: relative; z-index: 5; }
+.syv-tabs button { cursor: pointer; }
 .syv-vibe-badges { display: flex; flex-wrap: wrap; gap: 5px; }
 .syv-vibe-actions { margin-top: 5px; }
 .syv-order-status { color: #b45309; font-size: .875rem; }

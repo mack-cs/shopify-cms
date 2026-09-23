@@ -1,11 +1,16 @@
-﻿<x-filament-panels::page>
-    <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}?v={{ filemtime(public_path('css/shop-your-vibe.css')) }}">
+@once
+    @push('styles')
+        <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}?v={{ filemtime(public_path('css/shop-your-vibe.css')) }}">
+    @endpush
+@endonce
+
+<x-filament-panels::page>
     <div x-data="{
         formDirty: false, savingOrder: false,
         pending() { return this.formDirty || this.$el.dataset.pending === 'true'; },
         async saveOrder(grid, type, gid = null, ids = null) {
             if (this.savingOrder || grid.closest('fieldset')?.disabled) return;
-            const order = ids ?? grid.sortable.toArray();
+            const order = ids ?? Array.from(grid.children).map(el => el.dataset.orderKey).filter(Boolean);
             const grids = Array.from(grid.closest('.syv-workflow').querySelectorAll('[data-order-grid]'));
             this.savingOrder = true;
             grids.forEach(item => item.sortable?.option('disabled', true));
@@ -46,7 +51,7 @@
             <p class="text-sm text-gray-500">Vibe cards and sorting use a reviewable draft. Product assignments update their configured membership tags, Design and Colour Style immediately after confirmation.</p>
             <div class="syv-parent-grid">
                 @forelse ($parents as $parent)
-                    <x-filament::section class="syv-parent-card" wire:key="parent-{{ $parent['gid'] }}">
+                    <x-filament::section class="syv-parent-card" wire:key="parent-{{ md5($parent['gid']) }}">
                         <h2 class="text-lg font-semibold">{{ $parent['title'] }}</h2>
                         <p class="text-sm text-gray-500">{{ $parent['handle'] }}</p>
                         <p class="mt-3 font-medium">{{ $parent['product_count'] ?? 0 }} Products</p>
@@ -78,12 +83,12 @@
                 </div>
                 <x-filament::button color="gray" wire:click="back" wire:confirm="You may have changes that have not been pushed to Shopify. Leave this editor? Saved drafts will be kept.">Back to collections</x-filament::button>
             </div>
-            <div class="flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
-                <button type="button" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
+            <div class="syv-tabs flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
+                <button type="button" wire:key="syv-tab-products" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'products' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
                     Products ({{ count($parentProducts) }})
                 </button>
-                <button type="button" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
+                <button type="button" wire:key="syv-tab-vibes" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'vibes' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
                     Shop Your Vibes ({{ count($draft->desired['cards']) }})
                 </button>
@@ -131,7 +136,7 @@
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
                     </x-filament::section>
                 @endif
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products'])>
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products']) wire:key="syv-products-panel">
                     <div class="flex items-center justify-between gap-3">
                         <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
                         <input type="search" wire:model.live.debounce.300ms="assignmentProductSearch"
@@ -154,18 +159,18 @@
                     @endif
                     @if ($parentCanSort)
                     <div data-order-grid class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-sortable"
+                        wire:key="parent-products-{{ $draft->id }}-sortable-{{ md5($draft->collection_gid) }}"
                         x-sortable data-sortable-animation-duration="200"
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
                     @else
                     <div data-order-grid class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-fixed">
+                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ md5($draft->collection_gid) }}">
                     @endif
                         @if (count($filteredParentProducts) > 0)
                         @foreach ($filteredParentProducts as $product)
                             @php($productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag))))
                             @php($assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag'])))))
-                            <article wire:key="parent-product-{{ $product['id'] }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ $product['id'] }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                            <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                                 @if ($parentCanSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
                                 <div class="syv-product-image-wrap">
                                     @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
@@ -193,7 +198,7 @@
                         @endif
                     </div>
                 </div>
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes'])>
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes']) wire:key="syv-vibes-panel">
                 <div class="flex items-center justify-between gap-3">
                     <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder. Reordering saves a pending draft.</p></div>
                     <div class="flex flex-wrap gap-2">
@@ -208,7 +213,7 @@
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'cards')"
                     @endif>
                     @foreach ($draft->desired['cards'] as $vibe)
-                        <article wire:key="vibe-{{ $vibe['key'] }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ $vibe['key'] }}"
+                        <article wire:key="vibe-{{ md5($vibe['key']) }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ md5($vibe['key']) }}"
                             class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-700 dark:bg-gray-900">
                             <button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">Drag</button>
                             <button type="button" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
@@ -283,15 +288,15 @@
                                 @php($canSort = $draft->status !== 'pushing' && $collection['manual_supported'] && ($collection['sort'] === 'MANUAL' || $collection['enable_manual']))
                                 @if ($canSort)
                                 <div data-order-grid class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ $collection['gid'] }}-sortable"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable"
                                         x-sortable data-sortable-animation-duration="200"
                                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
                                 @else
                                 <div data-order-grid class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ $collection['gid'] }}-fixed">
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed">
                                 @endif
                                     @foreach ($collection['products'] as $product)
-                                        <article wire:key="vibe-product-{{ $collection['gid'] }}-{{ $product['id'] }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ $product['id'] }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                                             @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
                                             <div class="syv-product-image-wrap">
                                                 @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
