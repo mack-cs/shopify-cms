@@ -25,6 +25,7 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($gid);
+        $state['collections'][$gid] = $this->shopify->collection($gid);
 
         return ShopYourVibeDraft::firstOrCreate(['collection_gid' => $gid], [
             'snapshot' => $state, 'desired' => $state, 'refreshed_at' => now(),
@@ -42,6 +43,7 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($draft->collection_gid);
+        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
             $state['collections'][$gid] = $this->shopify->collection($gid);
         }
@@ -181,7 +183,7 @@ class ShopYourVibeWorkflow
                 case 'remove_product':
                 case 'reorder_products':
                     $gid = $input['collection_gid'];
-                    if (! in_array($gid, array_column($state['cards'], 'collection_gid'), true) || ! isset($state['collections'][$gid])) {
+                    if (($gid !== $draft->collection_gid && ! in_array($gid, array_column($state['cards'], 'collection_gid'), true)) || ! isset($state['collections'][$gid])) {
                         throw new RuntimeException('Open this vibe’s products first.');
                     }
                     $collection = &$state['collections'][$gid];
@@ -223,7 +225,10 @@ class ShopYourVibeWorkflow
                 default:
                     throw new RuntimeException('Unknown workflow edit.');
             }
-            $represented = array_filter(array_column($state['cards'], 'collection_gid'));
+            $represented = array_values(array_unique(array_filter(array_merge(
+                [$draft->collection_gid],
+                array_column($state['cards'], 'collection_gid'),
+            ))));
             foreach ($state['delete_collections'] ?? [] as $gid => $deletion) {
                 if (in_array($gid, $represented, true)) {
                     throw new RuntimeException('Another vibe in this layout uses the collection selected for deletion. Remove that vibe first.');

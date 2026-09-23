@@ -619,7 +619,7 @@ it('requires confirmation to refresh pending changes and only reads Shopify duri
     $this->fake->calls = [];
     $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
     expect($this->draft->pending)->toBeFalse()->and($this->draft->desired['cards'])->toHaveCount(2)
-        ->and($this->draft->desired['collections'])->toHaveCount(2)->and($this->fake->mutations())->toBe([]);
+        ->and($this->draft->desired['collections'])->toHaveCount(3)->and($this->fake->mutations())->toBe([]);
 });
 
 it('rejects stale revisions and duplicate or incomplete drag lists', function () {
@@ -742,7 +742,8 @@ it('renders Filament sortable grids and saves the final drop position for cards 
     $html = new DOMDocument;
     @$html->loadHTML($page->html());
     $xpath = new DOMXPath($html);
-    $grid = $xpath->query('//*[@data-order-grid]')->item(0);
+    $grid = collect(iterator_to_array($xpath->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_starts_with($element->getAttribute('wire:key'), 'vibe-grid-'));
     expect($grid->hasAttribute('x-sortable'))->toBeTrue()
         ->and($grid->getAttribute('x-on:end.stop'))->toContain("saveOrder($".'el, \'cards\')');
     $keys = array_map(fn ($item) => $item->getAttribute('x-sortable-item'), iterator_to_array($xpath->query('./*[@x-sortable-item]', $grid)));
@@ -758,7 +759,8 @@ it('renders Filament sortable grids and saves the final drop position for cards 
     $page->call('editCard', 'gid://shopify/Metaobject/11');
     @$html->loadHTML($page->html());
     $xpath = new DOMXPath($html);
-    $productGrid = $xpath->query('//*[@data-order-grid]')->item(1);
+    $productGrid = collect(iterator_to_array($xpath->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'vibe-products-gid://shopify/Collection/2'));
     expect($productGrid->hasAttribute('x-sortable'))->toBeTrue()
         ->and($productGrid->getAttribute('x-on:end.stop'))->toContain("'products'")
         ->and($page->html())->not->toContain('x-on:drop=', 'x-on:dragstart=');
@@ -766,6 +768,56 @@ it('renders Filament sortable grids and saves the final drop position for cards 
     $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/103', 'gid://shopify/Product/101'];
     $page->call('reorderProducts', 'gid://shopify/Collection/2', $ids);
     expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/2']['products'], 'id'))->toBe($ids)
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('sorts parent collection products locally and shows stock badges on product cards', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $this->fake->products['gid://shopify/Product/101']['variants']['nodes'][0]['inventoryQuantity'] = -1;
+    $this->fake->products['gid://shopify/Product/101']['variants']['nodes'][0]['inventoryItem'] = ['tracked' => true];
+    $this->fake->products['gid://shopify/Product/102']['variants']['nodes'][0]['inventoryQuantity'] = 3;
+    $this->fake->products['gid://shopify/Product/102']['variants']['nodes'][0]['inventoryItem'] = ['tracked' => true];
+    $products = [
+        $this->fake->products['gid://shopify/Product/101'],
+        $this->fake->products['gid://shopify/Product/102'],
+        $this->fake->products['gid://shopify/Product/103'],
+    ];
+    $state = $this->draft->desired;
+    $state['collections']['gid://shopify/Collection/1']['products'] = array_map(
+        fn (array $product): array => [
+            'id' => $product['id'],
+            'title' => $product['title'],
+            'status' => $product['status'],
+            'tags' => $product['tags'],
+            'image' => data_get($product, 'featuredImage.url'),
+            'sku' => data_get($product, 'variants.nodes.0.sku'),
+            'inventory_quantity' => data_get($product, 'variants.nodes.0.inventoryQuantity'),
+            'inventory_tracked' => data_get($product, 'variants.nodes.0.inventoryItem.tracked'),
+            'available_for_sale' => data_get($product, 'variants.nodes.0.availableForSale'),
+        ],
+        $products,
+    );
+    $this->draft->update(['desired' => $state, 'snapshot' => $state, 'revision' => $this->draft->revision + 1]);
+    $this->draft->refresh();
+
+    $component = app(ShopYourVibe::class);
+    $decorate = new ReflectionMethod($component, 'decorateProductCards');
+    $decorate->setAccessible(true);
+    $decorated = $decorate->invoke($component, $state['collections']['gid://shopify/Collection/1']['products']);
+    expect($decorated[0]['is_sold_out'])->toBeTrue()
+        ->and($decorated[0]['is_low_stock'])->toBeFalse()
+        ->and($decorated[1]['is_sold_out'])->toBeFalse()
+        ->and($decorated[1]['is_low_stock'])->toBeTrue();
+    $this->fake->calls = [];
+    $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103'];
+    $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [
+        'collection_gid' => 'gid://shopify/Collection/1',
+        'ids' => $ids,
+    ]);
+    expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))->toBe($ids)
+        ->and($this->draft->pending)->toBeTrue()
         ->and($this->fake->calls)->toBe([]);
 });
 
@@ -777,13 +829,15 @@ it('only mounts the product sortable grid after manual sorting is explicitly req
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')->call('editCard', 'gid://shopify/Metaobject/11');
     $html = new DOMDocument;
     @$html->loadHTML($page->html());
-    $grid = (new DOMXPath($html))->query('//*[@data-order-grid]')->item(1);
+    $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'vibe-products-gid://shopify/Collection/2'));
     expect($grid->hasAttribute('x-sortable'))->toBeFalse();
     $oldKey = $grid->getAttribute('wire:key');
     $this->fake->calls = [];
     $page->call('enableManual', 'gid://shopify/Collection/2');
     @$html->loadHTML($page->html());
-    $grid = (new DOMXPath($html))->query('//*[@data-order-grid]')->item(1);
+    $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'vibe-products-gid://shopify/Collection/2'));
     expect($grid->hasAttribute('x-sortable'))->toBeTrue()
         ->and($grid->getAttribute('wire:key'))->not->toBe($oldKey)
         ->and($this->fake->calls)->toBe([]);
