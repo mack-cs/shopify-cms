@@ -25,6 +25,7 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($gid);
+        $state['collections'][$gid] = $this->shopify->collection($gid);
 
         return ShopYourVibeDraft::firstOrCreate(['collection_gid' => $gid], [
             'snapshot' => $state, 'desired' => $state, 'refreshed_at' => now(),
@@ -42,6 +43,7 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($draft->collection_gid);
+        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
             $state['collections'][$gid] = $this->shopify->collection($gid);
         }
@@ -170,7 +172,7 @@ class ShopYourVibeWorkflow
                     }
                     $state['cards'] = array_values(array_filter($state['cards'], fn ($card) => $card['key'] !== $input['key']));
                     // Do not push product edits for a collection no longer represented in this layout.
-                    $gids = array_column($state['cards'], 'collection_gid');
+                    $gids = array_merge([$draft->collection_gid], array_column($state['cards'], 'collection_gid'));
                     $state['collections'] = array_intersect_key($state['collections'], array_flip(array_filter($gids)));
                     break;
                 case 'reorder_cards':
@@ -181,7 +183,7 @@ class ShopYourVibeWorkflow
                 case 'remove_product':
                 case 'reorder_products':
                     $gid = $input['collection_gid'];
-                    if (! in_array($gid, array_column($state['cards'], 'collection_gid'), true) || ! isset($state['collections'][$gid])) {
+                    if (($gid !== $draft->collection_gid && ! in_array($gid, array_column($state['cards'], 'collection_gid'), true)) || ! isset($state['collections'][$gid])) {
                         throw new RuntimeException('Open this vibe’s products first.');
                     }
                     $collection = &$state['collections'][$gid];
@@ -191,8 +193,12 @@ class ShopYourVibeWorkflow
                         }
                         $collection['enable_manual'] = $collection['sort'] !== 'MANUAL';
                     } elseif ($operation === 'reorder_products') {
-                        if (! $collection['manual_supported'] || ($collection['sort'] !== 'MANUAL' && ! $collection['enable_manual'])) {
-                            throw new RuntimeException('Explicitly enable manual sorting before reordering products.');
+                        if (! $this->manualSortingSupported($collection)) {
+                            throw new RuntimeException('Manual sorting is not supported for this collection.');
+                        }
+                        if ($collection['sort'] !== 'MANUAL') {
+                            $collection['manual_supported'] = true;
+                            $collection['enable_manual'] = true;
                         }
                         $collection['products'] = $this->reorder($collection['products'], $input['ids'], 'id');
                     } else {
@@ -223,7 +229,10 @@ class ShopYourVibeWorkflow
                 default:
                     throw new RuntimeException('Unknown workflow edit.');
             }
-            $represented = array_filter(array_column($state['cards'], 'collection_gid'));
+            $represented = array_values(array_unique(array_filter(array_merge(
+                [$draft->collection_gid],
+                array_column($state['cards'], 'collection_gid'),
+            ))));
             foreach ($state['delete_collections'] ?? [] as $gid => $deletion) {
                 if (in_array($gid, $represented, true)) {
                     throw new RuntimeException('Another vibe in this layout uses the collection selected for deletion. Remove that vibe first.');
@@ -328,7 +337,7 @@ class ShopYourVibeWorkflow
                 if (! $current['membership_supported'] && $this->membership($current) !== $this->membership($desiredCollection)) {
                     throw new RuntimeException('Shopify rules control membership in '.$current['title'].'.');
                 }
-                if (! $current['manual_supported'] && ($desiredCollection['enable_manual']
+                if (! $this->manualSortingSupported($current) && ($desiredCollection['enable_manual']
                     || ($current['sort'] === 'MANUAL' && array_column($current['products'], 'id') !== array_column($desiredCollection['products'], 'id')))) {
                     throw new RuntimeException('Manual sorting is not supported for '.$current['title'].'.');
                 }
@@ -571,6 +580,12 @@ class ShopYourVibeWorkflow
         return $before['sort'] !== $sort || ($sort === 'MANUAL'
             ? array_column($before['products'], 'id') !== array_column($after['products'], 'id')
             : $this->membership($before) !== $this->membership($after));
+    }
+
+    private function manualSortingSupported(array $collection): bool
+    {
+        return ($collection['manual_supported'] ?? true) !== false
+            || ($collection['sort'] ?? null) !== 'UNSUPPORTED';
     }
 
     private function membership(array $collection): array

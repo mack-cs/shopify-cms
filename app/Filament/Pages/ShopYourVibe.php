@@ -6,6 +6,8 @@ use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Jobs\PushShopYourVibe;
 use App\Models\Product;
+use App\Models\ProductMovementReportRow;
+use App\Models\ProductMovementReportRun;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
@@ -511,6 +513,11 @@ class ShopYourVibe extends Page
     public function reorderProducts(string $gid, array $ids): void
     {
         $this->change('reorder_products', ['collection_gid' => $gid, 'ids' => $ids]);
+        if ($gid === $this->draft()?->collection_gid) {
+            $this->parentProducts = $this->decorateProductCards(
+                $this->draft()->desired['collections'][$gid]['products'] ?? []
+            );
+        }
     }
 
     public function enableManual(string $gid): void
@@ -598,13 +605,6 @@ class ShopYourVibe extends Page
             $this->dispatch('close-modal', id: 'manage-vibe-assignments');
             Notification::make()->title('Shop Your Vibe assignments updated')->success()->send();
         });
-    }
-
-    public function removeProductAssignment(string $productGid, string $collectionGid): void
-    {
-        $this->openProductAssignments($productGid);
-        $this->selectedVibes = array_values(array_filter($this->selectedVibes, fn ($gid) => $gid !== $collectionGid));
-        $this->reviewProductAssignments();
     }
 
     public function findImages(bool $more = false): void
@@ -718,7 +718,10 @@ class ShopYourVibe extends Page
             if (! $gid || str_starts_with($gid, 'new:')) {
                 continue;
             }
-            $collection = $shopify->collection($gid);
+            if (isset($mappings[$gid])) {
+                continue;
+            }
+            $collection = $this->mappingCollectionSummary($draft, $gid, $card);
             $mapping = $service->syncMapping($draft->collection_gid, $card, $collection);
             // More than one preview card may link to the same Shopify collection.
             // Product assignment is collection-based, so show and process it only once.
@@ -728,8 +731,91 @@ class ShopYourVibe extends Page
         $service->deactivateMissing($draft->collection_gid, array_column($mappings, 'shopify_collection_id'));
         $this->vibeMappings = $mappings;
         if ($refreshProducts || $this->parentProducts === []) {
-            $this->parentProducts = $shopify->parentProducts($draft->collection_gid);
+            $this->parentProducts = $this->decorateProductCards(
+                $draft->desired['collections'][$draft->collection_gid]['products']
+                    ?? $shopify->parentProducts($draft->collection_gid)
+            );
         }
+    }
+
+    private function mappingCollectionSummary(ShopYourVibeDraft $draft, string $gid, array $card): array
+    {
+        $collection = $draft->desired['collections'][$gid]
+            ?? $draft->snapshot['collections'][$gid]
+            ?? null;
+        if (is_array($collection)) {
+            return [
+                'gid' => $gid,
+                'title' => $collection['title'] ?? $card['name'],
+                'handle' => $collection['handle'] ?? basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+                'detected_membership_tag' => $collection['detected_membership_tag'] ?? null,
+                'product_count' => (int) ($collection['product_count'] ?? count($collection['products'] ?? [])),
+            ];
+        }
+
+        $local = ShopifyCollection::query()
+            ->where('shopify_id', $gid)
+            ->latest('id')
+            ->first();
+
+        return [
+            'gid' => $gid,
+            'title' => $local?->title ?: $card['name'],
+            'handle' => $local?->handle ?: basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+            'detected_membership_tag' => null,
+            'product_count' => 0,
+        ];
+    }
+
+    private function decorateProductCards(array $products): array
+    {
+        $movementBySku = $this->movementClassificationsBySku($products);
+        $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
+
+        return collect($products)->map(function (array $product) use ($movementBySku, $threshold): array {
+            $inventoryTracked = $product['inventory_tracked'] ?? null;
+            $quantity = $product['inventory_quantity'] ?? null;
+            if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
+                $variant = \App\Models\Variant::query()->where('sku', $product['sku'])->latest('id')->first();
+                $inventoryTracked ??= $variant?->inventory_tracked;
+                $quantity ??= $variant?->inventory_qty;
+            }
+
+            $tracked = $inventoryTracked === true || $inventoryTracked === 1 || $inventoryTracked === 'true';
+            $quantity = $quantity === null ? null : (int) $quantity;
+            $isSoldOut = $tracked && $quantity !== null && $quantity <= 0;
+
+            $product['inventory_tracked'] = $tracked;
+            $product['inventory_quantity'] = $quantity;
+            $product['is_sold_out'] = $isSoldOut;
+            $product['is_low_stock'] = $tracked && ! $isSoldOut && $quantity !== null && $quantity <= $threshold;
+            $product['movement_classification'] = $movementBySku[trim((string) ($product['sku'] ?? ''))] ?? null;
+
+            return $product;
+        })->all();
+    }
+
+    private function movementClassificationsBySku(array $products): array
+    {
+        $skus = collect($products)->pluck('sku')->filter()->map(fn ($sku) => trim((string) $sku))->unique()->values();
+        if ($skus->isEmpty()) {
+            return [];
+        }
+        $runId = ProductMovementReportRun::query()
+            ->where('status', ProductMovementReportRun::STATUS_COMPLETED)
+            ->latest('completed_at')
+            ->latest('id')
+            ->value('id');
+        if (! $runId) {
+            return [];
+        }
+
+        return ProductMovementReportRow::query()
+            ->where('product_movement_report_run_id', $runId)
+            ->whereIn('sku', $skus)
+            ->pluck('movement_classification', 'sku')
+            ->map(fn ($value) => strtoupper((string) $value))
+            ->all();
     }
 
     private function readMappingCsv(mixed $file): array
@@ -829,6 +915,9 @@ class ShopYourVibe extends Page
         $parents = $parents->filter(fn ($parent) => $this->search === '' || str_contains(strtolower($parent['title'].' '.$parent['handle']), strtolower($this->search)));
         $card = $draft ? collect($draft->desired['cards'])->firstWhere('key', $this->activeCard) : null;
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
+        if ($collection) {
+            $collection['products'] = $this->decorateProductCards($collection['products'] ?? []);
+        }
         $products = collect();
         if ($this->addingProducts && $collection && $collection['membership_supported']) {
             $products = Product::with(['images', 'variants'])->whereNotNull('shopify_id')

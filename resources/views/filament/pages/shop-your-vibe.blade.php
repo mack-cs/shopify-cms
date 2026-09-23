@@ -1,11 +1,16 @@
+@once
+    @push('styles')
+        <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}?v={{ filemtime(public_path('css/shop-your-vibe.css')) }}">
+    @endpush
+@endonce
+
 <x-filament-panels::page>
-    <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}?v={{ filemtime(public_path('css/shop-your-vibe.css')) }}">
     <div x-data="{
         formDirty: false, savingOrder: false,
         pending() { return this.formDirty || this.$el.dataset.pending === 'true'; },
         async saveOrder(grid, type, gid = null, ids = null) {
             if (this.savingOrder || grid.closest('fieldset')?.disabled) return;
-            const order = ids ?? grid.sortable.toArray();
+            const order = ids ?? Array.from(grid.children).map(el => el.dataset.orderKey).filter(Boolean);
             const grids = Array.from(grid.closest('.syv-workflow').querySelectorAll('[data-order-grid]'));
             this.savingOrder = true;
             grids.forEach(item => item.sortable?.option('disabled', true));
@@ -46,7 +51,7 @@
             <p class="text-sm text-gray-500">Vibe cards and sorting use a reviewable draft. Product assignments update their configured membership tags, Design and Colour Style immediately after confirmation.</p>
             <div class="syv-parent-grid">
                 @forelse ($parents as $parent)
-                    <x-filament::section class="syv-parent-card" wire:key="parent-{{ $parent['gid'] }}">
+                    <x-filament::section class="syv-parent-card" wire:key="parent-{{ md5($parent['gid']) }}">
                         <h2 class="text-lg font-semibold">{{ $parent['title'] }}</h2>
                         <p class="text-sm text-gray-500">{{ $parent['handle'] }}</p>
                         <p class="mt-3 font-medium">{{ $parent['product_count'] ?? 0 }} Products</p>
@@ -58,7 +63,7 @@
                         @endif
                         <x-filament::button class="syv-manage-button" wire:click="manage({{ \Illuminate\Support\Js::from($parent['gid']) }})" wire:target="manage" wire:loading.attr="disabled">
                             <span wire:loading.remove wire:target="manage">Manage</span>
-                            <span wire:loading wire:target="manage">Opening editor…</span>
+                            <span wire:loading wire:target="manage">Opening editor...</span>
                         </x-filament::button>
                     </x-filament::section>
                 @empty
@@ -68,32 +73,32 @@
         @else
             @if ($draft->status === 'pushing')
                 <div wire:poll.3s="pollPush" role="status" class="rounded-xl border border-primary-300 p-4">
-                    Pushing to Shopify… You can return later; your draft is saved. Editing is paused until this push finishes.
+                    Pushing to Shopify... You can return later; your draft is saved. Editing is paused until this push finishes.
                 </div>
             @endif
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                    <h2 class="text-2xl font-bold">{{ $draft->desired['parent']['title'] }} — Shop Your Vibe</h2>
+                    <h2 class="text-2xl font-bold">{{ $draft->desired['parent']['title'] }} - Shop Your Vibe</h2>
                     <p class="text-sm text-gray-500">Last confirmed with Shopify: {{ $draft->refreshed_at?->format('d M Y H:i') ?? 'Not yet refreshed' }}</p>
                 </div>
                 <x-filament::button color="gray" wire:click="back" wire:confirm="You may have changes that have not been pushed to Shopify. Leave this editor? Saved drafts will be kept.">Back to collections</x-filament::button>
             </div>
-            <div class="flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
-                <button type="button" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
+            <div class="syv-tabs flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
+                <button type="button" wire:key="syv-tab-products" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'products' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
                     Products ({{ count($parentProducts) }})
                 </button>
-                <button type="button" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
+                <button type="button" wire:key="syv-tab-vibes" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'vibes' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
                     Shop Your Vibes ({{ count($draft->desired['cards']) }})
                 </button>
             </div>
             <div x-show="formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
-                Pending field edits — not pushed to Shopify. Save the card to keep these edits in your draft.
+                Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
             @if ($draft->pending)
                 <div role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
-                    <strong>{{ $draft->status === 'failed' ? 'Push failed — some changes are still pending' : 'Pending changes — not pushed to Shopify' }}</strong>
+                    <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
                     <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
                     @if ($draft->last_error)<p class="mt-2">{{ $draft->last_error }}</p>@endif
                     @if ($draft->progress)
@@ -104,7 +109,7 @@
                 <x-filament::badge color="success">Up to date with Shopify</x-filament::badge>
             @endif
             <fieldset @disabled($draft->status === 'pushing') class="space-y-6 disabled:opacity-60">
-                <p x-show="savingOrder" x-cloak role="status" class="syv-order-status">Saving order to draft — not pushed to Shopify…</p>
+                <p x-show="savingOrder" x-cloak role="status" class="syv-order-status">Saving order to draft - not pushed to Shopify...</p>
                 <div class="flex flex-wrap gap-3">
                     <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty" :disabled="!$draft->pending" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
@@ -124,48 +129,99 @@
                             @endif
                             @if (!empty($draft->desired['delete_collections']))
                                 <p><strong>Collections to delete from Shopify:</strong> Their collection pages will be removed. All products stay in Shopify and in their other collections. This cannot be undone.</p>
-                                <ul>@foreach ($draft->desired['delete_collections'] as $deletion)<li>{{ $deletion['title'] }} — /collections/{{ $deletion['handle'] }}</li>@endforeach</ul>
+                                <ul>@foreach ($draft->desired['delete_collections'] as $deletion)<li>{{ $deletion['title'] }} - /collections/{{ $deletion['handle'] }}</li>@endforeach</ul>
                             @endif
                         </div>
                         <x-filament::button wire:click="pushChanges" x-bind:disabled="formDirty" wire:loading.attr="disabled">Push Changes</x-filament::button>
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
                     </x-filament::section>
                 @endif
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products'])>
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products']) wire:key="syv-products-panel">
                     <div class="flex items-center justify-between gap-3">
                         <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
                         <input type="search" wire:model.live.debounce.300ms="assignmentProductSearch"
                             placeholder="Search product name or SKU" aria-label="Search products by name or SKU"
                             class="block w-full max-w-sm rounded-lg border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-900" />
                     </div>
-                    <div class="syv-card-grid syv-product-grid">
-                        @forelse ($filteredParentProducts as $product)
-                            @php
-                                $productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag)));
-                                $assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag']))));
-                            @endphp
-                            <article wire:key="parent-product-{{ $product['id'] }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                @if ($product['image'])<img src="{{ $product['image'] }}" alt="" class="syv-product-image" loading="lazy">@endif
+                    @php($parentCollection = $draft->desired['collections'][$draft->collection_gid] ?? null)
+                    @php($parentSort = $parentCollection['sort'] ?? null)
+                    @php($parentSortLabel = $parentSort ? str_replace('_', ' ', ucwords(strtolower($parentSort), '_')) : 'Unknown')
+                    @php($parentIsAutomated = $parentCollection && ! ($parentCollection['membership_supported'] ?? true))
+                    @php($parentManualSupported = $parentCollection && (($parentCollection['manual_supported'] ?? true) !== false || $parentSort !== 'UNSUPPORTED'))
+                    @php($parentCanSort = $draft->status !== 'pushing' && $parentManualSupported)
+                    <div class="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-900">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="font-semibold text-gray-900 dark:text-white">Main collection sorting:</span>
+                            @if ($parentCollection)
+                                <span class="text-gray-600 dark:text-gray-300">Current Shopify sort: {{ $parentSortLabel }}</span>
+                                <x-filament::badge :color="$parentIsAutomated ? 'gray' : 'info'">{{ $parentIsAutomated ? 'Automated collection' : 'Manual membership collection' }}</x-filament::badge>
+                            @else
+                                <span class="text-gray-600 dark:text-gray-300">Sorting data is not loaded for this draft.</span>
+                            @endif
+                            @if ($parentCanSort)
+                                @if ($parentSort === 'MANUAL')
+                                    <x-filament::badge color="success">Sortable manually</x-filament::badge>
+                                @elseif ($parentCollection['enable_manual'] ?? false)
+                                    <x-filament::badge color="warning">Manual sorting requested</x-filament::badge>
+                                @else
+                                    <x-filament::badge color="warning">Dragging will request Manual sorting</x-filament::badge>
+                                @endif
+                            @elseif ($parentCollection)
+                                <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
+                            @endif
+                        </div>
+                        @if ($parentCanSort)
+                            <p class="mt-1 text-xs text-gray-500">Drag handles appear on product cards below. Pushing changes will send this order to Shopify.</p>
+                        @elseif (! $parentCollection)
+                            <p class="mt-1 text-xs text-gray-500">Refresh from Shopify to reload the main collection sort mode before sorting products.</p>
+                        @else
+                            <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so drag handles are hidden.</p>
+                        @endif
+                    </div>
+                    @if ($parentCanSort)
+                    <div data-order-grid class="syv-card-grid syv-product-grid"
+                        wire:key="parent-products-{{ $draft->id }}-sortable-{{ md5($draft->collection_gid) }}"
+                        x-sortable data-sortable-animation-duration="200"
+                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
+                    @else
+                    <div data-order-grid class="syv-card-grid syv-product-grid"
+                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ md5($draft->collection_gid) }}">
+                    @endif
+                        @if (count($filteredParentProducts) > 0)
+                        @foreach ($filteredParentProducts as $product)
+                            @php($productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag))))
+                            @php($assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag'])))))
+                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                @if ($parentCanSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
+                                @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
+                                <div class="syv-product-image-wrap">
+                                    @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
-                                <div class="my-3">
+                                <div class="my-3 syv-vibe-badge-list">
                                     <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
+                                    <div class="syv-vibe-badges">
                                     @forelse ($assignments as $assignment)
                                         <x-filament::badge color="info">{{ $assignment['collection_name'] }}</x-filament::badge>
                                     @empty
                                         <span class="text-sm text-gray-500">None</span>
                                     @endforelse
+                                    </div>
                                 </div>
-                                <x-filament::button size="xs" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                <div class="flex flex-wrap gap-2 syv-vibe-actions">
+                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                </div>
                             </article>
-                        @empty
+                        @endforeach
+                        @else
                             <p class="text-gray-500">{{ $assignmentProductSearch !== '' ? 'No products match your search.' : 'No products belong to this Shopify collection.' }}</p>
-                        @endforelse
+                        @endif
                     </div>
                 </div>
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes'])>
+                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes']) wire:key="syv-vibes-panel">
                 <div class="flex items-center justify-between gap-3">
-                    <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder, or use the arrow buttons. Reordering saves a pending draft.</p></div>
+                    <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder. Reordering saves a pending draft.</p></div>
                     <div class="flex flex-wrap gap-2">
                         <x-filament::button color="gray" wire:click="openMappingUpload" wire:loading.attr="disabled">Bulk Upload Mappings</x-filament::button>
                         <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled">Add Vibe</x-filament::button>
@@ -178,9 +234,9 @@
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'cards')"
                     @endif>
                     @foreach ($draft->desired['cards'] as $vibe)
-                        <article wire:key="vibe-{{ $vibe['key'] }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ $vibe['key'] }}"
+                        <article wire:key="vibe-{{ md5($vibe['key']) }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ md5($vibe['key']) }}"
                             class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                            <button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">⠿ Drag</button>
+                            <button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">Drag</button>
                             <button type="button" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
                                 @if ($vibe['image_url'])<img src="{{ $vibe['image_url'] }}" alt="" draggable="false" class="syv-vibe-image" loading="lazy">@else<div class="syv-vibe-image syv-image-placeholder">Choose an image</div>@endif
                                 <h4 class="my-3 font-semibold">{{ $vibe['name'] }}</h4>
@@ -196,8 +252,8 @@
                                 @endif
                             </button>
                             <div class="flex flex-wrap gap-2">
-                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">←</x-filament::button>
-                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, 1)" aria-label="Move vibe later">→</x-filament::button>
+                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">Up</x-filament::button>
+                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, 1)" aria-label="Move vibe later">Down</x-filament::button>
                                 <x-filament::button size="xs" color="gray" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty &amp;&amp; !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false">Edit</x-filament::button>
                                 <x-filament::button size="xs" color="danger" wire:click="mountAction('removeVibe', {{ \Illuminate\Support\Js::from(['key' => $vibe['key']]) }})">Remove</x-filament::button>
                             </div>
@@ -231,50 +287,51 @@
                         <div class="mt-6 space-y-4">
                             <h3 class="text-lg font-semibold">Products</h3>
                             @if (!$collection)
-                                <p class="text-sm text-gray-500">This card’s link has no loaded collection. Save a link to a synchronized collection, then reopen the vibe to load its products.</p>
+                                <p class="text-sm text-gray-500">This card's link has no loaded collection. Save a link to a synchronized collection, then reopen the vibe to load its products.</p>
                             @else
                                 <h4 class="font-semibold">{{ $collection['title'] }}</h4>
-                                @if (str_starts_with($collection['gid'], 'new:'))<p class="text-sm text-gray-500">New collection — will be created and published when you push. Add and sort its products below.</p>@else<p>Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($collection['sort']), '_')) }}</p>@endif
-                                @if (!$collection['manual_supported'])
+                                @if (str_starts_with($collection['gid'], 'new:'))<p class="text-sm text-gray-500">New collection - will be created and published when you push. Add and sort its products below.</p>@else<p>Current Shopify sort: {{ str_replace('_', ' ', ucwords(strtolower($collection['sort']), '_')) }}</p>@endif
+                                @php($collectionManualSupported = ($collection['manual_supported'] ?? true) !== false || ($collection['sort'] ?? null) !== 'UNSUPPORTED')
+                                @if (!$collectionManualSupported)
                                     <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
                                 @elseif ($collection['sort'] === 'MANUAL')
                                     <x-filament::badge color="success">Manual sorting: ON</x-filament::badge>
                                 @elseif ($collection['enable_manual'])
-                                    <x-filament::badge color="warning">Manual sorting requested — pending push</x-filament::badge>
+                                    <x-filament::badge color="warning">Manual sorting requested - pending push</x-filament::badge>
                                 @else
                                     <x-filament::badge color="gray">Manual sorting: OFF</x-filament::badge>
-                                    <x-filament::button color="gray" wire:click="enableManual({{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="This will change the Shopify collection’s product sorting mode to Manual when you push changes. Continue?">Enable Manual Sorting</x-filament::button>
+                                    <x-filament::button color="gray" wire:click="enableManual({{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="This will change the Shopify collection's product sorting mode to Manual when you push changes. Continue?">Enable Manual Sorting</x-filament::button>
                                 @endif
                                 @if (!$collection['membership_supported'])
                                     <p class="syv-membership-note">This is an automated collection. Shop Your Vibe assignments are managed by adding or removing only its configured membership tag.</p>
                                 @else
                                     <p class="syv-membership-note">Remove takes a product out of this linked Shopify collection when you push changes. It does not delete the product. This can also affect the live storefront.</p>
                                 @endif
-                                @php($canSort = $draft->status !== 'pushing' && $collection['manual_supported'] && ($collection['sort'] === 'MANUAL' || $collection['enable_manual']))
+                                @php($canSort = $draft->status !== 'pushing' && $collectionManualSupported)
+                                @if ($canSort)
                                 <div data-order-grid class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ $collection['gid'] }}-{{ $canSort ? 'sortable' : 'fixed' }}"
-                                    @if ($canSort)
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable"
                                         x-sortable data-sortable-animation-duration="200"
-                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})"
-                                    @endif>
+                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
+                                @else
+                                <div data-order-grid class="syv-card-grid syv-product-grid"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed">
+                                @endif
                                     @foreach ($collection['products'] as $product)
-                                        <article wire:key="vibe-product-{{ $collection['gid'] }}-{{ $product['id'] }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ $product['id'] }}" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                            @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">⠿ Drag</button>@endif
-                                            @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                            @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
+                                            @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
+                                            <div class="syv-product-image-wrap">
+                                                @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                            </div>
                                             <h5 class="mt-2 font-medium">{{ $product['title'] }}</h5>
                                             @if ($product['sku'])<p class="mb-2 text-xs text-gray-500">SKU: {{ $product['sku'] }}</p>@endif
                                             <div class="mt-2 flex gap-2">
-                                                @if ($canSort)
-                                                    <x-filament::button size="xs" color="gray" x-on:click="move($el, 'products', {{ \Illuminate\Support\Js::from($product['id']) }}, -1, {{ \Illuminate\Support\Js::from($collection['gid']) }})" aria-label="Move product earlier">←</x-filament::button>
-                                                    <x-filament::button size="xs" color="gray" x-on:click="move($el, 'products', {{ \Illuminate\Support\Js::from($product['id']) }}, 1, {{ \Illuminate\Support\Js::from($collection['gid']) }})" aria-label="Move product later">→</x-filament::button>
-                                                @endif
                                                 @if ($collection['membership_supported'])
                                                     <x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
-                                                @elseif (filled(collect($vibeMappings)->firstWhere('shopify_collection_id', $collection['gid'])['membership_tag'] ?? null))
-                                                    <x-filament::button size="xs" color="danger" wire:click="removeProductAssignment({{ \Illuminate\Support\Js::from($product['id']) }}, {{ \Illuminate\Support\Js::from($collection['gid']) }})" wire:confirm="Remove this product from {{ $collection['title'] }}? Only its configured Shopify membership tag will be removed.">Remove from this Vibe</x-filament::button>
                                                 @endif
                                                 @if (collect($parentProducts)->contains('id', $product['id']))
-                                                    <x-filament::button size="xs" color="gray" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
                                                 @endif
                                             </div>
                                         </article>
@@ -366,7 +423,7 @@
                             @foreach ($assignmentAddDetails as $change)
                                 <li>
                                     {{ $change['name'] }}
-                                    <span class="text-sm text-gray-500">— tag: <code>{{ $change['membership_tag'] }}</code></span>
+                                    <span class="text-sm text-gray-500">- tag: <code>{{ $change['membership_tag'] }}</code></span>
                                     @if (filled($change['design_value']))
                                         <span class="text-sm text-gray-500">; Bracelet Design: <code>{{ $change['design_value'] }}</code></span>
                                     @endif

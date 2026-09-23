@@ -136,15 +136,14 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   id title handle sortOrder productsCount { count }
   ruleSet { appliedDisjunctively rules { column relation condition } }
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title featuredImage { url } variants(first: 1) { nodes { sku } } }
+    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } } }
     pageInfo { hasNextPage endCursor }
   }
 } }
 GQL, ['id' => $gid, 'after' => $after]);
             $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
             foreach ($node['products']['nodes'] as $product) {
-                $products[] = ['id' => $product['id'], 'title' => $product['title'],
-                    'image' => data_get($product, 'featuredImage.url'), 'sku' => data_get($product, 'variants.nodes.0.sku')];
+                $products[] = $this->productCard($product);
             }
             $after = $this->cursor($node['products']);
         } while ($after !== null);
@@ -155,7 +154,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
 
         return ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'sort' => $node['sortOrder'],
-            'manual_supported' => in_array($node['sortOrder'], ['MANUAL', 'BEST_SELLING', 'ALPHA_ASC', 'ALPHA_DESC', 'PRICE_ASC', 'PRICE_DESC', 'CREATED', 'CREATED_DESC'], true),
+            'manual_supported' => $node['sortOrder'] !== 'UNSUPPORTED',
             'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false,
             'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
@@ -195,7 +194,7 @@ GQL, ['id' => $gid]);
             $data = $this->client->graphql(<<<'GQL'
 query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku } } }
+    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } } }
     pageInfo { hasNextPage endCursor }
   }
 } }
@@ -203,11 +202,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             $connection = data_get($data, 'collection.products')
                 ?? throw new RuntimeException('The selected collection is no longer available in Shopify.');
             foreach ($connection['nodes'] as $product) {
-                $products[] = [
-                    'id' => $product['id'], 'title' => $product['title'], 'status' => $product['status'] ?? null,
-                    'tags' => array_values($product['tags'] ?? []), 'image' => data_get($product, 'featuredImage.url'),
-                    'sku' => data_get($product, 'variants.nodes.0.sku'),
-                ];
+                $products[] = $this->productCard($product);
             }
             $after = $this->cursor($connection);
         } while ($after !== null);
@@ -223,6 +218,23 @@ query VibeProductTags($id: ID!) { product(id: $id) { id tags } }
 GQL, ['id' => $gid]);
 
         return $data['product'] ?? throw new RuntimeException('This product is no longer available in Shopify.');
+    }
+
+    private function productCard(array $product): array
+    {
+        $variant = data_get($product, 'variants.nodes.0', []);
+
+        return [
+            'id' => $product['id'],
+            'title' => $product['title'],
+            'status' => $product['status'] ?? null,
+            'tags' => array_values($product['tags'] ?? []),
+            'image' => data_get($product, 'featuredImage.url'),
+            'sku' => data_get($variant, 'sku'),
+            'inventory_quantity' => data_get($variant, 'inventoryQuantity'),
+            'inventory_tracked' => data_get($variant, 'inventoryItem.tracked'),
+            'available_for_sale' => data_get($variant, 'availableForSale'),
+        ];
     }
 
     public function addProductTags(string $gid, array $tags): void
