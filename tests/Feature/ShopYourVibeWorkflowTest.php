@@ -810,6 +810,14 @@ it('sorts parent collection products locally and shows stock badges on product c
         ->and($decorated[0]['is_low_stock'])->toBeFalse()
         ->and($decorated[1]['is_sold_out'])->toBeFalse()
         ->and($decorated[1]['is_low_stock'])->toBeTrue();
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
+    expect($parentGrid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($parentGrid->getAttribute('x-on:end.stop'))->toContain("saveOrder($".'el, \'products\'')
+        ->and($page->html())->toContain('x-sortable-handle');
     $this->fake->calls = [];
     $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103'];
     $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [

@@ -36,6 +36,8 @@
 .syv-drag-handle:active { cursor: grabbing; }
 .syv-drag-handle:disabled { cursor: wait; opacity: .5; }
 .syv-card-grid > .fi-sortable-ghost { opacity: .3; outline: 2px dashed #d97706; outline-offset: -2px; }
+.syv-vibe-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.syv-vibe-actions { margin-top: 5px; }
 .syv-order-status { color: #b45309; font-size: .875rem; }
 .syv-collection-options { display: grid; gap: .5rem; max-height: 55vh; overflow-y: auto; }
 .syv-collection-option { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid #d1d5db; border-radius: .5rem; }
