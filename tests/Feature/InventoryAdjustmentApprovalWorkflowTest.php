@@ -1,6 +1,9 @@
 <?php
 
 use App\Jobs\InventorySyncJob;
+use App\Enums\PermissionEnum;
+use App\Filament\Resources\InventoryAdjustmentRequestResource;
+use App\Filament\Resources\InventoryAdjustmentRequestResource\Pages\ListInventoryAdjustmentRequests;
 use App\Models\Import;
 use App\Models\InventoryAdjustmentRequest;
 use App\Models\Product;
@@ -11,6 +14,8 @@ use App\Services\ProductInventoryCsvImporter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Validation\ValidationException;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
 
@@ -83,6 +88,55 @@ it('approves and rejects inventory requests without duplicate requester approval
     $service->reject($rejectRequest, $approver->id, 'No evidence');
     expect($rejectRequest->fresh()->status)->toBe(InventoryAdjustmentRequest::STATUS_REJECTED)
         ->and($variant->fresh()->current_on_hand_quantity)->toBe(12);
+});
+
+it('shows review actions and navigation badge only for the selected inventory approver', function (): void {
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $requester = User::factory()->create();
+    $approver = User::factory()->create();
+    $otherUser = User::factory()->create();
+    $requester->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $approver->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $otherUser->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $variant = inventoryApprovalVariant('APPROVAL-VISIBLE', 4);
+    $request = app(InventoryAdjustmentApprovalService::class)->submit([[
+        'variant' => $variant,
+        'inventory_tracked' => true,
+        'on_hand_quantity' => 8,
+        'reason' => 'Selected approver check',
+    ]], $requester->id, $approver->id);
+
+    $this->actingAs($approver);
+    expect(InventoryAdjustmentRequestResource::getNavigationBadge())->toBe('1');
+    Livewire::test(ListInventoryAdjustmentRequests::class)
+        ->assertTableActionVisible('approve', $request)
+        ->assertTableActionVisible('reject', $request);
+
+    $this->actingAs($otherUser);
+    expect(InventoryAdjustmentRequestResource::getNavigationBadge())->toBeNull();
+    Livewire::test(ListInventoryAdjustmentRequests::class)
+        ->assertTableActionHidden('approve', $request)
+        ->assertTableActionHidden('reject', $request);
+});
+
+it('surfaces a shortcut for pending inventory approvals in the inventory workspace', function (): void {
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $requester = User::factory()->create();
+    $approver = User::factory()->create();
+    $approver->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $variant = inventoryApprovalVariant('APPROVAL-SHORTCUT', 4);
+    app(InventoryAdjustmentApprovalService::class)->submit([[
+        'variant' => $variant,
+        'inventory_tracked' => true,
+        'on_hand_quantity' => 7,
+        'reason' => 'Shortcut check',
+    ]], $requester->id, $approver->id);
+
+    $this->actingAs($approver);
+
+    Livewire::test(\App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
+        ->set('activeTab', 'inventory_adjustments')
+        ->assertSee('Review My Approvals (1)');
 });
 
 it('creates a file approval request with SKU-level reasons', function (): void {

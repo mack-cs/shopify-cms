@@ -20,7 +20,7 @@ final class ProcurementSupplierOrderResource extends Resource
     protected static ?string $navigationGroup = 'Inventory';
     protected static ?string $navigationLabel = 'Purchase Orders';
     protected static ?string $navigationIcon = 'heroicon-o-truck';
-    protected static ?int $navigationSort = 4;
+    protected static ?int $navigationSort = 5;
 
     public static function form(Form $form): Form
     {

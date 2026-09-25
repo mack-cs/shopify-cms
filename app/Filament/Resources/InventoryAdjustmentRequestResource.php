@@ -18,9 +18,30 @@ class InventoryAdjustmentRequestResource extends Resource
 {
     protected static ?string $model = InventoryAdjustmentRequest::class;
     protected static ?string $navigationIcon = 'heroicon-o-clipboard-document-check';
-    protected static ?string $navigationGroup = 'Catalog';
+    protected static ?string $navigationGroup = 'Inventory';
     protected static ?string $navigationLabel = 'Inventory Approvals';
-    protected static ?int $navigationSort = 5;
+    protected static ?int $navigationSort = 4;
+
+    public static function getNavigationBadge(): ?string
+    {
+        $userId = Auth::id();
+
+        if ($userId === null) {
+            return null;
+        }
+
+        $count = InventoryAdjustmentRequest::query()
+            ->where('status', InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL)
+            ->where('approver_id', $userId)
+            ->count();
+
+        return $count > 0 ? (string) $count : null;
+    }
+
+    public static function getNavigationBadgeColor(): ?string
+    {
+        return 'warning';
+    }
 
     public static function table(Table $table): Table
     {
@@ -59,14 +80,14 @@ class InventoryAdjustmentRequestResource extends Resource
                     ->icon('heroicon-o-check')
                     ->color('success')
                     ->requiresConfirmation()
-                    ->visible(fn (InventoryAdjustmentRequest $record): bool => $record->status === InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL && (int) $record->requester_id !== (int) Auth::id())
+                    ->visible(fn (InventoryAdjustmentRequest $record): bool => self::canReviewRequest($record))
                     ->action(fn (InventoryAdjustmentRequest $record) => app(InventoryAdjustmentApprovalService::class)->approve($record, (int) Auth::id())),
                 Action::make('reject')
                     ->label('Reject')
                     ->icon('heroicon-o-x-mark')
                     ->color('danger')
                     ->form([Forms\Components\Textarea::make('reason')->label('Rejection reason')->rows(3)])
-                    ->visible(fn (InventoryAdjustmentRequest $record): bool => $record->status === InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL && (int) $record->requester_id !== (int) Auth::id())
+                    ->visible(fn (InventoryAdjustmentRequest $record): bool => self::canReviewRequest($record))
                     ->action(fn (InventoryAdjustmentRequest $record, array $data) => app(InventoryAdjustmentApprovalService::class)->reject($record, (int) Auth::id(), $data['reason'] ?? null)),
             ]);
     }
@@ -79,5 +100,15 @@ class InventoryAdjustmentRequestResource extends Resource
     public static function canViewAny(): bool
     {
         return app(InventoryAccessService::class)->canAccess(Auth::user());
+    }
+
+    private static function canReviewRequest(InventoryAdjustmentRequest $record): bool
+    {
+        $userId = Auth::id();
+
+        return $userId !== null
+            && $record->status === InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL
+            && (int) $record->approver_id === (int) $userId
+            && (int) $record->requester_id !== (int) $userId;
     }
 }

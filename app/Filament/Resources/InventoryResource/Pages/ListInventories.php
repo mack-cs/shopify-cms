@@ -3,8 +3,10 @@
 namespace App\Filament\Resources\InventoryResource\Pages;
 
 use App\Filament\Resources\InventoryResource;
+use App\Filament\Resources\InventoryAdjustmentRequestResource;
 use App\Filament\Resources\InventoryResource\Widgets\InventoryRunBanner;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Models\InventoryAdjustmentRequest;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
@@ -311,6 +313,13 @@ class ListInventories extends ListRecords
                     $skipped > 0 ? $notification->warning() : $notification->success();
                     $notification->send();
                 }),
+            Actions\Action::make('reviewMyInventoryApprovals')
+                ->label(fn (): string => 'Review My Approvals'.($this->pendingInventoryApprovalsCount() > 0 ? ' ('.$this->pendingInventoryApprovalsCount().')' : ''))
+                ->icon('heroicon-o-clipboard-document-check')
+                ->color('warning')
+                ->visible(fn (): bool => $this->activeTab === 'inventory_adjustments'
+                    && $this->pendingInventoryApprovalsCount() > 0)
+                ->url(fn (): string => InventoryAdjustmentRequestResource::getUrl()),
         ];
     }
 
@@ -371,6 +380,20 @@ class ListInventories extends ListRecords
         })->implode("\n");
 
         return "There are earlier pending supplier orders for one or more SKUs. Confirm that the receipt is correct and provide a reason before continuing.\n{$lines}";
+    }
+
+    private function pendingInventoryApprovalsCount(): int
+    {
+        $userId = Auth::id();
+
+        if ($userId === null) {
+            return 0;
+        }
+
+        return InventoryAdjustmentRequest::query()
+            ->where('status', InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL)
+            ->where('approver_id', $userId)
+            ->count();
     }
 
     public function getTabs(): array
