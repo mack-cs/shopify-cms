@@ -4,6 +4,7 @@ namespace App\Filament\Resources\DropdownOptionResource\Pages;
 
 use App\Filament\Resources\DropdownOptionResource;
 use App\Jobs\RecalculateDropdownOptionProductsJob;
+use App\Services\DropdownReviewWorkbookExporter;
 use Filament\Actions;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
@@ -17,6 +18,18 @@ class ListDropdownOptions extends ListRecords
         return [
             Actions\CreateAction::make()
                 ->label('Add dropdown value'),
+            Actions\Action::make('exportReviewWorkbook')
+                ->label('Export Review Workbook')
+                ->icon('heroicon-o-table-cells')
+                ->color('success')
+                ->action(fn (DropdownReviewWorkbookExporter $exporter) => response()->streamDownload(
+                    fn () => print $exporter->export(
+                        DropdownOptionResource::reviewHeaders(),
+                        DropdownOptionResource::reviewCollections(),
+                    ),
+                    'dropdown-review-by-collection-'.now()->format('Ymd_His').'.xlsx',
+                    ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+                )),
             Actions\Action::make('revalidateProducts')
                 ->label('Revalidate product dropdowns')
                 ->icon('heroicon-o-arrow-path')
