@@ -100,3 +100,49 @@ it('exports a review workbook with a sheet per collection and dropdown headers a
         ->and($sheet)->toContain('sterling silver')
         ->and($sheet)->toContain('10mm');
 });
+
+it('conditionally deactivates review values missing from an imported workbook', function (): void {
+    if (! class_exists(\ZipArchive::class)) {
+        $this->markTestSkipped('ZipArchive is required to build XLSX exports.');
+    }
+
+    DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'black',
+        'collection_style' => 'Livi Road Bracelets',
+        'active' => true,
+    ]));
+
+    $contents = app(DropdownReviewWorkbookExporter::class)->export(
+        \App\Filament\Resources\DropdownOptionResource::reviewHeaders(),
+        \App\Filament\Resources\DropdownOptionResource::reviewCollections(),
+    );
+
+    $extra = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'rainbow',
+        'collection_style' => 'Livi Road Bracelets',
+        'active' => true,
+    ]));
+
+    $path = tempnam(sys_get_temp_dir(), 'dropdown-review-import-');
+    file_put_contents($path, $contents);
+
+    app(\App\Services\DropdownReviewWorkbookImporter::class)->import(
+        $path,
+        \App\Filament\Resources\DropdownOptionResource::reviewHeaders(),
+        \App\Filament\Resources\DropdownOptionResource::reviewCollections(),
+        false,
+    );
+    expect($extra->fresh()->active)->toBeTrue();
+
+    app(\App\Services\DropdownReviewWorkbookImporter::class)->import(
+        $path,
+        \App\Filament\Resources\DropdownOptionResource::reviewHeaders(),
+        \App\Filament\Resources\DropdownOptionResource::reviewCollections(),
+        true,
+    );
+    @unlink($path);
+
+    expect($extra->fresh()->active)->toBeFalse();
+});
