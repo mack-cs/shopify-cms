@@ -1328,6 +1328,10 @@ final class Normalizer
             return $this->parseColorTokens($value);
         }
 
+        if (app(ShopifyTaxonomyValueNormalizer::class)->usesHandleValues($header)) {
+            return app(ShopifyTaxonomyValueNormalizer::class)->normalizeMany($header, $value);
+        }
+
         // This is a single descriptive dropdown value. Commas, semicolons and
         // line breaks may be part of the text and must not create false values.
         if ($header === HeaderStore::MATERIALS_AND_DIMENSIONS) {

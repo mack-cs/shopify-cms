@@ -58,7 +58,7 @@ final class DropdownReviewWorkbookImporter
 
                 foreach ($rows as $rowIndex => $row) {
                     foreach ($columns as $columnIndex => $header) {
-                        $value = trim((string) ($row[$columnIndex] ?? ''));
+                        $value = app(ShopifyTaxonomyValueNormalizer::class)->normalize($header, (string) ($row[$columnIndex] ?? ''));
                         if ($value === '') {
                             continue;
                         }

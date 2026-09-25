@@ -72,7 +72,7 @@ final class DropdownReviewWorkbookExporter
                     ->where('collection_style', $collection)
                     ->where('header', $header)
                     ->pluck('value')
-                    ->map(fn ($value): string => trim((string) $value))
+                    ->map(fn ($value): string => app(ShopifyTaxonomyValueNormalizer::class)->normalize($header, (string) $value))
                     ->filter(fn (string $value): bool => $value !== '')
                     ->unique(fn (string $value): string => mb_strtolower($value))
                     ->values()

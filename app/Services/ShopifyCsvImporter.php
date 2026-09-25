@@ -66,7 +66,8 @@ class ShopifyCsvImporter
     {
         $out = [];
         foreach ($headers as $h) {
-            $out[$h] = $row[$h] ?? '';
+            $value = $row[$h] ?? '';
+            $out[$h] = app(ShopifyTaxonomyValueNormalizer::class)->normalize((string) $h, is_scalar($value) ? (string) $value : '');
         }
         return $out;
     }

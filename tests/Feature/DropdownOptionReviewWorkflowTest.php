@@ -6,6 +6,7 @@ use App\Models\DropdownOption;
 use App\Models\User;
 use App\Services\DropdownReviewWorkbookExporter;
 use App\Services\HeaderStore;
+use App\Services\Normalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
@@ -66,7 +67,7 @@ it('exports a review workbook with a sheet per collection and dropdown headers a
     ]));
     DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
         'header' => HeaderStore::JEWELRY_MATERIAL,
-        'value' => 'sterling silver',
+        'value' => 'Sterling Silver',
         'collection_style' => 'Livi Road Bracelets',
         'active' => true,
     ]));
@@ -97,7 +98,7 @@ it('exports a review workbook with a sheet per collection and dropdown headers a
         ->and($sheet)->toContain('Jewelry Material')
         ->and($sheet)->toContain('Materials and Dimensions')
         ->and($sheet)->toContain('black')
-        ->and($sheet)->toContain('sterling silver')
+        ->and($sheet)->toContain('sterling-silver')
         ->and($sheet)->toContain('10mm');
 });
 
@@ -145,4 +146,50 @@ it('conditionally deactivates review values missing from an imported workbook', 
     @unlink($path);
 
     expect($extra->fresh()->active)->toBeFalse();
+});
+
+it('stores imported jewelry material labels as Shopify handles', function (): void {
+    if (! class_exists(\ZipArchive::class)) {
+        $this->markTestSkipped('ZipArchive is required to build XLSX exports.');
+    }
+
+    DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::JEWELRY_MATERIAL,
+        'value' => 'Gold',
+        'collection_style' => 'Livi Road Bracelets',
+        'active' => true,
+    ]));
+
+    $contents = app(DropdownReviewWorkbookExporter::class)->export(
+        \App\Filament\Resources\DropdownOptionResource::reviewHeaders(),
+        \App\Filament\Resources\DropdownOptionResource::reviewCollections(),
+    );
+    $path = tempnam(sys_get_temp_dir(), 'dropdown-review-handle-import-');
+    file_put_contents($path, $contents);
+
+    app(\App\Services\DropdownReviewWorkbookImporter::class)->import(
+        $path,
+        \App\Filament\Resources\DropdownOptionResource::reviewHeaders(),
+        \App\Filament\Resources\DropdownOptionResource::reviewCollections(),
+        false,
+    );
+    @unlink($path);
+
+    expect(DropdownOption::query()
+        ->where('header', HeaderStore::JEWELRY_MATERIAL)
+        ->where('collection_style', 'Livi Road Bracelets')
+        ->where('value', 'gold')
+        ->exists())->toBeTrue();
+});
+
+it('normalizes captured jewelry material labels to Shopify handles', function (): void {
+    $normalizer = app(Normalizer::class);
+    $method = new ReflectionMethod($normalizer, 'parseDropdownValues');
+
+    expect($method->invoke($normalizer, HeaderStore::JEWELRY_MATERIAL, 'Sterling Silver'))
+        ->toBe(['sterling-silver'])
+        ->and($method->invoke($normalizer, HeaderStore::JEWELRY_MATERIAL, 'Gold'))
+        ->toBe(['gold'])
+        ->and($method->invoke($normalizer, HeaderStore::JEWELRY_MATERIAL, 'Fresh Water Pearls; Japanese Miyuki Beads; natural-stones'))
+        ->toBe(['fresh-water-pearls', 'japanese-miyuki-beads', 'natural-stones']);
 });

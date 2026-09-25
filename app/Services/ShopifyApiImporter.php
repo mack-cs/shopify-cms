@@ -712,7 +712,7 @@ GQL;
             return;
         }
 
-        $row[$header] = (string) $value;
+        $row[$header] = app(ShopifyTaxonomyValueNormalizer::class)->normalize($header, (string) $value);
     }
 
     private function resolveMetaobjectValues(array $product): array
