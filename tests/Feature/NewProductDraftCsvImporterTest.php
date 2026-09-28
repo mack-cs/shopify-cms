@@ -149,6 +149,45 @@ it('prepopulates draft fields from an imported collection tag', function (): voi
     @unlink($path);
 });
 
+it('upserts seo draft data for new product csv rows without a handle', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-bracelets',
+        'collection_name' => 'Elevated Basics Bracelets',
+        'add_tags' => [
+            'elevated-basics',
+            'elevated-basics-bracelets',
+            'bracelet',
+        ],
+        'auto_vendor' => 'Elevated Basics',
+        'auto_type' => 'Bracelets',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-no-handle-seo-import-');
+    $seoTitle = 'Sunday in Bali Bracelet | Gold Silver Beaded Jewelry';
+    $seoDescription = "The Sunday in Bali Bracelet combines delicate gold and silver beading with a relaxed holiday feel. A versatile women's bracelet for everyday layering.";
+    file_put_contents(
+        $path,
+        "SKU,Collection Tag,Title,Price,SEO Title,SEO Description\n"
+        ."LAB0182TestF,elevated-basics-bracelets,Test ProductDF 28 Sept,640,{$seoTitle},{$seoDescription}\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'LAB0182TestF')->first();
+    $profile = StyleProfile::query()->where('handle', 'test-productdf-28-sept')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['seo_drafts_upserted'])->toBe(1)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->handle)->toBe('test-productdf-28-sept')
+        ->and($profile)->not->toBeNull()
+        ->and($profile->draft_seo_title)->toBe($seoTitle)
+        ->and($profile->draft_seo_description)->toBe($seoDescription);
+
+    @unlink($path);
+});
+
 it('resolves complementary product skus to existing product references', function (): void {
     $product = Product::create([
         'import_id' => $this->draftCsvImport->id,

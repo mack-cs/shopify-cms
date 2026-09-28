@@ -9,6 +9,7 @@ use App\Models\StyleProfile;
 use App\Models\Variant;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use League\Csv\Reader;
 
 final class NewProductDraftCsvImporter
@@ -363,6 +364,15 @@ final class NewProductDraftCsvImporter
                     $this->syncImportedDraftToProduct($draft, $data, $payload);
                     $updated++;
                 } else {
+                    if (
+                        ! isset($data['handle'])
+                        && ! empty($seoDraftData)
+                        && trim((string) ($data['title'] ?? '')) !== ''
+                    ) {
+                        $data['handle'] = Str::slug((string) $data['title']);
+                        $handle = $data['handle'];
+                    }
+
                     $data['payload'] = $payload ?: null;
                     $data['created_by'] = Auth::id();
                     $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
@@ -375,23 +385,25 @@ final class NewProductDraftCsvImporter
                     $created++;
                 }
 
-                if (! empty($seoDraftData) && $handle) {
+                $resolvedHandle = trim((string) ($handle ?: $draft?->handle ?: '')) ?: null;
+
+                if (! empty($seoDraftData) && $resolvedHandle) {
                     $product = Product::query()
-                        ->where('handle', $handle)
+                        ->where('handle', $resolvedHandle)
                         ->with('variants')
                         ->first();
 
-                    $styleProfile = StyleProfile::where('handle', $handle)->first();
+                    $styleProfile = StyleProfile::where('handle', $resolvedHandle)->first();
                     $styleProfileData = array_merge(
                         $seoDraftData,
                         [
-                            'handle' => $handle,
+                            'handle' => $resolvedHandle,
                             'product_id' => $product?->id,
                             'sku' => trim((string) (
                                 $styleProfile?->sku
                                 ?? $data['sku']
                                 ?? $product?->variants->first()?->sku
-                                ?? $handle
+                                ?? $resolvedHandle
                             )),
                         ]
                     );

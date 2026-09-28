@@ -213,3 +213,27 @@ it('adds the bracelet stack new in tag when the bundle collection is selected be
         'livi-road-bracelet-stacks-new-in',
     )->and($tags)->not->toContain('livi-road-new-in');
 });
+
+it('removes managed new in tags when the draft new in toggle is off', function (): void {
+    $data = NewProductDraftResource::mutateDraftFormData([
+        'title' => 'Not New Bracelet',
+        'type' => 'Bracelets',
+        'tags' => [
+            'elevated-basics',
+            'elevated-basics-bracelets',
+            'new-arrivals',
+            'new-in',
+            'newbies',
+            'elevated-basics-new-in',
+        ],
+        'is_on_sale' => false,
+        'is_new_in' => false,
+        'extra_shopify_fields' => [],
+    ]);
+
+    $tags = TagNormalizer::parseTokens($data['tags'] ?? null);
+
+    expect($tags)
+        ->toContain('elevated-basics', 'elevated-basics-bracelets', 'bracelet')
+        ->not->toContain('new-arrivals', 'new-in', 'newbies', 'elevated-basics-new-in');
+});

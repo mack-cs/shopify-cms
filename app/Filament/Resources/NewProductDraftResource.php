@@ -532,7 +532,8 @@ class NewProductDraftResource extends Resource
                                         is_string($state) ? $state : null,
                                         $resolvedType,
                                         $get('title'),
-                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                        filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                     );
                                     $set('tags', $tags);
                                     self::applyCollectionPrepopulation(
@@ -610,7 +611,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             null,
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                         return;
                                     }
@@ -624,7 +626,8 @@ class NewProductDraftResource extends Resource
                                     $set('tags', self::defaultedDraftTags(
                                         self::normalizeTagList($get('tags')),
                                         $state,
-                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                        filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                     ));
                                 }),
                             Select::make('product_category')
@@ -650,7 +653,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             null,
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                         return;
                                     }
@@ -662,7 +666,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             $mapping['type'],
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                     }
                                 }),
@@ -861,6 +866,28 @@ class NewProductDraftResource extends Resource
                                         $set('variant_compare_at_price', $currentPrice);
                                         $set('variant_price', null);
                                     }
+                                }),
+                            Forms\Components\Toggle::make('is_new_in')
+                                ->label('Mark as new in')
+                                ->default(true)
+                                ->inline(false)
+                                ->live()
+                                ->helperText('Adds the New In tags, including collection-specific New In tags. Turn off to remove New In tagging.')
+                                ->afterStateHydrated(function (Forms\Components\Toggle $component, ?NewProductDraft $record): void {
+                                    $tags = self::normalizeTagList($record?->tags);
+                                    $component->state($tags === [] || self::newInStateFromTags($tags));
+                                })
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                    $isNewIn = filter_var($state, FILTER_VALIDATE_BOOLEAN);
+                                    $isOnSale = self::saleStateFromForm($get('is_on_sale'), $get('tags'));
+                                    $tags = self::defaultedDraftTags(
+                                        self::normalizeTagList($get('tags')),
+                                        $get('type'),
+                                        $isOnSale,
+                                        $isNewIn
+                                    );
+
+                                    $set('tags', $tags);
                                 }),
                         ])
                         ->columnSpanFull(),
@@ -1919,7 +1946,8 @@ class NewProductDraftResource extends Resource
         ?string $collection,
         mixed $type,
         mixed $title,
-        bool $isOnSale
+        bool $isOnSale,
+        bool $isNewIn = true
     ): array {
         $normalized = self::normalizeTagList($currentTags);
         $selectionTags = self::collectionTags($collection, forProductTags: false);
@@ -1939,7 +1967,8 @@ class NewProductDraftResource extends Resource
         return self::defaultedDraftTags(
             self::uniqueNormalizedTags(array_merge($kept, $collectionTags)),
             $type,
-            $isOnSale
+            $isOnSale,
+            $isNewIn
         );
     }
 
@@ -2418,7 +2447,7 @@ class NewProductDraftResource extends Resource
      * @param array<int, string> $tags
      * @return array<int, string>
      */
-    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale): array
+    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale, bool $isNewIn = true): array
     {
         $tags = self::normalizeBundleCollectionTags($tags);
         $tags = array_values(array_filter(
@@ -2444,7 +2473,27 @@ class NewProductDraftResource extends Resource
 
         $tags = self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
 
-        return app(NewInTagService::class)->tagsForNewProduct($tags, $type);
+        $service = app(NewInTagService::class);
+
+        return $isNewIn
+            ? $service->tagsForNewProduct($tags, $type)
+            : $service->removeManagedTags($tags);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function newInStateFromTags(array $tags): bool
+    {
+        $normalized = self::uniqueNormalizedTags($tags);
+
+        foreach (NewInTagService::TAGS as $tag) {
+            if (in_array($tag, $normalized, true)) {
+                return true;
+            }
+        }
+
+        return app(NewInTagService::class)->tagsForNewProduct($normalized) !== $normalized;
     }
 
     /**
@@ -6715,6 +6764,10 @@ class NewProductDraftResource extends Resource
         $isOnSale = array_key_exists('is_on_sale', $data)
             ? self::saleStateFromForm($data['is_on_sale'], null)
             : self::tagListContains($tags, self::SALE_TAG);
+        $isNewIn = array_key_exists('is_new_in', $data)
+            ? filter_var($data['is_new_in'], FILTER_VALIDATE_BOOLEAN)
+            : true;
+        unset($data['is_new_in']);
 
         if ($isOnSale) {
             $currentPrice = self::decimalStringFromState($data['variant_price'] ?? null);
@@ -6728,7 +6781,7 @@ class NewProductDraftResource extends Resource
 
         $data['is_on_sale'] = $isOnSale;
         $data['tags'] = TagNormalizer::normalizeFromArray(
-            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale)
+            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale, $isNewIn)
         );
 
         self::validateDraftSalePricing($data);
