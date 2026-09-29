@@ -509,6 +509,7 @@ class ShopYourVibe extends Page
                         $this->cardForm = [];
                     }
                     $this->confirmingPush = false;
+                    $this->dispatch('vibe-draft-saved');
                 });
                 if ($this->loadError) {
                     $action->halt();
@@ -723,6 +724,7 @@ class ShopYourVibe extends Page
         $this->attempt(function () use ($operation, $input): void {
             $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, $operation, $input));
             $this->confirmingPush = false;
+            $this->dispatch('vibe-draft-saved');
         });
     }
 

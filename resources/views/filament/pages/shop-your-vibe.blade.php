@@ -35,6 +35,7 @@
     }"
         data-pending="{{ $draft?->pending ? 'true' : 'false' }}"
         x-on:vibe-form-saved.window="formDirty = false; localPending = false"
+        x-on:vibe-draft-saved.window="formDirty = false; localPending = true; $el.dataset.pending = 'true'"
         x-on:beforeunload.window="if (pending()) { $event.preventDefault(); $event.returnValue = ''; }"
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
         class="syv-workflow space-y-6"
