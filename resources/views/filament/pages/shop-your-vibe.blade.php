@@ -115,10 +115,14 @@
             @else
                 <x-filament::badge color="success">Up to date with Shopify</x-filament::badge>
             @endif
-            <fieldset @disabled($draft->status === 'pushing') class="space-y-6 disabled:opacity-60">
+            <div class="space-y-6">
                 <p x-show="savingOrder" x-cloak role="status" class="syv-order-status">Saving order to draft - not pushed to Shopify...</p>
                 <div class="flex flex-wrap gap-3">
-                    <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty || !pending()" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                    @if ($draft->status === 'pushing')
+                        <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
+                    @else
+                        <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty || !pending()" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                    @endif
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
                 </div>
@@ -226,7 +230,7 @@
                                     </div>
                                 </div>
                                 <div class="syv-vibe-actions">
-                                    <x-filament::button size="xs" color="warning" icon="heroicon-m-pencil-square" class="syv-card-action syv-vibe-button" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</x-filament::button>
+                                    <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
                                 </div>
                             </article>
@@ -243,7 +247,7 @@
                     <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder. Reordering saves a pending draft.</p></div>
                     <div class="flex flex-wrap gap-2">
                         <x-filament::button color="gray" wire:click="openMappingUpload" wire:loading.attr="disabled" wire:target="openMappingUpload">Bulk Upload Mappings</x-filament::button>
-                        <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled" wire:target="openCollectionPicker">Add Vibe</x-filament::button>
+                        <button type="button" class="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-500 disabled:opacity-60" wire:click.stop="openCollectionPicker(true)" wire:loading.attr="disabled" wire:target="openCollectionPicker">Add Vibe</button>
                     </div>
                 </div>
                 <div data-order-grid class="syv-card-grid"
@@ -350,7 +354,7 @@
                                                     <x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
                                                 @endif
                                                 @if (collect($parentProducts)->contains('id', $product['id']))
-                                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                                    <button type="button" class="rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</button>
                                                 @endif
                                             </div>
                                         </article>
@@ -380,7 +384,7 @@
                 @endif
                 </div>
                 @endif
-            </fieldset>
+            </div>
         @endif
 
         <x-filament::modal id="shop-your-vibe-collections" width="3xl"
@@ -396,7 +400,9 @@
                 @endif
                 @if ($addingCard && $collectionMode === 'new')
                     <p class="my-3 text-sm text-gray-500">Save a new collection to this draft. Pushing changes creates it in Shopify, applies its image and publishes it to the Online Store.</p>
-                    {{ $this->newCollectionForm }}
+                    <div data-new-collection-form>
+                        {{ $this->newCollectionForm }}
+                    </div>
                 @else
                     <p class="my-3 text-sm text-gray-500">Search by collection title or handle inside the dropdown. Already configured collections are excluded when adding Shop Your Vibe.</p>
                     {{ $this->collectionPickerForm }}

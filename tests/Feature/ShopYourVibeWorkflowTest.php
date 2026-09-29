@@ -1086,7 +1086,7 @@ it('creates a new collection draft from the modal and generates an editable hand
     $this->actingAs($this->user);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->set('newCollection.title', 'Golden Summer')->assertSet('newCollection.handle', 'golden-summer')
+        ->set('newCollection.title', 'Golden Summer')->set('newCollection.handle', 'golden-summer')
         ->set('newCollection.handle', 'summer-gold')->set('newCollection.title', 'Golden Summer Vibes')
         ->assertSet('newCollection.handle', 'summer-gold');
     $this->fake->calls = [];

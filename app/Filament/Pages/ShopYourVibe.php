@@ -23,7 +23,6 @@ use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Radio;
 use Filament\Actions\Action;
 use Filament\Forms\Get;
-use Filament\Forms\Set;
 use Filament\Forms\Form;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Pages\Page;
@@ -296,14 +295,17 @@ class ShopYourVibe extends Page
     public function newCollectionForm(Form $form): Form
     {
         return $form->statePath('newCollection')->schema([
-            TextInput::make('title')->label('Collection name')->required()->maxLength(255)->live(debounce: 300)
-                ->afterStateUpdated(function (Set $set, Get $get, ?string $state, ?string $old): void {
-                    if (blank($get('handle')) || $get('handle') === Str::slug($old ?? '')) {
-                        $set('handle', Str::slug($state ?? ''));
-                    }
-                }),
+            TextInput::make('title')->label('Collection name')->required()->maxLength(255)
+                ->extraInputAttributes([
+                    'x-on:input' => "const slug = (\$event.target.value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-'); const handle = \$el.closest('[data-new-collection-form]')?.querySelector('[data-new-collection-handle]'); if (handle && (!handle.value || handle.dataset.autoSlug === 'true')) { handle.dataset.autoUpdating = 'true'; handle.value = slug; handle.dataset.autoSlug = 'true'; handle.dispatchEvent(new Event('input', { bubbles: true })); }",
+                ]),
             TextInput::make('handle')->label('Slug (Shopify handle)')->required()->maxLength(255)
                 ->regex('/^[a-z0-9]+(?:-[a-z0-9]+)*$/')
+                ->extraInputAttributes([
+                    'data-new-collection-handle' => true,
+                    'data-auto-slug' => 'true',
+                    'x-on:input' => "if (\$el.dataset.autoUpdating === 'true') { \$el.dataset.autoUpdating = 'false'; \$el.dataset.autoSlug = 'true'; } else { \$el.dataset.autoSlug = 'false'; }",
+                ])
                 ->helperText('Automatically generated from the collection name. You can edit it; your changes will be kept. URL: /collections/your-slug'),
             Select::make('image_mode')->label('Collection image')->options([
                 'none' => 'No image', 'upload' => 'Upload a new image', 'existing' => 'Choose an image from Shopify',
@@ -707,6 +709,24 @@ class ShopYourVibe extends Page
             $this->confirmingPush = false;
             $this->dispatch('vibe-form-saved');
             Cache::forget($this->parentCacheKey());
+        });
+    }
+
+    public function retryPush(): void
+    {
+        $this->guard();
+        $this->attempt(function (): void {
+            $draft = $this->draft();
+            if (! $draft || $draft->status !== 'pushing') {
+                return;
+            }
+
+            PushShopYourVibe::dispatch($draft->id);
+            Notification::make()
+                ->title('Push check queued')
+                ->body('Shopify confirmation is being retried. This page will update when the draft changes.')
+                ->success()
+                ->send();
         });
     }
 
