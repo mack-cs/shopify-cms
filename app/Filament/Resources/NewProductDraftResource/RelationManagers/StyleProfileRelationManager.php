@@ -104,11 +104,15 @@ class StyleProfileRelationManager extends RelationManager
         }
 
         return !StyleProfile::query()
-            ->when(
-                $handle !== '',
-                fn (Builder $query): Builder => $query->where('handle', $handle),
-                fn (Builder $query): Builder => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
-            )
+            ->where(function (Builder $query) use ($handle, $sku): void {
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+
+                if ($sku !== '') {
+                    $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+                }
+            })
             ->exists();
     }
 
@@ -125,12 +129,23 @@ class StyleProfileRelationManager extends RelationManager
         }
 
         $handle = trim((string) ($record?->handle ?? $owner?->handle ?? ''));
-        if ($handle === '') {
+        if ($handle !== '') {
+            $product = Product::query()
+                ->where('handle', $handle)
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $sku = trim((string) ($record?->sku ?? $owner?->sku ?? ''));
+        if ($sku === '') {
             return null;
         }
 
         return Product::query()
-            ->where('handle', $handle)
+            ->whereHas('allVariants', fn (Builder $query): Builder => $query->where('sku', $sku))
             ->first();
     }
 

@@ -69,6 +69,7 @@ class EditNewProductDraft extends EditRecord
     {
         try {
             $this->syncSavedDraftFieldsToProduct();
+            $this->syncSeoDraftToProduct();
         } catch (\Throwable $e) {
             Notification::make()
                 ->title('Draft saved with sync warning')
@@ -91,7 +92,10 @@ class EditNewProductDraft extends EditRecord
 
         $this->refreshEditLock();
 
-        $linkedProduct = $this->record?->fresh(['product'])?->product;
+        $freshRecord = $this->record?->fresh();
+        $linkedProduct = $freshRecord instanceof NewProductDraft
+            ? NewProductDraftResource::linkedProductForDraft($freshRecord)
+            : null;
         if (($linkedProduct?->has_errors ?? false) === true) {
             $errorFields = $linkedProduct?->error_fields;
             $fieldSummary = '';
@@ -178,13 +182,23 @@ class EditNewProductDraft extends EditRecord
                 ->label('Edit Product')
                 ->icon('heroicon-o-photo')
                 ->color('gray')
-                ->visible(fn (): bool => $this->record?->product !== null)
-                ->url(fn (): ?string => $this->record?->product
-                    ? ProductResource::getUrl('edit', [
-                        'record' => $this->record->product,
+                ->visible(fn (): bool => $this->record instanceof NewProductDraft
+                    && NewProductDraftResource::linkedProductForDraft($this->record) !== null)
+                ->url(function (): ?string {
+                    if (!$this->record instanceof NewProductDraft) {
+                        return null;
+                    }
+
+                    $product = NewProductDraftResource::linkedProductForDraft($this->record);
+                    if (!$product instanceof Product) {
+                        return null;
+                    }
+
+                    return ProductResource::getUrl('edit', [
+                        'record' => $product,
                         'activeRelationManager' => '1',
-                    ]) . '#relationManager1'
-                    : null),
+                    ]) . '#relationManager1';
+                }),
         ];
     }
 
@@ -404,6 +418,15 @@ class EditNewProductDraft extends EditRecord
         }
 
         if (!$product instanceof Product) {
+            $sku = trim((string) ($this->record->sku ?? ''));
+            if ($sku !== '') {
+                $product = Product::query()
+                    ->whereHas('allVariants', fn ($variantQuery) => $variantQuery->where('sku', $sku))
+                    ->first();
+            }
+        }
+
+        if (!$product instanceof Product) {
             return;
         }
 
@@ -454,6 +477,19 @@ class EditNewProductDraft extends EditRecord
         );
 
         $this->savedDraftAttributes = [];
+        $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
+    }
+
+    private function syncSeoDraftToProduct(): void
+    {
+        if (!$this->record instanceof NewProductDraft) {
+            return;
+        }
+
+        NewProductDraftResource::mirrorSeoDraftToProduct(
+            $this->record->fresh() ?? $this->record
+        );
+
         $this->record = $this->record->fresh(['editingUser']) ?? $this->record;
     }
 

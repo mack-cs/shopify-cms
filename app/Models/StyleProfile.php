@@ -86,30 +86,30 @@ class StyleProfile extends Model
                 }
             }
 
-            if (!$profile->product_id) {
+            $product = self::resolvedProduct($profile);
+
+            if (!$product instanceof Product) {
                 return;
             }
 
-            $handle = Product::where('id', $profile->product_id)->value('handle');
-            if ($handle) {
-                $profile->handle = $handle;
+            $profile->product_id = $product->id;
+
+            if ($product->handle) {
+                $profile->handle = $product->handle;
             }
 
-            if (!$profile->sku && $profile->handle) {
-                $profile->sku = $profile->handle;
+            if (!$profile->sku) {
+                $profile->sku = self::nullIfEmpty($product->allVariants()->orderBy('id')->value('sku'))
+                    ?? $profile->handle;
             }
         });
 
         static::saved(function (self $profile): void {
-            if (!$profile->product_id) {
-                return;
-            }
-
             if (!$profile->wasChanged(['draft_seo_title', 'draft_seo_description'])) {
                 return;
             }
 
-            $product = $profile->product;
+            $product = self::resolvedProduct($profile);
             if (!$product) {
                 return;
             }
@@ -140,6 +140,36 @@ class StyleProfile extends Model
                 $row->save();
             }
         });
+    }
+
+    private static function resolvedProduct(self $profile): ?Product
+    {
+        if ($profile->product_id) {
+            $product = Product::query()->find($profile->product_id);
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $handle = self::nullIfEmpty($profile->handle);
+        if ($handle !== null) {
+            $product = Product::query()
+                ->where('handle', $handle)
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $sku = self::nullIfEmpty($profile->sku);
+        if ($sku === null) {
+            return null;
+        }
+
+        return Product::query()
+            ->whereHas('allVariants', fn ($query) => $query->where('sku', $sku))
+            ->first();
     }
 
     private static function nullIfEmpty(?string $value): ?string

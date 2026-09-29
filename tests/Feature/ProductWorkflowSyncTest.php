@@ -52,6 +52,105 @@ it('resets product approvals when a style profile seo draft updates product seo 
     expect($product->approval_version)->toBe(2);
 });
 
+it('mirrors sku linked seo drafts into the product when the style profile has no product id', function (): void {
+    $product = createWorkflowTestProduct([
+        'seo_title' => null,
+        'seo_description' => null,
+        'approval_version' => 1,
+    ]);
+    createWorkflowTestVariant($product, [
+        'sku' => 'LAB0183TestStack',
+    ]);
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::SEO_TITLE => '',
+            HeaderStore::SEO_DESCRIPTION => '',
+        ],
+    ]);
+
+    $profile = StyleProfile::create([
+        'product_id' => null,
+        'handle' => null,
+        'sku' => 'LAB0183TestStack',
+        'draft_seo_title' => null,
+        'draft_seo_description' => null,
+        'seo_sync_status' => 'draft',
+    ]);
+
+    $profile->update([
+        'draft_seo_title' => 'Pearls & Palms Bracelet | Freshwater Pearl Jewellery',
+        'draft_seo_description' => 'The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.',
+    ]);
+
+    $product->refresh();
+    $row->refresh();
+    $profile->refresh();
+
+    expect($profile->product_id)->toBe($product->id)
+        ->and($profile->handle)->toBe($product->handle)
+        ->and($product->seo_title)->toBe('Pearls & Palms Bracelet | Freshwater Pearl Jewellery')
+        ->and($product->seo_description)->toBe('The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.')
+        ->and($row->get(HeaderStore::SEO_TITLE))->toBe('Pearls & Palms Bracelet | Freshwater Pearl Jewellery')
+        ->and($row->get(HeaderStore::SEO_DESCRIPTION))->toBe('The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.');
+});
+
+it('can mirror an existing sku linked seo draft into the product without editing the seo row again', function (): void {
+    $product = createWorkflowTestProduct([
+        'seo_title' => null,
+        'seo_description' => null,
+        'approval_version' => 1,
+    ]);
+    createWorkflowTestVariant($product, [
+        'sku' => 'LAB0183TestStack',
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => null,
+        'shopify_id' => null,
+        'sku' => 'LAB0183TestStack',
+        'title' => 'Pearls & Palms Bracelet Test Stack',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::SEO_TITLE => '',
+            HeaderStore::SEO_DESCRIPTION => '',
+        ],
+    ]);
+
+    $profile = StyleProfile::withoutEvents(fn (): StyleProfile => StyleProfile::create([
+        'product_id' => null,
+        'handle' => null,
+        'sku' => 'LAB0183TestStack',
+        'draft_seo_title' => 'Pearls & Palms Bracelet | Freshwater Pearl Jewellery',
+        'draft_seo_description' => 'The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.',
+        'seo_sync_status' => 'draft',
+    ]));
+
+    expect(NewProductDraftResource::mirrorSeoDraftToProduct($draft))->toBeTrue();
+
+    $product->refresh();
+    $row->refresh();
+    $profile->refresh();
+
+    expect($profile->product_id)->toBe($product->id)
+        ->and($product->seo_title)->toBe('Pearls & Palms Bracelet | Freshwater Pearl Jewellery')
+        ->and($product->seo_description)->toBe('The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.')
+        ->and($row->get(HeaderStore::SEO_TITLE))->toBe('Pearls & Palms Bracelet | Freshwater Pearl Jewellery')
+        ->and($row->get(HeaderStore::SEO_DESCRIPTION))->toBe('The Pearls & Palms Bracelet combines freshwater pearls and delicate metallic beads for a polished everyday stack with tropical ease.');
+});
+
 it('pushes changed draft fields into the linked product on save, including clears', function (): void {
     $product = createWorkflowTestProduct([
         'vendor' => 'Original Vendor',
@@ -77,6 +176,70 @@ it('pushes changed draft fields into the linked product on save, including clear
     expect($product->vendor)->toBeNull();
     expect($product->title)->toBe('Original Title');
     expect($product->approval_version)->toBe(2);
+});
+
+it('pushes changed draft fields into an existing product by sku when the draft handle is blank', function (): void {
+    $product = createWorkflowTestProduct([
+        'handle' => 'the-riviera-escape-necklace-stack',
+        'shopify_id' => null,
+        'vendor' => 'Original Vendor',
+        'published' => null,
+        'approval_version' => 1,
+    ]);
+
+    $variant = createWorkflowTestVariant($product, [
+        'sku' => 'EBB19',
+        'price' => null,
+        'barcode' => null,
+    ]);
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::JEWELRY_MATERIAL => '',
+            HeaderStore::MATERIALS_AND_DIMENSIONS => '',
+            HeaderStore::VARIANT_SKU => '',
+            HeaderStore::VARIANT_PRICE => '',
+            HeaderStore::VARIANT_BARCODE => '',
+        ],
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => null,
+        'shopify_id' => null,
+        'sku' => 'EBB19',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $draft->update([
+        'title' => 'The Riviera Escape Necklace Stack',
+        'vendor' => 'Elevated Basics Bundles',
+        'published' => true,
+        'jewelry_material' => 'gold; silver',
+        'materials_and_dimensions' => "Japanese Miyuki beads\nWax coated cord",
+        'variant_price' => '1160.00',
+        'material_cost' => '63.00',
+    ]);
+
+    $product->refresh();
+    $variant->refresh();
+    $row->refresh();
+
+    expect($product->vendor)->toBe('Elevated Basics Bundles')
+        ->and((bool) $product->published)->toBeTrue()
+        ->and($product->approval_version)->toBeGreaterThan(1)
+        ->and($variant->sku)->toBe('EBB19')
+        ->and($variant->barcode)->toBe('EBB19')
+        ->and($variant->price)->toBe('1160.00')
+        ->and($row->get(HeaderStore::JEWELRY_MATERIAL))->toBe('gold; silver')
+        ->and($row->get(HeaderStore::MATERIALS_AND_DIMENSIONS))->toBe("Japanese Miyuki beads\nWax coated cord")
+        ->and($row->get(HeaderStore::VARIANT_SKU))->toBe('EBB19')
+        ->and($row->get(HeaderStore::VARIANT_PRICE))->toBe('1160.00')
+        ->and($row->get(HeaderStore::VARIANT_BARCODE))->toBe('EBB19');
 });
 
 it('keeps removed complementary products removed after draft sync and reseed', function (): void {

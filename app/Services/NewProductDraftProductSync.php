@@ -21,7 +21,7 @@ final class NewProductDraftProductSync
         bool $ensureApprovalReset = true,
         ?array $attributes = null
     ): bool {
-        if (! $draft->handle && ! $draft->shopify_id) {
+        if (! $draft->handle && ! $draft->shopify_id && ! $draft->sku) {
             return false;
         }
 
@@ -165,12 +165,24 @@ final class NewProductDraftProductSync
 
         $handle = trim((string) ($draft->handle ?? ''));
 
-        if ($handle === '') {
+        if ($handle !== '') {
+            $product = Product::query()
+                ->where('handle', $handle)
+                ->first();
+
+            if ($product) {
+                return $product;
+            }
+        }
+
+        $sku = trim((string) ($draft->sku ?? ''));
+
+        if ($sku === '') {
             return null;
         }
 
         return Product::query()
-            ->where('handle', $handle)
+            ->whereHas('allVariants', fn ($query) => $query->where('sku', $sku))
             ->first();
     }
 
@@ -220,9 +232,14 @@ final class NewProductDraftProductSync
         }
 
         $updates = [];
-        if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
-            $updates['sku'] = $draft->sku;
-            $updates['barcode'] = $draft->sku;
+        $draftSku = trim((string) ($draft->sku ?? ''));
+        if ($draftSku !== '' && (
+            $this->shouldSyncDraftAttribute('sku', $attributes, $draftSku)
+            || trim((string) ($variant->sku ?? '')) === ''
+            || trim((string) ($variant->barcode ?? '')) === ''
+        )) {
+            $updates['sku'] = $draftSku;
+            $updates['barcode'] = $draftSku;
         }
         if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)) {
             $updates['price'] = $draft->variant_price;
@@ -296,11 +313,21 @@ final class NewProductDraftProductSync
 
         $updates = [];
 
-        if ($this->shouldSyncDraftAttribute('sku', $attributes, $draft->sku)) {
-            $updates[HeaderStore::VARIANT_SKU] = trim((string) ($draft->sku ?? ''));
-            $updates[HeaderStore::VARIANT_BARCODE] = trim((string) ($draft->sku ?? ''));
+        $draftSku = trim((string) ($draft->sku ?? ''));
+        if ($draftSku !== '' && (
+            $this->shouldSyncDraftAttribute('sku', $attributes, $draftSku)
+            || trim((string) ($row->get(HeaderStore::VARIANT_SKU, '') ?? '')) === ''
+            || trim((string) ($row->get(HeaderStore::VARIANT_BARCODE, '') ?? '')) === ''
+        )) {
+            $updates[HeaderStore::VARIANT_SKU] = $draftSku;
+            $updates[HeaderStore::VARIANT_BARCODE] = $draftSku;
         }
 
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_PRICE, $draft->variant_price, 'variant_price', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_COMPARE_AT, $draft->variant_compare_at_price, 'variant_compare_at_price', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_INVENTORY_QTY, $draft->variant_inventory_qty, 'variant_inventory_qty', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_GRAMS, $draft->variant_weight, 'variant_weight', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_WEIGHT_UNIT, $draft->variant_weight_unit, 'variant_weight_unit', $attributes);
         $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes);
         $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes);
         $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials, 'product_materials', $attributes);

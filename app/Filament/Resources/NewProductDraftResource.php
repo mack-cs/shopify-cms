@@ -6062,7 +6062,7 @@ class NewProductDraftResource extends Resource
 
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
     {
-        return (bool) ($record->product?->has_errors ?? false);
+        return (bool) (self::linkedProductForDraft($record)?->has_errors ?? false);
     }
 
     private static function draftHasVariantClash(?NewProductDraft $record): bool
@@ -6391,7 +6391,7 @@ class NewProductDraftResource extends Resource
 
     private static function draftErrorFieldsSummary(NewProductDraft $record): string
     {
-        $fields = $record->product?->error_fields;
+        $fields = self::linkedProductForDraft($record)?->error_fields;
 
         if (is_array($fields)) {
             return empty($fields) ? 'All required fields are good.' : implode(', ', $fields);
@@ -6516,7 +6516,7 @@ class NewProductDraftResource extends Resource
         return $src !== '' ? $src : null;
     }
 
-    private static function linkedProductForDraft(NewProductDraft $record): ?Product
+    public static function linkedProductForDraft(NewProductDraft $record): ?Product
     {
         if ($record->relationLoaded('product') && $record->product instanceof Product) {
             $shopifyId = trim((string) ($record->shopify_id ?? ''));
@@ -6529,7 +6529,8 @@ class NewProductDraftResource extends Resource
 
         $product = self::findLinkedProduct(
             is_string($record->shopify_id ?? null) ? $record->shopify_id : null,
-            is_string($record->handle ?? null) ? $record->handle : null
+            is_string($record->handle ?? null) ? $record->handle : null,
+            sku: is_string($record->sku ?? null) ? $record->sku : null
         );
 
         return $product instanceof Product ? $product : null;
@@ -6539,11 +6540,17 @@ class NewProductDraftResource extends Resource
     {
         $shopifyId = trim((string) ($get('shopify_id') ?? $record?->shopify_id ?? ''));
         $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
+        $sku = trim((string) ($get('sku') ?? $record?->sku ?? ''));
 
-        return self::findLinkedProduct($shopifyId !== '' ? $shopifyId : null, $handle !== '' ? $handle : null, $withImages);
+        return self::findLinkedProduct(
+            $shopifyId !== '' ? $shopifyId : null,
+            $handle !== '' ? $handle : null,
+            $withImages,
+            $sku !== '' ? $sku : null
+        );
     }
 
-    private static function findLinkedProduct(?string $shopifyId, ?string $handle, bool $withImages = false): ?Product
+    private static function findLinkedProduct(?string $shopifyId, ?string $handle, bool $withImages = false, ?string $sku = null): ?Product
     {
         $query = Product::query();
 
@@ -6562,8 +6569,18 @@ class NewProductDraftResource extends Resource
         }
 
         if ($handle !== null && trim($handle) !== '') {
-            return $query
+            $product = (clone $query)
                 ->where('handle', trim($handle))
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        if ($sku !== null && trim($sku) !== '') {
+            return $query
+                ->whereHas('allVariants', fn (Builder $variantQuery): Builder => $variantQuery->where('sku', trim($sku)))
                 ->first();
         }
 
@@ -7821,6 +7838,69 @@ class NewProductDraftResource extends Resource
                 ->firstOrFail();
     }
 
+    public static function mirrorSeoDraftToProduct(NewProductDraft $record): bool
+    {
+        $styleProfile = self::seoDraftStyleProfile($record);
+        if (!$styleProfile instanceof StyleProfile) {
+            return false;
+        }
+
+        $product = self::linkedProductForDraft($record);
+        if (!$product instanceof Product) {
+            $product = self::resolvedSeoDraftProduct($record, $styleProfile);
+        }
+
+        if (!$product instanceof Product) {
+            return false;
+        }
+
+        $seoTitle = self::nullIfEmpty($styleProfile->draft_seo_title);
+        $seoDescription = self::nullIfEmpty($styleProfile->draft_seo_description);
+        if ($seoTitle === null && $seoDescription === null) {
+            return false;
+        }
+
+        $updates = [];
+        if ($seoTitle !== null && $product->seo_title !== $seoTitle) {
+            $updates['seo_title'] = $seoTitle;
+        }
+        if ($seoDescription !== null && $product->seo_description !== $seoDescription) {
+            $updates['seo_description'] = $seoDescription;
+        }
+
+        if ($updates !== []) {
+            $product->update($updates);
+            $product->refresh();
+        }
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if ($row) {
+            $row->set(HeaderStore::SEO_TITLE, $seoTitle ?? '');
+            $row->set(HeaderStore::SEO_DESCRIPTION, $seoDescription ?? '');
+            $row->save();
+        }
+
+        $profileUpdates = [];
+        if ((int) ($styleProfile->product_id ?? 0) !== (int) $product->id) {
+            $profileUpdates['product_id'] = $product->id;
+        }
+        if (trim((string) ($styleProfile->handle ?? '')) !== trim((string) ($product->handle ?? ''))) {
+            $profileUpdates['handle'] = $product->handle;
+        }
+
+        if ($profileUpdates !== []) {
+            StyleProfile::withoutEvents(function () use ($styleProfile, $profileUpdates): void {
+                $styleProfile->forceFill($profileUpdates)->save();
+            });
+        }
+
+        return $updates !== [] || $row !== null || $profileUpdates !== [];
+    }
+
     private static function draftStyleProfileAttribute(string $source, string $attribute): ?string
     {
         if ($source !== 'product') {
@@ -7976,11 +8056,19 @@ class NewProductDraftResource extends Resource
 
         $product = self::linkedProductForDraft($record);
         $styleProfile = StyleProfile::query()
-            ->when(
-                $handle !== '',
-                fn ($query) => $query->where('handle', $handle),
-                fn ($query) => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
-            )
+            ->where(function ($query) use ($handle, $sku, $product): void {
+                if ($product instanceof Product) {
+                    $query->orWhere('product_id', $product->id);
+                }
+
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+
+                if ($sku !== '') {
+                    $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+                }
+            })
             ->orderBy('id')
             ->first();
 
