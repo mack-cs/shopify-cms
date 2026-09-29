@@ -116,15 +116,50 @@ final class PrepopulationRuleService
             return null;
         }
 
-        $slug = Str::slug($value);
+        $slugs = $this->collectionLookupSlugs($value);
+        $lowerSlugs = array_map('strtolower', $slugs);
 
         return PrepopulationRule::query()
             ->where('behavior', $behavior)
-            ->where(function ($query) use ($value, $slug): void {
-                $query->whereRaw('LOWER(handle) = ?', [strtolower($slug)])
+            ->where(function ($query) use ($value, $slugs, $lowerSlugs): void {
+                $query->whereRaw('LOWER(handle) IN (' . implode(',', array_fill(0, count($lowerSlugs), '?')) . ')', $lowerSlugs)
                     ->orWhereRaw('LOWER(collection_name) = ?', [strtolower($value)]);
+
+                foreach ($slugs as $slug) {
+                    $query->orWhereJsonContains('add_tags', $slug);
+                }
             })
             ->first();
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function collectionLookupSlugs(string $value): array
+    {
+        $slug = Str::slug($value);
+        $slugs = [$slug];
+
+        foreach ([
+            '-bundles' => '-stacks',
+            '-bundle' => '-stack',
+            '-stacks' => '-bundles',
+            '-stack' => '-bundle',
+        ] as $from => $to) {
+            if (str_ends_with($slug, $from)) {
+                $slugs[] = substr($slug, 0, -strlen($from)) . $to;
+            }
+        }
+
+        if (str_contains($slug, '-bundle-')) {
+            $slugs[] = str_replace('-bundle-', '-stack-', $slug);
+        }
+
+        if (str_contains($slug, '-stack-')) {
+            $slugs[] = str_replace('-stack-', '-bundle-', $slug);
+        }
+
+        return array_values(array_unique($slugs));
     }
 
     private function ensureDropdownOption(string $header, string $value, PrepopulationRule $rule): void

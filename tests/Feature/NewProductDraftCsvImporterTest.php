@@ -152,6 +152,65 @@ it('prepopulates draft fields from an imported collection tag', function (): voi
     @unlink($path);
 });
 
+it('prepopulates stack fields when the imported collection tag is a bundle tag added by a stack rule', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-stacks',
+        'collection_name' => 'Elevated Basics Stacks',
+        'add_tags' => [
+            'all-products',
+            'all-products-collections',
+            'bundles',
+            'elevated-basics-bundles',
+            'elevated-basics',
+            'bracelets',
+            'bracelet',
+        ],
+        'auto_vendor' => 'Elevated Basics Bundles',
+        'auto_type' => 'Bracelets',
+        'auto_product_category' => 'gid://shopify/TaxonomyCategory/aa-6-3',
+        'auto_google_product_category' => '191',
+        'auto_status' => 'draft',
+        'auto_design' => 'beaded',
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $component = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Pearls and Palms Bracelet',
+        'handle' => 'pearls-and-palms-bracelet',
+        'shopify_id' => 'gid://shopify/Product/720001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $component->id,
+        'sku' => 'LAB-COMP-001',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-bundle-tag-import-');
+    file_put_contents(
+        $path,
+        "SKU,Collection Tag,Title,Associated Product SKUs\n"
+        ."LAB0182TestStack,elevated-basics-bundles,Sunday in Bali Bracelet Test Stack,LAB-COMP-001\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'LAB0182TestStack')->first();
+    $tags = App\Services\TagNormalizer::parseTokens($draft?->tags);
+
+    expect($result['created'])->toBe(1)
+        ->and($result['prepopulation_applied'])->toBe(1)
+        ->and($result['prepopulation_unmatched'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->vendor)->toBe('Elevated Basics Bundles')
+        ->and($draft->type)->toBe('Bracelets')
+        ->and($tags)->toContain('bundles', 'elevated-basics-bundles')
+        ->and($draft->bundle_product_ids)->toBe([$component->id]);
+
+    @unlink($path);
+});
+
 it('upserts seo draft data for new product csv rows without a handle', function (): void {
     PrepopulationRule::query()->create([
         'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
