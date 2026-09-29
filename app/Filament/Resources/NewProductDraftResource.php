@@ -7760,7 +7760,11 @@ class NewProductDraftResource extends Resource
     {
         $product = self::resolvedSeoDraftProduct($ownerRecord);
 
-        $data['handle'] = $ownerRecord?->handle;
+        $ownerHandle = trim((string) ($ownerRecord?->handle ?? ''));
+        $ownerSku = trim((string) ($ownerRecord?->sku ?? $data['sku'] ?? ''));
+        $data['handle'] = $ownerHandle !== ''
+            ? $ownerHandle
+            : (trim((string) ($product?->handle ?? '')) ?: \Illuminate\Support\Str::slug((string) ($ownerRecord?->title ?: $ownerSku)));
         $data['product_id'] = $product?->id;
         $data['sku'] = self::resolvedSeoDraftSku($ownerRecord) ?? self::nullIfEmpty($data['sku'] ?? null);
 
@@ -7783,8 +7787,8 @@ class NewProductDraftResource extends Resource
 
     public static function saveSeoDraft(NewProductDraft $record, array $data): StyleProfile
     {
-        if (blank(trim((string) ($record->handle ?? '')))) {
-            throw new \InvalidArgumentException('Draft needs a handle before an SEO draft can be saved.');
+        if (blank(trim((string) ($record->handle ?? ''))) && blank(trim((string) ($record->sku ?? '')))) {
+            throw new \InvalidArgumentException('Draft needs a SKU before an SEO draft can be saved.');
         }
 
         $normalized = self::normalizeSeoDraftFormData($record, $data);
@@ -7808,7 +7812,11 @@ class NewProductDraftResource extends Resource
 
         return self::seoDraftStyleProfile($record->fresh('styleProfiles') ?? $record)
             ?? StyleProfile::query()
-                ->where('handle', $record->handle)
+                ->when(
+                    filled(trim((string) ($record->handle ?? ''))),
+                    fn ($query) => $query->where('handle', $record->handle),
+                    fn ($query) => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower(trim((string) $record->sku))])
+                )
                 ->latest('id')
                 ->firstOrFail();
     }
@@ -7833,9 +7841,22 @@ class NewProductDraftResource extends Resource
 
     private static function seoDraftStyleProfile(NewProductDraft $record): ?StyleProfile
     {
-        $profile = $record->relationLoaded('styleProfiles')
-            ? $record->styleProfiles->first()
-            : $record->styleProfiles()->first();
+        $handle = trim((string) ($record->handle ?? ''));
+        $sku = trim((string) ($record->sku ?? ''));
+
+        $profile = null;
+        if ($handle !== '') {
+            $profile = $record->relationLoaded('styleProfiles')
+                ? $record->styleProfiles->first()
+                : $record->styleProfiles()->first();
+        }
+
+        if (!$profile instanceof StyleProfile && $sku !== '') {
+            $profile = StyleProfile::query()
+                ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
+                ->orderBy('id')
+                ->first();
+        }
 
         return $profile instanceof StyleProfile ? $profile : null;
     }
@@ -7948,29 +7969,39 @@ class NewProductDraftResource extends Resource
     private static function upsertDraftStyleProfile(NewProductDraft $record, array $updates): void
     {
         $handle = trim((string) ($record->handle ?? ''));
-        if ($handle === '') {
+        $sku = trim((string) ($record->sku ?? ''));
+        if ($handle === '' && $sku === '') {
             return;
         }
 
         $product = self::linkedProductForDraft($record);
         $styleProfile = StyleProfile::query()
-            ->where('handle', $handle)
+            ->when(
+                $handle !== '',
+                fn ($query) => $query->where('handle', $handle),
+                fn ($query) => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
+            )
+            ->orderBy('id')
             ->first();
+
+        $styleHandle = $handle !== ''
+            ? $handle
+            : (trim((string) ($product?->handle ?? '')) ?: \Illuminate\Support\Str::slug((string) ($record->title ?: $sku)));
 
         if (!$styleProfile) {
             $styleProfile = new StyleProfile([
-                'handle' => $handle,
+                'handle' => $styleHandle,
             ]);
         }
 
         $styleProfile->product_id = $product?->id;
-        $styleProfile->handle = $handle;
+        $styleProfile->handle = $styleHandle;
 
         if (!filled($styleProfile->sku)) {
             $styleProfile->sku = trim((string) (
                 $record->sku
                 ?? $product?->variants()->orderBy('id')->value('sku')
-                ?? $handle
+                ?? $styleHandle
             )) ?: null;
         }
 

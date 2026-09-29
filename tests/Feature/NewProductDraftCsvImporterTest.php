@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\StyleProfile;
 use App\Models\User;
 use App\Models\Variant;
+use App\Filament\Resources\NewProductDraftResource;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftRoundtripCsvService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -177,17 +178,42 @@ it('upserts seo draft data for new product csv rows without a handle', function 
     $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
 
     $draft = NewProductDraft::query()->where('sku', 'LAB0182TestF')->first();
-    $profile = StyleProfile::query()->where('handle', 'test-productdf-28-sept')->first();
+    $profile = StyleProfile::query()->where('sku', 'LAB0182TestF')->first();
 
     expect($result['created'])->toBe(1)
         ->and($result['seo_drafts_upserted'])->toBe(1)
         ->and($draft)->not->toBeNull()
-        ->and($draft->handle)->toBe('test-productdf-28-sept')
+        ->and($draft->handle)->toBeNull()
         ->and($profile)->not->toBeNull()
+        ->and($profile->handle)->toBe('test-productdf-28-sept')
         ->and($profile->draft_seo_title)->toBe($seoTitle)
         ->and($profile->draft_seo_description)->toBe($seoDescription);
 
     @unlink($path);
+});
+
+it('saves and reads seo drafts for sku only drafts without writing a draft handle', function (): void {
+    $draft = NewProductDraft::create([
+        'sku' => 'SKU-SEO-ONLY',
+        'title' => 'SKU SEO Only Product',
+    ]);
+
+    $seoTitle = 'SKU SEO Only Product | Gold Beaded Bracelet Gift';
+    $seoDescription = 'SKU SEO Only Product is a polished gold beaded bracelet with everyday styling appeal, made for gifting, stacking, and adding a refined finish.';
+
+    $profile = NewProductDraftResource::saveSeoDraft($draft, [
+        'draft_seo_title' => $seoTitle,
+        'draft_seo_description' => $seoDescription,
+    ]);
+
+    $draft->refresh();
+    $formData = NewProductDraftResource::seoDraftFormData($draft);
+
+    expect($draft->handle)->toBeNull()
+        ->and($profile->sku)->toBe('SKU-SEO-ONLY')
+        ->and($profile->handle)->toBe('sku-seo-only-product')
+        ->and($formData['draft_seo_title'])->toBe($seoTitle)
+        ->and($formData['draft_seo_description'])->toBe($seoDescription);
 });
 
 it('resolves complementary product skus to existing product references', function (): void {

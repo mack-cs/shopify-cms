@@ -390,15 +390,6 @@ final class NewProductDraftCsvImporter
                     $this->syncImportedDraftToProduct($draft, $data, $payload);
                     $updated++;
                 } else {
-                    if (
-                        ! isset($data['handle'])
-                        && ! empty($seoDraftData)
-                        && trim((string) ($data['title'] ?? '')) !== ''
-                    ) {
-                        $data['handle'] = Str::slug((string) $data['title']);
-                        $handle = $data['handle'];
-                    }
-
                     $data['payload'] = $payload ?: null;
                     $data['created_by'] = Auth::id();
                     $data['variant_inventory_policy'] = $data['variant_inventory_policy'] ?? 'deny';
@@ -411,28 +402,35 @@ final class NewProductDraftCsvImporter
                     $created++;
                 }
 
-                $resolvedHandle = trim((string) ($handle ?: $draft?->handle ?: '')) ?: null;
+                if (! empty($seoDraftData)) {
+                    $resolvedSku = trim((string) ($data['sku'] ?? $draft?->sku ?? $sku ?? ''));
+                    $resolvedHandle = trim((string) ($handle ?: $draft?->handle ?: '')) ?: null;
+                    $inferredHandle = $resolvedHandle
+                        ?: (trim((string) ($data['title'] ?? $draft?->title ?? '')) !== ''
+                            ? Str::slug((string) ($data['title'] ?? $draft?->title))
+                            : null);
 
-                if (! empty($seoDraftData) && $resolvedHandle) {
-                    $product = Product::query()
-                        ->where('handle', $resolvedHandle)
-                        ->with('variants')
-                        ->first();
+                    $product = $this->productForSeoDraft($resolvedSku, $resolvedHandle);
+                    $styleProfile = $this->styleProfileForSeoDraft($resolvedSku, $resolvedHandle);
+                    $styleProfileHandle = $resolvedHandle
+                        ?: trim((string) ($product?->handle ?? ''))
+                        ?: $inferredHandle;
+                    $styleProfileSku = trim((string) (
+                        $styleProfile?->sku
+                        ?? $resolvedSku
+                        ?? $product?->variants()->orderBy('id')->value('sku')
+                        ?? $styleProfileHandle
+                    ));
 
-                    $styleProfile = StyleProfile::where('handle', $resolvedHandle)->first();
-                    $styleProfileData = array_merge(
-                        $seoDraftData,
-                        [
-                            'handle' => $resolvedHandle,
-                            'product_id' => $product?->id,
-                            'sku' => trim((string) (
-                                $styleProfile?->sku
-                                ?? $data['sku']
-                                ?? $product?->variants->first()?->sku
-                                ?? $resolvedHandle
-                            )),
-                        ]
-                    );
+                    if ($styleProfileSku === '' || trim((string) $styleProfileHandle) === '') {
+                        continue;
+                    }
+
+                    $styleProfileData = array_merge($seoDraftData, [
+                        'handle' => $styleProfileHandle,
+                        'product_id' => $product?->id,
+                        'sku' => $styleProfileSku,
+                    ]);
 
                     if ($styleProfile) {
                         $styleProfile->update($styleProfileData);
@@ -544,6 +542,55 @@ final class NewProductDraftCsvImporter
 
         return NewProductDraft::query()
             ->whereRaw('LOWER(TRIM(handle)) = ?', [strtolower($trimmedHandle)])
+            ->first();
+    }
+
+    private function productForSeoDraft(?string $sku, ?string $handle): ?Product
+    {
+        $trimmedHandle = trim((string) ($handle ?? ''));
+        if ($trimmedHandle !== '') {
+            $product = Product::query()
+                ->where('handle', $trimmedHandle)
+                ->first();
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $trimmedSku = trim((string) ($sku ?? ''));
+        if ($trimmedSku === '') {
+            return null;
+        }
+
+        $variant = Variant::query()
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($trimmedSku)])
+            ->with('product')
+            ->orderBy('id')
+            ->first();
+
+        return $variant?->product instanceof Product ? $variant->product : null;
+    }
+
+    private function styleProfileForSeoDraft(?string $sku, ?string $handle): ?StyleProfile
+    {
+        $trimmedHandle = trim((string) ($handle ?? ''));
+        if ($trimmedHandle !== '') {
+            $profile = StyleProfile::query()
+                ->where('handle', $trimmedHandle)
+                ->first();
+            if ($profile instanceof StyleProfile) {
+                return $profile;
+            }
+        }
+
+        $trimmedSku = trim((string) ($sku ?? ''));
+        if ($trimmedSku === '') {
+            return null;
+        }
+
+        return StyleProfile::query()
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($trimmedSku)])
+            ->orderBy('id')
             ->first();
     }
 

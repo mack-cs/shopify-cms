@@ -28,7 +28,16 @@ class StyleProfileRelationManager extends RelationManager
 
     public function table(Table $table): Table
     {
-        return $table->columns([
+        return $table->modifyQueryUsing(function (Builder $query): Builder {
+            $owner = $this->getOwnerRecord();
+            $sku = trim((string) ($owner?->sku ?? ''));
+
+            if ($sku === '') {
+                return $query;
+            }
+
+            return $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+        })->columns([
             ImageColumn::make('image_url')
                 ->label('Image')
                 ->square()
@@ -65,8 +74,7 @@ class StyleProfileRelationManager extends RelationManager
                 }),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
-                ->visible(fn (): bool => filled(trim((string) ($this->getOwnerRecord()?->handle ?? '')))
-                    && !(bool) $this->getOwnerRecord()?->styleProfiles()->exists())
+                ->visible(fn (): bool => $this->canCreateSeoDraft())
                 ->mutateFormDataUsing(function (array $data): array {
                     return NewProductDraftResource::normalizeSeoDraftFormData($this->getOwnerRecord(), $data);
                 }),
@@ -80,6 +88,28 @@ class StyleProfileRelationManager extends RelationManager
                 }),
             Tables\Actions\DeleteAction::make(),
         ]);
+    }
+
+    private function canCreateSeoDraft(): bool
+    {
+        $owner = $this->getOwnerRecord();
+        if (!$owner) {
+            return false;
+        }
+
+        $handle = trim((string) ($owner->handle ?? ''));
+        $sku = trim((string) ($owner->sku ?? ''));
+        if ($handle === '' && $sku === '') {
+            return false;
+        }
+
+        return !StyleProfile::query()
+            ->when(
+                $handle !== '',
+                fn (Builder $query): Builder => $query->where('handle', $handle),
+                fn (Builder $query): Builder => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
+            )
+            ->exists();
     }
 
     private function resolvedProduct(?StyleProfile $record): ?Product
