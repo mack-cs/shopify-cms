@@ -143,7 +143,8 @@
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
                     </x-filament::section>
                 @endif
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'products']) wire:key="syv-products-panel">
+                @if ($activeTab === 'products')
+                <div class="space-y-6" wire:key="syv-products-panel">
                     <div class="flex items-center justify-between gap-3">
                         <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
                         <input type="search" wire:model.live.debounce.300ms="assignmentProductSearch"
@@ -196,8 +197,6 @@
                     @endif
                         @if (count($filteredParentProducts) > 0)
                         @foreach ($filteredParentProducts as $product)
-                            @php($productTags = collect($product['tags'])->map(fn ($tag) => mb_strtolower(trim($tag))))
-                            @php($assignments = collect($vibeMappings)->filter(fn ($mapping) => filled($mapping['membership_tag'] ?? null) && $productTags->contains(mb_strtolower(trim($mapping['membership_tag'])))))
                                         <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                                 @if ($parentCanSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
                                 @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
@@ -209,8 +208,8 @@
                                 <div class="my-3 syv-vibe-badge-list">
                                     <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
                                     <div class="syv-vibe-badges">
-                                    @forelse ($assignments as $assignment)
-                                        <x-filament::badge color="info">{{ $assignment['collection_name'] }}</x-filament::badge>
+                                    @forelse (($product['vibe_assignments'] ?? []) as $assignment)
+                                        <x-filament::badge color="info">{{ $assignment }}</x-filament::badge>
                                     @empty
                                         <span class="syv-empty-state">None</span>
                                     @endforelse
@@ -237,12 +236,14 @@
                         @endif
                     </div>
                 </div>
-                <div @class(['space-y-6', 'hidden' => $activeTab !== 'vibes']) wire:key="syv-vibes-panel">
+                @endif
+                @if ($activeTab === 'vibes')
+                <div class="space-y-6" wire:key="syv-vibes-panel">
                 <div class="flex items-center justify-between gap-3">
                     <div><h3 class="text-lg font-semibold">Vibes</h3><p class="text-sm text-gray-500">Drag the grip to reorder. Reordering saves a pending draft.</p></div>
                     <div class="flex flex-wrap gap-2">
-                        <x-filament::button color="gray" wire:click="openMappingUpload" wire:loading.attr="disabled">Bulk Upload Mappings</x-filament::button>
-                        <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled">Add Vibe</x-filament::button>
+                        <x-filament::button color="gray" wire:click="openMappingUpload" wire:loading.attr="disabled" wire:target="openMappingUpload">Bulk Upload Mappings</x-filament::button>
+                        <x-filament::button wire:click="openCollectionPicker(true)" wire:loading.attr="disabled" wire:target="openCollectionPicker">Add Vibe</x-filament::button>
                     </div>
                 </div>
                 <div data-order-grid class="syv-card-grid"
@@ -378,6 +379,7 @@
                     </x-filament::section>
                 @endif
                 </div>
+                @endif
             </fieldset>
         @endif
 

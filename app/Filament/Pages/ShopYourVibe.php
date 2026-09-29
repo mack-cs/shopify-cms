@@ -1022,18 +1022,41 @@ class ShopYourVibe extends Page
                 ->orderBy('title')->limit(60)->get()->unique('shopify_id');
         }
 
+        $showProductList = $this->activeTab === 'products'
+            || filled($this->managingProductGid)
+            || filled($this->managingSiblingProductGid);
         $managedProduct = $this->managingProductGid
             ? collect($this->parentProducts)->firstWhere('id', $this->managingProductGid)
             : null;
-        $needle = mb_strtolower(trim($this->assignmentProductSearch));
-        $filteredParentProducts = collect($this->parentProducts)->filter(function (array $product) use ($needle): bool {
-            if ($needle === '') {
-                return true;
-            }
+        $filteredParentProducts = [];
+        if ($showProductList) {
+            $membershipLabels = collect($this->vibeMappings)
+                ->filter(fn ($mapping): bool => filled($mapping['membership_tag'] ?? null))
+                ->mapWithKeys(fn ($mapping): array => [
+                    mb_strtolower(trim((string) $mapping['membership_tag'])) => $mapping['collection_name'],
+                ]);
+            $needle = mb_strtolower(trim($this->assignmentProductSearch));
+            $filteredParentProducts = collect($this->parentProducts)
+                ->filter(function (array $product) use ($needle): bool {
+                    if ($needle === '') {
+                        return true;
+                    }
 
-            return str_contains(mb_strtolower((string) ($product['title'] ?? '')), $needle)
-                || str_contains(mb_strtolower((string) ($product['sku'] ?? '')), $needle);
-        })->values()->all();
+                    return str_contains(mb_strtolower((string) ($product['title'] ?? '')), $needle)
+                        || str_contains(mb_strtolower((string) ($product['sku'] ?? '')), $needle);
+                })
+                ->map(function (array $product) use ($membershipLabels): array {
+                    $productTags = collect($product['tags'] ?? [])->map(fn ($tag): string => mb_strtolower(trim((string) $tag)));
+                    $product['vibe_assignments'] = $membershipLabels
+                        ->filter(fn ($_name, string $tag): bool => $productTags->contains($tag))
+                        ->values()
+                        ->all();
+
+                    return $product;
+                })
+                ->values()
+                ->all();
+        }
         $selectedVibes = collect($this->selectedVibes);
         $originalVibes = collect($this->originalSelectedVibes);
         $assignmentAdds = collect($this->vibeMappings)
