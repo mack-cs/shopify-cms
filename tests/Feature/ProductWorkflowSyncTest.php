@@ -242,6 +242,55 @@ it('pushes changed draft fields into an existing product by sku when the draft h
         ->and($row->get(HeaderStore::VARIANT_BARCODE))->toBe('EBB19');
 });
 
+it('creates a missing primary shopify row when mirroring draft fields by sku', function (): void {
+    $product = createWorkflowTestProduct([
+        'handle' => 'wanderlust-wine-necklace-stack',
+        'shopify_id' => null,
+        'approval_version' => 1,
+    ]);
+
+    createWorkflowTestVariant($product, [
+        'sku' => 'EBBN17',
+        'price' => null,
+        'barcode' => null,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => null,
+        'shopify_id' => null,
+        'sku' => 'EBBN17',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $draft->update([
+        'title' => 'Wanderlust & Wine Necklace Stack',
+        'jewelry_material' => 'gold; silver',
+        'materials_and_dimensions' => "Freshwater pearls\nStainless steel",
+        'uvp_short_paragraph' => 'A layered necklace stack with luminous pearl details and everyday polish.',
+        'variant_price' => '540.00',
+        'variant_inventory_qty' => 13,
+        'variant_weight' => '46.000',
+        'variant_weight_unit' => 'g',
+    ]);
+
+    $row = ShopifyRow::query()
+        ->where('import_id', $product->import_id)
+        ->where('handle', $product->handle)
+        ->where('row_type', 'product_primary')
+        ->firstOrFail();
+
+    expect($row->get(HeaderStore::VARIANT_SKU))->toBe('EBBN17')
+        ->and($row->get(HeaderStore::VARIANT_BARCODE))->toBe('EBBN17')
+        ->and($row->get(HeaderStore::VARIANT_PRICE))->toBe('540.00')
+        ->and($row->get(HeaderStore::VARIANT_INVENTORY_QTY))->toBe('13')
+        ->and($row->get(HeaderStore::VARIANT_GRAMS))->toBe('46.000')
+        ->and($row->get(HeaderStore::VARIANT_WEIGHT_UNIT))->toBe('g')
+        ->and($row->get(HeaderStore::JEWELRY_MATERIAL))->toBe('gold; silver')
+        ->and($row->get(HeaderStore::MATERIALS_AND_DIMENSIONS))->toBe("Freshwater pearls\nStainless steel")
+        ->and($row->get(HeaderStore::UVP_SHORT_PARAGRAPH))->toBe('A layered necklace stack with luminous pearl details and everyday polish.');
+});
+
 it('keeps removed complementary products removed after draft sync and reseed', function (): void {
     $product = createWorkflowTestProduct([
         'approval_version' => 1,

@@ -276,10 +276,7 @@ final class NewProductDraftProductSync
             return;
         }
 
-        $row = ShopifyRow::where('import_id', $product->import_id)
-            ->where('handle', $product->handle)
-            ->where('row_type', 'product_primary')
-            ->first();
+        $row = $this->primaryShopifyRowForDraft($product, $draft);
 
         if (! $row) {
             return;
@@ -302,10 +299,7 @@ final class NewProductDraftProductSync
 
     private function syncShopifyRowFieldsFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
     {
-        $row = ShopifyRow::where('import_id', $product->import_id)
-            ->where('handle', $product->handle)
-            ->where('row_type', 'product_primary')
-            ->first();
+        $row = $this->primaryShopifyRowForDraft($product, $draft);
 
         if (! $row) {
             return;
@@ -395,6 +389,7 @@ final class NewProductDraftProductSync
             $row->set($header, $value);
         }
 
+        $row->handle = $product->handle;
         $row->save();
 
         if ($seoDeindexChanged) {
@@ -455,6 +450,58 @@ final class NewProductDraftProductSync
         }
 
         $updates[$header] = is_scalar($value) ? (string) $value : '';
+    }
+
+    private function primaryShopifyRowForDraft(Product $product, NewProductDraft $draft): ?ShopifyRow
+    {
+        if (!$product->import_id) {
+            return null;
+        }
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if ($row instanceof ShopifyRow) {
+            return $row;
+        }
+
+        $sku = trim((string) ($draft->sku ?? ''));
+        if ($sku === '') {
+            $sku = trim((string) ($product->allVariants()->orderBy('id')->value('sku') ?? ''));
+        }
+
+        if ($sku !== '') {
+            $row = ShopifyRow::query()
+                ->where('import_id', $product->import_id)
+                ->where('row_type', 'product_primary')
+                ->get()
+                ->first(function (ShopifyRow $candidate) use ($sku): bool {
+                    return strcasecmp(
+                        trim((string) ($candidate->get(HeaderStore::VARIANT_SKU, '') ?? '')),
+                        $sku
+                    ) === 0;
+                });
+
+            if ($row instanceof ShopifyRow) {
+                $row->handle = $product->handle;
+                return $row;
+            }
+        }
+
+        $rowIndex = ((int) ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->max('row_index')) + 1;
+
+        return new ShopifyRow([
+            'import_id' => $product->import_id,
+            'row_index' => $rowIndex,
+            'handle' => $product->handle,
+            'row_type' => 'product_primary',
+            'data' => [],
+        ]);
     }
 
     /**
