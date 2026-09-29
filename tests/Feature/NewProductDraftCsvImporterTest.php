@@ -8,7 +8,9 @@ use App\Models\StyleProfile;
 use App\Models\User;
 use App\Models\Variant;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\NewProductDraftRoundtripCsvService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
@@ -241,6 +243,81 @@ it('resolves complementary product skus to handles from the same csv import', fu
         ->and($draft->complementary_products)->toBe('new-comp-necklace');
 
     @unlink($path);
+});
+
+it('resolves associated product references from the product template into local product links', function (): void {
+    $first = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Associated First Bracelet',
+        'handle' => 'associated-first-bracelet',
+        'shopify_id' => 'gid://shopify/Product/700001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $first->id,
+        'sku' => 'ASSOC-FIRST-001',
+    ]);
+
+    $second = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Associated Second Bracelet',
+        'handle' => 'associated-second-bracelet',
+        'shopify_id' => 'gid://shopify/Product/700002',
+        'status' => 'active',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-associated-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Tags,Color Style,Associated Product SKUs,Associated Products\n"
+        ."STACK-001,Main Bracelet Stack,bundles,solid,ASSOC-FIRST-001,associated-second-bracelet\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'STACK-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['resolved_product_references'])->toBe(2)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->colour_style)->toBe('solid')
+        ->and($draft->bundle_product_ids)->toBe([$second->id, $first->id]);
+
+    @unlink($path);
+});
+
+it('exports associated products as a populateable product template column', function (): void {
+    $first = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Export First Bracelet',
+        'handle' => 'export-first-bracelet',
+        'shopify_id' => 'gid://shopify/Product/710001',
+        'status' => 'active',
+    ]);
+    $second = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Export Second Bracelet',
+        'handle' => 'export-second-bracelet',
+        'shopify_id' => 'gid://shopify/Product/710002',
+        'status' => 'active',
+    ]);
+
+    $draft = NewProductDraft::create([
+        'handle' => 'export-stack',
+        'sku' => 'EXPORT-STACK',
+        'title' => 'Export Stack',
+        'tags' => 'bundles',
+        'bundle_product_ids' => [$first->id, $second->id],
+    ]);
+
+    $result = app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['associated_products']);
+
+    $csv = Storage::disk($result['disk'])->get($result['path']);
+
+    expect($csv)
+        ->toContain('Associated Products')
+        ->toContain('export-first-bracelet; export-second-bracelet');
 });
 
 it('still rejects an update when another product owns the same sku', function (): void {

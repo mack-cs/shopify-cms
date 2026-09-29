@@ -211,12 +211,23 @@
                                     @forelse ($assignments as $assignment)
                                         <x-filament::badge color="info">{{ $assignment['collection_name'] }}</x-filament::badge>
                                     @empty
-                                        <span class="text-sm text-gray-500">None</span>
+                                        <span class="syv-empty-state">None</span>
                                     @endforelse
                                     </div>
                                 </div>
-                                <div class="flex flex-wrap gap-2 syv-vibe-actions">
-                                    <x-filament::button size="xs" color="warning" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</x-filament::button>
+                                <div class="my-3 syv-vibe-badge-list">
+                                    <p class="text-xs font-semibold uppercase text-gray-500">Siblings</p>
+                                    <div class="syv-vibe-badges">
+                                    @forelse (($product['siblings'] ?? []) as $sibling)
+                                        <span class="syv-sibling-badge">{{ strtoupper($sibling['label']) }}</span>
+                                    @empty
+                                        <span class="syv-empty-state">None</span>
+                                    @endforelse
+                                    </div>
+                                </div>
+                                <div class="syv-vibe-actions">
+                                    <x-filament::button size="xs" color="warning" icon="heroicon-m-pencil-square" class="syv-card-action syv-vibe-button" wire:click="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</x-filament::button>
+                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
                                 </div>
                             </article>
                         @endforeach
@@ -451,6 +462,29 @@
             <x-slot name="footer">
                 <x-filament::button color="danger" wire:click="saveProductAssignments" wire:loading.attr="disabled">Yes, update Shopify</x-filament::button>
                 <x-filament::button color="gray" wire:click="cancelProductAssignmentConfirmation">Go back</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="manage-sibling-assignments" width="2xl" heading="Manage Siblings">
+            @php($siblingProduct = $managingSiblingProductGid ? collect($parentProducts)->firstWhere('id', $managingSiblingProductGid) : null)
+            @if ($siblingProduct)
+                <p class="font-semibold">{{ $siblingProduct['title'] }}</p>
+                <p class="mb-4 text-sm text-gray-500">SKU: {{ $siblingProduct['sku'] ?: 'No SKU' }}</p>
+                <div class="space-y-3">
+                    @forelse ($siblingOptions as $option)
+                        <label class="flex items-start gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                            <input type="checkbox" wire:model="selectedSiblings" value="{{ $option['tag'] }}">
+                            <span><strong>{{ $option['label'] }}</strong><small class="block text-gray-500">{{ $option['tag'] }}</small></span>
+                        </label>
+                    @empty
+                        <p class="text-sm text-gray-500">No sibling collections were found for this main collection.</p>
+                    @endforelse
+                </div>
+                <p class="mt-4 text-sm text-gray-500">Saving immediately updates only the sibling tags for this product in Shopify. Unrelated tags are preserved.</p>
+            @endif
+            <x-slot name="footer">
+                <x-filament::button wire:click="saveProductSiblings" wire:loading.attr="disabled">Save siblings</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-sibling-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
 

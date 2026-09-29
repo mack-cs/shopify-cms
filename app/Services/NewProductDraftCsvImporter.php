@@ -102,6 +102,7 @@ final class NewProductDraftCsvImporter
             'product design beaded' => 'product_design',
             'metal' => 'metal',
             'pattern category' => 'colour_style',
+            'color style' => 'colour_style',
             'colour style' => 'colour_style',
             'colour style solid multicolor' => 'colour_style',
             'size' => 'size',
@@ -115,6 +116,21 @@ final class NewProductDraftCsvImporter
             'complementary product skus' => 'complementary_product_skus',
             'complementary products skus' => 'complementary_product_skus',
             'complementary skus' => 'complementary_product_skus',
+            'associated products' => 'associated_products',
+            'associated product handles' => 'associated_products',
+            'associated products handles' => 'associated_products',
+            'associated product skus' => 'associated_product_skus',
+            'associated products skus' => 'associated_product_skus',
+            'associated skus' => 'associated_product_skus',
+            'bundle products' => 'associated_products',
+            'bundle product handles' => 'associated_products',
+            'bundle product skus' => 'associated_product_skus',
+            'component products' => 'associated_products',
+            'component product handles' => 'associated_products',
+            'component product skus' => 'associated_product_skus',
+            'stack products' => 'associated_products',
+            'stack product handles' => 'associated_products',
+            'stack product skus' => 'associated_product_skus',
         ];
 
         $seoDraftMap = [
@@ -285,6 +301,16 @@ final class NewProductDraftCsvImporter
                     $unresolvedProductReferences += $unresolvedCount;
                 }
                 unset($data['complementary_product_skus']);
+
+                if (array_key_exists('associated_products', $data) || array_key_exists('associated_product_skus', $data)) {
+                    [$data['bundle_product_ids'], $resolvedCount, $unresolvedCount] = $this->normalizeAssociatedProductField(
+                        $data['associated_products'] ?? null,
+                        $data['associated_product_skus'] ?? null
+                    );
+                    $resolvedProductReferences += $resolvedCount;
+                    $unresolvedProductReferences += $unresolvedCount;
+                }
+                unset($data['associated_products'], $data['associated_product_skus']);
 
                 if ($this->failsProductReferenceRules($data)) {
                     $skippedReferenceValidation++;
@@ -738,6 +764,84 @@ final class NewProductDraftCsvImporter
         $lookup = $this->productReferenceLookup();
 
         return $lookup[$normalized] ?? null;
+    }
+
+    /**
+     * @return array{0:?array<int, int>,1:int,2:int}
+     */
+    private function normalizeAssociatedProductField(?string $value, ?string $skuValue = null): array
+    {
+        $tokens = $this->parseProductReferenceTokens($value);
+        $skuTokens = $this->parseProductReferenceTokens($skuValue);
+        if ($tokens === [] && $skuTokens === []) {
+            return [null, 0, 0];
+        }
+
+        $productIds = [];
+        $resolvedCount = 0;
+        $unresolvedCount = 0;
+
+        foreach ($tokens as $token) {
+            $productId = $this->resolveAssociatedProductToken($token);
+            if ($productId !== null) {
+                $productIds[] = $productId;
+                $resolvedCount++;
+
+                continue;
+            }
+
+            $unresolvedCount++;
+        }
+
+        foreach ($skuTokens as $token) {
+            $productId = $this->resolveAssociatedProductSku($token);
+            if ($productId !== null) {
+                $productIds[] = $productId;
+                $resolvedCount++;
+
+                continue;
+            }
+
+            $unresolvedCount++;
+        }
+
+        $productIds = array_values(array_unique(array_filter(
+            array_map('intval', $productIds),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        return [$productIds === [] ? null : $productIds, $resolvedCount, $unresolvedCount];
+    }
+
+    private function resolveAssociatedProductSku(string $sku): ?int
+    {
+        $reference = $this->resolveProductReferenceSku($sku);
+
+        return $reference === null ? null : $this->resolveAssociatedProductToken($reference);
+    }
+
+    private function resolveAssociatedProductToken(string $token): ?int
+    {
+        $reference = $this->resolveProductReferenceToken($token) ?? trim($token);
+        if ($reference === '') {
+            return null;
+        }
+
+        if (preg_match('#(?:^|/)products/([a-z0-9][a-z0-9\\-]*)(?:[/?\\#].*)?$#i', $reference, $matches)) {
+            $reference = $matches[1];
+        }
+
+        $normalized = $this->normalizeReferenceToken($reference);
+        if ($normalized === '') {
+            return null;
+        }
+
+        $product = Product::query()
+            ->whereRaw('LOWER(TRIM(shopify_id)) = ?', [$normalized])
+            ->orWhereRaw('LOWER(TRIM(handle)) = ?', [$normalized])
+            ->first(['id']);
+
+        return $product instanceof Product ? (int) $product->id : null;
     }
 
     /**

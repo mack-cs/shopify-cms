@@ -185,6 +185,48 @@ GQL, ['id' => $gid]);
         ];
     }
 
+    /**
+     * @return array<int, array{gid:string,title:string,handle:string,tag_rules:array<int,string>}>
+     */
+    public function siblingCollectionCandidates(): array
+    {
+        $result = [];
+        $after = null;
+        do {
+            $data = $this->client->graphql(<<<'GQL'
+query VibeSiblingCollections($after: String) { collections(first: 100, after: $after) {
+  nodes {
+    id title handle
+    ruleSet { rules { column relation condition } }
+  }
+  pageInfo { hasNextPage endCursor }
+} }
+GQL, ['after' => $after]);
+            foreach ($data['collections']['nodes'] as $node) {
+                $tagRules = collect(data_get($node, 'ruleSet.rules', []))
+                    ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG')
+                    ->pluck('condition')
+                    ->filter(fn ($tag) => trim((string) $tag) !== '')
+                    ->values()
+                    ->all();
+                $haystack = strtolower($node['title'].' '.$node['handle'].' '.implode(' ', $tagRules));
+                if (! preg_match('/(?:^|[\s_-])siblings?(?:$|[\s_-])/', $haystack)) {
+                    continue;
+                }
+
+                $result[] = [
+                    'gid' => $node['id'],
+                    'title' => $node['title'],
+                    'handle' => $node['handle'],
+                    'tag_rules' => $tagRules,
+                ];
+            }
+            $after = $this->cursor($data['collections']);
+        } while ($after !== null);
+
+        return $result;
+    }
+
     public function parentProducts(string $gid): array
     {
         $this->gid($gid, 'Collection');

@@ -940,22 +940,6 @@ class NewProductDraftResource extends Resource
                                         $get('bundle_component_quantities'),
                                         $state,
                                     ));
-
-                                    if (!self::shouldShowBundleImageTools($get, $record)) {
-                                        return;
-                                    }
-
-                                    $allowed = array_keys(self::bundleProductImageOptions($state));
-                                    $selected = array_values(array_intersect(
-                                        self::normalizeBundleImageUrls($get('bundle_image_urls')),
-                                        $allowed
-                                    ));
-
-                                    $set('bundle_image_urls', $selected);
-
-                                    if ($selected !== [] && blank($get('image_path'))) {
-                                        $set('image_url', $selected[0]);
-                                    }
                                 })
                                 ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
                             Forms\Components\Repeater::make('bundle_component_quantities')
@@ -1370,27 +1354,6 @@ class NewProductDraftResource extends Resource
                             }
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_path'))),
-                    CheckboxList::make('bundle_image_urls')
-                        ->label('Associated product image choices')
-                        ->helperText('Pick images from the associated products. The first selected image becomes the draft primary image URL.')
-                        ->columns(2)
-                        ->bulkToggleable()
-                        ->options(fn (Get $get): array => self::bundleProductImageOptions($get('bundle_product_ids')))
-                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record)
-                            && self::normalizeBundleProductIds($get('bundle_product_ids')) !== [])
-                        ->afterStateHydrated(function (CheckboxList $component, $state): void {
-                            $component->state(self::normalizeBundleImageUrls($state));
-                        })
-                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                            $selected = self::normalizeBundleImageUrls($state);
-                            if ($selected === [] || filled($get('image_path'))) {
-                                return;
-                            }
-
-                            $set('image_url', $selected[0]);
-                        })
-                        ->dehydrated(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record))
-                        ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleImageUrls($state))),
                     Placeholder::make('image_locked_notice')
                         ->label('')
                         ->content(function (Get $get, ?NewProductDraft $record): ?string {
@@ -2669,12 +2632,6 @@ class NewProductDraftResource extends Resource
         return self::isBundleOrStackDraft($get('type'), $get('tags'), $record);
     }
 
-    private static function shouldShowBundleImageTools(Get $get, ?NewProductDraft $record): bool
-    {
-        return !self::draftImageLocked($get, $record)
-            && self::shouldShowBundleAssociationField($get, $record);
-    }
-
     private static function isBundleOrStackDraft(mixed $type, mixed $tags = null, ?NewProductDraft $record = null): bool
     {
         return self::isBundleOrStackState($type, self::normalizeTagList($tags), $record?->title);
@@ -2858,51 +2815,6 @@ class NewProductDraftResource extends Resource
         $options = [];
         foreach ($products as $product) {
             $options[(int) $product->id] = self::localProductReferenceLabel($product);
-        }
-
-        return $options;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private static function bundleProductImageOptions(mixed $productIds): array
-    {
-        $ids = self::normalizeBundleProductIds($productIds);
-        if ($ids === []) {
-            return [];
-        }
-
-        $order = array_flip($ids);
-        $products = Product::query()
-            ->whereIn('id', $ids)
-            ->with(['images' => fn ($query) => $query
-                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-                ->orderBy('position')
-                ->orderBy('id')])
-            ->get(['id', 'title', 'handle'])
-            ->sortBy(fn (Product $product): int => $order[(int) $product->id] ?? PHP_INT_MAX);
-
-        $options = [];
-        foreach ($products as $product) {
-            $productLabel = self::localProductReferenceLabel($product);
-
-            foreach ($product->images as $image) {
-                if (!$image instanceof Image) {
-                    continue;
-                }
-
-                $src = trim((string) ($image->src ?? ''));
-                if ($src === '' || isset($options[$src])) {
-                    continue;
-                }
-
-                $position = $image->position !== null ? '#' . $image->position : '#?';
-                $path = parse_url($src, PHP_URL_PATH);
-                $filename = is_string($path) ? basename($path) : '';
-
-                $options[$src] = trim($productLabel . ' ' . $position . ($filename !== '' ? " - {$filename}" : ''));
-            }
         }
 
         return $options;

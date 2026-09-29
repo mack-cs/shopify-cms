@@ -40,7 +40,76 @@
 .syv-tabs { position: relative; z-index: 5; }
 .syv-tabs button { cursor: pointer; }
 .syv-vibe-badges { display: flex; flex-wrap: wrap; gap: 5px; }
-.syv-vibe-actions { margin-top: 5px; }
+.syv-sibling-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.5rem;
+    padding: .125rem .5rem;
+    border-radius: .375rem;
+    background: #ede9fe;
+    color: #4c1d95;
+    font-size: .75rem;
+    font-weight: 500;
+    line-height: 1rem;
+}
+.syv-empty-state {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.5rem;
+    padding: .125rem .25rem;
+    color: #6b7280;
+    font-size: .875rem;
+    line-height: 1.25rem;
+}
+.syv-vibe-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .375rem;
+    align-items: center;
+    margin-top: 5px;
+}
+.syv-card-action {
+    min-height: 1.75rem !important;
+    padding: .25rem .55rem !important;
+    border-radius: .375rem !important;
+    font-size: .75rem !important;
+    font-weight: 600 !important;
+    line-height: 1rem !important;
+    gap: .25rem !important;
+    white-space: nowrap;
+}
+.syv-card-action svg {
+    width: .8rem !important;
+    height: .8rem !important;
+}
+.syv-vibe-button {
+    background-color: #f59e0b !important;
+    color: #fff !important;
+}
+.syv-vibe-button:hover,
+.syv-vibe-button:focus {
+    background-color: #d97706 !important;
+    color: #fff !important;
+}
+.syv-sibling-button {
+    background-color: #7c3aed !important;
+    color: #fff !important;
+}
+.syv-sibling-button:hover,
+.syv-sibling-button:focus {
+    background-color: #6d28d9 !important;
+    color: #fff !important;
+}
+.syv-sibling-button *,
+.syv-sibling-button:hover *,
+.syv-sibling-button:focus * {
+    color: inherit !important;
+}
+.syv-vibe-button *,
+.syv-vibe-button:hover *,
+.syv-vibe-button:focus * {
+    color: inherit !important;
+}
 .syv-order-status { color: #b45309; font-size: .875rem; }
 .syv-collection-options { display: grid; gap: .5rem; max-height: 55vh; overflow-y: auto; }
 .syv-collection-option { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid #d1d5db; border-radius: .5rem; }

@@ -342,50 +342,31 @@ class PendingDropdownOptionResource extends Resource
             }
         }
 
-        $contexts = self::applicableCollectionContexts($record->header);
-        if (empty($contexts)) {
+        $resolved = self::resolvedCollectionStyle($record);
+        if ($resolved !== null && $record->collection_style !== $resolved) {
+            $record->update(['collection_style' => $resolved]);
+            $record->refresh();
+        }
+
+        if (blank($record->collection_tag_primary)) {
             return;
         }
 
-        foreach ($contexts as $ctx) {
-            $existing = DropdownOption::query()
-                ->where('header', $record->header)
-                ->whereRaw('LOWER(value) = ?', [strtolower((string) $record->value)])
-                ->where('collection_tag_primary', $ctx['tag_primary'])
-                ->where(function ($query) use ($ctx): void {
-                    if ($ctx['tag_secondary'] !== null) {
-                        $query->where('collection_tag_secondary', $ctx['tag_secondary']);
-                    } else {
-                        $query->whereNull('collection_tag_secondary');
-                    }
-                })
-                ->first();
-
-            if ($existing) {
-                if (!$existing->active || $existing->collection_style !== $ctx['collection_style']) {
-                    $existing->update([
-                        'active' => true,
-                        'collection_style' => $ctx['collection_style'],
-                    ]);
-                }
-                continue;
-            }
-
-            DropdownOption::create([
-                'header' => $record->header,
-                'value' => $record->value,
-                'collection_style' => $ctx['collection_style'],
-                'collection_tag_primary' => $ctx['tag_primary'],
-                'collection_tag_secondary' => $ctx['tag_secondary'],
-                'active' => true,
-                'sort_order' => 0,
-            ]);
-        }
+        $record->update(['active' => true]);
 
         DropdownOption::query()
             ->where('header', $record->header)
             ->whereRaw('LOWER(value) = ?', [strtolower((string) $record->value)])
             ->where('active', false)
+            ->whereKeyNot($record->id)
+            ->where('collection_tag_primary', $record->collection_tag_primary)
+            ->where(function (Builder $query) use ($record): void {
+                if ($record->collection_tag_secondary !== null) {
+                    $query->where('collection_tag_secondary', $record->collection_tag_secondary);
+                } else {
+                    $query->whereNull('collection_tag_secondary');
+                }
+            })
             ->delete();
 
         self::logChange($record, 'active', 'false', 'true', $userId);

@@ -101,6 +101,67 @@ it('updates only configured vibe membership tags and preserves unrelated Shopify
     expect($queries)->toContain('VibeTagsAdd')->toContain('VibeTagsRemove')->not->toContain('productUpdate');
 });
 
+it('discovers collection-specific sibling options and updates only sibling tags', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    $this->fake->collections['gid://shopify/Collection/1']['title'] = 'Livi Road';
+    $this->fake->collections['gid://shopify/Collection/1']['handle'] = 'livi-road';
+    $this->fake->collections['gid://shopify/Collection/20'] = [
+        'id' => 'gid://shopify/Collection/20',
+        'title' => 'Livi Road-Chevron-Sibling',
+        'handle' => 'livi-road-chevron-sibling',
+        'image' => null,
+        'updatedAt' => '2026-09-08T12:00:00Z',
+        'sortOrder' => 'MANUAL',
+        'ruleSet' => ['rules' => [['column' => 'TAG', 'relation' => 'CONTAINS', 'condition' => 'livi-road-chevron-sibling']]],
+        'productsCount' => ['count' => 0],
+        'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
+    ];
+    $this->fake->collections['gid://shopify/Collection/21'] = [
+        'id' => 'gid://shopify/Collection/21',
+        'title' => 'Untamed Gold Siblings',
+        'handle' => 'untamed-gold-siblings',
+        'image' => null,
+        'updatedAt' => '2026-09-08T12:00:00Z',
+        'sortOrder' => 'MANUAL',
+        'ruleSet' => ['rules' => [['column' => 'TAG', 'relation' => 'CONTAINS', 'condition' => 'untamed-gold-siblings']]],
+        'productsCount' => ['count' => 0],
+        'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
+    ];
+    $this->fake->products['gid://shopify/Product/101']['tags'] = ['keep-me'];
+
+    Product::where('shopify_id', 'gid://shopify/Product/101')->update(['tags' => 'keep-me']);
+
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->assertSee('Siblings')
+        ->assertSee('None')
+        ->call('openProductSiblings', 'gid://shopify/Product/101')
+        ->assertSet('siblingOptions.0.tag', 'livi-road-chevron-sibling')
+        ->assertSee('Chevron')
+        ->assertDontSee('Untamed Gold')
+        ->set('selectedSiblings', ['livi-road-chevron-sibling'])
+        ->call('saveProductSiblings')
+        ->assertHasNoErrors()
+        ->assertDispatched('close-modal', id: 'manage-sibling-assignments');
+
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])
+        ->toBe(['keep-me', 'livi-road-chevron-sibling'])
+        ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))
+        ->toBe('keep-me, livi-road-chevron-sibling');
+
+    $page->call('openProductSiblings', 'gid://shopify/Product/101')
+        ->assertSet('selectedSiblings', ['livi-road-chevron-sibling'])
+        ->set('selectedSiblings', [])
+        ->call('saveProductSiblings')
+        ->assertHasNoErrors();
+
+    expect($this->fake->products['gid://shopify/Product/101']['tags'])->toBe(['keep-me'])
+        ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))->toBe('keep-me');
+});
+
 it('does not reapply mapped fields when adding a tag-only vibe', function () {
     ShopYourVibeCollectionMapping::create([
         'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/2',

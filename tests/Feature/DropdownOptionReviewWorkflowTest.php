@@ -182,6 +182,59 @@ it('stores imported jewelry material labels as Shopify handles', function (): vo
         ->exists())->toBeTrue();
 });
 
+it('approves pending dropdown values only for their discovered collection context', function (): void {
+    $livi = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'Gold',
+        'collection_style' => 'Livi Road Bracelets',
+        'collection_tag_primary' => 'livi-road',
+        'collection_tag_secondary' => 'livi-road-bracelets',
+        'active' => false,
+    ]));
+    $untamed = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'Gold',
+        'collection_style' => 'Untamed Bracelets',
+        'collection_tag_primary' => 'untamed',
+        'collection_tag_secondary' => 'untamed-bracelets',
+        'active' => false,
+    ]));
+
+    DropdownOption::withoutEvents(fn (): null => \App\Filament\Resources\PendingDropdownOptionResource::approveForApplicableCollections($livi, null, false));
+
+    expect($livi->fresh()->active)->toBeTrue()
+        ->and($untamed->fresh()->active)->toBeFalse()
+        ->and(DropdownOption::query()
+            ->where('header', HeaderStore::COLOR_METAFIELD)
+            ->where('value', 'Gold')
+            ->where('active', true)
+            ->count())->toBe(1);
+});
+
+it('keeps collection-specific dropdown options isolated by tags', function (): void {
+    DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'Gold',
+        'collection_style' => 'Livi Road Bracelets',
+        'collection_tag_primary' => 'livi-road',
+        'collection_tag_secondary' => 'livi-road-bracelets',
+        'active' => true,
+    ]));
+    DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::COLOR_METAFIELD,
+        'value' => 'Black',
+        'collection_style' => 'Untamed Bracelets',
+        'collection_tag_primary' => 'untamed',
+        'collection_tag_secondary' => 'untamed-bracelets',
+        'active' => true,
+    ]));
+
+    expect(DropdownOption::optionsForHeader(HeaderStore::COLOR_METAFIELD, tags: 'livi-road, livi-road-bracelets')->all())
+        ->toBe(['Gold'])
+        ->and(DropdownOption::optionsForHeader(HeaderStore::COLOR_METAFIELD, tags: 'untamed, untamed-bracelets')->all())
+        ->toBe(['Black']);
+});
+
 it('normalizes captured jewelry material labels to Shopify handles', function (): void {
     $normalizer = app(Normalizer::class);
     $method = new ReflectionMethod($normalizer, 'parseDropdownValues');

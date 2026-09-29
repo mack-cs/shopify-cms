@@ -177,6 +177,10 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             return ['collections' => ['nodes' => array_map(fn ($collection) => array_replace($collection, ['metafield' => $this->metafield($collection['id'])]), array_values($this->collections)),
                 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
         }
+        if (str_contains($query, 'query VibeSiblingCollections')) {
+            return ['collections' => ['nodes' => array_values($this->collections),
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+        }
         if (str_contains($query, 'query VibeParent(')) {
             return ['collection' => array_replace($this->collections[$variables['id']], ['metafield' => $this->metafield($variables['id'])])];
         }

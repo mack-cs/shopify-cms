@@ -13,6 +13,7 @@ use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\Variant;
 use App\Services\ShopYourVibeAssignmentService;
+use App\Services\ShopYourVibeSiblingService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
@@ -104,6 +105,15 @@ class ShopYourVibe extends Page
 
     #[Locked]
     public array $originalSelectedVibes = [];
+
+    public ?string $managingSiblingProductGid = null;
+
+    public array $siblingOptions = [];
+
+    public array $selectedSiblings = [];
+
+    #[Locked]
+    public array $parentSiblingOptions = [];
 
     public bool $confirmingAssignments = false;
 
@@ -567,6 +577,49 @@ class ShopYourVibe extends Page
         $this->dispatch('open-modal', id: 'manage-vibe-assignments');
     }
 
+    public function openProductSiblings(string $productGid): void
+    {
+        $this->guard();
+        $product = collect($this->parentProducts)->firstWhere('id', $productGid);
+        abort_unless($product, 404);
+        if ($this->parentSiblingOptions === []) {
+            $this->parentSiblingOptions = app(ShopYourVibeSiblingService::class)
+                ->optionsForParent($this->draft()?->desired['parent'] ?? []);
+        }
+        $this->siblingOptions = $this->parentSiblingOptions;
+        $selected = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $this->siblingOptions);
+        $this->managingSiblingProductGid = $productGid;
+        $this->selectedSiblings = collect($selected)->pluck('tag')->values()->all();
+        $this->dispatch('open-modal', id: 'manage-sibling-assignments');
+    }
+
+    public function saveProductSiblings(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingSiblingProductGid), 422);
+        $this->attempt(function (): void {
+            $confirmed = app(ShopYourVibeSiblingService::class)->assign(
+                $this->draft()->desired['parent'] ?? [],
+                $this->managingSiblingProductGid,
+                $this->selectedSiblings,
+            );
+            foreach ($this->parentProducts as &$product) {
+                if ($product['id'] === $this->managingSiblingProductGid) {
+                    $product['tags'] = $confirmed['tags'];
+                    $product['siblings'] = app(ShopYourVibeSiblingService::class)
+                        ->selectedForTags((array) $confirmed['tags'], $this->siblingOptions);
+                }
+            }
+            unset($product);
+            $this->managingSiblingProductGid = null;
+            $this->selectedSiblings = [];
+            $this->siblingOptions = [];
+            $this->dispatch('close-modal', id: 'manage-sibling-assignments');
+            Notification::make()->title('Sibling assignments updated')->success()->send();
+        });
+    }
+
     public function reviewProductAssignments(): void
     {
         $this->guard();
@@ -715,6 +768,8 @@ class ShopYourVibe extends Page
 
         $service = app(ShopYourVibeAssignmentService::class);
         $shopify = app(ShopYourVibeShopify::class);
+        $this->parentSiblingOptions = app(ShopYourVibeSiblingService::class)
+            ->optionsForParent($draft->desired['parent'] ?? []);
         $mappings = [];
         foreach ($draft->desired['cards'] as $card) {
             $gid = $card['collection_gid'] ?? null;
@@ -775,8 +830,9 @@ class ShopYourVibe extends Page
         $movementBySku = $this->movementClassificationsBySku($products);
         $variantInventoryBySku = $this->variantInventoryBySku($products);
         $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
+        $siblingOptions = $this->parentSiblingOptions;
 
-        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $threshold): array {
+        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $threshold, $siblingOptions): array {
             $inventoryTracked = $product['inventory_tracked'] ?? null;
             $quantity = $product['inventory_quantity'] ?? null;
             if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
@@ -794,6 +850,7 @@ class ShopYourVibe extends Page
             $product['is_sold_out'] = $isSoldOut;
             $product['is_low_stock'] = $tracked && ! $isSoldOut && $quantity !== null && $quantity <= $threshold;
             $product['movement_classification'] = $movementBySku[trim((string) ($product['sku'] ?? ''))] ?? null;
+            $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
 
             return $product;
         })->all();
