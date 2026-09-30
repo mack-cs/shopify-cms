@@ -209,6 +209,14 @@
                                 </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
+                                <div class="syv-finish-row">
+                                    <span class="syv-finish-label">Material Colour Finish</span>
+                                    @if (filled($product['bead_colour_finish'] ?? null))
+                                        <span class="syv-finish-badge">{{ $product['bead_colour_finish'] }}</span>
+                                    @else
+                                        <span class="syv-finish-badge syv-finish-badge-empty">None</span>
+                                    @endif
+                                </div>
                                 <div class="my-3 syv-vibe-badge-list">
                                     <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
                                     <div class="syv-vibe-badges">
@@ -352,6 +360,14 @@
                                             </div>
                                             <h4 class="mt-2 font-medium">{{ $displayProduct['title'] }}</h4>
                                             <p class="text-xs text-gray-500">SKU: {{ $displayProduct['sku'] ?: 'No SKU' }}</p>
+                                            <div class="syv-finish-row">
+                                                <span class="syv-finish-label">Material Colour Finish</span>
+                                                @if (filled($displayProduct['bead_colour_finish'] ?? null))
+                                                    <span class="syv-finish-badge">{{ $displayProduct['bead_colour_finish'] }}</span>
+                                                @else
+                                                    <span class="syv-finish-badge syv-finish-badge-empty">None</span>
+                                                @endif
+                                            </div>
                                             <div class="my-3 syv-vibe-badge-list">
                                                 <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
                                                 <div class="syv-vibe-badges">
@@ -528,10 +544,10 @@
                 <p class="font-semibold">{{ $tagProduct['title'] }}</p>
                 <p class="mb-4 text-sm text-gray-500">SKU: {{ $tagProduct['sku'] ?: 'No SKU' }}</p>
                 {{ $this->productTagForm }}
-                <p class="mt-4 text-sm text-gray-500">This saves these product metafields directly to Shopify now, then mirrors the local product and new-product draft values.</p>
+                <p class="mt-4 text-sm text-gray-500">This queues a Shopify metafield update, then mirrors the local product and new-product draft values when the job finishes.</p>
             @endif
             <x-slot name="footer">
-                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Save to Shopify</x-filament::button>
+                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Queue Shopify update</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-tag-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>

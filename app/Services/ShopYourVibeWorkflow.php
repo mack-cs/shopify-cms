@@ -48,13 +48,17 @@ class ShopYourVibeWorkflow
             $state['collections'][$gid] = $this->shopify->collection($gid);
         }
 
-        return DB::transaction(function () use ($id, $revision, $state) {
+        app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($state);
+
+        $refreshed = DB::transaction(function () use ($id, $revision, $state) {
             $draft = $this->editable($id, $revision, true);
             $draft->update(['snapshot' => $state, 'desired' => $state, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'progress' => [], 'remote_jobs' => [], 'revision' => $revision + 1, 'refreshed_at' => now()]);
 
             return $draft;
         });
+
+        return $refreshed;
     }
 
     public function loadProducts(int $id, int $revision, string $key): ShopYourVibeDraft

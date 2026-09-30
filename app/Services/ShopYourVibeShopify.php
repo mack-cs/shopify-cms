@@ -136,7 +136,14 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   id title handle sortOrder productsCount { count }
   ruleSet { appliedDisjunctively rules { column relation condition } }
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } } }
+    nodes {
+      id title vendor productType status tags featuredImage { url }
+      materialsAndDimensions: metafield(namespace: "custom", key: "materials_and_dimensions") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+    }
     pageInfo { hasNextPage endCursor }
   }
 } }
@@ -236,7 +243,14 @@ GQL, ['after' => $after]);
             $data = $this->client->graphql(<<<'GQL'
 query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } } }
+    nodes {
+      id title vendor productType status tags featuredImage { url }
+      materialsAndDimensions: metafield(namespace: "custom", key: "materials_and_dimensions") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+    }
     pageInfo { hasNextPage endCursor }
   }
 } }
@@ -269,6 +283,8 @@ GQL, ['id' => $gid]);
         return [
             'id' => $product['id'],
             'title' => $product['title'],
+            'vendor' => $product['vendor'] ?? null,
+            'type' => $product['productType'] ?? null,
             'status' => $product['status'] ?? null,
             'tags' => array_values($product['tags'] ?? []),
             'image' => data_get($product, 'featuredImage.url'),
@@ -276,6 +292,12 @@ GQL, ['id' => $gid]);
             'inventory_quantity' => data_get($variant, 'inventoryQuantity'),
             'inventory_tracked' => data_get($variant, 'inventoryItem.tracked'),
             'available_for_sale' => data_get($variant, 'availableForSale'),
+            'shopify_metafields' => [
+                HeaderStore::MATERIALS_AND_DIMENSIONS => $product['materialsAndDimensions'] ?? null,
+                HeaderStore::COLOR_METAFIELD => $product['colorPattern'] ?? null,
+                HeaderStore::JEWELRY_MATERIAL => $product['jewelryMaterial'] ?? null,
+                HeaderStore::BEAD_COLOUR_FINISH => $product['beadColourFinish'] ?? null,
+            ],
         ];
     }
 

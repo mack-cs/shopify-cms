@@ -4,14 +4,20 @@ use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
 use App\Filament\Pages\ShopYourVibe;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeProductTags;
+use App\Jobs\RefreshShopYourVibeDraft;
+use App\Jobs\RefreshShopYourVibeParents;
+use App\Models\DropdownOption;
 use App\Models\Import;
 use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyRow;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\User;
+use App\Services\HeaderStore;
 use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
@@ -160,6 +166,48 @@ it('discovers collection-specific sibling options and updates only sibling tags'
 
     expect($this->fake->products['gid://shopify/Product/101']['tags'])->toBe(['keep-me'])
         ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))->toBe('keep-me');
+});
+
+it('queues product metafield updates from the Shop Your Vibe tag modal', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibeProductTags::class]);
+
+    $product = Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail();
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::MATERIALS_AND_DIMENSIONS => 'Old material',
+            HeaderStore::COLOR_METAFIELD => 'gold',
+            HeaderStore::JEWELRY_MATERIAL => 'gold',
+            HeaderStore::BEAD_COLOUR_FINISH => 'Metallic',
+        ],
+    ]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->assertSee('Material Colour Finish')
+        ->assertSee('Metallic')
+        ->call('openProductTags', 'gid://shopify/Product/101')
+        ->set('tagForm.bead_colour_finish', 'Colourful')
+        ->call('saveProductTags')
+        ->assertHasNoErrors()
+        ->assertDispatched('close-modal', id: 'manage-tag-assignments');
+
+    Bus::assertDispatched(PushShopYourVibeProductTags::class, function (PushShopYourVibeProductTags $job): bool {
+        $reflection = new ReflectionClass($job);
+        $productGid = $reflection->getProperty('productGid');
+        $productGid->setAccessible(true);
+        $state = $reflection->getProperty('state');
+        $state->setAccessible(true);
+
+        return $productGid->getValue($job) === 'gid://shopify/Product/101'
+            && ($state->getValue($job)['bead_colour_finish'] ?? null) === 'Colourful';
+    });
 });
 
 it('does not reapply mapped fields when adding a tag-only vibe', function () {
@@ -758,6 +806,167 @@ it('renders the workflow and only dispatches a push after the explicit action', 
     Bus::assertNothingDispatched();
     $page->call('reviewPush')->assertSee('Ready to push')->call('pushChanges')->assertSee('Pushing to Shopify');
     Bus::assertDispatched(PushShopYourVibe::class);
+});
+
+it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([RefreshShopYourVibeDraft::class]);
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $revision = $this->draft->fresh()->revision;
+    $this->fake->calls = [];
+
+    $page->call('refreshDraft', true)->assertHasNoErrors();
+
+    expect($this->fake->calls)->toBe([]);
+    Bus::assertDispatched(RefreshShopYourVibeDraft::class, function (RefreshShopYourVibeDraft $job) use ($revision): bool {
+        $reflection = new ReflectionClass($job);
+        $draftId = $reflection->getProperty('draftId');
+        $draftId->setAccessible(true);
+        $jobRevision = $reflection->getProperty('revision');
+        $jobRevision->setAccessible(true);
+        $discard = $reflection->getProperty('discard');
+        $discard->setAccessible(true);
+
+        return $draftId->getValue($job) === $this->draft->id
+            && $jobRevision->getValue($job) === $revision
+            && $discard->getValue($job) === true;
+    });
+});
+
+it('runs a queued Shop Your Vibe refresh against the latest draft revision', function () {
+    $oldRevision = $this->draft->revision;
+    vibeEdit($this, 'edit_card', [
+        'key' => 'gid://shopify/Metaobject/11',
+        'name' => 'Changed before worker runs',
+        'image' => 'gid://shopify/MediaImage/1',
+        'link' => 'https://leighavenue.co.za/collections/pearl',
+    ]);
+
+    (new RefreshShopYourVibeDraft($this->draft->id, $oldRevision, true, $this->user->id))
+        ->handle(app(ShopYourVibeWorkflow::class));
+
+    expect($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->draft->fresh()->status)->toBe('synced');
+});
+
+it('queues the Shop Your Vibe parent collection refresh cache rebuild', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([RefreshShopYourVibeParents::class]);
+
+    $page = Livewire::test(ShopYourVibe::class);
+    $this->fake->calls = [];
+
+    $page->call('loadParents', true)->assertHasNoErrors();
+
+    expect($this->fake->calls)->toBe([]);
+    Bus::assertDispatched(RefreshShopYourVibeParents::class, function (RefreshShopYourVibeParents $job): bool {
+        $reflection = new ReflectionClass($job);
+        $cacheKey = $reflection->getProperty('cacheKey');
+        $cacheKey->setAccessible(true);
+
+        return $cacheKey->getValue($job) === 'shop-your-vibe-parents:'.config('services.shopify.shop');
+    });
+});
+
+it('mirrors refreshed Shopify product metafields into local dropdown data', function () {
+    $product = Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail();
+    Product::withoutEvents(fn () => $product->forceFill([
+        'tags' => 'livi-road, bracelets',
+        'color_string' => 'old-gold',
+    ])->save());
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COLOR_METAFIELD => 'old-gold',
+            HeaderStore::JEWELRY_MATERIAL => 'old-material',
+            HeaderStore::MATERIALS_AND_DIMENSIONS => 'Old material',
+            HeaderStore::BEAD_COLOUR_FINISH => 'Metallic',
+        ],
+    ]);
+
+    $freshProduct = [
+        'tags' => ['livi-road', 'bracelets', 'fresh-shopify-tag'],
+        'colorPattern' => ['type' => 'list.single_line_text_field', 'value' => json_encode(['Black and Gold', 'Black and Grey'])],
+        'jewelryMaterial' => ['type' => 'list.single_line_text_field', 'value' => json_encode(['Enamel', 'Metal'])],
+        'materialsAndDimensions' => ['type' => 'multi_line_text_field', 'value' => 'Fresh Shopify material'],
+        'beadColourFinish' => ['type' => 'single_line_text_field', 'value' => 'Metallic and colourful'],
+    ];
+    $this->fake->products['gid://shopify/Product/101'] = array_replace($this->fake->products['gid://shopify/Product/101'], $freshProduct);
+    $this->fake->collections['gid://shopify/Collection/1']['products']['nodes'][0] = array_replace(
+        $this->fake->collections['gid://shopify/Collection/1']['products']['nodes'][0],
+        $freshProduct,
+    );
+
+    expect(app(ShopYourVibeShopify::class)->collection('gid://shopify/Collection/1')['products'][0]['shopify_metafields'][HeaderStore::BEAD_COLOUR_FINISH]['value'])
+        ->toBe('Metallic and colourful');
+
+    (new RefreshShopYourVibeDraft($this->draft->id, $this->draft->revision, true, $this->user->id))
+        ->handle(app(ShopYourVibeWorkflow::class));
+
+    expect(ShopYourVibeDraft::find($this->draft->id)->desired['collections']['gid://shopify/Collection/1']['products'][0]['shopify_metafields'][HeaderStore::BEAD_COLOUR_FINISH]['value'])
+        ->toBe('Metallic and colourful');
+
+    $row = ShopifyRow::where('import_id', $product->import_id)
+        ->where('handle', $product->handle)
+        ->where('row_type', 'product_primary')
+        ->latest('id')
+        ->firstOrFail();
+
+    expect($row->get(HeaderStore::BEAD_COLOUR_FINISH))->toBe('Metallic and colourful')
+        ->and($row->get(HeaderStore::MATERIALS_AND_DIMENSIONS))->toBe('Fresh Shopify material')
+        ->and($row->get(HeaderStore::COLOR_METAFIELD))->toBe('Black and Gold; Black and Grey')
+        ->and($row->get(HeaderStore::JEWELRY_MATERIAL))->toBe('enamel; metal')
+        ->and($product->fresh()->color_string)->toBe('Black and Gold; Black and Grey')
+        ->and($product->fresh()->tags)->toContain('fresh-shopify-tag')
+        ->and(DropdownOption::query()
+            ->where('header', HeaderStore::BEAD_COLOUR_FINISH)
+            ->where('value', 'Metallic and colourful')
+            ->where('active', true)
+            ->exists())->toBeTrue();
+});
+
+it('mirrors product metafields from a known Shop Your Vibe state', function () {
+    $product = Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail();
+    Product::withoutEvents(fn () => $product->forceFill([
+        'tags' => 'livi-road, bracelets',
+        'color_string' => 'old-gold',
+    ])->save());
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::BEAD_COLOUR_FINISH => 'Metallic',
+        ],
+    ]);
+
+    app(\App\Services\ShopYourVibeProductMirror::class)->mirrorFromDraftState([
+        'collections' => [
+            'gid://shopify/Collection/1' => [
+                'products' => [[
+                    'id' => 'gid://shopify/Product/101',
+                    'tags' => ['livi-road', 'bracelets'],
+                    'shopify_metafields' => [
+                        HeaderStore::BEAD_COLOUR_FINISH => ['type' => 'single_line_text_field', 'value' => 'Metallic and colourful'],
+                    ],
+                ]],
+            ],
+        ],
+    ]);
+
+    expect(ShopifyRow::where('handle', $product->handle)->firstOrFail()->get(HeaderStore::BEAD_COLOUR_FINISH))
+        ->toBe('Metallic and colourful');
 });
 
 it('prevents unauthorized users from opening the workflow', function () {
