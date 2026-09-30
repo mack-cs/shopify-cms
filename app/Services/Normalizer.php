@@ -1249,6 +1249,7 @@ final class Normalizer
             HeaderStore::COLOR_METAFIELD,
             HeaderStore::JEWELRY_MATERIAL,
             HeaderStore::MATERIALS_AND_DIMENSIONS,
+            HeaderStore::BEAD_COLOUR_FINISH,
             HeaderStore::BRACELET_DESIGN,
             'Necklace design (product.metafields.shopify.necklace-design)',
             'Earring design (product.metafields.shopify.earring-design)',
@@ -1293,11 +1294,7 @@ final class Normalizer
             return [$collectionContext];
         }
 
-        return [[
-            'collection_style' => null,
-            'tag_primary' => null,
-            'tag_secondary' => null,
-        ]];
+        return [];
     }
 
     private function parseDropdownValues(string $header, mixed $raw): array

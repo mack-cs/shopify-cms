@@ -22,6 +22,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Notifications\Notification;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 class PendingDropdownOptionResource extends Resource
 {
@@ -213,6 +214,15 @@ class PendingDropdownOptionResource extends Resource
 
     private static function usageCount(DropdownOption $record): int
     {
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            return count(self::affectedProductIds(
+                (string) $record->header,
+                (string) $record->value,
+                $record->collection_tag_primary,
+                $record->collection_tag_secondary
+            ));
+        }
+
         $tagPrimary = $record->collection_tag_primary;
         $tagSecondary = $record->collection_tag_secondary;
         $header = $record->header;
@@ -301,6 +311,42 @@ class PendingDropdownOptionResource extends Resource
         ?string $tagSecondary
     ): array
     {
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            return DB::table('shopify_rows')
+                ->join('products', function ($join): void {
+                    $join->on('shopify_rows.import_id', '=', 'products.import_id')
+                        ->on('shopify_rows.handle', '=', 'products.handle');
+                })
+                ->where('shopify_rows.row_type', 'product_primary')
+                ->select('products.id', 'products.tags', 'shopify_rows.data')
+                ->get()
+                ->filter(function ($row) use ($header, $value, $tagPrimary, $tagSecondary): bool {
+                    $data = json_decode((string) ($row->data ?? ''), true);
+                    if (!is_array($data) || (string) ($data[$header] ?? '') !== $value) {
+                        return false;
+                    }
+
+                    $tags = array_map(
+                        static fn (string $tag): string => strtolower(trim($tag)),
+                        preg_split('/\s*,\s*/', (string) ($row->tags ?? ''), -1, PREG_SPLIT_NO_EMPTY) ?: []
+                    );
+
+                    if ($tagPrimary && !in_array(strtolower(trim($tagPrimary)), $tags, true)) {
+                        return false;
+                    }
+
+                    if ($tagSecondary && !in_array(strtolower(trim($tagSecondary)), $tags, true)) {
+                        return false;
+                    }
+
+                    return true;
+                })
+                ->pluck('id')
+                ->map(fn (mixed $id): int => (int) $id)
+                ->values()
+                ->all();
+        }
+
         $query = ShopifyRow::query()
             ->join('products', function ($join): void {
                 $join->on('shopify_rows.import_id', '=', 'products.import_id')
@@ -500,6 +546,19 @@ class PendingDropdownOptionResource extends Resource
         }
         self::$cleanedUnknownPendingRows = true;
 
+        DropdownOption::query()
+            ->where('active', false)
+            ->whereIn('header', self::controlledDropdownHeaders())
+            ->where(function (Builder $query): void {
+                $query->whereNull('collection_tag_primary')
+                    ->orWhere('collection_tag_primary', '');
+            })
+            ->where(function (Builder $query): void {
+                $query->whereNull('collection_tag_secondary')
+                    ->orWhere('collection_tag_secondary', '');
+            })
+            ->delete();
+
         $allowed = [];
         foreach (app(DropdownCollectionCatalog::class)->contexts() as $ctx) {
             $allowed[strtolower(implode('|', [
@@ -514,7 +573,6 @@ class PendingDropdownOptionResource extends Resource
             ->chunkById(200, function ($rows) use ($allowed): void {
                 foreach ($rows as $row) {
                     if (blank($row->collection_tag_primary) && blank($row->collection_tag_secondary)) {
-                        // Keep unmapped pending rows visible so users can review/reject them.
                         continue;
                     }
 
@@ -560,6 +618,21 @@ class PendingDropdownOptionResource extends Resource
 
             return str_contains($haystack, $needle) || str_contains($haystack, $needle . 's');
         }));
+    }
+
+    private static function controlledDropdownHeaders(): array
+    {
+        return [
+            HeaderStore::COLOR_METAFIELD,
+            HeaderStore::JEWELRY_MATERIAL,
+            HeaderStore::MATERIALS_AND_DIMENSIONS,
+            HeaderStore::BEAD_COLOUR_FINISH,
+            HeaderStore::BRACELET_DESIGN,
+            'Necklace design (product.metafields.shopify.necklace-design)',
+            'Earring design (product.metafields.shopify.earring-design)',
+            'Pattern Category (product.metafields.custom.pattern_category)',
+            'Product Metals (product.metafields.custom.product_metals)',
+        ];
     }
 
     private static function sendQueuedNotification(string $title, string $body): void

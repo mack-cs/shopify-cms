@@ -44,7 +44,12 @@ class ProcessPendingDropdownOptionsJob implements ShouldQueue
         $affectedProductIdSet = [];
 
         foreach ($records as $record) {
-            $key = strtolower(trim((string) $record->header) . '|' . trim((string) $record->value));
+            $key = strtolower(implode('|', [
+                trim((string) $record->header),
+                trim((string) $record->value),
+                trim((string) ($record->collection_tag_primary ?? '')),
+                trim((string) ($record->collection_tag_secondary ?? '')),
+            ]));
             if ($key === '|' || isset($handled[$key])) {
                 continue;
             }
