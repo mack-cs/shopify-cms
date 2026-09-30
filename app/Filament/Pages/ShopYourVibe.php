@@ -554,16 +554,16 @@ class ShopYourVibe extends Page
     {
         return Action::make('removeVibe')->color('danger')->requiresConfirmation()
             ->modalHeading('Remove vibe')->modalSubmitActionLabel('Confirm removal')
-            ->modalDescription('The selected removal will be saved to your draft and applied when you push changes to Shopify.')
+            ->modalDescription('Choose what should happen when you push changes.')
             ->form([
                 Radio::make('mode')->label('Removal option')->options([
-                    'layout' => 'Remove from this preview layout only',
-                    'permanent' => 'Permanently delete the vibe card from Shopify',
-                    'collection' => 'Delete the vibe card and its collection from Shopify — keep all products',
+                    'layout' => 'Remove locally from this preview',
+                    'permanent' => 'Delete the Shop Your Vibe card from Shopify',
+                    'collection' => 'Delete the Shop Your Vibe card and collection from Shopify',
                 ])->descriptions([
-                    'layout' => 'Keep the Shopify vibe card and its linked collection.',
-                    'permanent' => 'Delete the Shopify vibe card. Its linked collection, products and images are kept. This cannot be undone after pushing.',
-                    'collection' => 'Permanently delete the linked collection and its collection page, plus this vibe card. Every product stays in Shopify and in its other collections. Images are kept. Applied on the next push.',
+                    'layout' => 'Only removes it from this main collection preview. Shopify is kept.',
+                    'permanent' => 'Removes the SYV card in Shopify. The linked collection and products stay.',
+                    'collection' => 'Removes the SYV card and linked Shopify collection. Products stay in Shopify.',
                 ])->default('layout')->required(),
             ])
             ->action(function (array $arguments, array $data, Action $action): void {
