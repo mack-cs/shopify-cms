@@ -14,9 +14,11 @@ use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\Variant;
 use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeSiblingService;
+use App\Services\ShopYourVibeTagService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
+use Filament\Forms\Components\Grid;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\FileUpload;
@@ -114,6 +116,22 @@ class ShopYourVibe extends Page
     #[Locked]
     public array $parentSiblingOptions = [];
 
+    public ?string $managingTagProductGid = null;
+
+    public array $tagForm = [
+        'materials_and_dimensions' => '',
+        'color_string' => [],
+        'jewelry_material' => [],
+        'bead_colour_finish' => '',
+    ];
+
+    public array $tagOptions = [
+        'materials_and_dimensions' => [],
+        'color_string' => [],
+        'jewelry_material' => [],
+        'bead_colour_finish' => [],
+    ];
+
     public bool $confirmingAssignments = false;
 
     public array $mappingForm = [];
@@ -176,6 +194,20 @@ class ShopYourVibe extends Page
         $this->assignmentProductSearch = '';
         $this->vibeMappings = [];
         $this->managingProductGid = null;
+        $this->managingSiblingProductGid = null;
+        $this->managingTagProductGid = null;
+        $this->tagForm = [
+            'materials_and_dimensions' => '',
+            'color_string' => [],
+            'jewelry_material' => [],
+            'bead_colour_finish' => '',
+        ];
+        $this->tagOptions = [
+            'materials_and_dimensions' => [],
+            'color_string' => [],
+            'jewelry_material' => [],
+            'bead_colour_finish' => [],
+        ];
         $this->loadParents();
     }
 
@@ -233,7 +265,45 @@ class ShopYourVibe extends Page
 
     protected function getForms(): array
     {
-        return ['collectionPickerForm', 'newCollectionForm', 'mappingUploadForm'];
+        return ['collectionPickerForm', 'newCollectionForm', 'mappingUploadForm', 'productTagForm'];
+    }
+
+    public function productTagForm(Form $form): Form
+    {
+        return $form->statePath('tagForm')->schema([
+            Grid::make(2)->schema([
+                Select::make('materials_and_dimensions')
+                    ->label('Material & Dimensions')
+                    ->placeholder('Select option')
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['materials_and_dimensions'] ?? []),
+                Select::make('bead_colour_finish')
+                    ->label('Material Colour Finish')
+                    ->placeholder('Select option')
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['bead_colour_finish'] ?? []),
+                Select::make('color_string')
+                    ->label('Colour')
+                    ->placeholder('Select option')
+                    ->multiple()
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['color_string'] ?? []),
+                Select::make('jewelry_material')
+                    ->label('Jewelry Material')
+                    ->placeholder('Select option')
+                    ->multiple()
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['jewelry_material'] ?? []),
+            ]),
+        ]);
     }
 
     public function mappingUploadForm(Form $form): Form
@@ -620,6 +690,54 @@ class ShopYourVibe extends Page
             $this->siblingOptions = [];
             $this->dispatch('close-modal', id: 'manage-sibling-assignments');
             Notification::make()->title('Sibling assignments updated')->success()->send();
+        });
+    }
+
+    public function openProductTags(string $productGid): void
+    {
+        $this->guard();
+        abort_unless(collect($this->parentProducts)->contains('id', $productGid), 404);
+        $this->attempt(function () use ($productGid): void {
+            $service = app(ShopYourVibeTagService::class);
+            $product = $service->productForGid($productGid);
+            $state = $service->stateForProduct($product);
+
+            $this->managingTagProductGid = $productGid;
+            $this->tagForm = $state;
+            $this->tagOptions = $service->optionsForProduct($product, $state);
+            $this->productTagForm->fill($state);
+            $this->dispatch('open-modal', id: 'manage-tag-assignments');
+        });
+    }
+
+    public function saveProductTags(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingTagProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingTagProductGid), 422);
+        $this->attempt(function (): void {
+            $this->tagForm = $this->productTagForm->getState();
+            app(ShopYourVibeTagService::class)->save(
+                $this->managingTagProductGid,
+                $this->tagForm,
+                auth()->id(),
+            );
+
+            $this->managingTagProductGid = null;
+            $this->tagForm = [
+                'materials_and_dimensions' => '',
+                'color_string' => [],
+                'jewelry_material' => [],
+                'bead_colour_finish' => '',
+            ];
+            $this->tagOptions = [
+                'materials_and_dimensions' => [],
+                'color_string' => [],
+                'jewelry_material' => [],
+                'bead_colour_finish' => [],
+            ];
+            $this->dispatch('close-modal', id: 'manage-tag-assignments');
+            Notification::make()->title('Product tag fields updated')->success()->send();
         });
     }
 

@@ -232,6 +232,7 @@
                                 <div class="syv-vibe-actions">
                                     <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
+                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
                                 </div>
                             </article>
                         @endforeach
@@ -355,6 +356,8 @@
                                                 @endif
                                                 @if (collect($parentProducts)->contains('id', $product['id']))
                                                     <button type="button" class="rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</button>
+                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
+                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
                                                 @endif
                                             </div>
                                         </article>
@@ -494,6 +497,20 @@
             <x-slot name="footer">
                 <x-filament::button wire:click="saveProductSiblings" wire:loading.attr="disabled">Save siblings</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-sibling-assignments' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="manage-tag-assignments" width="2xl" heading="Manage Product Tags">
+            @php($tagProduct = $managingTagProductGid ? collect($parentProducts)->firstWhere('id', $managingTagProductGid) : null)
+            @if ($tagProduct)
+                <p class="font-semibold">{{ $tagProduct['title'] }}</p>
+                <p class="mb-4 text-sm text-gray-500">SKU: {{ $tagProduct['sku'] ?: 'No SKU' }}</p>
+                {{ $this->productTagForm }}
+                <p class="mt-4 text-sm text-gray-500">Saving immediately updates only these product metafields in Shopify, then mirrors the local product and new-product draft values.</p>
+            @endif
+            <x-slot name="footer">
+                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Save tags</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-tag-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
 

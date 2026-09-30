@@ -176,6 +176,68 @@ final class ProductShopifyUpdater
         $primaryRow->save();
     }
 
+    /**
+     * Push the existing-product tag/metafield editor values from Shop Your Vibe.
+     *
+     * @param array<string, string> $updates HeaderStore header => normalized display value
+     */
+    public function syncShopYourVibeTagFields(Product $product, array $updates): void
+    {
+        $allowedHeaders = [
+            HeaderStore::MATERIALS_AND_DIMENSIONS => true,
+            HeaderStore::COLOR_METAFIELD => true,
+            HeaderStore::JEWELRY_MATERIAL => true,
+            HeaderStore::BEAD_COLOUR_FINISH => true,
+        ];
+
+        $updates = collect($updates)
+            ->filter(fn (mixed $value, string $header): bool => isset($allowedHeaders[$header]) && is_scalar($value) && trim((string) $value) !== '')
+            ->map(fn (mixed $value): string => trim((string) $value))
+            ->all();
+
+        if ($updates === []) {
+            return;
+        }
+
+        $productId = trim((string) $product->shopify_id);
+        if ($productId === '') {
+            throw new \RuntimeException('The product has no Shopify ID.');
+        }
+
+        $primaryRow = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+        if (! $primaryRow) {
+            throw new \RuntimeException('The latest Shopify product data is unavailable. Refresh the product import and retry.');
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $categoryId = trim((string) (data_get($details, 'category.id') ?: data_get($details, 'productCategory.productTaxonomyNode.id', '')));
+        $categoryName = trim((string) (data_get($details, 'category.name') ?: data_get($details, 'productCategory.productTaxonomyNode.fullName', '')));
+        $raw = $this->productMetafieldRawValues($product, null, $productId);
+
+        $warnings = $this->updateMetafields(
+            $product,
+            $productId,
+            $updates,
+            $raw,
+            $categoryId !== '' ? $categoryId : null,
+            $categoryName !== '' ? $categoryName : null
+        );
+
+        if ($warnings !== []) {
+            throw new \RuntimeException(collect($warnings)->pluck('warning')->join('; '));
+        }
+
+        foreach ($updates as $header => $value) {
+            $primaryRow->set($header, $value);
+        }
+        $primaryRow->save();
+    }
+
     /** @return array<int, string> */
     private function mergeChangedLabels(string $current, array $remove, array $add): array
     {
