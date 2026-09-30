@@ -63,7 +63,7 @@ final class PrepopulationRuleService
 
         $updates = [
             'tags' => $resolvedTags,
-            'vendor' => $rule->auto_vendor,
+            'vendor' => $this->resolvedVendor($rule, $resolvedTags),
             'type' => $rule->auto_type,
             'product_category' => $rule->auto_product_category,
             'google_product_category' => $rule->auto_google_product_category,
@@ -84,6 +84,36 @@ final class PrepopulationRuleService
         }
 
         return array_filter($updates, fn ($value): bool => $value !== null && $value !== '');
+    }
+
+    /**
+     * @param array<int, string> $resolvedTags
+     */
+    private function resolvedVendor(PrepopulationRule $rule, array $resolvedTags): ?string
+    {
+        $vendor = trim((string) ($rule->auto_vendor ?? ''));
+        if ($vendor === '') {
+            return null;
+        }
+
+        $isBundleRule = collect(array_merge(
+            $resolvedTags,
+            [(string) ($rule->handle ?? ''), (string) ($rule->collection_name ?? '')]
+        ))->contains(function (string $value): bool {
+            $slug = Str::slug($value);
+
+            return in_array($slug, ['bundles', 'stacks'], true)
+                || str_contains($slug, '-bundles')
+                || str_contains($slug, '-bundle')
+                || str_contains($slug, '-stacks')
+                || str_contains($slug, '-stack');
+        });
+
+        if ($isBundleRule && strcasecmp($vendor, 'Elevated Basics') === 0) {
+            return 'Elevated Basics Bundles';
+        }
+
+        return $vendor;
     }
 
     /** @param array<int, string> $add @param array<int, string> $remove */

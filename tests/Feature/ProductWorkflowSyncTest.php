@@ -288,7 +288,137 @@ it('creates a missing primary shopify row when mirroring draft fields by sku', f
         ->and($row->get(HeaderStore::VARIANT_WEIGHT_UNIT))->toBe('g')
         ->and($row->get(HeaderStore::JEWELRY_MATERIAL))->toBe('gold; silver')
         ->and($row->get(HeaderStore::MATERIALS_AND_DIMENSIONS))->toBe("Freshwater pearls\nStainless steel")
-        ->and($row->get(HeaderStore::UVP_SHORT_PARAGRAPH))->toBe('A layered necklace stack with luminous pearl details and everyday polish.');
+        ->and($row->get(HeaderStore::UVP_SHORT_PARAGRAPH))->toBe('A layered necklace stack with luminous pearl details and everyday polish.')
+        ->and($row->get(HeaderStore::JEWELRY_TYPE))->toBe('handcrafted-jewellery')
+        ->and($row->get(HeaderStore::TARGET_GENDER))->toBe('Unisex')
+        ->and($row->get(HeaderStore::AGE_GROUP))->toBe('Universal')
+        ->and($row->get(HeaderStore::GOOGLE_SHOPPING_AGE_GROUP))->toBe('adult');
+});
+
+it('creates a missing product variant from draft variant fields', function (): void {
+    $product = createWorkflowTestProduct([
+        'handle' => 'missing-variant-stack',
+        'shopify_id' => null,
+        'approval_version' => 1,
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => null,
+        'sku' => 'MISSING-VARIANT-001',
+        'title' => 'Missing Variant Stack',
+        'variant_price' => '540.00',
+        'variant_compare_at_price' => '600.00',
+        'variant_inventory_qty' => 13,
+        'variant_weight' => '46.000',
+        'variant_weight_unit' => 'g',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        attributes: ['sku', 'variant_price', 'variant_compare_at_price', 'variant_inventory_qty', 'variant_weight', 'variant_weight_unit']
+    );
+
+    $variant = $product->variants()->firstOrFail();
+
+    expect($variant->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_NEW)
+        ->and($variant->local_dirty)->toBeTrue()
+        ->and($variant->inventory_local_dirty)->toBeTrue()
+        ->and($variant->sku)->toBe('MISSING-VARIANT-001')
+        ->and($variant->barcode)->toBe('MISSING-VARIANT-001')
+        ->and($variant->price)->toBe('540.00')
+        ->and($variant->compare_at_price)->toBe('600.00')
+        ->and($variant->inventory_qty)->toBe(13)
+        ->and($variant->weight)->toBe('46.000')
+        ->and($variant->weight_unit)->toBe('g');
+});
+
+it('copies a draft image onto the linked product when the product has no images', function (): void {
+    Storage::fake('public');
+    Storage::disk('public')->put('new-product-images/draft-image.jpg', 'image-body');
+
+    $product = createWorkflowTestProduct([
+        'handle' => 'draft-image-stack',
+        'shopify_id' => null,
+        'approval_version' => 1,
+    ]);
+    createWorkflowTestVariant($product, ['sku' => 'DRAFT-IMAGE-001']);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => null,
+        'sku' => 'DRAFT-IMAGE-001',
+        'title' => 'Draft Image Stack',
+        'image_path' => 'new-product-images/draft-image.jpg',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        attributes: ['image_path']
+    );
+
+    $image = $product->images()->firstOrFail();
+
+    expect($image->sync_state)->toBe(\App\Models\Image::SYNC_STATE_LOCAL_NEW)
+        ->and($image->local_dirty)->toBeTrue()
+        ->and($image->needs_shopify_image_sync)->toBeTrue()
+        ->and($image->image_path)->toBe('new-product-images/draft-image.jpg')
+        ->and($image->src)->toContain('new-product-images/draft-image.jpg')
+        ->and($image->alt_text)->toBe('Draft Image Stack');
+});
+
+it('backfills blank product variant fields from existing draft values on any later draft save', function (): void {
+    $product = createWorkflowTestProduct([
+        'handle' => 'variant-backfill-stack',
+        'shopify_id' => null,
+        'approval_version' => 1,
+    ]);
+
+    $variant = createWorkflowTestVariant($product, [
+        'sku' => null,
+        'price' => null,
+        'barcode' => null,
+    ]);
+
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::VARIANT_SKU => '',
+            HeaderStore::VARIANT_PRICE => '',
+            HeaderStore::VARIANT_BARCODE => '',
+        ],
+    ]);
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => null,
+        'sku' => 'EBBN17',
+        'title' => 'Variant Backfill Stack',
+        'variant_price' => '540.00',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $draft->update([
+        'uvp_short_paragraph' => 'A later save should backfill the missing variant values.',
+    ]);
+
+    $variant->refresh();
+    $row->refresh();
+
+    expect($variant->sku)->toBe('EBBN17')
+        ->and($variant->barcode)->toBe('EBBN17')
+        ->and($variant->price)->toBe('540.00')
+        ->and($row->get(HeaderStore::VARIANT_SKU))->toBe('EBBN17')
+        ->and($row->get(HeaderStore::VARIANT_BARCODE))->toBe('EBBN17')
+        ->and($row->get(HeaderStore::VARIANT_PRICE))->toBe('540.00');
 });
 
 it('keeps removed complementary products removed after draft sync and reseed', function (): void {

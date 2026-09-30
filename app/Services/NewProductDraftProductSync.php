@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Import;
+use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
@@ -43,6 +44,7 @@ final class NewProductDraftProductSync
             $product->fill($data)->save();
         }
         $this->syncVariantFromDraft($product, $draft, $attributes);
+        $this->syncImageFromDraft($product, $draft, $attributes);
         $this->syncCostPerItemRow($product, $draft, $attributes);
         $this->syncShopifyRowFieldsFromDraft($product, $draft, $attributes);
         $this->syncShopifyMetafieldFieldsFromDraft($product, $draft, $attributes);
@@ -228,6 +230,8 @@ final class NewProductDraftProductSync
     {
         $variant = Variant::where('product_id', $product->id)->orderBy('id')->first();
         if (! $variant) {
+            $this->createVariantFromDraft($product, $draft, $attributes);
+
             return;
         }
 
@@ -241,19 +245,24 @@ final class NewProductDraftProductSync
             $updates['sku'] = $draftSku;
             $updates['barcode'] = $draftSku;
         }
-        if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)) {
+        if ($this->shouldSyncDraftAttribute('variant_price', $attributes, $draft->variant_price)
+            || $this->shouldBackfillBlankValue($variant->price, $draft->variant_price)) {
             $updates['price'] = $draft->variant_price;
         }
-        if ($this->shouldSyncDraftAttribute('variant_compare_at_price', $attributes, $draft->variant_compare_at_price)) {
+        if ($this->shouldSyncDraftAttribute('variant_compare_at_price', $attributes, $draft->variant_compare_at_price)
+            || $this->shouldBackfillBlankValue($variant->compare_at_price, $draft->variant_compare_at_price)) {
             $updates['compare_at_price'] = $draft->variant_compare_at_price;
         }
-        if ($this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty)) {
+        if ($this->shouldSyncDraftAttribute('variant_inventory_qty', $attributes, $draft->variant_inventory_qty)
+            || $this->shouldBackfillBlankValue($variant->inventory_qty, $draft->variant_inventory_qty)) {
             $updates['inventory_qty'] = $draft->variant_inventory_qty;
         }
-        if ($this->shouldSyncDraftAttribute('variant_weight', $attributes, $draft->variant_weight)) {
+        if ($this->shouldSyncDraftAttribute('variant_weight', $attributes, $draft->variant_weight)
+            || $this->shouldBackfillBlankValue($variant->weight, $draft->variant_weight)) {
             $updates['weight'] = $draft->variant_weight;
         }
-        if ($this->shouldSyncDraftAttribute('variant_weight_unit', $attributes, $draft->variant_weight_unit)) {
+        if ($this->shouldSyncDraftAttribute('variant_weight_unit', $attributes, $draft->variant_weight_unit)
+            || $this->shouldBackfillBlankValue($variant->weight_unit, $draft->variant_weight_unit)) {
             $updates['weight_unit'] = $draft->variant_weight_unit;
         }
         if ($this->shouldSyncDraftAttribute('variant_inventory_policy', $attributes, $draft->variant_inventory_policy)) {
@@ -263,6 +272,85 @@ final class NewProductDraftProductSync
         if (! empty($updates)) {
             $variant->update($updates);
         }
+    }
+
+    private function createVariantFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
+    {
+        $draftSku = trim((string) ($draft->sku ?? ''));
+        $hasVariantValue = $draftSku !== ''
+            || $draft->variant_price !== null
+            || $draft->variant_compare_at_price !== null
+            || $draft->variant_inventory_qty !== null
+            || $draft->variant_weight !== null
+            || trim((string) ($draft->variant_weight_unit ?? '')) !== '';
+
+        if (! $hasVariantValue) {
+            return;
+        }
+
+        Variant::create([
+            'product_id' => $product->id,
+            'sync_state' => Variant::SYNC_STATE_LOCAL_NEW,
+            'local_dirty' => true,
+            'inventory_local_dirty' => true,
+            'sku' => $draftSku !== '' ? $draftSku : null,
+            'barcode' => $draftSku !== '' ? $draftSku : null,
+            'price' => $draft->variant_price,
+            'compare_at_price' => $draft->variant_compare_at_price,
+            'inventory_qty' => $draft->variant_inventory_qty,
+            'inventory_policy' => $draft->variant_inventory_policy,
+            'weight' => $draft->variant_weight,
+            'weight_unit' => $draft->variant_weight_unit,
+            'position' => ((int) $product->allVariants()->max('position')) + 1,
+        ]);
+    }
+
+    private function syncImageFromDraft(Product $product, NewProductDraft $draft, ?array $attributes = null): void
+    {
+        $imageUrl = $draft->imageUrl();
+        $imagePath = trim((string) ($draft->image_path ?? ''));
+
+        if ($imageUrl === null || trim($imageUrl) === '') {
+            return;
+        }
+
+        $hasImages = $product->allImages()
+            ->whereNotIn('sync_state', [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED])
+            ->exists();
+
+        $imageChanged = $this->shouldSyncDraftAttribute('image_path', $attributes, $draft->image_path)
+            || $this->shouldSyncDraftAttribute('image_url', $attributes, $draft->image_url);
+
+        if ($hasImages && ! $imageChanged) {
+            return;
+        }
+
+        $existing = $product->allImages()
+            ->where(function ($query) use ($imageUrl, $imagePath): void {
+                $query->where('src', $imageUrl);
+
+                if ($imagePath !== '') {
+                    $query->orWhere('image_path', $imagePath);
+                }
+            })
+            ->whereNotIn('sync_state', [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED])
+            ->first();
+
+        if ($existing instanceof Image) {
+            return;
+        }
+
+        Image::create([
+            'product_id' => $product->id,
+            'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+            'local_dirty' => true,
+            'src' => $imageUrl,
+            'image_path' => $imagePath !== '' && ! str_starts_with($imagePath, 'http') ? $imagePath : null,
+            'alt_text' => trim((string) ($draft->title ?? '')) ?: $draft->sku,
+            'position' => ((int) $product->allImages()->max('position')) + 1,
+            'needs_shopify_image_sync' => true,
+            'shopify_image_sync_error' => null,
+        ]);
     }
 
     private function syncCostPerItemRow(Product $product, NewProductDraft $draft, ?array $attributes = null): void
@@ -317,15 +405,15 @@ final class NewProductDraftProductSync
             $updates[HeaderStore::VARIANT_BARCODE] = $draftSku;
         }
 
-        $this->addRowUpdate($updates, HeaderStore::VARIANT_PRICE, $draft->variant_price, 'variant_price', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::VARIANT_COMPARE_AT, $draft->variant_compare_at_price, 'variant_compare_at_price', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::VARIANT_INVENTORY_QTY, $draft->variant_inventory_qty, 'variant_inventory_qty', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::VARIANT_GRAMS, $draft->variant_weight, 'variant_weight', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::VARIANT_WEIGHT_UNIT, $draft->variant_weight_unit, 'variant_weight_unit', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials, 'product_materials', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions, 'materials_and_dimensions', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_PRICE, $draft->variant_price, 'variant_price', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_COMPARE_AT, $draft->variant_compare_at_price, 'variant_compare_at_price', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_INVENTORY_QTY, $draft->variant_inventory_qty, 'variant_inventory_qty', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_GRAMS, $draft->variant_weight, 'variant_weight', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::VARIANT_WEIGHT_UNIT, $draft->variant_weight_unit, 'variant_weight_unit', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::MATERIAL_COST, $draft->material_cost, 'material_cost', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::JEWELRY_MATERIAL, $draft->jewelry_material, 'jewelry_material', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::PRODUCT_MATERIALS, $draft->product_materials, 'product_materials', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::MATERIALS_AND_DIMENSIONS, $draft->materials_and_dimensions, 'materials_and_dimensions', $attributes, $row);
 
         if ($this->shouldSyncDraftAttribute('product_design', $attributes, $draft->product_design)) {
             foreach (HeaderStore::designHeaders() as $designHeader) {
@@ -344,7 +432,7 @@ final class NewProductDraftProductSync
         if ($this->shouldSyncDraftAttribute('colour_style', $attributes, $draft->colour_style)) {
             $updates[HeaderStore::PATTERN_CATEGORY] = trim((string) ($draft->colour_style ?? ''));
         }
-        $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes, $row);
         if (
             $this->shouldSyncDraftAttribute('siblings_collection_name', $attributes, $draft->title)
             || $this->shouldSyncDraftAttribute('title', $attributes, $draft->title)
@@ -354,9 +442,14 @@ final class NewProductDraftProductSync
         $siblingCollection = $draft->sibling_collection === NewProductDraft::NO_SIBLING_COLLECTION
             ? ''
             : $draft->sibling_collection;
-        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $siblingCollection, 'sibling_collection', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes);
-        $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes);
+        $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $siblingCollection, 'sibling_collection', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes, $row);
+        foreach ($this->defaultExtraShopifyPayload() as $header => $value) {
+            if ($this->shouldBackfillBlankValue($row->get($header, null), $value)) {
+                $updates[$header] = $value;
+            }
+        }
         if ($this->shouldSyncDraftAttribute('seo_deindex', $attributes, $draft->seo_deindex)) {
             $updates[HeaderStore::SEO_DEINDEX] = $draft->seo_deindex ? 'true' : 'false';
         }
@@ -443,13 +536,32 @@ final class NewProductDraftProductSync
         string $header,
         mixed $value,
         string $attribute,
-        ?array $attributes = null
+        ?array $attributes = null,
+        ?ShopifyRow $row = null
     ): void {
-        if (! $this->shouldSyncDraftAttribute($attribute, $attributes, $value)) {
+        if (! $this->shouldSyncDraftAttribute($attribute, $attributes, $value)
+            && ! $this->shouldBackfillBlankValue($row?->get($header, null), $value)) {
             return;
         }
 
         $updates[$header] = is_scalar($value) ? (string) $value : '';
+    }
+
+    private function shouldBackfillBlankValue(mixed $currentValue, mixed $draftValue): bool
+    {
+        if ($draftValue === null) {
+            return false;
+        }
+
+        if (is_string($draftValue) && trim($draftValue) === '') {
+            return false;
+        }
+
+        if ($currentValue === null) {
+            return true;
+        }
+
+        return is_string($currentValue) && trim($currentValue) === '';
     }
 
     private function primaryShopifyRowForDraft(Product $product, NewProductDraft $draft): ?ShopifyRow
@@ -518,6 +630,7 @@ final class NewProductDraftProductSync
     private function extraDraftPayloadUpdates(NewProductDraft $draft, Product $product): array
     {
         $payload = is_array($draft->payload) ? $draft->payload : [];
+        $payload += $this->defaultExtraShopifyPayload();
         $allowed = array_flip($this->payloadAllowedHeaders($product));
 
         $updates = [];
@@ -537,6 +650,19 @@ final class NewProductDraftProductSync
         }
 
         return $updates;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function defaultExtraShopifyPayload(): array
+    {
+        return [
+            HeaderStore::JEWELRY_TYPE => 'handcrafted-jewellery',
+            HeaderStore::TARGET_GENDER => 'Unisex',
+            HeaderStore::AGE_GROUP => 'Universal',
+            HeaderStore::GOOGLE_SHOPPING_AGE_GROUP => 'adult',
+        ];
     }
 
     /**

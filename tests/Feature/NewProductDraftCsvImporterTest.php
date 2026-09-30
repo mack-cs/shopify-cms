@@ -8,6 +8,7 @@ use App\Models\StyleProfile;
 use App\Models\User;
 use App\Models\Variant;
 use App\Filament\Resources\NewProductDraftResource;
+use App\Services\HeaderStore;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftRoundtripCsvService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -206,7 +207,11 @@ it('prepopulates stack fields when the imported collection tag is a bundle tag a
         ->and($draft->vendor)->toBe('Elevated Basics Bundles')
         ->and($draft->type)->toBe('Bracelets')
         ->and($tags)->toContain('bundles', 'elevated-basics-bundles')
-        ->and($draft->bundle_product_ids)->toBe([$component->id]);
+        ->and($draft->bundle_product_ids)->toBe([$component->id])
+        ->and($draft->payload[HeaderStore::JEWELRY_TYPE] ?? null)->toBe('handcrafted-jewellery')
+        ->and($draft->payload[HeaderStore::TARGET_GENDER] ?? null)->toBe('Unisex')
+        ->and($draft->payload[HeaderStore::AGE_GROUP] ?? null)->toBe('Universal')
+        ->and($draft->payload[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] ?? null)->toBe('adult');
 
     @unlink($path);
 });

@@ -1233,7 +1233,7 @@ class NewProductDraftResource extends Resource
                                             ->integer()
                                             ->minValue(0)
                                             ->default(NewProductDraft::DEFAULT_VARIANT_INVENTORY_QTY)
-                                            ->helperText('Defaults to 40; change it when needed.')
+                                            ->helperText('Defaults to 15; change it when needed.')
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -6671,7 +6671,9 @@ class NewProductDraftResource extends Resource
             ? $title
             : null;
 
-        $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
+        $data['payload'] = self::applyDefaultExtraShopifyPayload(
+            self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null)
+        );
         unset($data['extra_shopify_fields']);
 
         $data = self::applyDraftSaleAndBundleData($data);
@@ -6814,6 +6816,20 @@ class NewProductDraftResource extends Resource
         }
 
         return $payload === [] ? null : $payload;
+    }
+
+    /**
+     * @param array<string, string>|null $payload
+     * @return array<string, string>
+     */
+    private static function applyDefaultExtraShopifyPayload(?array $payload): array
+    {
+        return ($payload ?? []) + [
+            HeaderStore::JEWELRY_TYPE => 'handcrafted-jewellery',
+            HeaderStore::TARGET_GENDER => 'Unisex',
+            HeaderStore::AGE_GROUP => 'Universal',
+            HeaderStore::GOOGLE_SHOPPING_AGE_GROUP => 'adult',
+        ];
     }
 
     /**

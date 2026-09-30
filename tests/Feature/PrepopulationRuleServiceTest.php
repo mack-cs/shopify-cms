@@ -187,3 +187,18 @@ it('resolves bundle tag names to matching stack collection rules', function (): 
     expect($service->ruleForCollection('elevated-basics-bundles')?->handle)->toBe('elevated-basics-stacks')
         ->and($service->ruleForCollection('earthy-bundle-shop-your-vibe')?->handle)->toBe('earthy-stack-shop-your-vibe');
 });
+
+it('keeps elevated basics bundle vendor when bundle rules use the base vendor', function (): void {
+    $rule = PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-bundles',
+        'collection_name' => 'Elevated Basics Bundles',
+        'add_tags' => ['all-products', 'elevated-basics', 'bundles', 'elevated-basics-bundles'],
+        'remove_tags' => [],
+        'auto_vendor' => 'Elevated Basics',
+    ]);
+
+    $updates = app(PrepopulationRuleService::class)->applyRule($rule, [], null);
+
+    expect($updates['vendor'])->toBe('Elevated Basics Bundles');
+});

@@ -10,7 +10,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
-it('defaults new drafts to 46 grams and quantity 40 while allowing overrides', function (): void {
+it('defaults new drafts to 46 grams and quantity 15 while allowing overrides', function (): void {
     $defaulted = NewProductDraft::create([
         'title' => 'Defaulted Draft',
         'status' => 'draft',
@@ -31,7 +31,7 @@ it('defaults new drafts to 46 grams and quantity 40 while allowing overrides', f
         'origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED,
     ]);
 
-    expect($defaulted->variant_inventory_qty)->toBe(40)
+    expect($defaulted->variant_inventory_qty)->toBe(15)
         ->and($defaulted->variant_weight)->toBe('46.000')
         ->and($defaulted->variant_weight_unit)->toBe('g')
         ->and($defaulted->material_cost)->toBe('63.00')
@@ -79,7 +79,7 @@ it('mirrors new draft quantity and weight defaults to an existing product varian
     app(NewProductDraftProductSync::class)->syncToExistingProduct($draft);
     $variant->refresh();
 
-    expect($variant->inventory_qty)->toBe(40)
+    expect($variant->inventory_qty)->toBe(15)
         ->and($variant->weight)->toBe('46.000')
         ->and($variant->weight_unit)->toBe('g');
 });

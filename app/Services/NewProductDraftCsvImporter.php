@@ -247,6 +247,7 @@ final class NewProductDraftCsvImporter
 
                 $data = $this->applyImportedTypeCategoryMapping($data);
                 [$data, $appliedCollectionRule] = $this->applyCollectionPrepopulation($data);
+                $payload = $this->applyDefaultExtraShopifyPayload($payload);
                 if ($appliedCollectionRule === true) {
                     $prepopulationApplied++;
                 } elseif ($appliedCollectionRule === false) {
@@ -1160,5 +1161,19 @@ final class NewProductDraftCsvImporter
                 ->update($authoritativeAttributes);
             $draft->refresh();
         }
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private function applyDefaultExtraShopifyPayload(array $payload): array
+    {
+        return $payload + [
+            HeaderStore::JEWELRY_TYPE => 'handcrafted-jewellery',
+            HeaderStore::TARGET_GENDER => 'Unisex',
+            HeaderStore::AGE_GROUP => 'Universal',
+            HeaderStore::GOOGLE_SHOPPING_AGE_GROUP => 'adult',
+        ];
     }
 }
