@@ -737,7 +737,7 @@ class ShopYourVibe extends Page
                 'bead_colour_finish' => [],
             ];
             $this->dispatch('close-modal', id: 'manage-tag-assignments');
-            Notification::make()->title('Product tag fields updated')->success()->send();
+            Notification::make()->title('Product metafields saved to Shopify')->success()->send();
         });
     }
 

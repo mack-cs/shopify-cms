@@ -528,10 +528,10 @@
                 <p class="font-semibold">{{ $tagProduct['title'] }}</p>
                 <p class="mb-4 text-sm text-gray-500">SKU: {{ $tagProduct['sku'] ?: 'No SKU' }}</p>
                 {{ $this->productTagForm }}
-                <p class="mt-4 text-sm text-gray-500">Saving immediately updates only these product metafields in Shopify, then mirrors the local product and new-product draft values.</p>
+                <p class="mt-4 text-sm text-gray-500">This saves these product metafields directly to Shopify now, then mirrors the local product and new-product draft values.</p>
             @endif
             <x-slot name="footer">
-                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Save tags</x-filament::button>
+                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Save to Shopify</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-tag-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
