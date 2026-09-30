@@ -121,7 +121,7 @@
                     @if ($draft->status === 'pushing')
                         <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
                     @else
-                        <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty || !pending()" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                        <x-filament::button wire:click="reviewPush" :disabled="! $draft->pending" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
                     @endif
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
