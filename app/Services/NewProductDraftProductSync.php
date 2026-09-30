@@ -206,6 +206,7 @@ final class NewProductDraftProductSync
             'published' => $draft->published,
             'color_string' => $draft->color_string,
             'uvp_short_paragraph' => $draft->uvp_short_paragraph,
+            'bead_colour_finish' => $draft->bead_colour_finish,
             'seo_deindex' => $draft->seo_deindex,
             'batch' => $draft->batch,
         ];
@@ -444,6 +445,7 @@ final class NewProductDraftProductSync
             : $draft->sibling_collection;
         $this->addRowUpdate($updates, HeaderStore::SIBLING_COLLECTION, $siblingCollection, 'sibling_collection', $attributes, $row);
         $this->addRowUpdate($updates, HeaderStore::UVP_SHORT_PARAGRAPH, $draft->uvp_short_paragraph, 'uvp_short_paragraph', $attributes, $row);
+        $this->addRowUpdate($updates, HeaderStore::BEAD_COLOUR_FINISH, $draft->bead_colour_finish, 'bead_colour_finish', $attributes, $row);
         $this->addRowUpdate($updates, HeaderStore::COMPLEMENTARY_PRODUCTS, $draft->complementary_products, 'complementary_products', $attributes, $row);
         foreach ($this->defaultExtraShopifyPayload() as $header => $value) {
             if ($this->shouldBackfillBlankValue($row->get($header, null), $value)) {

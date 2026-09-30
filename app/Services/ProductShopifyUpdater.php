@@ -41,8 +41,11 @@ final class ProductShopifyUpdater
     public const CORE_FIELD_PATTERN_CATEGORY = 'pattern_category';
     public const CORE_FIELD_PRODUCT_METALS = 'product_metals';
     public const CORE_FIELD_SIBLINGS = 'siblings';
+    public const CORE_FIELD_SIBLING_OPTION_NAME = 'sibling_option_name';
+    public const CORE_FIELD_SIBLING_COLLECTION = 'sibling_collection';
     public const CORE_FIELD_COMPLEMENTARY_PRODUCTS = 'complementary_products';
     public const CORE_FIELD_UVP_SHORT_PARAGRAPH = 'uvp_short_paragraph';
+    public const CORE_FIELD_BEAD_COLOUR_FINISH = 'bead_colour_finish';
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
 
     /** @var array<string, string> */
@@ -534,6 +537,9 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_SIBLING_OPTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -571,8 +577,11 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
             self::CORE_FIELD_SIBLINGS,
+            self::CORE_FIELD_SIBLING_OPTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -614,8 +623,11 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY => 'Color Style',
             self::CORE_FIELD_PRODUCT_METALS => 'Product metals',
             self::CORE_FIELD_SIBLINGS => 'Siblings',
+            self::CORE_FIELD_SIBLING_OPTION_NAME => 'Sibling option name',
+            self::CORE_FIELD_SIBLING_COLLECTION => 'Sibling collection',
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => 'Complementary products',
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => 'UVP short paragraph',
+            self::CORE_FIELD_BEAD_COLOUR_FINISH => 'Bead Colour Finish',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];
     }
@@ -5877,8 +5889,11 @@ GQL;
             self::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
             self::CORE_FIELD_SIBLINGS => HeaderStore::SIBLINGS,
+            self::CORE_FIELD_SIBLING_OPTION_NAME => HeaderStore::SIBLINGS_COLLECTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION => HeaderStore::SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH => HeaderStore::BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
     }
@@ -5914,6 +5929,27 @@ GQL;
 
         if ($header === HeaderStore::SIBLINGS) {
             $draftValue = $this->linkedDraftMetafieldValue($product, 'siblings');
+            if ($draftValue !== null) {
+                return $draftValue;
+            }
+        }
+
+        if ($header === HeaderStore::SIBLINGS_COLLECTION_NAME) {
+            $productValue = $this->nullIfEmpty($product->title);
+            if ($productValue !== null) {
+                return $productValue;
+            }
+        }
+
+        if ($header === HeaderStore::SIBLING_COLLECTION) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'sibling_collection');
+            if ($draftValue !== null && $draftValue !== NewProductDraft::NO_SIBLING_COLLECTION) {
+                return $draftValue;
+            }
+        }
+
+        if ($header === HeaderStore::BEAD_COLOUR_FINISH) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'bead_colour_finish');
             if ($draftValue !== null) {
                 return $draftValue;
             }

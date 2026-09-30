@@ -46,6 +46,7 @@ final class NewProductDraftSeeder
         'siblings_collection_name',
         'sibling_collection',
         'complementary_products',
+        'bead_colour_finish',
         'seo_deindex',
         'payload',
     ];
@@ -484,6 +485,9 @@ final class NewProductDraftSeeder
                 ['custom', 'uvp_short_paragraph'],
             ]);
         }
+        $data['bead_colour_finish'] = $this->valueFromRowOrMetafield($product, $row, HeaderStore::BEAD_COLOUR_FINISH, [
+            ['stiletto', 'bead_colour_finish'],
+        ]);
         $data['complementary_products'] = $this->complementaryValueFromMetafieldOrRow($product, $row);
 
         $variant = $product->variants()
@@ -659,6 +663,7 @@ final class NewProductDraftSeeder
             'colour_style' => 'Color Style',
             'siblings_collection_name' => 'Siblings collection name',
             'uvp_short_paragraph' => 'UVP short paragraph',
+            'bead_colour_finish' => 'Bead Colour Finish',
             'complementary_products' => 'Complementary products',
             default => ucwords(str_replace('_', ' ', $field)),
         };

@@ -21,7 +21,6 @@ class ShopifyCsvImporter
 
             // wipe previous processed data for this import (so re-processing works)
             ShopifyRow::where('import_id', $import->id)->delete();
-            Product::where('import_id', $import->id)->delete();
 
             $csv = Reader::createFromPath($absolutePath);
             $csv->setHeaderOffset(0);

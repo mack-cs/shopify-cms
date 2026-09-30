@@ -109,6 +109,8 @@ final class NewProductDraftCsvImporter
             'siblings collection name' => 'siblings_collection_name',
             'sibling collection' => 'sibling_collection',
             'uvp short paragraph' => 'uvp_short_paragraph',
+            'bead colour finish' => 'bead_colour_finish',
+            'bead color finish' => 'bead_colour_finish',
             'complementary products' => 'complementary_products',
             'complementary products finish the set and get one free' => 'complementary_products',
             'complementary products handles' => 'complementary_products',

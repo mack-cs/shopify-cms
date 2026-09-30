@@ -1476,6 +1476,8 @@ class NewProductDraftResource extends Resource
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
                         ->toolbarButtons(self::compactRichTextToolbarButtons()),
+                    TextInput::make('bead_colour_finish')
+                        ->label('Bead Colour Finish'),
                     Forms\Components\Toggle::make('seo_deindex')
                         ->label('SEO: Deindex products')
                         ->helperText('Stored as the `seo.hide_from_google` metafield for this draft.')
@@ -7198,6 +7200,7 @@ class NewProductDraftResource extends Resource
             HeaderStore::SIBLINGS_COLLECTION_NAME => 'siblings_collection_name',
             HeaderStore::SIBLING_COLLECTION => 'sibling_collection',
             HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
+            HeaderStore::BEAD_COLOUR_FINISH => 'bead_colour_finish',
             HeaderStore::COMPLEMENTARY_PRODUCTS => 'complementary_products',
             HeaderStore::SEO_DEINDEX => 'seo_deindex',
             default => null,
@@ -7554,6 +7557,7 @@ class NewProductDraftResource extends Resource
                 'variant_inventory_qty',
                 'material_cost',
                 'uvp_short_paragraph',
+                'bead_colour_finish',
                 'seo_deindex',
                 'batch',
             ], true);

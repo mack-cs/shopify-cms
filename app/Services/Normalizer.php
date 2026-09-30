@@ -38,17 +38,6 @@ final class Normalizer
                 ->filter(fn (string $handle): bool => $handle !== '')
                 ->values();
 
-            // Keep normalized catalog as latest Shopify snapshot:
-            // - remove products no longer present in latest sync
-            // - deduplicate to a single row per handle
-            if ($currentHandles->isNotEmpty()) {
-                Product::query()
-                    ->whereNotIn('handle', $currentHandles->all())
-                    ->delete();
-            } else {
-                Product::query()->delete();
-            }
-
             $existingByHandle = Product::query()
                 ->whereIn('handle', $currentHandles->all())
                 ->orderBy('id')
@@ -133,12 +122,6 @@ final class Normalizer
                 $existingForHandle = $existingByHandle->get($handle, collect());
                 $product = $existingForHandle->first();
                 if ($product) {
-                    // Drop duplicate legacy rows for this handle, keep first stable row.
-                    $duplicateIds = $existingForHandle->skip(1)->pluck('id')->all();
-                    if (!empty($duplicateIds)) {
-                        Product::query()->whereIn('id', $duplicateIds)->delete();
-                    }
-
                     $product->fill($payload);
                     $product->saveQuietly();
                 } else {

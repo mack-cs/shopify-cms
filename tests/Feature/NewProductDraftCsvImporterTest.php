@@ -191,8 +191,8 @@ it('prepopulates stack fields when the imported collection tag is a bundle tag a
     $path = tempnam(sys_get_temp_dir(), 'draft-bundle-tag-import-');
     file_put_contents(
         $path,
-        "SKU,Collection Tag,Title,Associated Product SKUs\n"
-        ."LAB0182TestStack,elevated-basics-bundles,Sunday in Bali Bracelet Test Stack,LAB-COMP-001\n"
+        "SKU,Collection Tag,Title,Bead Colour Finish,Associated Product SKUs\n"
+        ."LAB0182TestStack,elevated-basics-bundles,Sunday in Bali Bracelet Test Stack,pearlised,LAB-COMP-001\n"
     );
 
     $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
@@ -206,6 +206,7 @@ it('prepopulates stack fields when the imported collection tag is a bundle tag a
         ->and($draft)->not->toBeNull()
         ->and($draft->vendor)->toBe('Elevated Basics Bundles')
         ->and($draft->type)->toBe('Bracelets')
+        ->and($draft->bead_colour_finish)->toBe('pearlised')
         ->and($tags)->toContain('bundles', 'elevated-basics-bundles')
         ->and($draft->bundle_product_ids)->toBe([$component->id])
         ->and($draft->payload[HeaderStore::JEWELRY_TYPE] ?? null)->toBe('handcrafted-jewellery')
