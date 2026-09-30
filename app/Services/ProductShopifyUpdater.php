@@ -41,8 +41,11 @@ final class ProductShopifyUpdater
     public const CORE_FIELD_PATTERN_CATEGORY = 'pattern_category';
     public const CORE_FIELD_PRODUCT_METALS = 'product_metals';
     public const CORE_FIELD_SIBLINGS = 'siblings';
+    public const CORE_FIELD_SIBLING_OPTION_NAME = 'sibling_option_name';
+    public const CORE_FIELD_SIBLING_COLLECTION = 'sibling_collection';
     public const CORE_FIELD_COMPLEMENTARY_PRODUCTS = 'complementary_products';
     public const CORE_FIELD_UVP_SHORT_PARAGRAPH = 'uvp_short_paragraph';
+    public const CORE_FIELD_BEAD_COLOUR_FINISH = 'bead_colour_finish';
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
 
     /** @var array<string, string> */
@@ -169,6 +172,68 @@ final class ProductShopifyUpdater
 
         foreach ($updates as $header => $values) {
             $primaryRow->set($header, implode('; ', $values));
+        }
+        $primaryRow->save();
+    }
+
+    /**
+     * Push the existing-product tag/metafield editor values from Shop Your Vibe.
+     *
+     * @param array<string, string> $updates HeaderStore header => normalized display value
+     */
+    public function syncShopYourVibeTagFields(Product $product, array $updates): void
+    {
+        $allowedHeaders = [
+            HeaderStore::MATERIALS_AND_DIMENSIONS => true,
+            HeaderStore::COLOR_METAFIELD => true,
+            HeaderStore::JEWELRY_MATERIAL => true,
+            HeaderStore::BEAD_COLOUR_FINISH => true,
+        ];
+
+        $updates = collect($updates)
+            ->filter(fn (mixed $value, string $header): bool => isset($allowedHeaders[$header]) && is_scalar($value) && trim((string) $value) !== '')
+            ->map(fn (mixed $value): string => trim((string) $value))
+            ->all();
+
+        if ($updates === []) {
+            return;
+        }
+
+        $productId = trim((string) $product->shopify_id);
+        if ($productId === '') {
+            throw new \RuntimeException('The product has no Shopify ID.');
+        }
+
+        $primaryRow = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+        if (! $primaryRow) {
+            throw new \RuntimeException('The latest Shopify product data is unavailable. Refresh the product import and retry.');
+        }
+
+        $details = $this->productDetails($product, null, $productId);
+        $categoryId = trim((string) (data_get($details, 'category.id') ?: data_get($details, 'productCategory.productTaxonomyNode.id', '')));
+        $categoryName = trim((string) (data_get($details, 'category.name') ?: data_get($details, 'productCategory.productTaxonomyNode.fullName', '')));
+        $raw = $this->productMetafieldRawValues($product, null, $productId);
+
+        $warnings = $this->updateMetafields(
+            $product,
+            $productId,
+            $updates,
+            $raw,
+            $categoryId !== '' ? $categoryId : null,
+            $categoryName !== '' ? $categoryName : null
+        );
+
+        if ($warnings !== []) {
+            throw new \RuntimeException(collect($warnings)->pluck('warning')->join('; '));
+        }
+
+        foreach ($updates as $header => $value) {
+            $primaryRow->set($header, $value);
         }
         $primaryRow->save();
     }
@@ -534,6 +599,9 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_SIBLING_OPTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -571,8 +639,11 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
             self::CORE_FIELD_SIBLINGS,
+            self::CORE_FIELD_SIBLING_OPTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
     }
@@ -614,8 +685,11 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY => 'Color Style',
             self::CORE_FIELD_PRODUCT_METALS => 'Product metals',
             self::CORE_FIELD_SIBLINGS => 'Siblings',
+            self::CORE_FIELD_SIBLING_OPTION_NAME => 'Sibling option name',
+            self::CORE_FIELD_SIBLING_COLLECTION => 'Sibling collection',
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => 'Complementary products',
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => 'UVP short paragraph',
+            self::CORE_FIELD_BEAD_COLOUR_FINISH => 'Bead Colour Finish',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];
     }
@@ -5877,8 +5951,11 @@ GQL;
             self::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
             self::CORE_FIELD_SIBLINGS => HeaderStore::SIBLINGS,
+            self::CORE_FIELD_SIBLING_OPTION_NAME => HeaderStore::SIBLINGS_COLLECTION_NAME,
+            self::CORE_FIELD_SIBLING_COLLECTION => HeaderStore::SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_BEAD_COLOUR_FINISH => HeaderStore::BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
     }
@@ -5914,6 +5991,27 @@ GQL;
 
         if ($header === HeaderStore::SIBLINGS) {
             $draftValue = $this->linkedDraftMetafieldValue($product, 'siblings');
+            if ($draftValue !== null) {
+                return $draftValue;
+            }
+        }
+
+        if ($header === HeaderStore::SIBLINGS_COLLECTION_NAME) {
+            $productValue = $this->nullIfEmpty($product->title);
+            if ($productValue !== null) {
+                return $productValue;
+            }
+        }
+
+        if ($header === HeaderStore::SIBLING_COLLECTION) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'sibling_collection');
+            if ($draftValue !== null && $draftValue !== NewProductDraft::NO_SIBLING_COLLECTION) {
+                return $draftValue;
+            }
+        }
+
+        if ($header === HeaderStore::BEAD_COLOUR_FINISH) {
+            $draftValue = $this->linkedDraftMetafieldValue($product, 'bead_colour_finish');
             if ($draftValue !== null) {
                 return $draftValue;
             }

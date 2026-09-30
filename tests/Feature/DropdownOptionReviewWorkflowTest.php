@@ -2,6 +2,8 @@
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\DropdownOptionResource\Pages\ListDropdownOptions;
+use App\Filament\Resources\PendingDropdownOptionResource;
+use App\Jobs\ProcessPendingDropdownOptionsJob;
 use App\Models\DropdownOption;
 use App\Models\User;
 use App\Services\DropdownReviewWorkbookExporter;
@@ -209,6 +211,55 @@ it('approves pending dropdown values only for their discovered collection contex
             ->where('value', 'Gold')
             ->where('active', true)
             ->count())->toBe(1);
+});
+
+it('bulk approves the same dropdown value across every selected collection context', function (): void {
+    $livi = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Metallic',
+        'collection_style' => 'Livi Road Bracelets',
+        'collection_tag_primary' => 'livi-road',
+        'collection_tag_secondary' => 'livi-road-bracelets',
+        'active' => false,
+    ]));
+    $untamed = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Metallic',
+        'collection_style' => 'Untamed Bracelets',
+        'collection_tag_primary' => 'untamed',
+        'collection_tag_secondary' => 'untamed-bracelets',
+        'active' => false,
+    ]));
+
+    (new ProcessPendingDropdownOptionsJob([$livi->id, $untamed->id], 'approve'))->handle();
+
+    expect($livi->fresh()->active)->toBeTrue()
+        ->and($untamed->fresh()->active)->toBeTrue();
+});
+
+it('removes stale unmapped controlled dropdown rows from the pending queue cleanup', function (): void {
+    $unmapped = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Colourful',
+        'collection_style' => null,
+        'collection_tag_primary' => null,
+        'collection_tag_secondary' => null,
+        'active' => false,
+    ]));
+    $mapped = DropdownOption::withoutEvents(fn (): DropdownOption => DropdownOption::query()->create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Metallic',
+        'collection_style' => 'Livi Road Bracelets',
+        'collection_tag_primary' => 'livi-road',
+        'collection_tag_secondary' => 'livi-road-bracelets',
+        'active' => false,
+    ]));
+
+    $cleanup = new ReflectionMethod(PendingDropdownOptionResource::class, 'cleanupUnknownPendingRows');
+    $cleanup->invoke(null);
+
+    expect(DropdownOption::query()->whereKey($unmapped->id)->exists())->toBeFalse()
+        ->and(DropdownOption::query()->whereKey($mapped->id)->exists())->toBeTrue();
 });
 
 it('keeps collection-specific dropdown options isolated by tags', function (): void {

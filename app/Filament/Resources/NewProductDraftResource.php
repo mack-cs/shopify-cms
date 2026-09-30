@@ -1476,6 +1476,39 @@ class NewProductDraftResource extends Resource
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
                         ->toolbarButtons(self::compactRichTextToolbarButtons()),
+                    Select::make('bead_colour_finish')
+                        ->label('Bead Colour Finish')
+                        ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                            $get,
+                            'bead_colour_finish',
+                            HeaderStore::BEAD_COLOUR_FINISH
+                        ))
+                        ->placeholder('Select option')
+                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                            HeaderStore::BEAD_COLOUR_FINISH,
+                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                        ))
+                        ->searchable()
+                        ->reactive()
+                        ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                        ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                            $data,
+                            HeaderStore::BEAD_COLOUR_FINISH
+                        ))
+                        ->rules([
+                            fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                $invalid = self::invalidCollectionSelectionValues(
+                                    $value,
+                                    self::dropdownOptionsForHeader(
+                                        HeaderStore::BEAD_COLOUR_FINISH,
+                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                    )
+                                );
+                                if (!empty($invalid)) {
+                                    $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                }
+                            },
+                        ]),
                     Forms\Components\Toggle::make('seo_deindex')
                         ->label('SEO: Deindex products')
                         ->helperText('Stored as the `seo.hide_from_google` metafield for this draft.')
@@ -7198,6 +7231,7 @@ class NewProductDraftResource extends Resource
             HeaderStore::SIBLINGS_COLLECTION_NAME => 'siblings_collection_name',
             HeaderStore::SIBLING_COLLECTION => 'sibling_collection',
             HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
+            HeaderStore::BEAD_COLOUR_FINISH => 'bead_colour_finish',
             HeaderStore::COMPLEMENTARY_PRODUCTS => 'complementary_products',
             HeaderStore::SEO_DEINDEX => 'seo_deindex',
             default => null,
@@ -7554,6 +7588,7 @@ class NewProductDraftResource extends Resource
                 'variant_inventory_qty',
                 'material_cost',
                 'uvp_short_paragraph',
+                'bead_colour_finish',
                 'seo_deindex',
                 'batch',
             ], true);

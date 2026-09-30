@@ -1447,14 +1447,41 @@ it('syncs only the first three complementary products to Shopify while keeping e
     expect($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS))->toBe(implode('; ', $selectedComplementary));
 });
 
-it('includes the uvp metafield in an automatic full sync for a fully approved product', function (): void {
+it('includes the draft-owned stiletto metafields in an automatic full sync for a fully approved product', function (): void {
     $product = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1051',
+        'title' => 'Published Product Title',
         'uvp_short_paragraph' => '<p>A clear product promise.</p>',
         'approval_version' => 1,
     ]);
 
     approveWorkflowTestProduct($product);
+
+    \App\Models\ShopifyCollection::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Collection/2051',
+        'title' => 'Matching Sibling Collection',
+        'handle' => 'matching-sibling-collection',
+    ]);
+
+    ShopifyMetafield::create([
+        'import_id' => $product->import_id,
+        'handle' => $product->handle,
+        'namespace' => 'stiletto',
+        'key' => 'sibling_collection',
+        'type' => 'collection_reference',
+        'value' => '',
+    ]);
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => 'Published Product Title',
+        'sibling_collection' => 'Matching Sibling Collection',
+        'bead_colour_finish' => 'pearlised',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
 
     ShopifyRow::create([
         'import_id' => $product->import_id,
@@ -1463,6 +1490,9 @@ it('includes the uvp metafield in an automatic full sync for a fully approved pr
         'row_type' => 'product_primary',
         'data' => [
             HeaderStore::UVP_SHORT_PARAGRAPH => '<p>Stale UVP.</p>',
+            HeaderStore::SIBLINGS_COLLECTION_NAME => 'Stale Sibling Option Name',
+            HeaderStore::SIBLING_COLLECTION => '',
+            HeaderStore::BEAD_COLOUR_FINISH => '',
             HeaderStore::SIBLINGS => 'gid://shopify/Product/9999',
         ],
     ]);
@@ -1528,12 +1558,27 @@ it('includes the uvp metafield in an automatic full sync for a fully approved pr
     $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product]));
 
     $uvp = collect($capturedMetafields)->firstWhere('key', 'uvp_short_paragraph');
+    $siblingOptionName = collect($capturedMetafields)->firstWhere('key', 'sibling_option_name');
+    $siblingCollection = collect($capturedMetafields)->firstWhere('key', 'sibling_collection');
+    $beadColourFinish = collect($capturedMetafields)->firstWhere('key', 'bead_colour_finish');
 
     expect($result['updated'])->toBe(1)
         ->and($result['failed'])->toBe(0)
         ->and(ProductShopifyUpdater::defaultCoreFields())->toContain(ProductShopifyUpdater::CORE_FIELD_UVP_SHORT_PARAGRAPH)
+        ->and(ProductShopifyUpdater::defaultCoreFields())->toContain(ProductShopifyUpdater::CORE_FIELD_SIBLING_OPTION_NAME)
+        ->and(ProductShopifyUpdater::defaultCoreFields())->toContain(ProductShopifyUpdater::CORE_FIELD_SIBLING_COLLECTION)
+        ->and(ProductShopifyUpdater::defaultCoreFields())->toContain(ProductShopifyUpdater::CORE_FIELD_BEAD_COLOUR_FINISH)
         ->and($uvp)->not->toBeNull()
         ->and($uvp['namespace'])->toBe('custom')
+        ->and($siblingOptionName)->not->toBeNull()
+        ->and($siblingOptionName['namespace'])->toBe('stiletto')
+        ->and($siblingOptionName['value'])->toBe('Published Product Title')
+        ->and($siblingCollection)->not->toBeNull()
+        ->and($siblingCollection['namespace'])->toBe('stiletto')
+        ->and($siblingCollection['value'])->toBe('gid://shopify/Collection/2051')
+        ->and($beadColourFinish)->not->toBeNull()
+        ->and($beadColourFinish['namespace'])->toBe('stiletto')
+        ->and($beadColourFinish['value'])->toBe('pearlised')
         ->and(collect($capturedMetafields)->pluck('key')->all())->not->toContain('related_products')
         ->and($uvp['value'])->toBe(json_encode(['type' => 'root', 'children' => [[
             'type' => 'paragraph',

@@ -121,7 +121,7 @@
                     @if ($draft->status === 'pushing')
                         <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
                     @else
-                        <x-filament::button wire:click="reviewPush" x-bind:disabled="formDirty || !pending()" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                        <x-filament::button wire:click="reviewPush" :disabled="! $draft->pending" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
                     @endif
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
@@ -232,6 +232,7 @@
                                 <div class="syv-vibe-actions">
                                     <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
+                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
                                 </div>
                             </article>
                         @endforeach
@@ -341,20 +342,44 @@
                                     wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed">
                                 @endif
                                     @foreach ($collection['products'] as $product)
+                                        @php($parentProductCard = collect($parentProducts)->firstWhere('id', $product['id']))
+                                        @php($displayProduct = $parentProductCard ? array_replace($product, $parentProductCard) : $product)
                                         <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                            @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
-                                            @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
+                                            @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $displayProduct['title'] }}">Drag</button>@endif
+                                            @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $displayProduct])
                                             <div class="syv-product-image-wrap">
-                                                @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                                @if ($displayProduct['image'])<img src="{{ $displayProduct['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
                                             </div>
-                                            <h5 class="mt-2 font-medium">{{ $product['title'] }}</h5>
-                                            @if ($product['sku'])<p class="mb-2 text-xs text-gray-500">SKU: {{ $product['sku'] }}</p>@endif
-                                            <div class="mt-2 flex gap-2">
-                                                @if ($collection['membership_supported'])
-                                                    <x-filament::button size="xs" color="danger" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
+                                            <h4 class="mt-2 font-medium">{{ $displayProduct['title'] }}</h4>
+                                            <p class="text-xs text-gray-500">SKU: {{ $displayProduct['sku'] ?: 'No SKU' }}</p>
+                                            <div class="my-3 syv-vibe-badge-list">
+                                                <p class="text-xs font-semibold uppercase text-gray-500">Shop Your Vibes</p>
+                                                <div class="syv-vibe-badges">
+                                                @forelse (($displayProduct['vibe_assignments'] ?? []) as $assignment)
+                                                    <x-filament::badge color="info">{{ $assignment }}</x-filament::badge>
+                                                @empty
+                                                    <span class="syv-empty-state">None</span>
+                                                @endforelse
+                                                </div>
+                                            </div>
+                                            <div class="my-3 syv-vibe-badge-list">
+                                                <p class="text-xs font-semibold uppercase text-gray-500">Siblings</p>
+                                                <div class="syv-vibe-badges">
+                                                @forelse (($displayProduct['siblings'] ?? []) as $sibling)
+                                                    <span class="syv-sibling-badge">{{ strtoupper($sibling['label']) }}</span>
+                                                @empty
+                                                    <span class="syv-empty-state">None</span>
+                                                @endforelse
+                                                </div>
+                                            </div>
+                                            <div class="syv-vibe-actions">
+                                                @if ($parentProductCard)
+                                                    <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
+                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
+                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
                                                 @endif
-                                                @if (collect($parentProducts)->contains('id', $product['id']))
-                                                    <button type="button" class="rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Manage Vibes</button>
+                                                @if ($collection['membership_supported'])
+                                                    <x-filament::button size="xs" color="danger" class="syv-card-action" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
                                                 @endif
                                             </div>
                                         </article>
@@ -494,6 +519,20 @@
             <x-slot name="footer">
                 <x-filament::button wire:click="saveProductSiblings" wire:loading.attr="disabled">Save siblings</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-sibling-assignments' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="manage-tag-assignments" width="2xl" heading="Manage Product Tags">
+            @php($tagProduct = $managingTagProductGid ? collect($parentProducts)->firstWhere('id', $managingTagProductGid) : null)
+            @if ($tagProduct)
+                <p class="font-semibold">{{ $tagProduct['title'] }}</p>
+                <p class="mb-4 text-sm text-gray-500">SKU: {{ $tagProduct['sku'] ?: 'No SKU' }}</p>
+                {{ $this->productTagForm }}
+                <p class="mt-4 text-sm text-gray-500">This saves these product metafields directly to Shopify now, then mirrors the local product and new-product draft values.</p>
+            @endif
+            <x-slot name="footer">
+                <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Save to Shopify</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-tag-assignments' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
 

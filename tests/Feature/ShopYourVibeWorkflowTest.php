@@ -410,7 +410,7 @@ it('uses a Filament confirmation before removing a vibe and allows cancellation'
     $this->actingAs($this->user);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
-        ->assertSee('Permanently delete the vibe card from Shopify');
+        ->assertSee('Delete the Shop Your Vibe card from Shopify');
     expect($this->draft->fresh()->desired['cards'])->toHaveCount(2);
     $page->call('unmountAction');
     expect($this->draft->fresh()->pending)->toBeFalse();

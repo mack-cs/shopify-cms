@@ -763,8 +763,11 @@ class ProductPartialApprovalService
             ProductShopifyUpdater::CORE_FIELD_PATTERN_CATEGORY => HeaderStore::PATTERN_CATEGORY,
             ProductShopifyUpdater::CORE_FIELD_PRODUCT_METALS => HeaderStore::PRODUCT_METALS,
             ProductShopifyUpdater::CORE_FIELD_SIBLINGS => HeaderStore::SIBLINGS,
+            ProductShopifyUpdater::CORE_FIELD_SIBLING_OPTION_NAME => HeaderStore::SIBLINGS_COLLECTION_NAME,
+            ProductShopifyUpdater::CORE_FIELD_SIBLING_COLLECTION => HeaderStore::SIBLING_COLLECTION,
             ProductShopifyUpdater::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
             ProductShopifyUpdater::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
+            ProductShopifyUpdater::CORE_FIELD_BEAD_COLOUR_FINISH => HeaderStore::BEAD_COLOUR_FINISH,
             ProductShopifyUpdater::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
 

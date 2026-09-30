@@ -102,6 +102,7 @@ class NewProductDraft extends Model
         'siblings_collection_name',
         'sibling_collection',
         'uvp_short_paragraph',
+        'bead_colour_finish',
         'complementary_products',
         'bundle_product_ids',
         'bundle_component_quantities',
