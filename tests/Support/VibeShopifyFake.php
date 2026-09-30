@@ -63,7 +63,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
     public function product(int $id): array
     {
         return $this->products['gid://shopify/Product/'.$id] = ['id' => 'gid://shopify/Product/'.$id, 'title' => 'Product '.$id,
-            'status' => 'ACTIVE', 'tags' => [], 'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'],
+            'vendor' => 'Livi Road', 'productType' => 'Bracelets', 'status' => 'ACTIVE', 'tags' => [], 'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'],
+            'materialsAndDimensions' => null, 'colorPattern' => null, 'jewelryMaterial' => null, 'beadColourFinish' => null,
             'variants' => ['nodes' => [['sku' => 'SKU-'.$id]]]];
     }
 

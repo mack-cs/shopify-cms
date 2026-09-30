@@ -5,6 +5,9 @@ namespace App\Filament\Pages;
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeProductTags;
+use App\Jobs\RefreshShopYourVibeDraft;
+use App\Jobs\RefreshShopYourVibeParents;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
@@ -160,7 +163,14 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->attempt(function () use ($refresh): void {
             if ($refresh) {
-                Cache::forget($this->parentCacheKey());
+                RefreshShopYourVibeParents::dispatch($this->parentCacheKey(), auth()->id());
+                Notification::make()
+                    ->title('Shopify refresh queued')
+                    ->body('The collection list will refresh in the background.')
+                    ->success()
+                    ->send();
+
+                return;
             }
             $this->parents = Cache::remember($this->parentCacheKey(), 300, fn () => app(ShopYourVibeShopify::class)->parents());
             $this->loadError = null;
@@ -215,13 +225,15 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function () use ($discard): void {
-            $this->accept(app(ShopYourVibeWorkflow::class)->refresh($this->draftId, $this->revision, $discard));
             $this->activeCard = null;
             $this->cardForm = [];
             $this->confirmingPush = false;
-            $this->dispatch('vibe-form-saved');
-            Cache::forget($this->parentCacheKey());
-            $this->loadAssignmentOverview();
+            RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
+            Notification::make()
+                ->title('Shopify refresh queued')
+                ->body('This Shop Your Vibe draft will reload from Shopify in the background.')
+                ->success()
+                ->send();
         });
     }
 
@@ -717,7 +729,7 @@ class ShopYourVibe extends Page
         abort_unless(collect($this->parentProducts)->contains('id', $this->managingTagProductGid), 422);
         $this->attempt(function (): void {
             $this->tagForm = $this->productTagForm->getState();
-            app(ShopYourVibeTagService::class)->save(
+            PushShopYourVibeProductTags::dispatch(
                 $this->managingTagProductGid,
                 $this->tagForm,
                 auth()->id(),
@@ -737,7 +749,11 @@ class ShopYourVibe extends Page
                 'bead_colour_finish' => [],
             ];
             $this->dispatch('close-modal', id: 'manage-tag-assignments');
-            Notification::make()->title('Product metafields saved to Shopify')->success()->send();
+            Notification::make()
+                ->title('Product metafield update queued')
+                ->body('Shopify will update in the background.')
+                ->success()
+                ->send();
         });
     }
 
@@ -969,10 +985,11 @@ class ShopYourVibe extends Page
     {
         $movementBySku = $this->movementClassificationsBySku($products);
         $variantInventoryBySku = $this->variantInventoryBySku($products);
+        $beadColourFinishByGid = $this->beadColourFinishByGid($products);
         $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
         $siblingOptions = $this->parentSiblingOptions;
 
-        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $threshold, $siblingOptions): array {
+        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $beadColourFinishByGid, $threshold, $siblingOptions): array {
             $inventoryTracked = $product['inventory_tracked'] ?? null;
             $quantity = $product['inventory_quantity'] ?? null;
             if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
@@ -991,9 +1008,42 @@ class ShopYourVibe extends Page
             $product['is_low_stock'] = $tracked && ! $isSoldOut && $quantity !== null && $quantity <= $threshold;
             $product['movement_classification'] = $movementBySku[trim((string) ($product['sku'] ?? ''))] ?? null;
             $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
+            $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
 
             return $product;
         })->all();
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $products
+     * @return array<string, string>
+     */
+    private function beadColourFinishByGid(array $products): array
+    {
+        $gids = collect($products)
+            ->pluck('id')
+            ->filter()
+            ->map(fn ($gid): string => trim((string) $gid))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($gids->isEmpty()) {
+            return [];
+        }
+
+        return Product::query()
+            ->whereIn('shopify_id', $gids->all())
+            ->orderByDesc('id')
+            ->get()
+            ->unique('shopify_id')
+            ->mapWithKeys(function (Product $product): array {
+                $state = app(ShopYourVibeTagService::class)->stateForProduct($product);
+                $finish = trim((string) ($state['bead_colour_finish'] ?? ''));
+
+                return $finish !== '' ? [(string) $product->shopify_id => $finish] : [];
+            })
+            ->all();
     }
 
     private function variantInventoryBySku(array $products): array
