@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
+use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibe;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
@@ -16,6 +17,7 @@ use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\Variant;
 use App\Services\ShopYourVibeAssignmentService;
+use App\Services\ShopYourVibeComplementaryService;
 use App\Services\ShopYourVibeSiblingService;
 use App\Services\ShopYourVibeTagService;
 use App\Services\ShopYourVibeShopify;
@@ -121,6 +123,16 @@ class ShopYourVibe extends Page
 
     public ?string $managingTagProductGid = null;
 
+    public ?string $managingComplementaryProductGid = null;
+
+    public array $complementarySelected = [];
+
+    public string $complementarySearch = '';
+
+    public array $complementarySearchResults = [];
+
+    public array $complementaryErrors = [];
+
     public array $tagForm = [
         'materials_and_dimensions' => '',
         'color_string' => [],
@@ -206,6 +218,7 @@ class ShopYourVibe extends Page
         $this->managingProductGid = null;
         $this->managingSiblingProductGid = null;
         $this->managingTagProductGid = null;
+        $this->resetComplementaryModalState();
         $this->tagForm = [
             'materials_and_dimensions' => '',
             'color_string' => [],
@@ -757,6 +770,109 @@ class ShopYourVibe extends Page
         });
     }
 
+    public function openProductComplementary(string $productGid): void
+    {
+        $this->guard();
+        abort_unless(collect($this->parentProducts)->contains('id', $productGid), 404);
+        $this->attempt(function () use ($productGid): void {
+            $service = app(ShopYourVibeComplementaryService::class);
+            $state = $service->stateForProductGid($productGid);
+
+            $this->managingComplementaryProductGid = $productGid;
+            $this->complementarySelected = $state['selected'];
+            $this->complementarySearch = '';
+            $this->complementarySearchResults = [];
+            $this->complementaryErrors = [];
+            $this->dispatch('open-modal', id: 'manage-complementary-products');
+        });
+    }
+
+    public function updatedComplementarySearch(): void
+    {
+        $this->refreshComplementarySearch();
+    }
+
+    public function addComplementaryProduct(string $productGid): void
+    {
+        $this->guard();
+        abort_unless($this->managingComplementaryProductGid, 422);
+        if ($productGid === $this->managingComplementaryProductGid) {
+            $this->complementaryErrors = ['A product cannot complement itself.'];
+
+            return;
+        }
+        if (collect($this->complementarySelected)->contains('id', $productGid)) {
+            $this->complementaryErrors = ['This product is already selected.'];
+
+            return;
+        }
+
+        $service = app(ShopYourVibeComplementaryService::class);
+        $result = $service->addTokens(
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+            $productGid,
+        );
+        $this->complementarySelected = $result['selected'];
+        $this->complementaryErrors = $result['errors'];
+        $this->refreshComplementarySearch();
+    }
+
+    public function removeComplementaryProduct(string $productGid): void
+    {
+        $this->complementarySelected = collect($this->complementarySelected)
+            ->reject(fn (array $product): bool => ($product['id'] ?? null) === $productGid)
+            ->values()
+            ->all();
+        $this->refreshComplementarySelectionStatuses();
+        $this->refreshComplementarySearch();
+    }
+
+    public function moveComplementaryProduct(int $index, int $direction): void
+    {
+        $target = $index + $direction;
+        if (! isset($this->complementarySelected[$index], $this->complementarySelected[$target])) {
+            return;
+        }
+
+        $items = $this->complementarySelected;
+        [$items[$index], $items[$target]] = [$items[$target], $items[$index]];
+        $this->complementarySelected = array_values($items);
+        $this->refreshComplementarySelectionStatuses();
+    }
+
+    public function saveProductComplementary(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingComplementaryProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingComplementaryProductGid), 422);
+        $this->attempt(function (): void {
+            $service = app(ShopYourVibeComplementaryService::class);
+            $result = $service->saveLocal(
+                $this->managingComplementaryProductGid,
+                collect($this->complementarySelected)->pluck('id')->all(),
+                auth()->id(),
+            );
+
+            PushShopYourVibeComplementaryProducts::dispatch($this->managingComplementaryProductGid, auth()->id());
+
+            foreach ($this->parentProducts as &$product) {
+                if ($product['id'] === $this->managingComplementaryProductGid) {
+                    $product['complementary_count'] = count($result['selected']);
+                }
+            }
+            unset($product);
+
+            $this->resetComplementaryModalState();
+            $this->dispatch('close-modal', id: 'manage-complementary-products');
+            Notification::make()
+                ->title('Complementary products queued')
+                ->body('The full list was saved locally. Shopify will receive the first three sellable products in the background.')
+                ->success()
+                ->send();
+        });
+    }
+
     public function reviewProductAssignments(): void
     {
         $this->guard();
@@ -986,10 +1102,11 @@ class ShopYourVibe extends Page
         $movementBySku = $this->movementClassificationsBySku($products);
         $variantInventoryBySku = $this->variantInventoryBySku($products);
         $beadColourFinishByGid = $this->beadColourFinishByGid($products);
+        $complementaryCountByGid = app(ShopYourVibeComplementaryService::class)->countsByGid($products);
         $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
         $siblingOptions = $this->parentSiblingOptions;
 
-        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $beadColourFinishByGid, $threshold, $siblingOptions): array {
+        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $beadColourFinishByGid, $complementaryCountByGid, $threshold, $siblingOptions): array {
             $inventoryTracked = $product['inventory_tracked'] ?? null;
             $quantity = $product['inventory_quantity'] ?? null;
             if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
@@ -1009,9 +1126,49 @@ class ShopYourVibe extends Page
             $product['movement_classification'] = $movementBySku[trim((string) ($product['sku'] ?? ''))] ?? null;
             $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
             $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
+            $product['complementary_count'] = $complementaryCountByGid[$product['id'] ?? ''] ?? 0;
 
             return $product;
         })->all();
+    }
+
+    private function resetComplementaryModalState(): void
+    {
+        $this->managingComplementaryProductGid = null;
+        $this->complementarySelected = [];
+        $this->complementarySearch = '';
+        $this->complementarySearchResults = [];
+        $this->complementaryErrors = [];
+    }
+
+    private function refreshComplementarySelectionStatuses(): void
+    {
+        if (! $this->managingComplementaryProductGid) {
+            return;
+        }
+
+        $result = app(ShopYourVibeComplementaryService::class)->addTokens(
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+            '',
+        );
+
+        $this->complementarySelected = $result['selected'];
+    }
+
+    private function refreshComplementarySearch(): void
+    {
+        if (! $this->managingComplementaryProductGid) {
+            $this->complementarySearchResults = [];
+
+            return;
+        }
+
+        $this->complementarySearchResults = app(ShopYourVibeComplementaryService::class)->search(
+            $this->complementarySearch,
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+        );
     }
 
     /**
@@ -1212,7 +1369,8 @@ class ShopYourVibe extends Page
 
         $showProductList = $this->activeTab === 'products'
             || filled($this->managingProductGid)
-            || filled($this->managingSiblingProductGid);
+            || filled($this->managingSiblingProductGid)
+            || filled($this->managingComplementaryProductGid);
         $managedProduct = $this->managingProductGid
             ? collect($this->parentProducts)->firstWhere('id', $this->managingProductGid)
             : null;
@@ -1260,7 +1418,11 @@ class ShopYourVibe extends Page
         $assignmentRemovals = collect($this->vibeMappings)
             ->whereIn('shopify_collection_id', $originalVibes->diff($selectedVibes))->pluck('collection_name')->values();
 
-        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals') + [
+        $complementaryProduct = $this->managingComplementaryProductGid
+            ? collect($this->parentProducts)->firstWhere('id', $this->managingComplementaryProductGid)
+            : null;
+
+        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }
