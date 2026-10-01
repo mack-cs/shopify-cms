@@ -782,26 +782,46 @@ it('rejects duplicate Order ID and SKU lines within one pending-order CSV', func
         ->and(data_get($preview->errors, '3.0'))->toContain('duplicated within this CSV');
 });
 
-it('rejects a later pending-order upload when its Order ID already exists', function (): void {
+it('allows a later pending-order upload to add a new SKU to an existing Order ID', function (): void {
     config(['google_sheets.enabled' => false]);
     $first = supplierWorkflowVariant('DUP-ORDER-1');
-    supplierWorkflowVariant('DUP-ORDER-2');
+    $second = supplierWorkflowVariant('DUP-ORDER-2');
     app(SupplierOrderService::class)->createForVariant($first, 'PO-EXISTS', 10, '01/11/2026');
     $path = tempnam(sys_get_temp_dir(), 'supplier-duplicate-order-');
     file_put_contents($path, "SKU,Order ID,Quantity Ordered,ETA\nDUP-ORDER-2,PO-EXISTS,5,02/11/2026\n");
+
+    $csv = app(SupplierOrderCsvService::class);
+    $preview = $csv->preview($path, 'order');
+    $confirmed = $csv->confirm($preview->uuid, dispatchReceipts: false);
+    @unlink($path);
+
+    $order = ProcurementSupplierOrder::query()->where('order_number', 'PO-EXISTS')->firstOrFail();
+
+    expect($preview->valid_count)->toBe(1)
+        ->and($preview->invalid_count)->toBe(0)
+        ->and($confirmed->status)->toBe('completed')
+        ->and($order->lines()->where('variant_id', $first->id)->exists())->toBeTrue()
+        ->and($order->lines()->where('variant_id', $second->id)->exists())->toBeTrue();
+});
+
+it('rejects adding a SKU that already exists on the same Order ID', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $first = supplierWorkflowVariant('DUP-SAME-SKU');
+    app(SupplierOrderService::class)->createForVariant($first, 'PO-SAME-SKU', 10, '01/11/2026');
+    $path = tempnam(sys_get_temp_dir(), 'supplier-duplicate-existing-sku-');
+    file_put_contents($path, "SKU,Order ID,Quantity Ordered,ETA\nDUP-SAME-SKU,PO-SAME-SKU,5,02/11/2026\n");
 
     $preview = app(SupplierOrderCsvService::class)->preview($path, 'order');
     @unlink($path);
 
     expect($preview->valid_count)->toBe(0)
         ->and($preview->invalid_count)->toBe(1)
-        ->and(data_get($preview->errors, '2.0'))->toContain('Order ID already exists');
+        ->and(data_get($preview->errors, '2.0'))->toContain('Order ID already contains this SKU');
 });
 
-it('rechecks Order IDs during confirmation to close the preview race window', function (): void {
+it('rechecks existing Order ID SKU membership during confirmation to close the preview race window', function (): void {
     config(['google_sheets.enabled' => false]);
-    supplierWorkflowVariant('RACE-UPLOAD');
-    $winner = supplierWorkflowVariant('RACE-WINNER');
+    $winner = supplierWorkflowVariant('RACE-UPLOAD');
     $path = tempnam(sys_get_temp_dir(), 'supplier-race-');
     file_put_contents($path, "SKU,Order ID,Quantity Ordered,ETA\nRACE-UPLOAD,PO-RACE,5,02/11/2026\n");
     $csv = app(SupplierOrderCsvService::class);
@@ -809,10 +829,10 @@ it('rechecks Order IDs during confirmation to close the preview race window', fu
     app(SupplierOrderService::class)->createForVariant($winner, 'PO-RACE', 8, '02/11/2026');
 
     expect(fn () => $csv->confirm($preview->uuid))
-        ->toThrow(ValidationException::class, 'Order ID(s) already exist');
+        ->toThrow(ValidationException::class, 'already contains SKU');
     @unlink($path);
 
-    expect(ProcurementSupplierOrderLine::query()->where('sku', 'RACE-UPLOAD')->count())->toBe(0)
+    expect(ProcurementSupplierOrderLine::query()->where('sku', 'RACE-UPLOAD')->count())->toBe(1)
         ->and($preview->fresh()->status)->toBe('previewed');
 });
 

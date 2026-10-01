@@ -198,12 +198,40 @@ final class SupplierOrderCsvService
                 return;
             }
             if ($locked->type === 'order') {
-                $orderIds = collect($locked->preview_rows)->pluck('order_id')->map(fn ($id) => trim((string) $id))->filter()->unique();
-                $existingIds = ProcurementSupplierOrder::query()->whereIn('order_number', $orderIds)->lockForUpdate()->pluck('order_number');
-                if ($existingIds->isNotEmpty()) {
-                    throw ValidationException::withMessages([
-                        'batch_uuid' => 'Order ID(s) already exist and this pending-order import was rejected: '.$existingIds->implode(', ').'.',
-                    ]);
+                $rowsByOrder = collect($locked->preview_rows)
+                    ->map(fn (array $row): array => [
+                        'order_id' => trim((string) ($row['order_id'] ?? '')),
+                        'sku' => strtoupper(trim((string) ($row['sku'] ?? ''))),
+                    ])
+                    ->filter(fn (array $row): bool => $row['order_id'] !== '' && $row['sku'] !== '')
+                    ->groupBy('order_id');
+
+                $existingOrders = ProcurementSupplierOrder::query()
+                    ->whereIn('order_number', $rowsByOrder->keys()->all())
+                    ->with('lines:id,supplier_order_id,sku')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('order_number');
+
+                foreach ($rowsByOrder as $orderNumber => $rows) {
+                    $order = $existingOrders->get($orderNumber);
+                    if (! $order instanceof ProcurementSupplierOrder) {
+                        continue;
+                    }
+
+                    $existingSkus = $order->lines
+                        ->mapWithKeys(fn (ProcurementSupplierOrderLine $line): array => [strtoupper(trim((string) $line->sku)) => true]);
+                    $duplicates = $rows
+                        ->pluck('sku')
+                        ->filter(fn (string $sku): bool => isset($existingSkus[$sku]))
+                        ->unique()
+                        ->values();
+
+                    if ($duplicates->isNotEmpty()) {
+                        throw ValidationException::withMessages([
+                            'batch_uuid' => 'Order '.$orderNumber.' already contains SKU(s): '.$duplicates->implode(', ').'.',
+                        ]);
+                    }
                 }
             }
             $locked->update(['status' => 'processing', 'confirmed_at' => now()]);
@@ -325,9 +353,15 @@ final class SupplierOrderCsvService
                 $errors[] = 'eta is not a valid date';
             }
         }
-        if ($type === 'order' && trim((string) ($row['order_id'] ?? '')) !== ''
-            && ProcurementSupplierOrder::query()->where('order_number', trim((string) $row['order_id']))->exists()) {
-            $errors[] = 'Order ID already exists; use the receipt template to fulfil an existing order';
+        if ($type === 'order' && $sku !== '' && trim((string) ($row['order_id'] ?? '')) !== '') {
+            $orderId = trim((string) $row['order_id']);
+            $alreadyInOrder = ProcurementSupplierOrderLine::query()
+                ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+                ->whereHas('order', fn ($query) => $query->where('order_number', $orderId))
+                ->exists();
+            if ($alreadyInOrder) {
+                $errors[] = 'Order ID already contains this SKU';
+            }
         }
         if ($type === 'receipt' && $sku !== '' && trim((string) ($row['order_id'] ?? '')) !== '') {
             $lines = ProcurementSupplierOrderLine::query()->where('status', 'open')
