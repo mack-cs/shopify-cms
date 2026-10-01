@@ -3,9 +3,9 @@
 use App\Filament\Resources\NewProductDraftResource;
 use App\Models\Import;
 use App\Models\NewProductDraft;
-use App\Models\ShopifyCollection;
 use App\Models\User;
 use App\Models\DropdownOption;
+use App\Services\ShopYourVibeShopify;
 use App\Services\TagNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -82,45 +82,36 @@ it('allows draft form data mutation without forcing required product-completenes
     expect($data['payload'])->toBeNull();
 });
 
-it('limits sibling collection options to the selected collection', function (): void {
-    $user = User::factory()->create();
-    $import = Import::create([
-        'filename' => 'sibling-collection-filter.csv',
-        'mode' => 'overwrite',
-        'status' => 'ready',
-        'created_by' => $user->id,
-        'is_current' => true,
-    ]);
-
-    $relevant = ShopifyCollection::create([
-        'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Collection/1001',
-        'handle' => 'livi-road-bracelets',
-        'title' => 'Livi Road Bracelets',
-    ]);
-    $sibling = ShopifyCollection::create([
-        'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Collection/1003',
-        'handle' => 'livi-road-slims-siblings',
-        'title' => 'Livi Road Slims Siblings',
-    ]);
-    ShopifyCollection::create([
-        'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Collection/1002',
-        'handle' => 'pata-pata-bracelets',
-        'title' => 'Pata Pata Bracelets',
-    ]);
+it('limits sibling collection options to shared SYV sibling matches for the selected collection', function (): void {
+    $shopify = \Mockery::mock(ShopYourVibeShopify::class);
+    $shopify->shouldReceive('siblingCollectionCandidates')
+        ->once()
+        ->andReturn([
+            [
+                'gid' => 'gid://shopify/Collection/1003',
+                'handle' => 'livi-road-slims-siblings',
+                'title' => 'Livi Road Slims Siblings',
+                'tag_rules' => ['livi-road-slims-siblings'],
+            ],
+            [
+                'gid' => 'gid://shopify/Collection/1002',
+                'handle' => 'pata-pata-siblings',
+                'title' => 'Pata Pata Siblings',
+                'tag_rules' => ['pata-pata-siblings'],
+            ],
+        ]);
+    app()->instance(ShopYourVibeShopify::class, $shopify);
 
     $method = new ReflectionMethod(NewProductDraftResource::class, 'siblingCollectionOptions');
     $options = $method->invoke(null, 'Livi Road Bracelets', null);
     $templateHeaders = (new ReflectionMethod(NewProductDraftResource::class, 'templateHeaders'))->invoke(null);
 
-    expect($options)->toHaveCount(3)
+    expect($options)->toHaveCount(2)
         ->and($options)->toHaveKey(NewProductDraft::NO_SIBLING_COLLECTION)
         ->and($options[NewProductDraft::NO_SIBLING_COLLECTION])->toBe('No sibling collection')
-        ->and($options)->toHaveKey($relevant->shopify_id)
-        ->and($options)->toHaveKey($sibling->shopify_id)
-        ->and($options[$relevant->shopify_id])->toBe('Livi Road Bracelets (livi-road-bracelets)')
+        ->and($options)->toHaveKey('gid://shopify/Collection/1003')
+        ->and($options)->not->toHaveKey('gid://shopify/Collection/1002')
+        ->and($options['gid://shopify/Collection/1003'])->toBe('Livi Road Slims Siblings (livi-road-slims-siblings)')
         ->and(collect($templateHeaders)->contains(function (string $header): bool {
             $lines = preg_split('/\R/u', str_replace("\r", '', $header)) ?: [$header];
 

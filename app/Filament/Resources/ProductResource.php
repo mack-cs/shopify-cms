@@ -3317,6 +3317,7 @@ class ProductResource extends Resource
                   && $header !== HeaderStore::TARGET_GENDER
                   && $header !== 'Cost per item'
                   && $header !== HeaderStore::JEWELRY_MATERIAL
+                  && $header !== HeaderStore::PRODUCT_MATERIALS
                   && $header !== HeaderStore::MATERIALS_AND_DIMENSIONS
                   && $header !== HeaderStore::JEWELRY_TYPE
                   && $header !== HeaderStore::AGE_GROUP

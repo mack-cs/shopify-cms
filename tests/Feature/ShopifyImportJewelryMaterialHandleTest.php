@@ -9,6 +9,7 @@ use App\Models\ShopifyRow;
 use App\Models\User;
 use App\Models\Variant;
 use App\Services\Normalizer;
+use App\Services\ShopYourVibeShopify;
 use App\Services\ShopifyApiImporter;
 use App\Services\ShopifyCsvImporter;
 use App\Services\ShopifyTaxonomyValueNormalizer;
@@ -129,4 +130,100 @@ it('updates imported products without deleting procurement referenced variants',
         ->and(Variant::query()->whereKey($variant->id)->exists())->toBeTrue()
         ->and(Variant::query()->where('product_id', $product->id)->count())->toBe(1)
         ->and(ProcurementSupplierOrderLine::query()->where('variant_id', $variant->id)->exists())->toBeTrue();
+});
+
+it('stages existing csv imports even when only row metafields are supplied', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'products.csv',
+        'mode' => 'overwrite',
+        'status' => 'processing',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $product = Product::create([
+        'import_id' => $import->id,
+        'handle' => 'row-only-product',
+        'title' => 'Row Only Product',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]);
+
+    ShopifyRow::create([
+        'import_id' => $import->id,
+        'row_index' => 1,
+        'handle' => 'row-only-product',
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::HANDLE => 'row-only-product',
+            HeaderStore::TITLE => 'Row Only Product',
+            HeaderStore::STATUS => 'active',
+            HeaderStore::MATERIALS_AND_DIMENSIONS => 'Fresh material text',
+        ],
+    ]);
+
+    app(Normalizer::class)->buildNormalizedTables($import, stageExistingProductUpdates: true);
+
+    expect($product->fresh()->approval_version)->toBe(2)
+        ->and(ShopifyRow::query()
+            ->where('import_id', $import->id)
+            ->where('handle', 'row-only-product')
+            ->first()
+            ?->get(HeaderStore::MATERIALS_AND_DIMENSIONS))
+        ->toBe('Fresh material text');
+});
+
+it('auto attaches a matching sibling collection from the shared SYV sibling source', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'products.csv',
+        'mode' => 'overwrite',
+        'status' => 'processing',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+
+    $shopify = \Mockery::mock(ShopYourVibeShopify::class);
+    $shopify->shouldReceive('siblingCollectionCandidates')
+        ->once()
+        ->andReturn([
+            [
+                'gid' => 'gid://shopify/Collection/2051',
+                'handle' => 'livi-road-chevron-sibling',
+                'title' => 'Livi Road-Chevron-Sibling',
+                'tag_rules' => ['livi-road-chevron-sibling'],
+            ],
+            [
+                'gid' => 'gid://shopify/Collection/2052',
+                'handle' => 'livi-road-slims-sibling',
+                'title' => 'Livi Road-Slims-Sibling',
+                'tag_rules' => ['livi-road-slims-sibling'],
+            ],
+        ]);
+    app()->instance(ShopYourVibeShopify::class, $shopify);
+
+    ShopifyRow::create([
+        'import_id' => $import->id,
+        'row_index' => 1,
+        'handle' => 'livi-road-chevron-gold',
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::HANDLE => 'livi-road-chevron-gold',
+            HeaderStore::TITLE => 'Livi Road Chevron Gold Bracelet',
+            HeaderStore::STATUS => 'active',
+            HeaderStore::TAGS => 'livi-road, bracelets, livi-road-chevron-sibling',
+        ],
+    ]);
+
+    app(Normalizer::class)->buildNormalizedTables($import, stageExistingProductUpdates: true);
+
+    $row = ShopifyRow::query()
+        ->where('import_id', $import->id)
+        ->where('handle', 'livi-road-chevron-gold')
+        ->first();
+
+    expect($row?->get(HeaderStore::SIBLING_COLLECTION))->toBe('gid://shopify/Collection/2051');
 });

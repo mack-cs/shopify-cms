@@ -51,6 +51,7 @@ use App\Services\ProductPartialApprovalService;
 use App\Services\SaleTagService;
 use App\Services\SaleProductUpdateImporter;
 use App\Services\PrepopulationRuleService;
+use App\Services\SiblingCollectionResolver;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Actions;
@@ -1682,14 +1683,7 @@ class NewProductDraftResource extends Resource
         $filterByCollection = func_num_args() >= 2;
         $options = [
             NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection',
-        ] + self::siblingCollectionQuery(
-            $filterByCollection ? $selectedCollection : null,
-            $filterByCollection
-        )
-            ->limit(100)
-            ->get()
-            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
-            ->all();
+        ] + self::siblingCollectionOptionsForCollection($filterByCollection ? $selectedCollection : null);
 
         $current = self::normalizeSiblingCollectionValue(
             $filterByCollection ? $currentValue : $selectedCollection
@@ -1718,30 +1712,62 @@ class NewProductDraftResource extends Resource
     {
         $term = trim($search);
 
-        $query = self::siblingCollectionQuery(
-            $selectedCollection,
-            func_num_args() >= 2
+        $options = self::siblingCollectionOptionsForCollection(
+            func_num_args() >= 2 ? $selectedCollection : null
         );
 
         if ($term !== '') {
-            $query->where(function (Builder $query) use ($term): void {
-                $query->where('title', 'like', "%{$term}%")
-                    ->orWhere('handle', 'like', "%{$term}%")
-                    ->orWhere('shopify_id', 'like', "%{$term}%");
-            });
+            $needle = mb_strtolower($term);
+            $options = array_filter(
+                $options,
+                fn (string $label, string $value): bool => str_contains(mb_strtolower($label), $needle)
+                    || str_contains(mb_strtolower($value), $needle),
+                ARRAY_FILTER_USE_BOTH
+            );
         }
-
-        $options = $query
-            ->limit(50)
-            ->get()
-            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
-            ->all();
 
         if ($term === '' || str_contains('no sibling collection', strtolower($term))) {
             $options = [NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection'] + $options;
         }
 
         return $options;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function siblingCollectionOptionsForCollection(mixed $selectedCollection): array
+    {
+        $collection = trim((string) ($selectedCollection ?? ''));
+        if ($collection === '') {
+            return [];
+        }
+
+        return collect(app(SiblingCollectionResolver::class)->optionsForParent([
+            'title' => $collection,
+            'handle' => $collection,
+        ]))
+            ->filter(fn (array $option): bool => trim((string) ($option['collection_gid'] ?? '')) !== '')
+            ->mapWithKeys(fn (array $option): array => [
+                (string) $option['collection_gid'] => self::siblingCollectionSharedOptionLabel($option),
+            ])
+            ->all();
+    }
+
+    /**
+     * @param array{tag?:string,label?:string,collection_gid?:string,collection_title?:string} $option
+     */
+    private static function siblingCollectionSharedOptionLabel(array $option): string
+    {
+        $title = trim((string) ($option['collection_title'] ?? ''));
+        $tag = trim((string) ($option['tag'] ?? ''));
+        $label = trim((string) ($option['label'] ?? ''));
+
+        if ($title !== '' && $tag !== '') {
+            return "{$title} ({$tag})";
+        }
+
+        return $title !== '' ? $title : ($label !== '' ? $label : $tag);
     }
 
     /**

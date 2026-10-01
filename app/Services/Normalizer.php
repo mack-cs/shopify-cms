@@ -22,11 +22,11 @@ use App\Services\DropdownCollectionCatalog;
 
 final class Normalizer
 {
-    public function buildNormalizedTables(Import $import): void
+    public function buildNormalizedTables(Import $import, bool $stageExistingProductUpdates = false): void
     {
         $imageIdsNeedingBackup = [];
 
-        DB::transaction(function () use ($import, &$imageIdsNeedingBackup) {
+        DB::transaction(function () use ($import, $stageExistingProductUpdates, &$imageIdsNeedingBackup) {
             $rows = ShopifyRow::where('import_id', $import->id)
                 ->whereNotNull('handle')
                 ->orderBy('row_index')
@@ -90,6 +90,9 @@ final class Normalizer
                 $normalizedColor = $this->normalizeColorString($primary->get(HeaderStore::COLOR_METAFIELD, null));
                 $normalizedTags = TagNormalizer::normalizeString($primary->get(HeaderStore::TAGS, null));
                 $collectionContext = $this->resolveCollectionContext($normalizedTags);
+                if ($stageExistingProductUpdates) {
+                    $this->attachDetectedSiblingCollection($primary, $normalizedTags);
+                }
 
                 $this->capturePendingDropdownOptions($primary, $collectionContext);
 
@@ -122,8 +125,17 @@ final class Normalizer
                 $existingForHandle = $existingByHandle->get($handle, collect());
                 $product = $existingForHandle->first();
                 if ($product) {
+                    $approvalVersionBeforeImport = (int) ($product->approval_version ?? 1);
                     $product->fill($payload);
-                    $product->saveQuietly();
+                    if ($stageExistingProductUpdates) {
+                        $product->save();
+                        $product->refresh();
+                        if ((int) ($product->approval_version ?? 1) === $approvalVersionBeforeImport) {
+                            $this->bumpApprovalVersionForImportedRow($product);
+                        }
+                    } else {
+                        $product->saveQuietly();
+                    }
                 } else {
                     $product = Product::create($payload);
                 }
@@ -198,6 +210,35 @@ final class Normalizer
         foreach (array_chunk($imageIdsNeedingBackup, 100) as $chunk) {
             ProductImageBackupImagesJob::dispatch($chunk, $import->created_by, 'Shopify image change backup');
         }
+    }
+
+    private function attachDetectedSiblingCollection(ShopifyRow $primary, ?string $tags): void
+    {
+        $current = trim((string) ($primary->get(HeaderStore::SIBLING_COLLECTION, '') ?? ''));
+        if ($current !== '') {
+            return;
+        }
+
+        if (!preg_match('/(?:^|[\s,_-])siblings?(?:$|[\s,_-])/', strtolower((string) $tags))) {
+            return;
+        }
+
+        $gid = app(SiblingCollectionResolver::class)->resolveCollectionGidForTags($tags);
+        if ($gid === null) {
+            return;
+        }
+
+        $primary->set(HeaderStore::SIBLING_COLLECTION, $gid);
+        $primary->save();
+    }
+
+    private function bumpApprovalVersionForImportedRow(Product $product): void
+    {
+        Product::withoutEvents(function () use ($product): void {
+            $product->forceFill([
+                'approval_version' => ((int) ($product->approval_version ?? 1)) + 1,
+            ])->save();
+        });
     }
 
     /**

@@ -56,7 +56,7 @@ class ShopifyCsvImporter
         });
 
         // build normalized tables from rows
-        $this->normalizer->buildNormalizedTables($import);
+        $this->normalizer->buildNormalizedTables($import, stageExistingProductUpdates: true);
 
         $import->update(['status' => 'ready']);
     }

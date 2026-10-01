@@ -6,14 +6,13 @@ use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 use RuntimeException;
 
 class ShopYourVibeSiblingService
 {
     public function __construct(
         private readonly ShopYourVibeShopify $shopify,
-        private readonly DropdownCollectionCatalog $collectionCatalog,
+        private readonly SiblingCollectionResolver $siblings,
     ) {}
 
     /**
@@ -21,18 +20,7 @@ class ShopYourVibeSiblingService
      */
     public function optionsForParent(array $parent): array
     {
-        $main = $this->mainCollectionContext($parent);
-        if ($main['key'] === '') {
-            return [];
-        }
-
-        return collect($this->shopify->siblingCollectionCandidates())
-            ->map(fn (array $collection): ?array => $this->optionFromCollection($collection, $main))
-            ->filter()
-            ->unique(fn (array $option): string => mb_strtolower($option['tag']))
-            ->sortBy('label')
-            ->values()
-            ->all();
+        return $this->siblings->optionsForParent($parent);
     }
 
     /**
@@ -42,12 +30,7 @@ class ShopYourVibeSiblingService
      */
     public function selectedForTags(array $tags, array $options): array
     {
-        $tagKeys = collect($tags)->mapWithKeys(fn (string $tag): array => [mb_strtolower(trim($tag)) => true]);
-
-        return collect($options)
-            ->filter(fn (array $option): bool => isset($tagKeys[mb_strtolower(trim($option['tag']))]))
-            ->values()
-            ->all();
+        return $this->siblings->selectedForTags($tags, $options);
     }
 
     /**
@@ -99,100 +82,6 @@ class ShopYourVibeSiblingService
         $this->reconcileTags($productGid, $remote['tags'], $confirmed['tags']);
 
         return $confirmed;
-    }
-
-    /**
-     * @return array{key:string,prefixes:array<int,string>}
-     */
-    private function mainCollectionContext(array $parent): array
-    {
-        $title = trim((string) ($parent['title'] ?? ''));
-        $handle = trim((string) ($parent['handle'] ?? ''));
-        $candidates = array_values(array_filter([Str::slug($handle), Str::slug($title)]));
-
-        foreach ($this->collectionCatalog->contexts() as $context) {
-            $style = Str::slug((string) ($context['collection_style'] ?? ''));
-            $primary = Str::slug((string) ($context['tag_primary'] ?? ''));
-            $secondary = Str::slug((string) ($context['tag_secondary'] ?? ''));
-            if (
-                in_array($style, $candidates, true)
-                || in_array($primary, $candidates, true)
-                || in_array($secondary, $candidates, true)
-            ) {
-                return [
-                    'key' => $primary ?: ($secondary ?: $style),
-                    'prefixes' => array_values(array_unique(array_filter([$primary, $style, Str::slug($title), Str::slug($handle)]))),
-                ];
-            }
-        }
-
-        $fallback = preg_replace('/-(bracelets?|necklaces?|earrings?|rings?|charms?|anklets?|bundles?|stacks?)$/', '', Str::slug($handle ?: $title)) ?: Str::slug($handle ?: $title);
-
-        return ['key' => $fallback, 'prefixes' => array_values(array_unique(array_filter([$fallback, Str::slug($title), Str::slug($handle)])))];
-    }
-
-    private function optionFromCollection(array $collection, array $main): ?array
-    {
-        $rules = collect($collection['tag_rules'] ?? [])
-            ->map(fn (mixed $tag): string => trim((string) $tag))
-            ->filter();
-        $sources = $rules->merge([
-            (string) ($collection['handle'] ?? ''),
-            (string) ($collection['title'] ?? ''),
-        ]);
-
-        $matched = null;
-        foreach ($sources as $source) {
-            $slug = Str::slug($source);
-            if (! preg_match('/(?:^|[-\s])siblings?$/i', str_replace('-', ' ', $slug))) {
-                continue;
-            }
-
-            foreach ($main['prefixes'] as $prefix) {
-                if ($prefix !== '' && str_starts_with($slug, $prefix . '-')) {
-                    $matched = $source;
-                    break 2;
-                }
-            }
-        }
-
-        if ($matched === null) {
-            return null;
-        }
-
-        $canonical = $rules->first(function (string $rule) use ($main): bool {
-            $slug = Str::slug($rule);
-
-            return str_contains($slug, 'sibling')
-                && collect($main['prefixes'])->contains(fn (string $prefix): bool => $prefix !== '' && str_starts_with($slug, $prefix . '-'));
-        }) ?? (string) ($collection['handle'] ?? $matched);
-
-        $label = $this->displayLabel($canonical, $main['prefixes']);
-        if ($label === '') {
-            return null;
-        }
-
-        return [
-            'tag' => $canonical,
-            'label' => $label,
-            'collection_gid' => (string) ($collection['gid'] ?? ''),
-            'collection_title' => (string) ($collection['title'] ?? ''),
-        ];
-    }
-
-    /** @param array<int, string> $prefixes */
-    private function displayLabel(string $tag, array $prefixes): string
-    {
-        $slug = Str::slug($tag);
-        foreach ($prefixes as $prefix) {
-            if ($prefix !== '' && str_starts_with($slug, $prefix . '-')) {
-                $slug = substr($slug, strlen($prefix) + 1);
-                break;
-            }
-        }
-        $slug = preg_replace('/-siblings?$/', '', $slug) ?? $slug;
-
-        return trim(Str::headline(str_replace('-', ' ', $slug)));
     }
 
     /**

@@ -6008,6 +6008,11 @@ GQL;
             if ($draftValue !== null && $draftValue !== NewProductDraft::NO_SIBLING_COLLECTION) {
                 return $draftValue;
             }
+
+            $resolved = app(SiblingCollectionResolver::class)->resolveCollectionGidForTags($product->tags);
+            if ($resolved !== null) {
+                return $resolved;
+            }
         }
 
         if ($header === HeaderStore::BEAD_COLOUR_FINISH) {
