@@ -112,9 +112,16 @@ class ShopYourVibeWorkflow
                     }
                     $key = (string) Str::uuid();
                     $gid = 'new:'.$key;
-                    $state['new_collections'][$key] = $fields + ['token' => $key, 'gid' => $gid, 'published' => false, 'import_id' => $importId];
+                    $state['new_collections'][$key] = $fields + [
+                        'token' => $key,
+                        'gid' => $gid,
+                        'published' => false,
+                        'import_id' => $importId,
+                        'membership_tag' => $fields['handle'],
+                    ];
                     $state['collections'][$gid] = ['gid' => $gid, 'title' => $fields['title'], 'handle' => $fields['handle'],
-                        'sort' => 'MANUAL', 'manual_supported' => true, 'membership_supported' => true,
+                        'sort' => 'MANUAL', 'manual_supported' => true, 'membership_supported' => false,
+                        'detected_membership_tag' => $fields['handle'],
                         'enable_manual' => false, 'products' => []];
                     $state['cards'][] = ['key' => $key, 'id' => null, 'handle' => 'cms-vibe-'.$key,
                         'name' => $fields['title'], 'image' => $fields['image'] ?? '', 'image_url' => $fields['image_url'] ?? null,
@@ -363,7 +370,11 @@ class ShopYourVibeWorkflow
                 $gid = $created['id'];
                 $creation['gid'] = $gid;
                 $state['new_collections'][$token] = $creation;
-                $state['collections'][$gid] = array_replace($state['collections'][$oldGid], ['gid' => $gid, 'handle' => $created['handle']]);
+                $confirmedCollection = $this->shopify->collection($gid);
+                $state['collections'][$gid] = array_replace($state['collections'][$oldGid], $confirmedCollection, [
+                    'gid' => $gid,
+                    'handle' => $created['handle'],
+                ]);
                 unset($state['collections'][$oldGid]);
                 foreach ($state['cards'] as &$item) {
                     if ($item['collection_gid'] === $oldGid) {
@@ -375,7 +386,7 @@ class ShopYourVibeWorkflow
                 }
                 unset($item);
                 // Creation is checkpointed before publication or product changes can fail.
-                $baseline['collections'][$gid] = array_replace($state['collections'][$gid], ['products' => []]);
+                $baseline['collections'][$gid] = $state['collections'][$gid];
                 $currentCollections[$gid] = $baseline['collections'][$gid];
                 $progress[] = 'Collection created: '.$created['title'];
                 $draft->update(['desired' => $state, 'snapshot' => $baseline, 'progress' => $progress]);
@@ -509,7 +520,7 @@ class ShopYourVibeWorkflow
         $collection = $draft->desired['collections'][$creation['gid']];
         ShopifyCollection::withoutEvents(fn () => ShopifyCollection::firstOrCreate(['shopify_id' => $creation['gid']], [
             'import_id' => $creation['import_id'],
-            'handle' => $collection['handle'], 'title' => $creation['title'],
+            'handle' => $collection['handle'], 'title' => $collection['title'] ?? $creation['title'],
             'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED, 'last_synced_at' => now(),
         ]));
     }

@@ -1357,37 +1357,63 @@ it('searches modal collections by title and handle beyond the initial results', 
     expect($search('striped-accessories'))->toBe(['gid://shopify/Collection/2000']);
 });
 
-it('creates a new collection draft from the modal and generates an editable handle', function () {
+it('creates a new collection draft from the modal and generates an editable contextual handle', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
+    $this->fake->collections['gid://shopify/Collection/1']['title'] = 'Elevated Basics Necklaces';
+    $this->fake->collections['gid://shopify/Collection/1']['handle'] = 'elevated-basics-necklaces';
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Necklaces';
+    $state['parent']['handle'] = 'elevated-basics-necklaces';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->set('newCollection.title', 'Golden Summer')->set('newCollection.handle', 'golden-summer')
+        ->set('newCollection.title', 'Gold')
+        ->assertSet('newCollection.handle', 'elevated-basics-necklaces-gold')
+        ->set('newCollection.title', 'Silver and Gold')
+        ->assertSet('newCollection.handle', 'elevated-basics-necklaces-silver-and-gold')
         ->set('newCollection.handle', 'summer-gold')->set('newCollection.title', 'Golden Summer Vibes')
         ->assertSet('newCollection.handle', 'summer-gold');
     $this->fake->calls = [];
     $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false)
         ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Golden Summer Vibes');
     $card = $this->draft->fresh()->desired['cards'][2];
-    $page->call('editCard', $card['key'])->assertSee('New collection')->assertSee('Add Products');
+    $page->call('editCard', $card['key'])->assertSee('New collection');
     expect($card['link'])->toBe('https://leighavenue.co.za/collections/summer-gold')
         ->and($this->fake->calls)->toBe([]);
 });
 
-it('creates and publishes a new vibe collection with its image and product order only on push', function () {
+it('falls back to the parent title when generating a new collection handle without a parent handle', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $this->fake->collections['gid://shopify/Collection/1']['title'] = 'Livi Road Bracelets';
+    $this->fake->collections['gid://shopify/Collection/1']['handle'] = '';
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Livi Road Bracelets';
+    $state['parent']['handle'] = '';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->set('newCollection.title', 'Pearl')
+        ->assertSet('newCollection.handle', 'livi-road-bracelets-pearl');
+});
+
+it('creates and publishes a new automated vibe collection with its image only on push', function () {
     $this->fake->calls = [];
     vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer',
         'image' => 'gid://shopify/MediaImage/1', 'image_url' => 'https://cdn.shopify.com/image.jpg']);
     $card = $this->draft->desired['cards'][2];
-    vibeEdit($this, 'add_products', ['collection_gid' => $card['collection_gid'], 'ids' => ['gid://shopify/Product/102', 'gid://shopify/Product/101']]);
     expect($this->fake->calls)->toBe([])->and($this->workflow->summary($this->draft)['New collections to publish'])->toBe(1);
     vibePush($this);
     expect($this->draft->status)->toBe('synced')->and($this->draft->last_error)->toBeNull();
     $card = $this->draft->desired['cards'][2];
     $created = $this->fake->collections[$card['collection_gid']];
     expect($created['handle'])->toBe('golden-summer')->and($created['image']['url'])->toBe('https://cdn.shopify.com/image.jpg')
-        ->and(array_column($created['products']['nodes'], 'id'))->toBe(['gid://shopify/Product/102', 'gid://shopify/Product/101'])
+        ->and($created['ruleSet']['rules'][0])->toMatchArray(['column' => 'TAG', 'relation' => 'EQUALS', 'condition' => 'golden-summer'])
+        ->and($this->draft->desired['collections'][$created['id']]['detected_membership_tag'])->toBe('golden-summer')
         ->and($this->fake->published[$created['id']])->toBe('gid://shopify/Publication/1')
         ->and(ShopifyCollection::where('shopify_id', $created['id'])->value('handle'))->toBe('golden-summer');
 });

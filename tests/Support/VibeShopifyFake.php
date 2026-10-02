@@ -145,7 +145,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             $id = 'gid://shopify/Collection/'.(count($this->collections) + 100);
             $this->collections[$id] = ['id' => $id, 'title' => $input['title'], 'handle' => $input['handle'],
                 'image' => isset($input['image']) ? ['url' => $input['image']['src']] : null, 'updatedAt' => '2026-09-09T12:00:00Z',
-                'sortOrder' => $input['sortOrder'], 'ruleSet' => null, 'metafield' => ['value' => $input['metafields'][0]['value']],
+                'sortOrder' => $input['sortOrder'], 'ruleSet' => $input['ruleSet'] ?? null, 'metafield' => ['value' => $input['metafields'][0]['value']],
+                'productsCount' => ['count' => 0],
                 'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
             if ($this->loseCreateResponse) {
                 $this->loseCreateResponse = false;

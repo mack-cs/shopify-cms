@@ -544,7 +544,13 @@ GQL, ['handle' => $creation['handle']]);
 
             return $collection;
         }
+        $membershipTag = trim((string) ($creation['membership_tag'] ?? $creation['handle']));
         $input = ['title' => $creation['title'], 'handle' => $creation['handle'], 'sortOrder' => 'MANUAL',
+            'ruleSet' => ['appliedDisjunctively' => false, 'rules' => [[
+                'column' => 'TAG',
+                'relation' => 'EQUALS',
+                'condition' => $membershipTag,
+            ]]],
             'metafields' => [['namespace' => 'custom', 'key' => 'syv_creation_token', 'type' => 'single_line_text_field', 'value' => $creation['token']]]];
         if ($imageUrl) {
             $input['image'] = ['src' => $imageUrl, 'altText' => $creation['title']];

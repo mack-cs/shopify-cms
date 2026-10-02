@@ -77,6 +77,8 @@ class ShopYourVibe extends Page
 
     public array $newCollection = [];
 
+    public bool $newCollectionHandleOverridden = false;
+
     public string $productSearch = '';
 
     public string $assignmentProductSearch = '';
@@ -272,6 +274,7 @@ class ShopYourVibe extends Page
         $this->addingCard = $forCard;
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
+        $this->newCollectionHandleOverridden = false;
         $this->newCollectionForm->fill(['image_mode' => 'none']);
         $this->loadError = null;
         $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
@@ -285,6 +288,7 @@ class ShopYourVibe extends Page
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
         $this->newCollection = [];
+        $this->newCollectionHandleOverridden = false;
         $this->resetValidation();
     }
 
@@ -392,7 +396,8 @@ class ShopYourVibe extends Page
         return $form->statePath('newCollection')->schema([
             TextInput::make('title')->label('Collection name')->required()->maxLength(255)
                 ->extraInputAttributes([
-                    'x-on:input' => "const slug = (\$event.target.value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-'); const handle = \$el.closest('[data-new-collection-form]')?.querySelector('[data-new-collection-handle]'); if (handle && (!handle.value || handle.dataset.autoSlug === 'true')) { handle.dataset.autoUpdating = 'true'; handle.value = slug; handle.dataset.autoSlug = 'true'; handle.dispatchEvent(new Event('input', { bubbles: true })); }",
+                    'x-on:input' => "const prefix = \$el.dataset.parentHandle || ''; const titleSlug = (\$event.target.value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-'); const slug = [prefix, titleSlug].filter(Boolean).join('-'); const handle = \$el.closest('[data-new-collection-form]')?.querySelector('[data-new-collection-handle]'); if (handle && (!handle.value || handle.dataset.autoSlug === 'true')) { handle.dataset.autoUpdating = 'true'; handle.value = slug; handle.dataset.autoSlug = 'true'; handle.dispatchEvent(new Event('input', { bubbles: true })); }",
+                    'data-parent-handle' => $this->newCollectionParentHandle(),
                 ]),
             TextInput::make('handle')->label('Slug (Shopify handle)')->required()->maxLength(255)
                 ->regex('/^[a-z0-9]+(?:-[a-z0-9]+)*$/')
@@ -453,6 +458,44 @@ class ShopYourVibe extends Page
             $this->closeCollectionPicker();
             $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
         });
+    }
+
+    public function updatedNewCollectionTitle(?string $value): void
+    {
+        if ($this->newCollectionHandleOverridden) {
+            return;
+        }
+
+        $this->newCollection['handle'] = $this->contextualCollectionHandle((string) $value);
+    }
+
+    public function updatedNewCollectionHandle(?string $value): void
+    {
+        $expected = $this->contextualCollectionHandle((string) ($this->newCollection['title'] ?? ''));
+        $this->newCollectionHandleOverridden = filled($value) && $value !== $expected;
+    }
+
+    private function contextualCollectionHandle(string $title): string
+    {
+        return collect([$this->newCollectionParentHandle(), Str::slug($title)])
+            ->filter()
+            ->implode('-');
+    }
+
+    private function newCollectionParentHandle(): string
+    {
+        $draft = $this->draft();
+        if (! $draft) {
+            return '';
+        }
+
+        $parent = $draft->desired['parent'] ?? $draft->snapshot['parent'] ?? [];
+        $handle = trim((string) ($parent['handle'] ?? ''));
+        if ($handle !== '') {
+            return Str::slug($handle);
+        }
+
+        return Str::slug((string) ($parent['title'] ?? ''));
     }
 
     public function collectionPickerForm(Form $form): Form
