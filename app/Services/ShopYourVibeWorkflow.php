@@ -274,6 +274,35 @@ class ShopYourVibeWorkflow
         });
     }
 
+    public function confirmCompletedPush(int $id): ShopYourVibeDraft
+    {
+        $draft = ShopYourVibeDraft::findOrFail($id);
+        if (! $draft->pending || $draft->status === 'pushing' || $draft->status === 'failed') {
+            return $draft;
+        }
+        if ($draft->remote_jobs || empty($draft->progress)) {
+            return $draft;
+        }
+
+        $state = $draft->desired;
+        if (collect($state['cards'] ?? [])->contains(fn ($card) => empty($card['id']) || str_starts_with((string) ($card['collection_gid'] ?? ''), 'new:'))) {
+            return $draft;
+        }
+        if (collect($state['new_collections'] ?? [])->contains(fn ($collection) => empty($collection['published']) || str_starts_with((string) ($collection['gid'] ?? ''), 'new:'))) {
+            return $draft;
+        }
+        if (collect($state['delete_cards'] ?? [])->contains(fn ($deletion) => empty($deletion['deleted']))
+            || collect($state['delete_collections'] ?? [])->contains(fn ($deletion) => empty($deletion['deleted']))) {
+            return $draft;
+        }
+
+        $confirmed = $this->confirmedState($draft, $state, array_column($state['cards'] ?? [], 'id'));
+        $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
+            'last_error' => null, 'remote_jobs' => [], 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
+
+        return $draft->refresh();
+    }
+
     /** Called by the queue worker only after the explicit push action. */
     public function push(int $id): void
     {
@@ -492,11 +521,7 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
                 Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
             }
-            $confirmed = $this->shopify->parent($draft->collection_gid);
-            if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
-                throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
-            }
-            $confirmed['collections'] = $state['collections'];
+            $confirmed = $this->confirmedState($draft, $state, $ids);
             $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'remote_jobs' => [], 'progress' => $progress, 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
         } catch (Throwable $e) {
@@ -505,6 +530,22 @@ class ShopYourVibeWorkflow
         } finally {
             $lock->release();
         }
+    }
+
+    private function confirmedState(ShopYourVibeDraft $draft, array $state, array $ids): array
+    {
+        $confirmed = $this->shopify->parent($draft->collection_gid);
+        if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
+            throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
+        }
+        foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
+            if (preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
+                $state['collections'][$gid] = $this->shopify->collection($gid);
+            }
+        }
+        $confirmed['collections'] = $state['collections'];
+
+        return $confirmed;
     }
 
     private function trackJob(ShopYourVibeDraft $draft, string $gid, string $job): void

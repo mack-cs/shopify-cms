@@ -1418,6 +1418,37 @@ it('creates and publishes a new automated vibe collection with its image only on
         ->and(ShopifyCollection::where('shopify_id', $created['id'])->value('handle'))->toBe('golden-summer');
 });
 
+it('clears a stale pending banner after Shopify already confirmed a completed push', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    vibeEdit($this, 'create_collection', ['title' => 'Gold Test', 'handle' => 'necklaces-gold-test']);
+    vibePush($this);
+    expect($this->draft->pending)->toBeFalse();
+
+    $this->draft->update([
+        'pending' => true,
+        'status' => 'pending',
+        'progress' => [
+            'Collection created: Gold Test',
+            'Card saved: Gold Test',
+            'Preview card layout updated.',
+            'Product membership confirmed: Gold Test',
+            'Products synced: Gold Test',
+            'Collection published to Online Store: Gold Test',
+        ],
+    ]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->call('pollPush')
+        ->assertSee('Up to date with Shopify');
+
+    expect($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->draft->fresh()->status)->toBe('synced');
+});
+
 it('resumes a lost new collection creation response without duplicating the collection', function () {
     vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
     $this->fake->loseCreateResponse = true;

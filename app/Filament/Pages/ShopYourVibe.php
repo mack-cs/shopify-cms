@@ -1027,6 +1027,9 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         if ($draft = $this->draft()) {
+            if ($draft->pending && $draft->status === 'pending') {
+                $draft = app(ShopYourVibeWorkflow::class)->confirmCompletedPush($draft->id);
+            }
             $this->accept($draft);
         }
     }

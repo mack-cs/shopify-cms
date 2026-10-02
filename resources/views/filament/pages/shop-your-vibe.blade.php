@@ -104,7 +104,7 @@
                 <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
             </div>
             @if ($draft->pending)
-                <div role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
+                <div @if ($draft->status === 'pending') wire:poll.5s="pollPush" @endif role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                     <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
                     <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
                     @if ($draft->last_error)<p class="mt-2">{{ $draft->last_error }}</p>@endif
