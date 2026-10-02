@@ -4,6 +4,7 @@ use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
 use App\Filament\Pages\ShopYourVibe;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
@@ -17,6 +18,7 @@ use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\User;
+use App\Models\Variant;
 use App\Services\HeaderStore;
 use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeShopify;
@@ -207,6 +209,72 @@ it('queues product metafield updates from the Shop Your Vibe tag modal', functio
 
         return $productGid->getValue($job) === 'gid://shopify/Product/101'
             && ($state->getValue($job)['bead_colour_finish'] ?? null) === 'Colourful';
+    });
+});
+
+it('manages complementary products locally and queues Shopify sync from Shop Your Vibe', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibeComplementaryProducts::class]);
+
+    $owner = Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail();
+    $first = Product::where('shopify_id', 'gid://shopify/Product/102')->firstOrFail();
+    $second = Product::where('shopify_id', 'gid://shopify/Product/103')->firstOrFail();
+    $third = Product::where('shopify_id', 'gid://shopify/Product/104')->firstOrFail();
+
+    Variant::create(['product_id' => $owner->id, 'sku' => 'OWNER-SKU']);
+    Variant::create(['product_id' => $first->id, 'sku' => 'SKU-102']);
+    Variant::create(['product_id' => $second->id, 'sku' => 'SKU-103']);
+    Variant::create(['product_id' => $third->id, 'sku' => 'SKU-104']);
+
+    ShopifyRow::create([
+        'import_id' => $owner->import_id,
+        'row_index' => 1,
+        'handle' => $owner->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::COMPLEMENTARY_PRODUCTS => $first->shopify_id,
+        ],
+    ]);
+
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->assertSee('Complementary')
+        ->call('openProductComplementary', 'gid://shopify/Product/101')
+        ->assertSet('complementarySelected.0.id', 'gid://shopify/Product/102')
+        ->set('complementarySearch', 'SKU-103')
+        ->assertSee('Product 103')
+        ->call('addComplementaryProduct', 'gid://shopify/Product/103')
+        ->assertSet('complementarySelected.1.id', 'gid://shopify/Product/103')
+        ->call('addComplementaryProduct', 'gid://shopify/Product/102')
+        ->assertSee('This product is already selected.')
+        ->call('addComplementaryProduct', 'gid://shopify/Product/101')
+        ->assertSee('A product cannot complement itself.')
+        ->call('addComplementaryProduct', 'gid://shopify/Product/104')
+        ->call('moveComplementaryProduct', 2, -1)
+        ->call('saveProductComplementary')
+        ->assertHasNoErrors()
+        ->assertDispatched('close-modal', id: 'manage-complementary-products');
+
+    $row = ShopifyRow::where('import_id', $owner->import_id)
+        ->where('handle', $owner->handle)
+        ->where('row_type', 'product_primary')
+        ->firstOrFail();
+
+    expect($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS))
+        ->toBe(implode('; ', [
+            'gid://shopify/Product/102',
+            'gid://shopify/Product/104',
+            'gid://shopify/Product/103',
+        ]));
+
+    Bus::assertDispatched(PushShopYourVibeComplementaryProducts::class, function (PushShopYourVibeComplementaryProducts $job): bool {
+        $reflection = new ReflectionClass($job);
+        $productGid = $reflection->getProperty('productGid');
+        $productGid->setAccessible(true);
+
+        return $productGid->getValue($job) === 'gid://shopify/Product/101';
     });
 });
 

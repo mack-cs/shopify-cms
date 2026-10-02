@@ -237,10 +237,17 @@
                                     @endforelse
                                     </div>
                                 </div>
+                                <div class="my-3 syv-vibe-badge-list syv-complementary-section">
+                                    @php($complementaryCount = (int) ($product['complementary_count'] ?? 0))
+                                    <span class="syv-complementary-status {{ $complementaryCount > 0 ? 'syv-complementary-status-active' : 'syv-complementary-status-empty' }}">
+                                        {{ $complementaryCount > 0 ? $complementaryCount : 'None' }} Complementary
+                                    </span>
+                                </div>
                                 <div class="syv-vibe-actions">
                                     <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
+                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</x-filament::button>
                                 </div>
                             </article>
                         @endforeach
@@ -388,11 +395,18 @@
                                                 @endforelse
                                                 </div>
                                             </div>
+                                            <div class="my-3 syv-vibe-badge-list syv-complementary-section">
+                                                @php($complementaryCount = (int) ($displayProduct['complementary_count'] ?? 0))
+                                                <span class="syv-complementary-status {{ $complementaryCount > 0 ? 'syv-complementary-status-active' : 'syv-complementary-status-empty' }}">
+                                                    {{ $complementaryCount > 0 ? $complementaryCount : 'None' }} Complementary
+                                                </span>
+                                            </div>
                                             <div class="syv-vibe-actions">
                                                 @if ($parentProductCard)
                                                     <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
                                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
                                                     <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
+                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</x-filament::button>
                                                 @endif
                                                 @if ($collection['membership_supported'])
                                                     <x-filament::button size="xs" color="danger" class="syv-card-action" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
@@ -549,6 +563,94 @@
             <x-slot name="footer">
                 <x-filament::button wire:click="saveProductTags" wire:loading.attr="disabled">Queue Shopify update</x-filament::button>
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-tag-assignments' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="manage-complementary-products" width="4xl" heading="Manage Complementary Products">
+            @if ($complementaryProduct)
+                <p class="font-semibold">{{ $complementaryProduct['title'] }}</p>
+                <p class="mb-4 text-sm text-gray-500">SKU: {{ $complementaryProduct['sku'] ?: 'No SKU' }}</p>
+
+                @if ($complementaryErrors)
+                    <div class="mb-4 rounded-lg border border-warning-300 bg-warning-50 p-3 text-sm text-warning-800">
+                        @foreach ($complementaryErrors as $error)
+                            <p>{{ $error }}</p>
+                        @endforeach
+                    </div>
+                @endif
+
+                <div class="syv-complementary-modal-grid">
+                    <section class="syv-complementary-panel syv-complementary-selected-panel">
+                        <div class="syv-complementary-panel-heading">
+                            <h3>Selected complementary products</h3>
+                            <span>{{ count($complementarySelected) }} selected</span>
+                        </div>
+                        <div class="syv-complementary-selected-grid">
+                        @forelse ($complementarySelected as $index => $item)
+                            <div class="syv-complementary-card">
+                                <div class="syv-complementary-thumb-wrap">
+                                    @if ($item['image'])
+                                        <img src="{{ $item['image'] }}" alt="" class="syv-complementary-thumb" loading="lazy">
+                                    @else
+                                        <div class="syv-complementary-thumb-placeholder"></div>
+                                    @endif
+                                    <span class="syv-complementary-rank">{{ $index + 1 }}</span>
+                                </div>
+                                <div class="syv-complementary-card-body">
+                                    <p class="syv-complementary-title">{{ $item['title'] }}</p>
+                                    <p class="syv-complementary-meta">SKU: {{ $item['sku'] ?: 'No SKU' }}</p>
+                                    <span class="syv-complementary-availability {{ $item['available'] ? 'syv-complementary-availability-active' : 'syv-complementary-availability-muted' }}">
+                                        {{ $item['availability_label'] }}
+                                    </span>
+                                </div>
+                                <div class="syv-complementary-card-actions">
+                                    <button type="button" class="syv-mini-action" wire:click="moveComplementaryProduct({{ $index }}, -1)" @disabled($index === 0)>Up</button>
+                                    <button type="button" class="syv-mini-action" wire:click="moveComplementaryProduct({{ $index }}, 1)" @disabled($index === count($complementarySelected) - 1)>Down</button>
+                                    <button type="button" class="syv-mini-action syv-mini-action-danger" wire:click="removeComplementaryProduct({{ \Illuminate\Support\Js::from($item['id']) }})">Remove</button>
+                                </div>
+                            </div>
+                        @empty
+                            <p class="syv-complementary-empty">No complementary products selected.</p>
+                        @endforelse
+                        </div>
+                    </section>
+
+                    <section class="syv-complementary-panel syv-complementary-add-panel">
+                        <div class="syv-complementary-panel-heading">
+                            <h3>Add products</h3>
+                        </div>
+                        <label class="syv-complementary-field">
+                            <span>Search by product name or SKU</span>
+                            <x-filament::input.wrapper>
+                                <x-filament::input wire:model.live.debounce.300ms="complementarySearch" placeholder="Search product name or SKU" />
+                            </x-filament::input.wrapper>
+                        </label>
+                        @if ($complementarySearch !== '')
+                            <div class="syv-complementary-results">
+                                @forelse ($complementarySearchResults as $result)
+                                    <button type="button" class="syv-complementary-result" wire:click="addComplementaryProduct({{ \Illuminate\Support\Js::from($result['id']) }})">
+                                        @if ($result['image'])
+                                            <img src="{{ $result['image'] }}" alt="" class="syv-complementary-result-thumb" loading="lazy">
+                                        @else
+                                            <div class="syv-complementary-result-thumb syv-complementary-thumb-placeholder"></div>
+                                        @endif
+                                        <span>
+                                            <strong>{{ $result['title'] }}</strong>
+                                            <small>{{ $result['sku'] ?: $result['handle'] }}</small>
+                                        </span>
+                                    </button>
+                                @empty
+                                    <p class="syv-complementary-empty">No matching products found.</p>
+                                @endforelse
+                            </div>
+                        @endif
+                    </section>
+                </div>
+            @endif
+            <x-slot name="footer">
+                <p class="syv-complementary-footer-note">You can select multiple complementary products. Shopify will receive the first 3 that are currently sellable.</p>
+                <x-filament::button wire:click="saveProductComplementary" wire:loading.attr="disabled">Save &amp; update Shopify</x-filament::button>
+                <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'manage-complementary-products' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
 
