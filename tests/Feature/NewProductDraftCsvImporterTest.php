@@ -281,6 +281,29 @@ it('saves and reads seo drafts for sku only drafts without writing a draft handl
         ->and($formData['draft_seo_description'])->toBe($seoDescription);
 });
 
+it('uses the current draft sku for seo draft display when a handle profile has a stale sku', function (): void {
+    $draft = NewProductDraft::create([
+        'sku' => 'TEST1P324',
+        'handle' => 'magic-drum-bracelet-copy',
+        'title' => 'Siblings Template Test',
+    ]);
+    StyleProfile::withoutEvents(fn () => StyleProfile::create([
+        'handle' => $draft->handle,
+        'sku' => 'magic-drum-bracelet-copy',
+        'draft_seo_title' => 'Magic Drum Bracelet | Livi Road Collection',
+        'draft_seo_description' => 'In the bracelet colourful earth inspired beads collide with blue, ivory and gold accents.',
+    ]));
+
+    $formData = NewProductDraftResource::seoDraftFormData($draft);
+    $profile = NewProductDraftResource::saveSeoDraft($draft, [
+        'draft_seo_title' => $formData['draft_seo_title'],
+        'draft_seo_description' => $formData['draft_seo_description'],
+    ]);
+
+    expect($formData['sku'])->toBe('TEST1P324')
+        ->and($profile->fresh()->sku)->toBe('TEST1P324');
+});
+
 it('resolves complementary product skus to existing product references', function (): void {
     $product = Product::create([
         'import_id' => $this->draftCsvImport->id,

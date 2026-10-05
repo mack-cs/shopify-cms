@@ -399,7 +399,7 @@ final class SupplierOrderCsvService
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku]);
 
         if ($type === 'order') {
-            $variantQuery->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle());
+            $variantQuery->whereHas('product', fn ($query) => $query->procurementCatalogEligible());
         }
 
         $variants = $variantQuery->with('product:id,shopify_id,handle')->get();

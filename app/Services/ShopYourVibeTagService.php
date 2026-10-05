@@ -7,7 +7,9 @@ use App\Models\DropdownOption;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyRow;
+use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class ShopYourVibeTagService
@@ -126,6 +128,7 @@ class ShopYourVibeTagService
         });
 
         app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
+        $this->syncProcurementRow($product);
 
         $fresh = $product->fresh();
         $state = $this->stateForProduct($fresh);
@@ -135,6 +138,21 @@ class ShopYourVibeTagService
             'state' => $state,
             'options' => $this->optionsForProduct($fresh, $state),
         ];
+    }
+
+    private function syncProcurementRow(Product $product): void
+    {
+        try {
+            $variantIds = $product->variants()->pluck('id')->all();
+            if ($variantIds !== []) {
+                app(ProcurementSheetSyncService::class)->publishOperational($variantIds);
+            }
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement Sheet tag write-back failed after confirmed Shopify update.', [
+                'product_id' => $product->id,
+                'error' => $exception->getMessage(),
+            ]);
+        }
     }
 
     private function primaryRow(Product $product): ?ShopifyRow

@@ -52,7 +52,9 @@ class StyleProfileRelationManager extends RelationManager
 
                     return self::normalizeImageUrl($source);
                 }),
-            Tables\Columns\TextColumn::make('sku')->searchable(),
+            Tables\Columns\TextColumn::make('sku')
+                ->state(fn (StyleProfile $record): ?string => $this->resolvedSku($record))
+                ->searchable(),
             Tables\Columns\TextColumn::make('product.color_string')->label('Colors')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_title')->label('SEO Title')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_description')->label('SEO Desc')->limit(80)->wrap(),
@@ -139,7 +141,7 @@ class StyleProfileRelationManager extends RelationManager
             }
         }
 
-        $sku = trim((string) ($record?->sku ?? $owner?->sku ?? ''));
+        $sku = trim((string) ($owner?->sku ?? $record?->sku ?? ''));
         if ($sku === '') {
             return null;
         }
@@ -147,6 +149,18 @@ class StyleProfileRelationManager extends RelationManager
         return Product::query()
             ->whereHas('allVariants', fn (Builder $query): Builder => $query->where('sku', $sku))
             ->first();
+    }
+
+    private function resolvedSku(StyleProfile $record): ?string
+    {
+        $ownerSku = trim((string) ($this->getOwnerRecord()?->sku ?? ''));
+        if ($ownerSku !== '') {
+            return $ownerSku;
+        }
+
+        $profileSku = trim((string) ($record->sku ?? ''));
+
+        return $profileSku === '' ? null : $profileSku;
     }
 
     private static function normalizeImageUrl(?string $src): ?string

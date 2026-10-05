@@ -35,7 +35,7 @@ final class ProcurementSheetSyncService
             return ['tabs' => 0, 'rows' => 0, 'changed' => 0];
         }
         $variantGroups = Variant::query()->active()->whereNotNull('sku')
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->with('product')->get()
             ->groupBy(fn (Variant $variant): string => strtoupper(trim((string) $variant->sku)));
         $stats = ['tabs' => 0, 'rows' => 0, 'changed' => 0];
@@ -149,10 +149,7 @@ final class ProcurementSheetSyncService
         }
 
         $this->backupBeforePublish($masterTab, $masterValues, $brandSheets);
-        $this->sheets->replaceBody($masterTab, array_map(
-            fn (array $record): array => $this->orderedRow($record, $masterMap),
-            $records
-        ), count($masterValues));
+        $this->sheets->replaceBody($masterTab, $this->masterRowsPreservingHumanInputs($records, $masterValues, $masterMap), count($masterValues));
         $this->formatDateColumns($masterTab, $masterMap);
 
         $brandRows = 0;
@@ -171,7 +168,7 @@ final class ProcurementSheetSyncService
     }
 
     /** Publish live inventory/order fields without requiring a fresh ML prediction. */
-    public function publishOperational(array $variantIds = [], bool $includeHumanInputs = false): array
+    public function publishOperational(array $variantIds = [], bool $includeHumanInputs = false, bool $appendMissing = false): array
     {
         if (! $this->enabled()) {
             return ['rows' => 0, 'tabs' => 0];
@@ -191,6 +188,7 @@ final class ProcurementSheetSyncService
             $records = $records->reject(fn (array $record): bool => $ambiguous->contains($record['sku']));
         }
         $fields = [
+            'sibling_shapes', 'bead_color_finish', 'current_price',
             'current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
             'next_order_id', 'second_order_id', 'second_eta',
             'predicted_runout_date_after_replenishment',
@@ -229,22 +227,97 @@ final class ProcurementSheetSyncService
                 $rows[$sku] = $offset + 2;
             }
             $updates = [];
+            $append = [];
             foreach ($tabRecords as $record) {
-                if (! isset($rows[$record['sku']])) {
+                $rowNumber = $rows[$record['sku']] ?? null;
+                if ($rowNumber === null) {
+                    if ($appendMissing) {
+                        $append[] = $this->orderedRow($record, $map);
+                        $updated++;
+                    }
+
                     continue;
                 }
                 foreach ($fields as $field) {
                     $column = $this->schema->columnName($map[$field]);
-                    $updates[] = ['range' => $this->sheets->range($tab, $column.$rows[$record['sku']]), 'values' => [[$this->cell($record[$field] ?? null)]]];
+                    $updates[] = ['range' => $this->sheets->range($tab, $column.$rowNumber), 'values' => [[$this->cell($record[$field] ?? null)]]];
                 }
                 $updated++;
             }
             $this->sheets->batchUpdateValues($updates);
+            $this->sheets->append($tab, $append);
             $this->formatDateColumns($tab, $map);
         }
         $this->publishChangeLogSafely();
 
         return ['rows' => $updated, 'tabs' => count($tabs)];
+    }
+
+    /** @return array<int,array{sku:string,new_price:string,tab:string,row:int}> */
+    public function newPriceInputs(): array
+    {
+        if (! $this->enabled()) {
+            return [];
+        }
+
+        $inputs = [];
+        foreach ($this->sheetTabs() as $tab) {
+            $values = $this->currentLayoutValues($tab);
+            $map = $this->mapForTab($tab, array_shift($values) ?? []);
+            $seen = [];
+            foreach ($values as $offset => $row) {
+                $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+                $newPrice = trim((string) ($row[$map['new_price']] ?? ''));
+                if ($sku === '' || $newPrice === '') {
+                    continue;
+                }
+                if (isset($seen[$sku])) {
+                    throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
+                }
+                $seen[$sku] = true;
+                $inputs[] = ['sku' => $sku, 'new_price' => $newPrice, 'tab' => $tab, 'row' => $offset + 2];
+            }
+        }
+
+        return $inputs;
+    }
+
+    /** @param array<string,array<string,mixed>> $updatesBySku */
+    public function updateConfirmedRows(array $updatesBySku): int
+    {
+        if (! $this->enabled() || $updatesBySku === []) {
+            return 0;
+        }
+
+        $normalized = collect($updatesBySku)->mapWithKeys(
+            fn (array $updates, string $sku): array => [strtoupper(trim($sku)) => $updates]
+        );
+        $updated = 0;
+        foreach ($this->sheetTabs() as $tab) {
+            $values = $this->currentLayoutValues($tab);
+            $map = $this->mapForTab($tab, array_shift($values) ?? []);
+            $sheetUpdates = [];
+            foreach ($values as $offset => $row) {
+                $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+                if ($sku === '' || ! $normalized->has($sku)) {
+                    continue;
+                }
+                foreach ($normalized->get($sku) as $field => $value) {
+                    if (! array_key_exists($field, $map)) {
+                        continue;
+                    }
+                    $column = $this->schema->columnName($map[$field]);
+                    $sheetUpdates[] = [
+                        'range' => $this->sheets->range($tab, $column.($offset + 2)),
+                        'values' => [[$this->cell($value)]],
+                    ];
+                }
+                $updated++;
+            }
+            $this->sheets->batchUpdateValues($sheetUpdates);
+        }
+
+        return $updated;
     }
 
     private function publishChangeLog(): void
@@ -358,6 +431,30 @@ final class ProcurementSheetSyncService
         return count($desired);
     }
 
+    /** @param array<int,array<string,mixed>> $records @param array<int,array<int,mixed>> $masterValues @param array<string,int> $map */
+    private function masterRowsPreservingHumanInputs(array $records, array $masterValues, array $map): array
+    {
+        $existing = [];
+        foreach ($masterValues as $row) {
+            $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+            if ($sku !== '') {
+                $existing[$sku] = $row;
+            }
+        }
+
+        return array_map(function (array $record) use ($existing, $map): array {
+            $row = $this->orderedRow($record, $map);
+            $sku = strtoupper(trim((string) ($record['sku'] ?? '')));
+            foreach (ProcurementSheetSchema::HUMAN_OWNED_FIELDS as $field) {
+                if (isset($map[$field]) && isset($existing[$sku])) {
+                    $row[$map[$field]] = $existing[$sku][$map[$field]] ?? '';
+                }
+            }
+
+            return $row;
+        }, $records);
+    }
+
     /** @param array<string,mixed> $record @param array<string,int> $map */
     private function orderedRow(array $record, array $map): array
     {
@@ -411,6 +508,18 @@ final class ProcurementSheetSyncService
         $this->sheets->replaceAll($tab, $upgraded, count($values), count($values[0] ?? []));
 
         return $upgraded;
+    }
+
+    /** @return array<int,string> */
+    private function sheetTabs(): array
+    {
+        return array_values(array_unique(array_filter([
+            trim((string) config('google_sheets.master_tab', 'master-file')),
+            ...$this->collections->configured()
+                ->pluck('google_sheet_tab_name')
+                ->map(fn (mixed $tab): string => trim((string) $tab))
+                ->all(),
+        ])));
     }
 
     /** @param array<int,array<int,mixed>> $masterValues @param array<int,array<int,array<int,mixed>>> $brandSheets */

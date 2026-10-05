@@ -7,11 +7,15 @@ use App\Models\ProcurementPredictionRun;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
+use App\Models\ShopifyRow;
 use App\Models\Variant;
+use App\Services\HeaderStore;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\Procurement\ProcurementActionPolicy;
 use App\Services\Procurement\ProcurementRecommendationCalculator;
 use App\Services\SalePercentageCalculator;
+use App\Services\SiblingCollectionResolver;
+use App\Services\TagNormalizer;
 use Illuminate\Support\Facades\Log;
 
 final class ProcurementSheetDatasetBuilder
@@ -22,6 +26,7 @@ final class ProcurementSheetDatasetBuilder
         private readonly OperationalProcurementCollectionResolver $collections,
         private readonly SalePercentageCalculator $salePercentages,
         private readonly ProcurementActionPolicy $actionPolicy,
+        private readonly SiblingCollectionResolver $siblings,
         ?ProcurementRecommendationCalculator $recommendations = null,
     ) {
         $this->recommendations = $recommendations ?? app(ProcurementRecommendationCalculator::class);
@@ -53,7 +58,7 @@ final class ProcurementSheetDatasetBuilder
             ->groupBy('variant_id');
         $duplicateSkus = Variant::query()->active()->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->selectRaw('UPPER(TRIM(sku)) AS normalized_sku')
             ->groupByRaw('UPPER(TRIM(sku))')
             ->havingRaw('COUNT(*) > 1')
@@ -63,7 +68,7 @@ final class ProcurementSheetDatasetBuilder
         $records = [];
         Variant::query()->active()->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->with(['product', 'procurementIncomingStock'])
             ->orderBy('id')->chunkById(500, function ($variants) use (&$records, $predictions, $movement, $predictionRun, $pendingOrders, $duplicateSkus): void {
                 foreach ($variants as $variant) {
@@ -122,8 +127,10 @@ final class ProcurementSheetDatasetBuilder
                         $duplicateSkus->has($sku),
                     );
                     $collectionId = null;
+                    $collectionContext = null;
                     try {
-                        $collectionId = $this->collections->resolve($variant->product)->id;
+                        $collectionContext = $this->collections->resolve($variant->product);
+                        $collectionId = $collectionContext->id;
                     } catch (\DomainException $exception) {
                         Log::warning('Procurement collection resolution failed', [
                             'sku' => $sku, 'product_id' => $variant->product_id,
@@ -140,6 +147,10 @@ final class ProcurementSheetDatasetBuilder
                         'product' => $variant->product?->title,
                         'vendor' => $variant->product?->vendor,
                         'product_type' => $variant->product?->type,
+                        'sibling_shapes' => $this->siblingShapes($variant, $collectionContext),
+                        'bead_color_finish' => $this->beadColorFinish($variant),
+                        'current_price' => $variant->price === null ? null : number_format((float) $variant->price, 2, '.', ''),
+                        'new_price' => null,
                         'currently_on_sale' => $variant->compare_at_price !== null
                             && (float) $variant->compare_at_price > (float) $variant->price,
                         'sale_percentage' => $this->salePercentages->percentage(
@@ -213,6 +224,55 @@ final class ProcurementSheetDatasetBuilder
         });
 
         return $records;
+    }
+
+    private function siblingShapes(Variant $variant, mixed $collection): string
+    {
+        if ($collection === null || ! $variant->product) {
+            return '';
+        }
+
+        $productTags = TagNormalizer::parseTokens((string) $variant->product->tags);
+        if (! collect($productTags)->contains(fn (string $tag): bool => str_contains(strtolower($tag), 'sibling'))) {
+            return '';
+        }
+
+        try {
+            $options = $this->siblings->optionsForParent([
+                'title' => $collection->collection_title,
+                'handle' => $collection->collection_handle,
+            ]);
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement sibling shape resolution failed', [
+                'variant_id' => $variant->id,
+                'product_id' => $variant->product_id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return '';
+        }
+
+        return collect($this->siblings->selectedForTags(
+            $productTags,
+            $options,
+        ))->pluck('label')->implode('; ');
+    }
+
+    private function beadColorFinish(Variant $variant): string
+    {
+        $product = $variant->product;
+        if (! $product) {
+            return '';
+        }
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+
+        return trim((string) ($row?->get(HeaderStore::BEAD_COLOUR_FINISH, '') ?? ''));
     }
 
     private function actionReason(

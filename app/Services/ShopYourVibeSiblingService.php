@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class ShopYourVibeSiblingService
@@ -80,6 +82,7 @@ class ShopYourVibeSiblingService
 
         $confirmed = $this->shopify->productTags($productGid);
         $this->reconcileTags($productGid, $remote['tags'], $confirmed['tags']);
+        $this->syncProcurementRow($productGid);
 
         return $confirmed;
     }
@@ -129,5 +132,21 @@ class ShopYourVibeSiblingService
                 'new_value' => $newTags,
             ]);
         });
+    }
+
+    private function syncProcurementRow(string $productGid): void
+    {
+        try {
+            $product = Product::query()->where('shopify_id', $productGid)->latest('id')->first();
+            $variantIds = $product?->variants()->pluck('id')->all() ?? [];
+            if ($variantIds !== []) {
+                app(ProcurementSheetSyncService::class)->publishOperational($variantIds);
+            }
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement Sheet sibling write-back failed after confirmed Shopify update.', [
+                'product_gid' => $productGid,
+                'error' => $exception->getMessage(),
+            ]);
+        }
     }
 }

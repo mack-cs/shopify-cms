@@ -8073,6 +8073,11 @@ class NewProductDraftResource extends Resource
 
     private static function resolvedSeoDraftSku(?NewProductDraft $ownerRecord, ?StyleProfile $styleProfile = null): ?string
     {
+        $sku = self::nullIfEmpty($ownerRecord?->sku);
+        if ($sku !== null) {
+            return $sku;
+        }
+
         $sku = self::nullIfEmpty($styleProfile?->sku);
         if ($sku !== null) {
             return $sku;
@@ -8081,7 +8086,6 @@ class NewProductDraftResource extends Resource
         $product = self::resolvedSeoDraftProduct($ownerRecord, $styleProfile);
         $sku = self::nullIfEmpty(
             $product?->variants()->orderBy('id')->value('sku')
-            ?? $ownerRecord?->sku
             ?? $ownerRecord?->handle
         );
 
@@ -8161,14 +8165,11 @@ class NewProductDraftResource extends Resource
 
         $styleProfile->product_id = $product?->id;
         $styleProfile->handle = $styleHandle;
-
-        if (!filled($styleProfile->sku)) {
-            $styleProfile->sku = trim((string) (
-                $record->sku
-                ?? $product?->variants()->orderBy('id')->value('sku')
-                ?? $styleHandle
-            )) ?: null;
-        }
+        $styleProfile->sku = trim((string) (
+            $record->sku
+            ?? $product?->variants()->orderBy('id')->value('sku')
+            ?? $styleHandle
+        )) ?: null;
 
         if (!filled($styleProfile->image_url)) {
             $styleProfile->image_url = $product?->images()->orderBy('position')->value('src') ?? $record->imageUrl();
