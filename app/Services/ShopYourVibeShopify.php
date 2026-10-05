@@ -142,7 +142,7 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
       colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
       jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
       beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
-      variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+      variants(first: 20) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -249,7 +249,7 @@ query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
       colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
       jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
       beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
-      variants(first: 1) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+      variants(first: 20) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -278,7 +278,10 @@ GQL, ['id' => $gid]);
 
     private function productCard(array $product): array
     {
-        $variant = data_get($product, 'variants.nodes.0', []);
+        $variants = collect(data_get($product, 'variants.nodes', []));
+        $variant = $variants->first(fn (mixed $node): bool => trim((string) data_get($node, 'sku')) !== '')
+            ?? $variants->first()
+            ?? [];
 
         return [
             'id' => $product['id'],

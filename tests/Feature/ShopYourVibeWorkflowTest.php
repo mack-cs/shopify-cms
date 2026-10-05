@@ -85,6 +85,18 @@ it('detects one exact Shopify tag rule as the automated vibe membership tag', fu
         ->and($collection['membership_supported'])->toBeFalse();
 });
 
+it('uses the first nonblank Shopify variant sku for Shop Your Vibe cards', function () {
+    $this->fake->collections['gid://shopify/Collection/1']['products']['nodes'][2]['variants']['nodes'] = [
+        ['sku' => '', 'inventoryQuantity' => 0, 'availableForSale' => false, 'inventoryItem' => ['tracked' => true]],
+        ['sku' => 'TEST1P324', 'inventoryQuantity' => 10, 'availableForSale' => true, 'inventoryItem' => ['tracked' => true]],
+    ];
+
+    $collection = app(ShopYourVibeShopify::class)->collection('gid://shopify/Collection/1');
+
+    expect(collect($collection['products'])->firstWhere('id', 'gid://shopify/Product/103')['sku'])
+        ->toBe('TEST1P324');
+});
+
 it('updates only configured vibe membership tags and preserves unrelated Shopify tags', function () {
     ShopYourVibeCollectionMapping::create([
         'parent_collection_id' => 'gid://shopify/Collection/1', 'shopify_collection_id' => 'gid://shopify/Collection/2',
@@ -1204,6 +1216,24 @@ it('sorts parent collection products locally and shows stock badges on product c
     expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))->toBe($ids)
         ->and($this->draft->pending)->toBeTrue()
         ->and($this->fake->calls)->toBe([]);
+});
+
+it('backfills missing Shop Your Vibe card skus from local product variants', function () {
+    $product = Product::where('shopify_id', 'gid://shopify/Product/103')->firstOrFail();
+    Variant::where('product_id', $product->id)->delete();
+    Variant::create(['product_id' => $product->id, 'sku' => 'TEST1P324']);
+
+    $component = app(ShopYourVibe::class);
+    $decorate = new ReflectionMethod($component, 'decorateProductCards');
+    $decorate->setAccessible(true);
+    $decorated = $decorate->invoke($component, [[
+        'id' => 'gid://shopify/Product/103',
+        'title' => 'Siblings Template Test',
+        'tags' => [],
+        'sku' => null,
+    ]]);
+
+    expect($decorated[0]['sku'])->toBe('TEST1P324');
 });
 
 it('shows associated prelaunch drafts in collection sorting without publishing them', function () {

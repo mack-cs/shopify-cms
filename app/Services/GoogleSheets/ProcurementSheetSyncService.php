@@ -168,20 +168,31 @@ final class ProcurementSheetSyncService
     }
 
     /** Publish live inventory/order fields without requiring a fresh ML prediction. */
-    public function publishOperational(array $variantIds = [], bool $includeHumanInputs = false, bool $appendMissing = false): array
+    public function publishOperational(
+        array $variantIds = [],
+        bool $includeHumanInputs = false,
+        bool $appendMissing = false,
+        array $draftIds = [],
+    ): array
     {
         if (! $this->enabled()) {
             return ['rows' => 0, 'tabs' => 0];
         }
         $allRecords = collect($this->dataset->records());
         $records = $allRecords;
-        if ($variantIds !== []) {
-            $records = $records->whereIn('_variant_id', array_map('intval', $variantIds));
+        if ($variantIds !== [] || $draftIds !== []) {
+            $variantIds = array_map('intval', $variantIds);
+            $draftIds = array_map('intval', $draftIds);
+            $records = $records->filter(
+                fn (array $record): bool => in_array((int) ($record['_variant_id'] ?? 0), $variantIds, true)
+                    || in_array((int) ($record['_draft_id'] ?? 0), $draftIds, true)
+            );
         }
-        $ambiguitySource = $variantIds === [] ? $records : $allRecords->whereIn('sku', $records->pluck('sku'));
+        $hasTargetIds = $variantIds !== [] || $draftIds !== [];
+        $ambiguitySource = ! $hasTargetIds ? $records : $allRecords->whereIn('sku', $records->pluck('sku'));
         $ambiguous = $ambiguitySource->groupBy('sku')->filter(fn ($group) => $group->count() > 1)->keys();
         if ($ambiguous->isNotEmpty()) {
-            if ($variantIds !== []) {
+            if ($hasTargetIds) {
                 throw new \RuntimeException('Cannot operationally publish duplicate catalog SKU(s): '.$ambiguous->implode(', ').'.');
             }
             Log::warning('Skipping duplicate catalog SKUs during operational procurement Sheet publish', ['skus' => $ambiguous->all()]);

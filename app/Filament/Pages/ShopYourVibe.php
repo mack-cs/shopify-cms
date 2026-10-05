@@ -9,6 +9,7 @@ use App\Jobs\PushShopYourVibe;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
@@ -1145,6 +1146,7 @@ class ShopYourVibe extends Page
 
     private function decorateProductCards(array $products): array
     {
+        $products = $this->withResolvedSkus($products);
         $movementBySku = $this->movementClassificationsBySku($products);
         $variantInventoryBySku = $this->variantInventoryBySku($products);
         $beadColourFinishByGid = $this->beadColourFinishByGid($products);
@@ -1174,6 +1176,64 @@ class ShopYourVibe extends Page
             $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
             $product['complementary_count'] = $complementaryCountByGid[$product['id'] ?? ''] ?? 0;
             $product['is_prelaunch_draft'] = (bool) ($product['is_prelaunch_draft'] ?? str_starts_with((string) ($product['id'] ?? ''), 'draft:'));
+
+            return $product;
+        })->all();
+    }
+
+    private function withResolvedSkus(array $products): array
+    {
+        $missing = collect($products)
+            ->filter(fn (array $product): bool => blank($product['sku'] ?? null))
+            ->values();
+
+        if ($missing->isEmpty()) {
+            return $products;
+        }
+
+        $shopifyIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'gid://shopify/Product/'))
+            ->unique()
+            ->values();
+        $draftIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'draft:'))
+            ->map(fn (string $id): int => (int) substr($id, 6))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $skuByProductGid = $shopifyIds->isEmpty()
+            ? collect()
+            : Product::query()
+                ->whereIn('shopify_id', $shopifyIds->all())
+                ->with(['variants' => fn ($query) => $query->orderBy('id')])
+                ->get()
+                ->mapWithKeys(fn (Product $product): array => [
+                    (string) $product->shopify_id => trim((string) ($product->variants->first()?->sku ?? '')),
+                ]);
+
+        $skuByDraftId = $draftIds->isEmpty()
+            ? collect()
+            : NewProductDraft::query()
+                ->whereKey($draftIds->all())
+                ->pluck('sku', 'id')
+                ->map(fn (mixed $sku): string => trim((string) $sku));
+
+        return collect($products)->map(function (array $product) use ($skuByProductGid, $skuByDraftId): array {
+            if (filled($product['sku'] ?? null)) {
+                return $product;
+            }
+
+            $id = (string) ($product['id'] ?? '');
+            $sku = str_starts_with($id, 'draft:')
+                ? $skuByDraftId->get((int) substr($id, 6), '')
+                : $skuByProductGid->get($id, '');
+
+            if (filled($sku)) {
+                $product['sku'] = $sku;
+            }
 
             return $product;
         })->all();
