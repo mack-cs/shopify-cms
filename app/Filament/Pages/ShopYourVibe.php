@@ -6,6 +6,7 @@ use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeProductSiblings;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
@@ -741,24 +742,41 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
         abort_unless(collect($this->parentProducts)->contains('id', $this->managingSiblingProductGid), 422);
         $this->attempt(function (): void {
-            $confirmed = app(ShopYourVibeSiblingService::class)->assign(
-                $this->draft()->desired['parent'] ?? [],
+            $parent = $this->draft()->desired['parent'] ?? [];
+            PushShopYourVibeProductSiblings::dispatch(
+                $parent,
                 $this->managingSiblingProductGid,
                 $this->selectedSiblings,
+                auth()->id(),
             );
+            $selected = app(ShopYourVibeSiblingService::class)->selectedForTags(
+                $this->selectedSiblings,
+                $this->siblingOptions,
+            );
+            $selectedTags = collect($selected)->pluck('tag')->values()->all();
+            $managedTags = collect($this->siblingOptions)
+                ->pluck('tag')
+                ->map(fn (mixed $tag): string => mb_strtolower(trim((string) $tag)))
+                ->filter()
+                ->all();
             foreach ($this->parentProducts as &$product) {
-                if ($product['id'] === $this->managingSiblingProductGid) {
-                    $product['tags'] = $confirmed['tags'];
-                    $product['siblings'] = app(ShopYourVibeSiblingService::class)
-                        ->selectedForTags((array) $confirmed['tags'], $this->siblingOptions);
+                if ($product['id'] !== $this->managingSiblingProductGid) {
+                    continue;
                 }
+
+                $existingTags = collect((array) ($product['tags'] ?? []))
+                    ->reject(fn (mixed $tag): bool => in_array(mb_strtolower(trim((string) $tag)), $managedTags, true))
+                    ->values()
+                    ->all();
+                $product['tags'] = array_values(array_unique([...$existingTags, ...$selectedTags]));
+                $product['siblings'] = $selected;
             }
             unset($product);
             $this->managingSiblingProductGid = null;
             $this->selectedSiblings = [];
             $this->siblingOptions = [];
             $this->dispatch('close-modal', id: 'manage-sibling-assignments');
-            Notification::make()->title('Sibling assignments updated')->success()->send();
+            Notification::make()->title('Sibling assignments queued')->success()->send();
         });
     }
 

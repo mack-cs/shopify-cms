@@ -5,6 +5,7 @@ use App\Enums\RolesEnum;
 use App\Filament\Pages\ShopYourVibe;
 use App\Jobs\PushShopYourVibe;
 use App\Jobs\PushShopYourVibeComplementaryProducts;
+use App\Jobs\PushShopYourVibeProductSiblings;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
@@ -125,6 +126,7 @@ it('discovers collection-specific sibling options and updates only sibling tags'
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibeProductSiblings::class]);
 
     $this->fake->collections['gid://shopify/Collection/1']['title'] = 'Livi Road';
     $this->fake->collections['gid://shopify/Collection/1']['handle'] = 'livi-road';
@@ -168,9 +170,21 @@ it('discovers collection-specific sibling options and updates only sibling tags'
         ->assertDispatched('close-modal', id: 'manage-sibling-assignments');
 
     expect($this->fake->products['gid://shopify/Product/101']['tags'])
-        ->toBe(['keep-me', 'livi-road-chevron-sibling'])
+        ->toBe(['keep-me'])
         ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->value('tags'))
-        ->toBe('keep-me, livi-road-chevron-sibling');
+        ->toBe('keep-me');
+    Bus::assertDispatched(PushShopYourVibeProductSiblings::class, function (PushShopYourVibeProductSiblings $job): bool {
+        $reflection = new ReflectionClass($job);
+        $productGid = $reflection->getProperty('productGid');
+        $productGid->setAccessible(true);
+        $selectedTags = $reflection->getProperty('selectedTags');
+        $selectedTags->setAccessible(true);
+
+        return $productGid->getValue($job) === 'gid://shopify/Product/101'
+            && $selectedTags->getValue($job) === ['livi-road-chevron-sibling']
+            && $job->queue === 'shop-your-vibe'
+            && $job->connection === 'shop-your-vibe';
+    });
 
     $page->call('openProductSiblings', 'gid://shopify/Product/101')
         ->assertSet('selectedSiblings', ['livi-road-chevron-sibling'])

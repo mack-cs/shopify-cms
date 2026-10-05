@@ -137,10 +137,34 @@ class ShopYourVibeSiblingService
     private function syncProcurementRow(string $productGid): void
     {
         try {
-            $product = Product::query()->where('shopify_id', $productGid)->latest('id')->first();
+            $product = Product::query()
+                ->where('shopify_id', $productGid)
+                ->with('variants:id,product_id,sku')
+                ->latest('id')
+                ->first();
             $variantIds = $product?->variants()->pluck('id')->all() ?? [];
-            if ($variantIds !== []) {
-                app(ProcurementSheetSyncService::class)->publishOperational($variantIds);
+            $skus = $product?->variants
+                ?->pluck('sku')
+                ->map(fn (mixed $sku): string => strtoupper(trim((string) $sku)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all() ?? [];
+            $draftIds = NewProductDraft::query()
+                ->where(function ($query) use ($product, $productGid, $skus): void {
+                    $query->where('shopify_id', $productGid);
+                    if ($product?->handle) {
+                        $query->orWhere('handle', $product->handle);
+                    }
+                    if ($skus !== []) {
+                        $query->orWhereIn(\DB::raw('UPPER(TRIM(sku))'), $skus);
+                    }
+                })
+                ->pluck('id')
+                ->all();
+
+            if ($variantIds !== [] || $draftIds !== []) {
+                app(ProcurementSheetSyncService::class)->publishOperational($variantIds, draftIds: $draftIds);
             }
         } catch (\Throwable $exception) {
             Log::warning('Procurement Sheet sibling write-back failed after confirmed Shopify update.', [
