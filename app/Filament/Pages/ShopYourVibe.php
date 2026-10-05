@@ -1173,6 +1173,40 @@ class ShopYourVibe extends Page
             $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
             $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
             $product['complementary_count'] = $complementaryCountByGid[$product['id'] ?? ''] ?? 0;
+            $product['is_prelaunch_draft'] = (bool) ($product['is_prelaunch_draft'] ?? str_starts_with((string) ($product['id'] ?? ''), 'draft:'));
+
+            return $product;
+        })->all();
+    }
+
+    private function withPlacementInfo(?ShopYourVibeDraft $draft, array $products): array
+    {
+        if (! $draft) {
+            return $products;
+        }
+        $collections = collect($draft->desired['collections'] ?? []);
+        $placements = $draft->desired['draft_placements'] ?? [];
+
+        return collect($products)->map(function (array $product) use ($collections, $placements): array {
+            $id = (string) ($product['id'] ?? '');
+            if ($id === '' || ! str_starts_with($id, 'draft:')) {
+                return $product;
+            }
+            $associated = $collections
+                ->filter(fn (array $collection): bool => collect($collection['products'] ?? [])->contains(fn (array $item): bool => ($item['id'] ?? null) === $id))
+                ->map(function (array $collection, string $gid) use ($placements, $id): array {
+                    return [
+                        'gid' => $gid,
+                        'name' => $collection['title'] ?? $collection['handle'] ?? $gid,
+                        'complete' => data_get($placements, "{$id}.{$gid}.status") === 'complete',
+                    ];
+                })
+                ->values()
+                ->all();
+
+            $product['collection_placements'] = $associated;
+            $product['placement_complete_count'] = collect($associated)->where('complete', true)->count();
+            $product['placement_total_count'] = count($associated);
 
             return $product;
         })->all();
@@ -1403,6 +1437,7 @@ class ShopYourVibe extends Page
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
         if ($collection) {
             $collection['products'] = $this->decorateProductCards($collection['products'] ?? []);
+            $collection['products'] = $this->withPlacementInfo($draft, $collection['products']);
         }
         $products = collect();
         if ($this->addingProducts && $collection && $collection['membership_supported']) {
@@ -1446,6 +1481,7 @@ class ShopYourVibe extends Page
 
                     return $product;
                 })
+                ->pipe(fn ($products) => collect($this->withPlacementInfo($draft, $products->all())))
                 ->values()
                 ->all();
         }

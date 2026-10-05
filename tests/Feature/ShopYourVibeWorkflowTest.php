@@ -1206,6 +1206,107 @@ it('sorts parent collection products locally and shows stock badges on product c
         ->and($this->fake->calls)->toBe([]);
 });
 
+it('shows associated prelaunch drafts in collection sorting without publishing them', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    $draftProduct = NewProductDraft::create([
+        'handle' => 'atlantic-tide-bracelet',
+        'sku' => 'LRB0120',
+        'title' => 'Atlantic Tide Bracelet',
+        'type' => 'Bracelets',
+        'status' => 'DRAFT',
+        'published' => false,
+        'tags' => 'necklaces, gold-bracelets',
+    ]);
+    $draftProduct->approvals()->create(['user_id' => $this->user->id, 'approval_version' => $draftProduct->approval_version ?? 0]);
+
+    ShopYourVibeCollectionMapping::create([
+        'parent_collection_id' => 'gid://shopify/Collection/1',
+        'shopify_collection_id' => 'gid://shopify/Collection/2',
+        'collection_name' => 'Gold',
+        'collection_handle' => 'gold',
+        'membership_tag' => 'gold-bracelets',
+        'is_active' => true,
+    ]);
+
+    $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
+    $ids = array_column($this->draft->desired['collections']['gid://shopify/Collection/1']['products'], 'id');
+    expect($ids)->toContain('draft:'.$draftProduct->id)
+        ->and($this->draft->desired['collections']['gid://shopify/Collection/2']['products'] ?? [])->not->toBeEmpty();
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $page->assertSee('Atlantic Tide Bracelet')
+        ->assertSee('Placement: 0/2 complete')
+        ->assertSee('Needs positioning: Necklaces')
+        ->assertSee('Needs positioning: Pearl');
+});
+
+it('saves draft product placement locally and leaves the product draft unpublished', function () {
+    $draftProduct = NewProductDraft::create([
+        'handle' => 'atlantic-tide-bracelet',
+        'sku' => 'LRB0120',
+        'title' => 'Atlantic Tide Bracelet',
+        'type' => 'Bracelets',
+        'status' => 'DRAFT',
+        'published' => false,
+        'tags' => 'necklaces',
+    ]);
+    $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
+    $this->fake->calls = [];
+
+    $ids = array_column($this->draft->desired['collections']['gid://shopify/Collection/1']['products'], 'id');
+    $ids = array_values(array_diff($ids, ['draft:'.$draftProduct->id]));
+    array_splice($ids, 1, 0, ['draft:'.$draftProduct->id]);
+
+    $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [
+        'collection_gid' => 'gid://shopify/Collection/1',
+        'ids' => $ids,
+    ]);
+
+    expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))->toBe($ids)
+        ->and(data_get($this->draft->desired, 'draft_placements.draft:'.$draftProduct->id.'.gid://shopify/Collection/1.status'))->toBe('complete')
+        ->and((bool) $draftProduct->fresh()->published)->toBeFalse()
+        ->and($this->fake->calls)->toBe([]);
+});
+
+it('preserves a prepared draft position after the product receives a Shopify gid', function () {
+    $draftProduct = NewProductDraft::create([
+        'handle' => 'atlantic-tide-bracelet',
+        'sku' => 'LRB0120',
+        'title' => 'Atlantic Tide Bracelet',
+        'type' => 'Bracelets',
+        'status' => 'DRAFT',
+        'published' => false,
+        'tags' => 'necklaces',
+    ]);
+    $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
+    $ids = array_column($this->draft->desired['collections']['gid://shopify/Collection/1']['products'], 'id');
+    $ids = array_values(array_diff($ids, ['draft:'.$draftProduct->id]));
+    array_splice($ids, 1, 0, ['draft:'.$draftProduct->id]);
+    $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [
+        'collection_gid' => 'gid://shopify/Collection/1',
+        'ids' => $ids,
+    ]);
+
+    $this->fake->product(104);
+    $this->fake->collections['gid://shopify/Collection/1']['products']['nodes'] = array_map(
+        fn (int $id): array => $this->fake->products['gid://shopify/Product/'.$id],
+        [101, 102, 103, 104],
+    );
+    $draftProduct->update([
+        'shopify_id' => 'gid://shopify/Product/104',
+        'status' => 'ACTIVE',
+        'published' => true,
+    ]);
+
+    $this->draft = $this->workflow->refresh($this->draft->id, $this->draft->revision, true);
+
+    expect(array_column($this->draft->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))
+        ->toBe(['gid://shopify/Product/101', 'gid://shopify/Product/104', 'gid://shopify/Product/102', 'gid://shopify/Product/103']);
+});
+
 it('keeps main collection products sortable when an existing draft has stale manual support data', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);

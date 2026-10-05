@@ -209,6 +209,21 @@
                                 </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
+                                @if (!empty($product['is_prelaunch_draft']))
+                                    <div class="my-3 rounded-md border border-warning-200 bg-warning-50 p-2 text-xs text-warning-900 dark:border-warning-700 dark:bg-warning-950 dark:text-warning-100">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <x-filament::badge color="warning">{{ $product['status'] ?: 'DRAFT' }}</x-filament::badge>
+                                            <span>Placement: {{ $product['placement_complete_count'] ?? 0 }}/{{ $product['placement_total_count'] ?? 0 }} complete</span>
+                                        </div>
+                                        @if (!empty($product['collection_placements']))
+                                            <div class="mt-2 flex flex-wrap gap-1">
+                                                @foreach ($product['collection_placements'] as $placement)
+                                                    <span>{{ $placement['complete'] ? 'Complete' : 'Needs positioning' }}: {{ $placement['name'] }}</span>
+                                                @endforeach
+                                            </div>
+                                        @endif
+                                    </div>
+                                @endif
                                 <div class="syv-finish-row">
                                     <span class="syv-finish-label">Material Colour Finish</span>
                                     @if (filled($product['bead_colour_finish'] ?? null))
@@ -367,6 +382,21 @@
                                             </div>
                                             <h4 class="mt-2 font-medium">{{ $displayProduct['title'] }}</h4>
                                             <p class="text-xs text-gray-500">SKU: {{ $displayProduct['sku'] ?: 'No SKU' }}</p>
+                                            @if (!empty($displayProduct['is_prelaunch_draft']))
+                                                <div class="my-3 rounded-md border border-warning-200 bg-warning-50 p-2 text-xs text-warning-900 dark:border-warning-700 dark:bg-warning-950 dark:text-warning-100">
+                                                    <div class="flex flex-wrap items-center gap-2">
+                                                        <x-filament::badge color="warning">{{ $displayProduct['status'] ?: 'DRAFT' }}</x-filament::badge>
+                                                        <span>Placement: {{ $displayProduct['placement_complete_count'] ?? 0 }}/{{ $displayProduct['placement_total_count'] ?? 0 }} complete</span>
+                                                    </div>
+                                                    @if (!empty($displayProduct['collection_placements']))
+                                                        <div class="mt-2 flex flex-wrap gap-1">
+                                                            @foreach ($displayProduct['collection_placements'] as $placement)
+                                                                <span>{{ $placement['complete'] ? 'Complete' : 'Needs positioning' }}: {{ $placement['name'] }}</span>
+                                                            @endforeach
+                                                        </div>
+                                                    @endif
+                                                </div>
+                                            @endif
                                             <div class="syv-finish-row">
                                                 <span class="syv-finish-label">Material Colour Finish</span>
                                                 @if (filled($displayProduct['bead_colour_finish'] ?? null))
