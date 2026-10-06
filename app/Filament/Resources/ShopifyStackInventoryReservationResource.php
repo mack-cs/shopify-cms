@@ -78,7 +78,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Cancel this stack reservation?')
-                    ->modalDescription('This only releases leftover reserved component stock when Shopify shows the order as fully fulfilled. Unfulfilled and partial orders are skipped so live stack reservations stay in place. Already consumed units are not reversed.')
+                    ->modalDescription('This asks Shopify live for fulfillment status. Cancel only runs when Shopify shows the order as fully fulfilled. CMS Order Data is ignored. Unfulfilled, partial, and unknown Shopify statuses are skipped. Already consumed units are not reversed.')
                     ->modalSubmitActionLabel('Cancel reservation')
                     ->visible(fn (): bool => self::canCancelReservations())
                     ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
@@ -94,7 +94,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ->color('danger')
                         ->requiresConfirmation()
                         ->modalHeading('Cancel the selected stack reservations?')
-                        ->modalDescription('This only releases leftover reserved component stock when Shopify shows the order as fully fulfilled. Unfulfilled and partial orders in the selection are skipped. Already consumed units are not reversed.')
+                        ->modalDescription('This asks Shopify live for fulfillment status. Cancel only runs when Shopify shows the order as fully fulfilled. CMS Order Data is ignored. Unfulfilled, partial, and unknown Shopify statuses in the selection are skipped. Already consumed units are not reversed.')
                         ->modalSubmitActionLabel('Cancel reservations')
                         ->visible(fn (): bool => self::canCancelReservations())
                         ->action(function (Collection $records): void {

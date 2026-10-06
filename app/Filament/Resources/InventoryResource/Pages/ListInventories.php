@@ -243,14 +243,22 @@ class ListInventories extends ListRecords
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->requiresConfirmation()
                 ->modalHeading('Apply Price Updates')
-                ->modalDescription('All populated New Price values in the procurement sheet will be validated and queued for Shopify price updates. Successful rows will update Current Price and clear New Price only after Shopify confirms the change.')
+                ->modalDescription('Populated New Price values are queued for Shopify. SKUs that are not an active catalog variant, have no Shopify ID, or have an invalid New Price are skipped and left in the sheet. Successful rows update Current Price and clear New Price only after Shopify confirms the change.')
                 ->modalSubmitActionLabel('Apply Price Updates')
                 ->action(function (ProcurementPriceUpdateService $prices): void {
                     try {
                         $result = $prices->queueFromSheet(Auth::id());
+                        $unready = $result['unready_skus'] ?? [];
+                        $body = "Queued {$result['queued']} price update(s). Skipped {$result['skipped_unchanged']} unchanged row(s).";
+                        if (($result['skipped_unready'] ?? 0) > 0) {
+                            $preview = implode(', ', array_slice($unready, 0, 8));
+                            $body .= " Skipped {$result['skipped_unready']} SKU(s) that cannot be sent to Shopify";
+                            $body .= $preview !== '' ? ": {$preview}." : '.';
+                            $body .= ' Valid SKUs were still queued. Unready New Price cells were left as-is.';
+                        }
                         Notification::make()
                             ->title($result['queued'] > 0 ? 'Price updates queued' : 'No price updates to queue')
-                            ->body("Queued {$result['queued']} price update(s). Skipped {$result['skipped_unchanged']} unchanged row(s).")
+                            ->body($body)
                             ->success()
                             ->send();
                     } catch (Throwable $e) {
