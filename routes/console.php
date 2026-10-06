@@ -16,6 +16,7 @@ use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
+use App\Services\Shopify\StackOrderLineMapper;
 use App\Services\Shopify\StackOrderReservationService;
 use App\Services\ComplementaryProductMaintenanceService;
 use App\Services\StackBundleSellabilityService;
@@ -526,31 +527,42 @@ GRAPHQL, [
     return self::SUCCESS;
 })->purpose('Register order and fulfillment webhooks used for Stack component inventory reservations.');
 
-Artisan::command('shopify:reconcile-stack-reservations', function (
+Artisan::command('shopify:reconcile-stack-reservations {--include-fulfilled : Also snapshot fully fulfilled open orders into the ledger without reserving Shopify stock} {--reprocess : Re-run previously completed backfill events with the current Shopify quantities}', function (
     ShopifyApiClient $client,
     StackOrderReservationService $service,
+    StackOrderLineMapper $mapper,
 ): int {
+    $includeFulfilled = (bool) $this->option('include-fulfilled');
+    $reprocess = (bool) $this->option('reprocess');
+    $this->warn('This command snapshots current Shopify quantities. It will not undo leftover reserved stock from an earlier bad backfill; cancel those rows as Super Admin.');
+    $query = $includeFulfilled
+        ? 'status:open'
+        : 'status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial)';
     $cursor = null;
     $orders = 0;
     $reservations = 0;
+    $skippedLines = 0;
     do {
         $data = $client->graphql(<<<'GRAPHQL'
-query OpenOrdersForStackReservation($after: String) {
-  orders(first: 50, after: $after, query: "status:open", sortKey: UPDATED_AT) {
+query OpenOrdersForStackReservation($query: String!, $after: String) {
+  orders(first: 50, after: $after, query: $query, sortKey: UPDATED_AT) {
     nodes {
-      id name cancelledAt updatedAt
+      id name cancelledAt updatedAt createdAt displayFulfillmentStatus
       lineItems(first: 250) {
-        nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+        nodes { id sku title quantity currentQuantity unfulfilledQuantity variant { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
-GRAPHQL, ['after' => $cursor]);
+GRAPHQL, ['query' => $query, 'after' => $cursor]);
 
         foreach ((array) data_get($data, 'orders.nodes', []) as $order) {
             if (! is_array($order) || data_get($order, 'cancelledAt') !== null) {
+                continue;
+            }
+            if (! $includeFulfilled && $mapper->isGraphqlOrderFullyFulfilled($order)) {
                 continue;
             }
             $lineNodes = (array) data_get($order, 'lineItems.nodes', []);
@@ -560,7 +572,7 @@ GRAPHQL, ['after' => $cursor]);
 query MoreOpenOrderLines($orderId: ID!, $after: String!) {
   order(id: $orderId) {
     lineItems(first: 250, after: $after) {
-      nodes { id sku quantity currentQuantity unfulfilledQuantity variant { id } }
+      nodes { id sku title quantity currentQuantity unfulfilledQuantity variant { id } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -570,33 +582,43 @@ GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
                 $order['lineItems']['pageInfo'] = data_get($more, 'order.lineItems.pageInfo', []);
                 $lineCursor = data_get($more, 'order.lineItems.pageInfo.endCursor');
             }
-            $lines = collect($lineNodes)->map(function (array $line): array {
-                $current = max(0, (int) ($line['currentQuantity'] ?? $line['quantity'] ?? 0));
-                $unfulfilled = max(0, min($current, (int) ($line['unfulfilledQuantity'] ?? $current)));
-
-                return [
-                    'admin_graphql_api_id' => $line['id'] ?? null,
-                    'variant_id' => data_get($line, 'variant.id'),
-                    'sku' => $line['sku'] ?? null,
-                    'quantity' => $current,
-                    'current_quantity' => $current,
-                    '_stack_baseline_fulfilled_quantity' => $current - $unfulfilled,
-                ];
-            })->all();
+            $lines = [];
+            foreach ($lineNodes as $line) {
+                if (! is_array($line)) {
+                    continue;
+                }
+                $mapped = $mapper->fromGraphqlLine($line);
+                if ($mapped === null) {
+                    $skippedLines++;
+                    continue;
+                }
+                $lines[] = $mapped;
+            }
             $orderId = trim((string) ($order['id'] ?? ''));
-            if ($orderId === '') {
+            if ($orderId === '' || $lines === []) {
                 continue;
             }
-            $event = ShopifyStackOrderEvent::query()->firstOrCreate(
-                ['webhook_id' => 'backfill-'.sha1($orderId)],
-                [
-                    'topic' => 'orders/updated',
-                    'shopify_order_id' => $orderId,
-                    'shopify_order_name' => trim((string) ($order['name'] ?? '')) ?: null,
-                    'shopify_updated_at' => $order['updatedAt'] ?? null,
-                    'payload' => ['admin_graphql_api_id' => $orderId, 'name' => $order['name'] ?? null, 'line_items' => $lines],
-                ],
-            );
+            $payload = [
+                'admin_graphql_api_id' => $orderId,
+                'name' => $order['name'] ?? null,
+                'created_at' => $order['createdAt'] ?? null,
+                'line_items' => $lines,
+            ];
+            $event = ShopifyStackOrderEvent::query()->firstOrNew(['webhook_id' => 'backfill-'.sha1($orderId)]);
+            $event->fill([
+                'topic' => 'orders/updated',
+                'shopify_order_id' => $orderId,
+                'shopify_order_name' => trim((string) ($order['name'] ?? '')) ?: null,
+                'shopify_updated_at' => $order['updatedAt'] ?? null,
+                'payload' => $payload,
+            ]);
+            if ($reprocess && $event->status === ShopifyStackOrderEvent::STATUS_COMPLETED) {
+                $event->status = ShopifyStackOrderEvent::STATUS_PENDING;
+                $event->error_message = null;
+            } elseif (! $event->exists) {
+                $event->status = ShopifyStackOrderEvent::STATUS_PENDING;
+            }
+            $event->save();
             if ($event->status !== ShopifyStackOrderEvent::STATUS_COMPLETED) {
                 $summary = $service->process($event);
                 $reservations += $summary['reserved'];
@@ -608,10 +630,10 @@ GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
         $cursor = data_get($data, 'orders.pageInfo.endCursor');
     } while ($hasNextPage && is_string($cursor) && $cursor !== '');
 
-    $this->info("Reconciled {$orders} open orders; {$reservations} Stack component reservation movements completed.");
+    $this->info("Reconciled {$orders} open orders; {$reservations} Stack component reservation movements completed; {$skippedLines} line(s) skipped because unfulfilled quantity was missing.");
 
     return self::SUCCESS;
-})->purpose('Backfill current open Shopify Stack orders into the component reservation ledger.');
+})->purpose('Backfill current unfulfilled/partial Shopify Stack orders into the component reservation ledger.');
 
 Schedule::command('notifications:send-daily-task-reminders')
     ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))
