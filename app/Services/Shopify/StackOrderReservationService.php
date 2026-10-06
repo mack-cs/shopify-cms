@@ -146,7 +146,7 @@ final class StackOrderReservationService
             }
             if (! $this->fulfillment->isFullyFulfilled($locked)) {
                 $locked->forceFill([
-                    'error_message' => 'Manual cancel skipped because this Shopify order is still unfulfilled or only partially fulfilled.',
+                    'error_message' => 'Manual cancel skipped because live Shopify does not show this order as fully fulfilled.',
                 ])->save();
 
                 return false;

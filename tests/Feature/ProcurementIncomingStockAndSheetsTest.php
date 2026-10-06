@@ -265,10 +265,77 @@ it('reads populated New Price values and queues one batch without changing the s
 
     $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
 
-    expect($result)->toBe(['queued' => 1, 'skipped_unchanged' => 0]);
+    expect($result)->toBe([
+        'queued' => 1,
+        'skipped_unchanged' => 0,
+        'skipped_unready' => 0,
+        'unready_skus' => [],
+    ]);
     Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($variant): bool {
         return $job->userId === 7
             && $job->updates === [['sku' => $variant->sku, 'variant_id' => $variant->id, 'new_price' => '125.50']];
+    });
+});
+
+it('queues active catalog price updates and skips unmatched draft SKUs', function (): void {
+    Queue::fake();
+    [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
+    [, $draft] = procurementSheetVariant('LTN0227/62', 'livi-road');
+    $draft->product->forceFill(['status' => 'draft'])->save();
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $map = (new ProcurementSheetSchema)->map($headers);
+    $activeRow = array_fill(0, count($headers), '');
+    $activeRow[$map['sku']] = $active->sku;
+    $activeRow[$map['new_price']] = '125.50';
+    $draftRow = array_fill(0, count($headers), '');
+    $draftRow[$map['sku']] = $draft->sku;
+    $draftRow[$map['new_price']] = '80.00';
+    Http::fake(fn () => Http::response(['values' => [$headers, $activeRow, $draftRow]]));
+
+    $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
+
+    expect($result['queued'])->toBe(1)
+        ->and($result['skipped_unready'])->toBe(1)
+        ->and($result['unready_skus'])->toBe(['LTN0227/62']);
+    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($active): bool {
+        return $job->updates === [['sku' => $active->sku, 'variant_id' => $active->id, 'new_price' => '125.50']];
+    });
+});
+
+it('queues valid Shopify price updates and skips SKUs with no Shopify variant ID', function (): void {
+    Queue::fake();
+    [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
+    [, $localOnly] = procurementSheetVariant('LRBLOCAL1', 'livi-road');
+    $localOnly->forceFill(['shopify_id' => ''])->save();
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $map = (new ProcurementSheetSchema)->map($headers);
+    $activeRow = array_fill(0, count($headers), '');
+    $activeRow[$map['sku']] = $active->sku;
+    $activeRow[$map['new_price']] = '125.50';
+    $localRow = array_fill(0, count($headers), '');
+    $localRow[$map['sku']] = $localOnly->sku;
+    $localRow[$map['new_price']] = '80.00';
+    Http::fake(fn () => Http::response(['values' => [$headers, $activeRow, $localRow]]));
+
+    $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
+
+    expect($result['queued'])->toBe(1)
+        ->and($result['skipped_unready'])->toBe(1)
+        ->and($result['unready_skus'])->toBe(['LRBLOCAL1']);
+    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($active): bool {
+        return $job->updates === [['sku' => $active->sku, 'variant_id' => $active->id, 'new_price' => '125.50']];
     });
 });
 

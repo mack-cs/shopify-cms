@@ -3,7 +3,6 @@
 namespace App\Services\Shopify;
 
 use App\Contracts\ShopifyGraphqlGateway;
-use App\Models\ShopifyOrder;
 use App\Models\ShopifyStackInventoryReservation;
 
 final class StackOrderFulfillmentInspector
@@ -23,30 +22,7 @@ final class StackOrderFulfillmentInspector
             return $this->cache[$orderId];
         }
 
-        $local = $this->localStatus($orderId);
-        if ($local === true) {
-            return $this->cache[$orderId] = true;
-        }
-
-        $live = $this->liveStatus($orderId);
-        if ($live !== null) {
-            return $this->cache[$orderId] = $live;
-        }
-
-        return $this->cache[$orderId] = false;
-    }
-
-    private function localStatus(string $orderId): ?bool
-    {
-        $order = ShopifyOrder::query()
-            ->whereIn('shopify_order_id', $this->idAliases($orderId))
-            ->latest('id')
-            ->first();
-        if (! $order) {
-            return null;
-        }
-
-        return $this->isFulfilledStatus($order->fulfillment_status);
+        return $this->cache[$orderId] = $this->liveStatus($orderId) === true;
     }
 
     private function liveStatus(string $orderId): ?bool
@@ -69,26 +45,8 @@ GRAPHQL, ['id' => $gid]);
             return null;
         }
 
-        return $this->isFulfilledStatus($status);
-    }
-
-    private function isFulfilledStatus(mixed $status): bool
-    {
-        $normalized = strtoupper(str_replace([' ', '-'], '_', trim((string) $status)));
+        $normalized = strtoupper(str_replace([' ', '-'], '_', trim($status)));
 
         return in_array($normalized, ['FULFILLED', 'COMPLETE', 'SHIPPED'], true);
-    }
-
-    /** @return array<int, string> */
-    private function idAliases(string $orderId): array
-    {
-        $aliases = [$orderId];
-        if (preg_match('#gid://shopify/Order/(\d+)$#', $orderId, $match) === 1) {
-            $aliases[] = $match[1];
-        } elseif (ctype_digit($orderId)) {
-            $aliases[] = 'gid://shopify/Order/'.$orderId;
-        }
-
-        return array_values(array_unique($aliases));
     }
 }
