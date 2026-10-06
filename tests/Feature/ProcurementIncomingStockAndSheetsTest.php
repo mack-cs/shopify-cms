@@ -10,6 +10,8 @@ use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
+use App\Jobs\ApplyProcurementPriceUpdatesJob;
+use App\Models\NewProductDraft;
 use App\Services\GoogleSheets\GoogleServiceAccountTokenProvider;
 use App\Services\GoogleSheets\GoogleSheetsClient;
 use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
@@ -17,6 +19,7 @@ use App\Services\GoogleSheets\ProcurementSheetSchema;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\Procurement\ProcurementActionPolicy;
+use App\Services\Procurement\ProcurementPriceUpdateService;
 use App\Services\Procurement\SupplierOrderService;
 use App\Services\ProcurementIncomingStockService;
 use App\Services\ProcurementPredictionIngestService;
@@ -24,6 +27,7 @@ use App\Services\SalePercentageCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
@@ -154,7 +158,8 @@ it('repairs duplicate trailing CMS columns but rejects duplicate human inputs', 
 it('keeps the required procurement column groups in the exact report order', function (): void {
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect($headers)->toBe([
-        'SKU', 'Product', 'Vendor', 'Product Type', 'Currently on Sale', 'Sale Percentage',
+        'SKU', 'Product', 'Vendor', 'Product Type', 'Sibling Shapes', 'Bead Color Finish',
+        'Current Price', 'New Price', 'Currently on Sale', 'Sale Percentage',
         'Available', 'On Hand', 'cms_movement_classification', 'Ignore',
         'Predicted Weekly Demand', 'Estimated Days of Stock Remaining', 'Predicted Runout Date',
         'Next Order ID', 'Replenishment Date', 'Stock Gap Status',
@@ -182,13 +187,13 @@ it('clears only the columns removed from the previous Google Sheet layout', func
     };
 
     (new GoogleSheetsClient($tokens))->replaceAll(
-        'pata-pata', [array_fill(0, 32, 'value')], 1, 34
+        'pata-pata', [array_fill(0, count(ProcurementSheetSchema::FIELDS), 'value')], 1, count(ProcurementSheetSchema::FIELDS) + 2
     );
 
     $requests = collect(Http::recorded())->pluck(0);
     expect($requests)->toHaveCount(2)
         ->and($requests->first()->url())->toContain('/values:batchUpdate')
-        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AG1:AH1");
+        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AK1:AL1");
 });
 
 it('upgrades legacy Current Inventory into Available without losing values', function (): void {
@@ -241,6 +246,87 @@ it('pulls Ignore and Quantity To Order but does not import CMS order totals from
         ->and(ProcurementIncomingStock::query()->where('variant_id', $second->id)->value('ignore'))->toBeTrue();
 });
 
+it('reads populated New Price values and queues one batch without changing the sheet immediately', function (): void {
+    Queue::fake();
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $map = (new ProcurementSheetSchema)->map($headers);
+    $row = array_fill(0, count($headers), '');
+    $row[$map['sku']] = $variant->sku;
+    $row[$map['current_price']] = '100.00';
+    $row[$map['new_price']] = '125.50';
+    Http::fake(fn () => Http::response(['values' => [$headers, $row]]));
+
+    $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
+
+    expect($result)->toBe(['queued' => 1, 'skipped_unchanged' => 0]);
+    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($variant): bool {
+        return $job->userId === 7
+            && $job->updates === [['sku' => $variant->sku, 'variant_id' => $variant->id, 'new_price' => '125.50']];
+    });
+});
+
+it('keeps New Price human owned during normal row construction', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', $variant->sku);
+
+    expect($record['current_price'])->toBe('100.00')
+        ->and($record['new_price'])->toBeNull();
+});
+
+it('excludes local test products from procurement sheets unless explicitly enabled', function (): void {
+    config(['procurement.include_test_products' => false]);
+    [, $variant] = procurementSheetVariant('TEST-LOCAL-001', 'livi-road');
+
+    expect(collect(app(ProcurementSheetDatasetBuilder::class)->records())->pluck('sku'))
+        ->not->toContain($variant->sku);
+
+    config(['procurement.include_test_products' => true]);
+
+    expect(collect(app(ProcurementSheetDatasetBuilder::class)->records())->pluck('sku'))
+        ->toContain($variant->sku);
+});
+
+it('records confirmed procurement price updates only after Shopify success', function (): void {
+    [$import, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    $user = User::factory()->create();
+    $draft = NewProductDraft::query()->create([
+        'handle' => $variant->product->handle,
+        'shopify_id' => $variant->product->shopify_id,
+        'sku' => $variant->sku,
+        'title' => $variant->product->title,
+        'variant_price' => '100.00',
+    ]);
+    config([
+        'services.shopify.shop' => 'example.myshopify.com',
+        'services.shopify.admin_access_token' => 'fake-shopify-token',
+    ]);
+    Http::fake(fn () => Http::response([
+        'data' => ['productVariantsBulkUpdate' => ['userErrors' => []]],
+    ]));
+    $updater = new \App\Services\ProductShopifyUpdater(
+        app(\App\Services\ShopifyApiClient::class),
+        app(\App\Services\ProductHandleService::class),
+        app(\App\Services\ProductPartialApprovalService::class),
+        app(\App\Services\SaleTagService::class),
+        app(\App\Services\ComplementaryProductAuditService::class),
+    );
+
+    (new ApplyProcurementPriceUpdatesJob([
+        ['sku' => $variant->sku, 'variant_id' => $variant->id, 'new_price' => '125.50'],
+    ], $user->id))->handle($updater, procurementTestSheetSync());
+
+    expect($variant->fresh()->price)->toBe('125.50')
+        ->and($draft->fresh()->variant_price)->toBe('125.50')
+        ->and(ChangeLog::query()->where('source', 'PROCUREMENT_PRICE_UPDATE')->where('model_id', $variant->id)->exists())->toBeTrue();
+});
+
 it('does not mark predictions stale for a working Quantity To Order change', function (): void {
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     $service = app(ProcurementIncomingStockService::class);
@@ -275,7 +361,7 @@ it('does not partially persist phases when a later Google tab read fails', funct
     $row[0] = 'LRB0004';
     $row[array_search('Quantity To Order', $headers, true)] = 60;
     Http::fake(function (Request $request) use ($headers, $row) {
-        if (str_contains(urldecode($request->url()), "'livi-road'!A:AJ")) {
+        if (str_contains(urldecode($request->url()), "'livi-road'!A:AN")) {
             return Http::response(['values' => [$headers, $row]]);
         }
 
@@ -326,10 +412,10 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         $url = $request->url();
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AJ")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'master-file'!A:AN")) {
             return Http::response(['values' => [$headers]]);
         }
-        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AJ")) {
+        if ($request->method() === 'GET' && str_contains(urldecode($url), "'livi-road'!A:AN")) {
             $row = array_fill(0, count($headers), '');
             $row[0] = 'LRB0004';
             $row[array_search('Quantity To Order', $headers, true)] = 60;
@@ -357,7 +443,8 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
     $sync = new ProcurementSheetSyncService(
         $client, new ProcurementSheetSchema, app(ProcurementIncomingStockService::class),
         $resolver, new ProcurementSheetDatasetBuilder(
-            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class)
+            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class),
+            app(\App\Services\SiblingCollectionResolver::class)
         ),
     );
 
@@ -367,9 +454,10 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range'))
         ->filter()->values();
     expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
-        ->and($ranges)->not->toContain("'livi-road'!J2")
-        ->and($ranges)->not->toContain("'livi-road'!AC2")
-        ->and($ranges)->toContain("'livi-road'!N2")
+        ->and($ranges)->not->toContain("'livi-road'!H2")
+        ->and($ranges)->not->toContain("'livi-road'!N2")
+        ->and($ranges)->not->toContain("'livi-road'!AG2")
+        ->and($ranges)->toContain("'livi-road'!J2")
         ->and($ranges)->toContain("'livi-road'!V2")
         ->and($ranges)->toContain("'livi-road'!W2")
         ->and($ranges)->toContain("'livi-road'!U2");
@@ -390,6 +478,13 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         'number_of_wip_orders' => 1,
     ]);
     config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $this->app->instance(GoogleServiceAccountTokenProvider::class, new class extends GoogleServiceAccountTokenProvider
+    {
+        public function token(): string
+        {
+            return 'fake-google-token';
+        }
+    });
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     Http::fake(function (Request $request) use ($headers) {
         if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
@@ -413,24 +508,207 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', []))->pluck('range')
     )->filter()->values();
 
-    expect($ranges)->toContain("'master-file'!G2")
-        ->and($ranges)->toContain("'master-file'!H2")
+    expect($ranges)->toContain("'master-file'!E2")
+        ->and($ranges)->toContain("'master-file'!F2")
+        ->and($ranges)->toContain("'master-file'!G2")
+        ->and($ranges)->not->toContain("'master-file'!H2")
         ->and($ranges)->not->toContain("'master-file'!I2")
         ->and($ranges)->not->toContain("'master-file'!J2")
-        ->and($ranges)->toContain("'master-file'!M2")
-        ->and($ranges)->toContain("'master-file'!N2")
-        ->and($ranges)->toContain("'master-file'!O2")
-        ->and($ranges)->toContain("'master-file'!P2")
+        ->and($ranges)->toContain("'master-file'!K2")
+        ->and($ranges)->toContain("'master-file'!L2")
+        ->and($ranges)->not->toContain("'master-file'!N2")
+        ->and($ranges)->toContain("'master-file'!Q2")
         ->and($ranges)->toContain("'master-file'!S2")
         ->and($ranges)->toContain("'master-file'!T2")
+        ->and($ranges)->toContain("'master-file'!U2")
         ->and($ranges)->toContain("'master-file'!V2")
         ->and($ranges)->toContain("'master-file'!W2")
         ->and($ranges)->toContain("'master-file'!X2")
+        ->and($ranges)->toContain("'master-file'!Y2")
+        ->and($ranges)->toContain("'master-file'!Z2")
+        ->and($ranges)->toContain("'master-file'!AA2")
         ->and($ranges)->toContain("'master-file'!AB2")
-        ->and($ranges)->toContain("'master-file'!AD2")
-        ->and($ranges)->toContain("'livi-road'!AF2")
-        ->and($ranges)->not->toContain("'master-file'!K2")
-        ->and($ranges)->not->toContain("'master-file'!L2");
+        ->and($ranges)->toContain("'master-file'!AF2")
+        ->and($ranges)->toContain("'master-file'!AH2")
+        ->and($ranges)->toContain("'master-file'!AI2")
+        ->and($ranges)->toContain("'livi-road'!AJ2")
+        ->and($ranges)->not->toContain("'master-file'!AG2");
+});
+
+it('can append a missing targeted operational row for local Sheet testing', function (): void {
+    [, $variant] = procurementSheetVariant('LOCAL-APPEND', 'livi-road');
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $this->app->instance(ProcurementSheetSyncService::class, procurementTestSheetSync());
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    Http::fake(function (Request $request) use ($headers) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
+            return Http::response(['values' => [$headers]]);
+        }
+        if ($request->method() === 'GET') {
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
+        }
+
+        return Http::response(['ok' => true]);
+    });
+
+    $result = procurementTestSheetSync()->publishOperational([$variant->id], appendMissing: true);
+    $appendRequests = collect(Http::recorded())
+        ->map(fn (array $pair) => $pair[0])
+        ->filter(fn (Request $request): bool => str_contains($request->url(), '/values/') && str_contains($request->url(), ':append'))
+        ->values();
+
+    expect($result)->toBe(['rows' => 2, 'tabs' => 2])
+        ->and($appendRequests)->toHaveCount(2)
+        ->and($appendRequests->map(fn (Request $request): mixed => data_get($request->data(), 'values.0.0'))->all())
+        ->toBe(['LOCAL-APPEND', 'LOCAL-APPEND']);
+});
+
+it('includes prelaunch drafts in procurement records while excluding test drafts by default', function (): void {
+    config(['procurement.include_test_products' => false]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'DRAFT-001', 'title' => 'Prelaunch Bracelet', 'handle' => 'prelaunch-bracelet',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 15,
+        'bead_colour_finish' => 'Colourful', 'siblings' => 'Slims',
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'TEST1P324', 'title' => 'Siblings Template Test', 'handle' => 'siblings-template-test',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 10,
+    ]);
+
+    $records = collect(app(ProcurementSheetDatasetBuilder::class)->records());
+
+    expect($records->pluck('sku'))->toContain('DRAFT-001')
+        ->not->toContain('TEST1P324');
+
+    $draft = $records->firstWhere('sku', 'DRAFT-001');
+    expect($draft['current_price'])->toBe('540.00')
+        ->and($draft['current_inventory'])->toBe(15)
+        ->and($draft['bead_color_finish'])->toBe('Colourful')
+        ->and($draft['sibling_shapes'])->toBe('')
+        ->and($draft['action_reason'])->toContain('Prelaunch draft');
+});
+
+it('allows test drafts in procurement records when the local test-products flag is enabled', function (): void {
+    config(['procurement.include_test_products' => true]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'TEST1P324', 'title' => 'Siblings Template Test', 'handle' => 'siblings-template-test',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 10,
+    ]);
+
+    expect(collect(app(ProcurementSheetDatasetBuilder::class)->records())->pluck('sku'))
+        ->toContain('TEST1P324');
+});
+
+it('does not publish raw sibling product gids from draft rows', function (): void {
+    config(['procurement.include_test_products' => true]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'TEST-GIDS', 'title' => 'Test Product Gids', 'handle' => 'test-product-gids',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 10,
+        'siblings' => 'gid://shopify/Product/8516761911432; gid://shopify/Product/8517414158472',
+    ]);
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'TEST-GIDS');
+
+    expect($record['sibling_shapes'])->toBe('');
+});
+
+it('can append a missing targeted draft operational row for local Sheet testing', function (): void {
+    config(['procurement.include_test_products' => true]);
+    $draft = NewProductDraft::query()->create([
+        'sku' => 'TEST1P324', 'title' => 'Siblings Template Test', 'handle' => 'siblings-template-test',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 10,
+    ]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $this->app->instance(ProcurementSheetSyncService::class, procurementTestSheetSync());
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    Http::fake(function (Request $request) use ($headers) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
+            return Http::response(['values' => [$headers]]);
+        }
+        if ($request->method() === 'GET') {
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
+        }
+
+        return Http::response(['ok' => true]);
+    });
+
+    $result = procurementTestSheetSync()->publishOperational(appendMissing: true, draftIds: [$draft->id]);
+    $appendRequests = collect(Http::recorded())
+        ->map(fn (array $pair) => $pair[0])
+        ->filter(fn (Request $request): bool => str_contains($request->url(), '/values/') && str_contains($request->url(), ':append'))
+        ->values();
+
+    expect($result)->toBe(['rows' => 2, 'tabs' => 2])
+        ->and($appendRequests->map(fn (Request $request): mixed => data_get($request->data(), 'values.0.0'))->all())
+        ->toBe(['TEST1P324', 'TEST1P324']);
+});
+
+it('falls back to a new product draft when a matched local variant is procurement excluded', function (): void {
+    config(['procurement.include_test_products' => true]);
+    [, $variant] = procurementSheetVariant('TEST1P324', 'livi-road');
+    Product::withoutEvents(fn () => $variant->product->update(['status' => 'draft']));
+    NewProductDraft::query()->create([
+        'sku' => 'TEST1P324', 'title' => 'Siblings Template Test', 'handle' => 'siblings-template-test',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 10,
+    ]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $this->app->instance(ProcurementSheetSyncService::class, procurementTestSheetSync());
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    Http::fake(function (Request $request) use ($headers) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
+            return Http::response(['values' => [$headers]]);
+        }
+        if ($request->method() === 'GET') {
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
+        }
+
+        return Http::response(['ok' => true]);
+    });
+
+    $this->artisan('procurement:sheets-operational', [
+        '--append-missing' => true,
+        '--sku' => ['TEST1P324'],
+    ])->expectsOutputToContain('Published 2 operational row update(s) across 2 tab(s).')
+        ->assertSuccessful();
 });
 
 it('refuses to publish stale incoming-stock inputs before making a Google write', function (): void {
@@ -1015,7 +1293,7 @@ function procurementTestSheetSync(): ProcurementSheetSyncService
         new GoogleSheetsClient($tokens), new ProcurementSheetSchema,
         app(ProcurementIncomingStockService::class), $resolver,
         new ProcurementSheetDatasetBuilder(
-            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class)
+            $resolver, app(SalePercentageCalculator::class), app(ProcurementActionPolicy::class), app(\App\Services\SiblingCollectionResolver::class)
         ),
     );
 }

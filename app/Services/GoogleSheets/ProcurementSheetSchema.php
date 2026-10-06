@@ -6,7 +6,12 @@ final class ProcurementSheetSchema
 {
     public const FIELDS = [
         'sku' => 'SKU', 'product' => 'Product', 'vendor' => 'Vendor',
-        'product_type' => 'Product Type', 'currently_on_sale' => 'Currently on Sale',
+        'product_type' => 'Product Type',
+        'sibling_shapes' => 'Sibling Shapes',
+        'bead_color_finish' => 'Bead Color Finish',
+        'current_price' => 'Current Price',
+        'new_price' => 'New Price',
+        'currently_on_sale' => 'Currently on Sale',
         'sale_percentage' => 'Sale Percentage',
         'current_inventory' => 'Available',
         'current_on_hand_inventory' => 'On Hand',
@@ -37,7 +42,7 @@ final class ProcurementSheetSchema
     ];
 
     public const HUMAN_OWNED_FIELDS = [
-        'ignore', 'quantity_to_order',
+        'new_price', 'ignore', 'quantity_to_order',
     ];
 
     /** @param array<int,mixed> $headers @return array<string,int> */

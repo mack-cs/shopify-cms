@@ -5,7 +5,9 @@ namespace App\Services;
 use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class ShopYourVibeSiblingService
@@ -80,6 +82,7 @@ class ShopYourVibeSiblingService
 
         $confirmed = $this->shopify->productTags($productGid);
         $this->reconcileTags($productGid, $remote['tags'], $confirmed['tags']);
+        $this->syncProcurementRow($productGid);
 
         return $confirmed;
     }
@@ -129,5 +132,45 @@ class ShopYourVibeSiblingService
                 'new_value' => $newTags,
             ]);
         });
+    }
+
+    private function syncProcurementRow(string $productGid): void
+    {
+        try {
+            $product = Product::query()
+                ->where('shopify_id', $productGid)
+                ->with('variants:id,product_id,sku')
+                ->latest('id')
+                ->first();
+            $variantIds = $product?->variants()->pluck('id')->all() ?? [];
+            $skus = $product?->variants
+                ?->pluck('sku')
+                ->map(fn (mixed $sku): string => strtoupper(trim((string) $sku)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all() ?? [];
+            $draftIds = NewProductDraft::query()
+                ->where(function ($query) use ($product, $productGid, $skus): void {
+                    $query->where('shopify_id', $productGid);
+                    if ($product?->handle) {
+                        $query->orWhere('handle', $product->handle);
+                    }
+                    if ($skus !== []) {
+                        $query->orWhereIn(\DB::raw('UPPER(TRIM(sku))'), $skus);
+                    }
+                })
+                ->pluck('id')
+                ->all();
+
+            if ($variantIds !== [] || $draftIds !== []) {
+                app(ProcurementSheetSyncService::class)->publishOperational($variantIds, draftIds: $draftIds);
+            }
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement Sheet sibling write-back failed after confirmed Shopify update.', [
+                'product_gid' => $productGid,
+                'error' => $exception->getMessage(),
+            ]);
+        }
     }
 }

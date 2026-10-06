@@ -5,13 +5,19 @@ namespace App\Services\GoogleSheets;
 use App\Models\ProcurementPrediction;
 use App\Models\ProcurementPredictionRun;
 use App\Models\ProcurementSupplierOrderLine;
+use App\Models\NewProductDraft;
+use App\Models\ProcurementCollectionConfig;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
+use App\Models\ShopifyRow;
 use App\Models\Variant;
+use App\Services\HeaderStore;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\Procurement\ProcurementActionPolicy;
 use App\Services\Procurement\ProcurementRecommendationCalculator;
 use App\Services\SalePercentageCalculator;
+use App\Services\SiblingCollectionResolver;
+use App\Services\TagNormalizer;
 use Illuminate\Support\Facades\Log;
 
 final class ProcurementSheetDatasetBuilder
@@ -22,6 +28,7 @@ final class ProcurementSheetDatasetBuilder
         private readonly OperationalProcurementCollectionResolver $collections,
         private readonly SalePercentageCalculator $salePercentages,
         private readonly ProcurementActionPolicy $actionPolicy,
+        private readonly SiblingCollectionResolver $siblings,
         ?ProcurementRecommendationCalculator $recommendations = null,
     ) {
         $this->recommendations = $recommendations ?? app(ProcurementRecommendationCalculator::class);
@@ -51,9 +58,17 @@ final class ProcurementSheetDatasetBuilder
             ->orderBy('eta_date')->orderBy('id')->get()
             ->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0)
             ->groupBy('variant_id');
+        $pendingDraftOrders = ProcurementSupplierOrderLine::query()
+            ->where('status', 'open')
+            ->whereNotNull('new_product_draft_id')
+            ->with('order')
+            ->withSum(['receipts as received_quantity' => fn ($query) => $query->where('status', 'succeeded')], 'quantity_received')
+            ->orderBy('eta_date')->orderBy('id')->get()
+            ->filter(fn (ProcurementSupplierOrderLine $line): bool => $line->quantity_outstanding > 0)
+            ->groupBy('new_product_draft_id');
         $duplicateSkus = Variant::query()->active()->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->selectRaw('UPPER(TRIM(sku)) AS normalized_sku')
             ->groupByRaw('UPPER(TRIM(sku))')
             ->havingRaw('COUNT(*) > 1')
@@ -63,7 +78,7 @@ final class ProcurementSheetDatasetBuilder
         $records = [];
         Variant::query()->active()->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->with(['product', 'procurementIncomingStock'])
             ->orderBy('id')->chunkById(500, function ($variants) use (&$records, $predictions, $movement, $predictionRun, $pendingOrders, $duplicateSkus): void {
                 foreach ($variants as $variant) {
@@ -122,8 +137,10 @@ final class ProcurementSheetDatasetBuilder
                         $duplicateSkus->has($sku),
                     );
                     $collectionId = null;
+                    $collectionContext = null;
                     try {
-                        $collectionId = $this->collections->resolve($variant->product)->id;
+                        $collectionContext = $this->collections->resolve($variant->product);
+                        $collectionId = $collectionContext->id;
                     } catch (\DomainException $exception) {
                         Log::warning('Procurement collection resolution failed', [
                             'sku' => $sku, 'product_id' => $variant->product_id,
@@ -140,6 +157,10 @@ final class ProcurementSheetDatasetBuilder
                         'product' => $variant->product?->title,
                         'vendor' => $variant->product?->vendor,
                         'product_type' => $variant->product?->type,
+                        'sibling_shapes' => $this->siblingShapes($variant, $collectionContext),
+                        'bead_color_finish' => $this->beadColorFinish($variant),
+                        'current_price' => $variant->price === null ? null : number_format((float) $variant->price, 2, '.', ''),
+                        'new_price' => null,
                         'currently_on_sale' => $variant->compare_at_price !== null
                             && (float) $variant->compare_at_price > (float) $variant->price,
                         'sale_percentage' => $this->salePercentages->percentage(
@@ -196,6 +217,89 @@ final class ProcurementSheetDatasetBuilder
                 }
             });
 
+        $variantSkus = collect($records)->pluck('sku')->flip();
+        NewProductDraft::query()
+            ->whereIn(\DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
+            ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
+            ->orderBy('id')
+            ->chunkById(500, function ($drafts) use (&$records, $pendingDraftOrders, $variantSkus): void {
+                foreach ($drafts as $draft) {
+                    $sku = strtoupper(trim((string) $draft->sku));
+                    if ($variantSkus->has($sku) || $this->isExcludedTestDraft($draft)) {
+                        continue;
+                    }
+
+                    $collection = $this->collectionForDraft($draft);
+                    if (! $collection instanceof ProcurementCollectionConfig) {
+                        Log::warning('Procurement collection resolution failed for draft', [
+                            'sku' => $sku, 'draft_id' => $draft->id,
+                        ]);
+
+                        continue;
+                    }
+
+                    $orders = $pendingDraftOrders->get($draft->id, collect());
+                    $nextOrder = $orders->get(0);
+                    $secondOrder = $orders->get(1);
+                    $outstandingTotal = (int) $orders->sum(fn (ProcurementSupplierOrderLine $line): int => $line->quantity_outstanding);
+                    $current = $draft->variant_inventory_qty;
+
+                    $records[] = [
+                        '_variant_id' => null,
+                        '_draft_id' => $draft->id,
+                        '_collection_id' => $collection->id,
+                        '_prediction_stale' => false,
+                        '_procurement_actioned' => $outstandingTotal > 0,
+                        'sku' => $sku,
+                        'product' => $draft->title,
+                        'vendor' => $draft->vendor,
+                        'product_type' => $draft->type,
+                        'sibling_shapes' => $this->draftSiblingShapes($draft, $collection),
+                        'bead_color_finish' => trim((string) ($draft->bead_colour_finish ?? '')),
+                        'current_price' => $draft->variant_price === null ? null : number_format((float) $draft->variant_price, 2, '.', ''),
+                        'new_price' => null,
+                        'currently_on_sale' => $draft->variant_compare_at_price !== null
+                            && (float) $draft->variant_compare_at_price > (float) $draft->variant_price,
+                        'sale_percentage' => $this->salePercentages->percentage(
+                            $draft->variant_price, $draft->variant_compare_at_price
+                        ),
+                        'current_inventory' => $current,
+                        'action_required' => 'INSUFFICIENT_DATA',
+                        'ignore' => false,
+                        'quantity_to_order' => 0,
+                        'total_quantity_on_order' => $outstandingTotal,
+                        'number_of_wip_orders' => $orders->count(),
+                        'next_order_id' => $nextOrder?->order?->order_number,
+                        'next_eta' => $nextOrder?->eta_date?->format('d/m/Y'),
+                        'second_order_id' => $secondOrder?->order?->order_number,
+                        'second_eta' => $secondOrder?->eta_date?->format('d/m/Y'),
+                        'predicted_runout_date_after_replenishment' => null,
+                        'projected_stock_before_second_eta' => null,
+                        'between_orders_stock_gap_status' => 'NO_SECOND_ORDER',
+                        'projected_inventory_position' => ($current ?? 0) + $outstandingTotal,
+                        'predicted_weekly_demand' => null,
+                        'estimated_days_of_stock_remaining' => null,
+                        'predicted_runout_date' => null,
+                        'replenishment_date' => $nextOrder?->eta_date?->format('d/m/Y'),
+                        'stock_gap_status' => $nextOrder === null ? 'NO_PENDING_ORDER' : null,
+                        'lead_time_days' => null,
+                        'stock_required_for_lead_time' => null,
+                        'recommended_order_before_incoming_stock' => null,
+                        'additional_order_required' => null,
+                        'cms_movement_classification' => null,
+                        'action_reason' => 'Prelaunch draft is available for supplier pre-purchasing; no Shopify demand forecast exists yet.',
+                        'stockout_before_incoming_arrival' => false,
+                        'incoming_stock_covers_requirement' => false,
+                        'current_committed_inventory' => null,
+                        'current_reserved_inventory' => null,
+                        'current_on_hand_inventory' => $current,
+                        'last_updated' => $draft->updated_at
+                            ?->timezone((string) config('procurement.timezone', 'Africa/Johannesburg'))
+                            ->format('d/m/Y H:i'),
+                    ];
+                }
+            });
+
         $priority = [
             'ORDER_NOW' => 0, 'ATTENTION_WITHIN_3_WEEKS' => 1, 'MANUAL_REVIEW' => 2,
             'INSUFFICIENT_DATA' => 3, 'MONITOR' => 4, 'NO_ACTION' => 5,
@@ -213,6 +317,104 @@ final class ProcurementSheetDatasetBuilder
         });
 
         return $records;
+    }
+
+    private function siblingShapes(Variant $variant, mixed $collection): string
+    {
+        if ($collection === null || ! $variant->product) {
+            return '';
+        }
+
+        $productTags = TagNormalizer::parseTokens((string) $variant->product->tags);
+        if (! collect($productTags)->contains(fn (string $tag): bool => str_contains(strtolower($tag), 'sibling'))) {
+            return '';
+        }
+
+        try {
+            $options = $this->siblings->optionsForParent([
+                'title' => $collection->collection_title,
+                'handle' => $collection->collection_handle,
+            ]);
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement sibling shape resolution failed', [
+                'variant_id' => $variant->id,
+                'product_id' => $variant->product_id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return '';
+        }
+
+        return collect($this->siblings->selectedForTags(
+            $productTags,
+            $options,
+        ))->pluck('label')->implode('; ');
+    }
+
+    private function beadColorFinish(Variant $variant): string
+    {
+        $product = $variant->product;
+        if (! $product) {
+            return '';
+        }
+
+        $row = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->latest('id')
+            ->first();
+
+        return trim((string) ($row?->get(HeaderStore::BEAD_COLOUR_FINISH, '') ?? ''));
+    }
+
+    private function collectionForDraft(NewProductDraft $draft): ?ProcurementCollectionConfig
+    {
+        $tokens = TagNormalizer::parseTokens((string) $draft->tags);
+        $matches = $this->collections->configured()->filter(function (ProcurementCollectionConfig $collection) use ($tokens): bool {
+            $handle = TagNormalizer::normalizeToken((string) $collection->collection_handle);
+
+            return $handle !== null
+                && (in_array($handle, $tokens, true) || in_array($handle.'-sale', $tokens, true));
+        })->values();
+
+        return $matches->count() === 1 ? $matches->first() : null;
+    }
+
+    private function isExcludedTestDraft(NewProductDraft $draft): bool
+    {
+        if ((bool) config('procurement.include_test_products', false)) {
+            return false;
+        }
+
+        $haystack = strtolower(implode(' ', [
+            (string) $draft->sku,
+            (string) $draft->title,
+            (string) $draft->handle,
+        ]));
+
+        return str_contains($haystack, 'test');
+    }
+
+    private function draftSiblingShapes(NewProductDraft $draft, ProcurementCollectionConfig $collection): string
+    {
+        $tags = TagNormalizer::parseTokens((string) $draft->tags);
+
+        try {
+            $options = $this->siblings->optionsForParent([
+                'title' => $collection->collection_title,
+                'handle' => $collection->collection_handle,
+            ]);
+        } catch (\Throwable $exception) {
+            Log::warning('Procurement draft sibling shape resolution failed', [
+                'draft_id' => $draft->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return '';
+        }
+
+        return collect($this->siblings->selectedForTags($tags, $options))->pluck('label')->implode('; ');
     }
 
     private function actionReason(

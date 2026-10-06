@@ -15,6 +15,8 @@ final class StackOrderReservationService
     public function __construct(
         private readonly ShopifyInventoryAdjustmentService $inventory,
         private readonly StackInventoryMovementService $movements,
+        private readonly StackOrderLineMapper $lines,
+        private readonly StackOrderFulfillmentInspector $fulfillment,
     ) {}
 
     /** @return array{stack_lines:int,reserved:int,released:int} */
@@ -64,8 +66,9 @@ final class StackOrderReservationService
             if ($event->topic === 'orders/cancelled') {
                 foreach (ShopifyStackInventoryReservation::query()
                     ->where('shopify_order_id', $event->shopify_order_id)->get() as $reservation) {
-                    $this->releaseRemaining($reservation, 'cancel:'.$event->shopify_order_id);
-                    $summary['released']++;
+                    if ($this->releaseRemaining($reservation, 'cancel:'.$event->shopify_order_id)) {
+                        $summary['released']++;
+                    }
                 }
             } else {
                 foreach ((array) data_get($event->payload, 'line_items', []) as $lineItem) {
@@ -92,6 +95,86 @@ final class StackOrderReservationService
         return $summary;
     }
 
+    /**
+     * @param iterable<int, ShopifyStackInventoryReservation|int> $reservations
+     * @return array{cancelled:int,skipped:int,failed:int,errors:array<int,string>}
+     */
+    public function cancelManually(iterable $reservations): array
+    {
+        $summary = ['cancelled' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => []];
+        foreach ($reservations as $reservation) {
+            $record = $reservation instanceof ShopifyStackInventoryReservation
+                ? $reservation
+                : ShopifyStackInventoryReservation::query()->find($reservation);
+            if (! $record instanceof ShopifyStackInventoryReservation) {
+                $summary['skipped']++;
+
+                continue;
+            }
+            try {
+                if ($this->cancelOne($record)) {
+                    $summary['cancelled']++;
+                } else {
+                    $summary['skipped']++;
+                }
+            } catch (\Throwable $exception) {
+                $summary['failed']++;
+                $summary['errors'][] = trim((string) ($record->shopify_order_name ?: $record->shopify_order_id))
+                    .' '.$record->component_sku.': '.$exception->getMessage();
+            }
+        }
+
+        return $summary;
+    }
+
+    private function cancelOne(ShopifyStackInventoryReservation $reservation): bool
+    {
+        $lock = Cache::lock('stack-order-inventory:'.$reservation->shopify_order_id, 300);
+        if (! $lock->get()) {
+            throw new \RuntimeException('Stack order inventory is already being processed; retrying.');
+        }
+
+        try {
+            $locked = ShopifyStackInventoryReservation::query()->findOrFail($reservation->id);
+            if ($locked->status === ShopifyStackInventoryReservation::STATUS_RELEASED
+                && $locked->remainingReserved() <= 0) {
+                return false;
+            }
+            if ($locked->status === ShopifyStackInventoryReservation::STATUS_COMPLETED
+                && $locked->remainingReserved() <= 0) {
+                return false;
+            }
+            if (! $this->fulfillment->isFullyFulfilled($locked)) {
+                $locked->forceFill([
+                    'error_message' => 'Manual cancel skipped because this Shopify order is still unfulfilled or only partially fulfilled.',
+                ])->save();
+
+                return false;
+            }
+
+            $this->releaseRemaining($locked, 'manual-cancel:'.$locked->id);
+            $locked = $locked->fresh() ?? $locked;
+            if ($locked->status === ShopifyStackInventoryReservation::STATUS_RELEASED
+                && $locked->remainingReserved() <= 0) {
+                $locked->forceFill([
+                    'error_message' => 'Manually cancelled by a super admin.',
+                ])->save();
+
+                return true;
+            }
+
+            $locked->forceFill([
+                'status' => ShopifyStackInventoryReservation::STATUS_RELEASED,
+                'released_at' => $locked->released_at ?? now(),
+                'error_message' => 'Manually cancelled by a super admin.',
+            ])->save();
+
+            return true;
+        } finally {
+            $lock->release();
+        }
+    }
+
     private function reconcileLine(ShopifyStackOrderEvent $event, array $lineItem, array $summary): array
     {
         $lineId = $this->gid('LineItem', $lineItem['admin_graphql_api_id'] ?? $lineItem['id'] ?? null);
@@ -109,23 +192,33 @@ final class StackOrderReservationService
             return $summary;
         }
 
+        $desiredStackQuantity = $this->lines->orderedQuantity($lineItem);
+        $baseline = $this->lines->fulfilledBaseline($lineItem, $event->topic);
+        if ($reservations->isEmpty() && $baseline === null) {
+            return $summary;
+        }
+
         $summary['stack_lines']++;
-        $desiredStackQuantity = max(0, (int) ($lineItem['current_quantity'] ?? $lineItem['quantity'] ?? 0));
+        $orderCreatedAt = $this->lines->orderCreatedAt((array) $event->payload);
         if ($reservations->isEmpty()) {
             foreach ($this->componentConfiguration($draft) as $componentProductId => $quantityPerStack) {
                 $reservations->push($this->createReservation(
                     $event, $lineId, $lineItem, $stackVariant, $componentProductId,
-                    $quantityPerStack, $desiredStackQuantity,
+                    $quantityPerStack, $desiredStackQuantity, (int) $baseline, $orderCreatedAt,
                 ));
             }
         }
 
         foreach ($reservations as $reservation) {
+            if ($reservation->status === ShopifyStackInventoryReservation::STATUS_RELEASED) {
+                continue;
+            }
             $required = $desiredStackQuantity * (int) $reservation->component_quantity_per_stack;
-            $reservation->forceFill([
+            $reservation->forceFill(array_filter([
                 'stack_quantity_ordered' => $desiredStackQuantity,
                 'total_component_quantity_required' => $required,
-            ])->save();
+                'shopify_order_created_at' => $reservation->shopify_order_created_at ?? $orderCreatedAt,
+            ], fn (mixed $value): bool => $value !== null))->save();
 
             $targetRemaining = max(0, $required - (int) $reservation->consumed_quantity);
             $remaining = $reservation->remainingReserved();
@@ -147,6 +240,9 @@ final class StackOrderReservationService
                     "order-target:{$event->shopify_order_id}:{$lineId}:{$required}:{$remaining}",
                 );
                 $summary['released']++;
+            } else {
+                $reservation->refreshLedgerStatus();
+                $reservation->save();
             }
         }
 
@@ -161,6 +257,8 @@ final class StackOrderReservationService
         int $componentProductId,
         int $quantityPerStack,
         int $stackQuantity,
+        int $fulfilledBaseline,
+        mixed $orderCreatedAt,
     ): ShopifyStackInventoryReservation {
         $component = Product::query()->with('variants')->find($componentProductId);
         if (! $component instanceof Product) {
@@ -177,8 +275,9 @@ final class StackOrderReservationService
         $locationId = $this->gid('Location', $this->inventory->resolveLocationId($componentVariant));
         $ledgerUri = 'leighavenue-cms://stack-reservations/'.rawurlencode($event->shopify_order_id)
             .'/'.rawurlencode($lineId).'/'.$componentProductId;
+        $baseline = max(0, min($stackQuantity, $fulfilledBaseline)) * $quantityPerStack;
 
-        return ShopifyStackInventoryReservation::query()->firstOrCreate(
+        $reservation = ShopifyStackInventoryReservation::query()->firstOrCreate(
             [
                 'shopify_order_id' => $event->shopify_order_id,
                 'shopify_order_line_item_id' => $lineId,
@@ -186,6 +285,7 @@ final class StackOrderReservationService
             ],
             [
                 'shopify_order_name' => $event->shopify_order_name,
+                'shopify_order_created_at' => $orderCreatedAt,
                 'stack_product_id' => $stackVariant->product_id,
                 'stack_variant_id' => $stackVariant->id,
                 'shopify_stack_product_id' => $stackVariant->product?->shopify_id,
@@ -202,20 +302,24 @@ final class StackOrderReservationService
                 'component_title' => $component->title,
                 'component_quantity_per_stack' => $quantityPerStack,
                 'total_component_quantity_required' => $stackQuantity * $quantityPerStack,
-                'reserved_quantity' => max(0, (int) ($lineItem['_stack_baseline_fulfilled_quantity'] ?? 0)) * $quantityPerStack,
-                'consumed_quantity' => max(0, (int) ($lineItem['_stack_baseline_fulfilled_quantity'] ?? 0)) * $quantityPerStack,
+                'reserved_quantity' => $baseline,
+                'consumed_quantity' => $baseline,
                 'shopify_location_id' => $locationId,
                 'ledger_document_uri' => $ledgerUri,
                 'status' => ShopifyStackInventoryReservation::STATUS_PENDING_PROCESSING,
             ],
         );
+        $reservation->refreshLedgerStatus();
+        $reservation->save();
+
+        return $reservation;
     }
 
-    private function releaseRemaining(ShopifyStackInventoryReservation $reservation, string $eventKey): void
+    private function releaseRemaining(ShopifyStackInventoryReservation $reservation, string $eventKey): bool
     {
         $remaining = $reservation->remainingReserved();
         if ($remaining <= 0) {
-            return;
+            return false;
         }
         $this->movements->execute(
             $reservation,
@@ -223,6 +327,8 @@ final class StackOrderReservationService
             $remaining,
             $eventKey.':remaining:'.$remaining,
         );
+
+        return true;
     }
 
     private function findVariant(mixed $shopifyVariantId): ?Variant

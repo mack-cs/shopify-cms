@@ -82,7 +82,7 @@ final class ProcurementSelectionCsvExporter
             ->whereNotNull('sku')
             ->whereRaw("TRIM(COALESCE(sku, '')) != ''")
             ->whereHas('product', fn (Builder $query): Builder => $query
-                ->activeStatus()->nonBundle())
+                ->procurementCatalogEligible())
             ->with(['product', 'procurementIncomingStock', 'supplierOrderLines.order', 'supplierOrderLines.receipts'])
             ->orderBy('sku')
             ->get();

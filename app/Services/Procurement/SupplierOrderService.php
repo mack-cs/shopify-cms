@@ -134,7 +134,7 @@ final class SupplierOrderService
     {
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()
-            ->whereHas('product', fn ($query) => $query->activeStatus()->nonBundle())
+            ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product:id,shopify_id,handle')->get();
         $drafts = NewProductDraft::query()
             ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])

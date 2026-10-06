@@ -14,6 +14,7 @@ use App\Models\ProcurementSupplierReceipt;
 use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
+use App\Services\Procurement\ProcurementPriceUpdateService;
 use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\ProcurementPipelineService;
 use App\Services\ProductInventoryCsvImporter;
@@ -232,6 +233,28 @@ class ListInventories extends ListRecords
                             ->send();
                     } catch (Throwable $e) {
                         Notification::make()->title('Recalculation was not queued')->body($e->getMessage())->danger()->send();
+                    }
+                }),
+            Actions\Action::make('applyPriceUpdates')
+                ->label('Apply Price Updates')
+                ->icon('heroicon-o-banknotes')
+                ->color('warning')
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->requiresConfirmation()
+                ->modalHeading('Apply Price Updates')
+                ->modalDescription('All populated New Price values in the procurement sheet will be validated and queued for Shopify price updates. Successful rows will update Current Price and clear New Price only after Shopify confirms the change.')
+                ->modalSubmitActionLabel('Apply Price Updates')
+                ->action(function (ProcurementPriceUpdateService $prices): void {
+                    try {
+                        $result = $prices->queueFromSheet(Auth::id());
+                        Notification::make()
+                            ->title($result['queued'] > 0 ? 'Price updates queued' : 'No price updates to queue')
+                            ->body("Queued {$result['queued']} price update(s). Skipped {$result['skipped_unchanged']} unchanged row(s).")
+                            ->success()
+                            ->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('Price updates were not queued')->body($e->getMessage())->danger()->persistent()->send();
                     }
                 }),
             Actions\Action::make('checkShopifyInventory')

@@ -120,6 +120,24 @@ class Product extends Model
             ->orWhereNull('is_bundle'));
     }
 
+    public function scopeExcludeTestProducts(Builder $query): Builder
+    {
+        return $query
+            ->whereRaw('LOWER(COALESCE(title, "")) NOT LIKE ?', ['%test%'])
+            ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
+    }
+
+    public function scopeProcurementCatalogEligible(Builder $query): Builder
+    {
+        $query->activeStatus()->nonBundle();
+
+        if (! (bool) config('procurement.include_test_products', false)) {
+            $query->excludeTestProducts();
+        }
+
+        return $query;
+    }
+
     public function scopeMissingImageAltText(Builder $query): Builder
     {
         return $query->whereHas('images', fn (Builder $imageQuery): Builder => self::applyMissingImageAltTextImageFilter($imageQuery));

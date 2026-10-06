@@ -6,9 +6,11 @@ use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeProductSiblings;
 use App\Jobs\PushShopYourVibeProductTags;
 use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductMovementReportRow;
 use App\Models\ProductMovementReportRun;
@@ -740,24 +742,41 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
         abort_unless(collect($this->parentProducts)->contains('id', $this->managingSiblingProductGid), 422);
         $this->attempt(function (): void {
-            $confirmed = app(ShopYourVibeSiblingService::class)->assign(
-                $this->draft()->desired['parent'] ?? [],
+            $parent = $this->draft()->desired['parent'] ?? [];
+            PushShopYourVibeProductSiblings::dispatch(
+                $parent,
                 $this->managingSiblingProductGid,
                 $this->selectedSiblings,
+                auth()->id(),
             );
+            $selected = app(ShopYourVibeSiblingService::class)->selectedForTags(
+                $this->selectedSiblings,
+                $this->siblingOptions,
+            );
+            $selectedTags = collect($selected)->pluck('tag')->values()->all();
+            $managedTags = collect($this->siblingOptions)
+                ->pluck('tag')
+                ->map(fn (mixed $tag): string => mb_strtolower(trim((string) $tag)))
+                ->filter()
+                ->all();
             foreach ($this->parentProducts as &$product) {
-                if ($product['id'] === $this->managingSiblingProductGid) {
-                    $product['tags'] = $confirmed['tags'];
-                    $product['siblings'] = app(ShopYourVibeSiblingService::class)
-                        ->selectedForTags((array) $confirmed['tags'], $this->siblingOptions);
+                if ($product['id'] !== $this->managingSiblingProductGid) {
+                    continue;
                 }
+
+                $existingTags = collect((array) ($product['tags'] ?? []))
+                    ->reject(fn (mixed $tag): bool => in_array(mb_strtolower(trim((string) $tag)), $managedTags, true))
+                    ->values()
+                    ->all();
+                $product['tags'] = array_values(array_unique([...$existingTags, ...$selectedTags]));
+                $product['siblings'] = $selected;
             }
             unset($product);
             $this->managingSiblingProductGid = null;
             $this->selectedSiblings = [];
             $this->siblingOptions = [];
             $this->dispatch('close-modal', id: 'manage-sibling-assignments');
-            Notification::make()->title('Sibling assignments updated')->success()->send();
+            Notification::make()->title('Sibling assignments queued')->success()->send();
         });
     }
 
@@ -1145,6 +1164,7 @@ class ShopYourVibe extends Page
 
     private function decorateProductCards(array $products): array
     {
+        $products = $this->withResolvedSkus($products);
         $movementBySku = $this->movementClassificationsBySku($products);
         $variantInventoryBySku = $this->variantInventoryBySku($products);
         $beadColourFinishByGid = $this->beadColourFinishByGid($products);
@@ -1173,6 +1193,98 @@ class ShopYourVibe extends Page
             $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
             $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
             $product['complementary_count'] = $complementaryCountByGid[$product['id'] ?? ''] ?? 0;
+            $product['is_prelaunch_draft'] = (bool) ($product['is_prelaunch_draft'] ?? str_starts_with((string) ($product['id'] ?? ''), 'draft:'));
+
+            return $product;
+        })->all();
+    }
+
+    private function withResolvedSkus(array $products): array
+    {
+        $missing = collect($products)
+            ->filter(fn (array $product): bool => blank($product['sku'] ?? null))
+            ->values();
+
+        if ($missing->isEmpty()) {
+            return $products;
+        }
+
+        $shopifyIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'gid://shopify/Product/'))
+            ->unique()
+            ->values();
+        $draftIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'draft:'))
+            ->map(fn (string $id): int => (int) substr($id, 6))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $skuByProductGid = $shopifyIds->isEmpty()
+            ? collect()
+            : Product::query()
+                ->whereIn('shopify_id', $shopifyIds->all())
+                ->with(['variants' => fn ($query) => $query->orderBy('id')])
+                ->get()
+                ->mapWithKeys(fn (Product $product): array => [
+                    (string) $product->shopify_id => trim((string) ($product->variants->first()?->sku ?? '')),
+                ]);
+
+        $skuByDraftId = $draftIds->isEmpty()
+            ? collect()
+            : NewProductDraft::query()
+                ->whereKey($draftIds->all())
+                ->pluck('sku', 'id')
+                ->map(fn (mixed $sku): string => trim((string) $sku));
+
+        return collect($products)->map(function (array $product) use ($skuByProductGid, $skuByDraftId): array {
+            if (filled($product['sku'] ?? null)) {
+                return $product;
+            }
+
+            $id = (string) ($product['id'] ?? '');
+            $sku = str_starts_with($id, 'draft:')
+                ? $skuByDraftId->get((int) substr($id, 6), '')
+                : $skuByProductGid->get($id, '');
+
+            if (filled($sku)) {
+                $product['sku'] = $sku;
+            }
+
+            return $product;
+        })->all();
+    }
+
+    private function withPlacementInfo(?ShopYourVibeDraft $draft, array $products): array
+    {
+        if (! $draft) {
+            return $products;
+        }
+        $collections = collect($draft->desired['collections'] ?? []);
+        $placements = $draft->desired['draft_placements'] ?? [];
+
+        return collect($products)->map(function (array $product) use ($collections, $placements): array {
+            $id = (string) ($product['id'] ?? '');
+            if ($id === '' || ! str_starts_with($id, 'draft:')) {
+                return $product;
+            }
+            $associated = $collections
+                ->filter(fn (array $collection): bool => collect($collection['products'] ?? [])->contains(fn (array $item): bool => ($item['id'] ?? null) === $id))
+                ->map(function (array $collection, string $gid) use ($placements, $id): array {
+                    return [
+                        'gid' => $gid,
+                        'name' => $collection['title'] ?? $collection['handle'] ?? $gid,
+                        'complete' => data_get($placements, "{$id}.{$gid}.status") === 'complete',
+                    ];
+                })
+                ->values()
+                ->all();
+
+            $product['collection_placements'] = $associated;
+            $product['placement_complete_count'] = collect($associated)->where('complete', true)->count();
+            $product['placement_total_count'] = count($associated);
 
             return $product;
         })->all();
@@ -1403,6 +1515,7 @@ class ShopYourVibe extends Page
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
         if ($collection) {
             $collection['products'] = $this->decorateProductCards($collection['products'] ?? []);
+            $collection['products'] = $this->withPlacementInfo($draft, $collection['products']);
         }
         $products = collect();
         if ($this->addingProducts && $collection && $collection['membership_supported']) {
@@ -1446,6 +1559,7 @@ class ShopYourVibe extends Page
 
                     return $product;
                 })
+                ->pipe(fn ($products) => collect($this->withPlacementInfo($draft, $products->all())))
                 ->values()
                 ->all();
         }
