@@ -20,6 +20,7 @@ use App\Services\Shopify\StackInventoryMovementService;
 use App\Services\Shopify\StackOrderFulfillmentInspector;
 use App\Services\Shopify\StackOrderLineMapper;
 use App\Services\Shopify\StackOrderReservationService;
+use App\Services\Shopify\StackReservationFulfillmentAuditService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
@@ -429,14 +430,81 @@ it('shows stack reservation cancel actions only to super admins', function (): v
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->assertCanSeeTableRecords([$reservation])
         ->assertTableActionHidden('cancelReservation', $reservation)
-        ->assertTableBulkActionHidden('cancelReservations');
+        ->assertTableBulkActionHidden('cancelReservations')
+        ->assertTableActionHidden('scanLeftoverReservations')
+        ->assertTableActionHidden('releaseFulfilledLeftovers');
 
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
     $this->actingAs($super);
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->assertTableActionVisible('cancelReservation', $reservation)
-        ->assertTableBulkActionVisible('cancelReservations');
+        ->assertTableBulkActionVisible('cancelReservations')
+        ->assertTableActionVisible('scanLeftoverReservations')
+        ->assertTableActionVisible('releaseFulfilledLeftovers');
+});
+
+it('reports leftover reserved stock on fulfilled Shopify orders without including open orders as fulfilled leftovers', function (): void {
+    $records = stackReservationRecords();
+    $fulfilled = stackLeftoverReservation($records, 9010, 2, 0);
+    stackLeftoverReservation($records, 9011, 1, 0);
+    ShopifyStackInventoryReservation::query()->create([
+        'shopify_order_id' => 'gid://shopify/Order/9012',
+        'shopify_order_name' => '#9012',
+        'shopify_order_line_item_id' => 'gid://shopify/LineItem/9012',
+        'configured_component_product_id' => $records['component_x_product']->id,
+        'stack_product_id' => $records['stack']->id,
+        'stack_variant_id' => $records['stack_variant']->id,
+        'component_product_id' => $records['component_x_product']->id,
+        'component_variant_id' => $records['component_x_variant']->id,
+        'component_sku' => 'COMP-X',
+        'component_quantity_per_stack' => 1,
+        'stack_quantity_ordered' => 1,
+        'total_component_quantity_required' => 1,
+        'ledger_document_uri' => 'leighavenue-cms://stack-reservations/9012',
+        'reserved_quantity' => 1,
+        'consumed_quantity' => 1,
+        'released_quantity' => 0,
+        'status' => ShopifyStackInventoryReservation::STATUS_COMPLETED,
+    ]);
+
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->andReturnUsing(function (string $query, array $variables): array {
+        expect($query)->toContain('StackOrderFulfillmentStatuses')
+            ->and($variables['ids'])->toContain('gid://shopify/Order/9010', 'gid://shopify/Order/9011');
+
+        return ['nodes' => [
+            ['id' => 'gid://shopify/Order/9010', 'name' => '#9010', 'displayFulfillmentStatus' => 'FULFILLED', 'cancelledAt' => null],
+            ['id' => 'gid://shopify/Order/9011', 'name' => '#9011', 'displayFulfillmentStatus' => 'UNFULFILLED', 'cancelledAt' => null],
+        ]];
+    });
+
+    $report = (new StackReservationFulfillmentAuditService(new StackOrderFulfillmentInspector($gateway)))->report();
+
+    expect($report['leftover_rows'])->toBe(2)
+        ->and($report['fulfilled_rows'])->toBe(1)
+        ->and($report['fulfilled_reservation_ids'])->toBe([(int) $fulfilled->id])
+        ->and($report['open_rows'])->toBe(1)
+        ->and($report['unknown_rows'])->toBe(0);
+});
+
+it('releases leftover reserved stock only for orders Shopify shows as fulfilled', function (): void {
+    $records = stackReservationRecords();
+    $fulfilled = stackLeftoverReservation($records, 9013, 2, 0);
+    $open = stackLeftoverReservation($records, 9014, 1, 0);
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $service = stackOrderService($inventory, lookupByOrder: [
+        'gid://shopify/Order/9013' => 'FULFILLED',
+        'gid://shopify/Order/9014' => 'UNFULFILLED',
+    ]);
+
+    $result = $service->cancelManually([$fulfilled, $open]);
+
+    expect($result['cancelled'])->toBe(1)
+        ->and($result['skipped'])->toBe(1)
+        ->and($fulfilled->fresh()->remainingReserved())->toBe(0)
+        ->and($open->fresh()->remainingReserved())->toBe(1);
 });
 
 it('uses Shopify state movement and consumes reserved without changing available', function (): void {
@@ -474,18 +542,29 @@ function stackOrderService(
     ShopifyInventoryAdjustmentService $inventory,
     string $shopifyFulfillmentStatus = 'UNFULFILLED',
     bool $lookupFails = false,
+    array $lookupByOrder = [],
 ): StackOrderReservationService {
     $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
     if ($lookupFails) {
         $gateway->shouldReceive('graphql')->zeroOrMoreTimes()
             ->andThrow(new RuntimeException('Shopify fulfillment lookup failed.'));
     } else {
-        $gateway->shouldReceive('graphql')->zeroOrMoreTimes()->andReturn([
-            'order' => [
-                'displayFulfillmentStatus' => $shopifyFulfillmentStatus,
-                'cancelledAt' => null,
-            ],
-        ]);
+        $gateway->shouldReceive('graphql')->zeroOrMoreTimes()->andReturnUsing(
+            function (string $query, array $variables) use ($shopifyFulfillmentStatus, $lookupByOrder): array {
+                $ids = $variables['ids'] ?? (isset($variables['id']) ? [$variables['id']] : []);
+                $nodes = [];
+                foreach ($ids as $id) {
+                    $nodes[] = [
+                        'id' => $id,
+                        'name' => null,
+                        'displayFulfillmentStatus' => $lookupByOrder[$id] ?? $shopifyFulfillmentStatus,
+                        'cancelledAt' => null,
+                    ];
+                }
+
+                return ['nodes' => $nodes];
+            }
+        );
     }
 
     return new StackOrderReservationService(
@@ -494,6 +573,30 @@ function stackOrderService(
         new StackOrderLineMapper,
         new StackOrderFulfillmentInspector($gateway),
     );
+}
+
+function stackLeftoverReservation(array $records, int $orderId, int $reserved, int $consumed): ShopifyStackInventoryReservation
+{
+    return ShopifyStackInventoryReservation::query()->create([
+        'shopify_order_id' => "gid://shopify/Order/{$orderId}",
+        'shopify_order_name' => "#{$orderId}",
+        'shopify_order_line_item_id' => "gid://shopify/LineItem/{$orderId}",
+        'configured_component_product_id' => $records['component_x_product']->id,
+        'stack_product_id' => $records['stack']->id,
+        'stack_variant_id' => $records['stack_variant']->id,
+        'component_product_id' => $records['component_x_product']->id,
+        'component_variant_id' => $records['component_x_variant']->id,
+        'component_sku' => 'COMP-X',
+        'component_quantity_per_stack' => 1,
+        'stack_quantity_ordered' => $reserved,
+        'total_component_quantity_required' => $reserved,
+        'ledger_document_uri' => "leighavenue-cms://stack-reservations/{$orderId}",
+        'reserved_quantity' => $reserved,
+        'consumed_quantity' => $consumed,
+        'released_quantity' => 0,
+        'status' => ShopifyStackInventoryReservation::STATUS_PENDING,
+        'reserved_at' => now(),
+    ]);
 }
 
 function stackShopifyOrder(int $orderId, string $fulfillmentStatus): ShopifyOrder

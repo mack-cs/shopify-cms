@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -40,6 +41,11 @@ final class ShopifyStackInventoryReservation extends Model
     public function remainingReserved(): int
     {
         return max(0, (int) $this->reserved_quantity - (int) $this->consumed_quantity - (int) $this->released_quantity);
+    }
+
+    public function scopeWithLeftoverReserved(Builder $query): Builder
+    {
+        return $query->whereRaw('(COALESCE(reserved_quantity, 0) - COALESCE(consumed_quantity, 0) - COALESCE(released_quantity, 0)) > 0');
     }
 
     public function refreshLedgerStatus(): void
