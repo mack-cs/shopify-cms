@@ -236,33 +236,33 @@ class ListInventories extends ListRecords
                     }
                 }),
             Actions\Action::make('applyPriceUpdates')
-                ->label('Apply Price Updates')
+                ->label('Apply Price & Cost Updates')
                 ->icon('heroicon-o-banknotes')
                 ->color('warning')
                 ->visible(fn (): bool => $this->activeTab === 'orders'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->requiresConfirmation()
-                ->modalHeading('Apply Price Updates')
-                ->modalDescription('Populated New Price values are queued for Shopify. SKUs that are not an active catalog variant, have no Shopify ID, or have an invalid New Price are skipped and left in the sheet. Successful rows update Current Price and clear New Price only after Shopify confirms the change.')
-                ->modalSubmitActionLabel('Apply Price Updates')
+                ->modalHeading('Apply Price & Cost Updates')
+                ->modalDescription('Populated New Price and New Cost values are queued for Shopify. Each field is processed independently. SKUs that are not an active catalog variant, have no Shopify ID, or have invalid values are skipped and left in the sheet. Successful fields update Current Price or Current Cost and clear only the confirmed input after Shopify accepts the change.')
+                ->modalSubmitActionLabel('Apply Price & Cost Updates')
                 ->action(function (ProcurementPriceUpdateService $prices): void {
                     try {
                         $result = $prices->queueFromSheet(Auth::id());
                         $unready = $result['unready_skus'] ?? [];
-                        $body = "Queued {$result['queued']} price update(s). Skipped {$result['skipped_unchanged']} unchanged row(s).";
+                        $body = "Queued {$result['queued']} price/cost update row(s). Skipped {$result['skipped_unchanged']} unchanged row(s).";
                         if (($result['skipped_unready'] ?? 0) > 0) {
                             $preview = implode(', ', array_slice($unready, 0, 8));
                             $body .= " Skipped {$result['skipped_unready']} SKU(s) that cannot be sent to Shopify";
                             $body .= $preview !== '' ? ": {$preview}." : '.';
-                            $body .= ' Valid SKUs were still queued. Unready New Price cells were left as-is.';
+                            $body .= ' Valid fields were still queued. Unready New Price/New Cost cells were left as-is.';
                         }
                         Notification::make()
-                            ->title($result['queued'] > 0 ? 'Price updates queued' : 'No price updates to queue')
+                            ->title($result['queued'] > 0 ? 'Price and cost updates queued' : 'No price or cost updates to queue')
                             ->body($body)
                             ->success()
                             ->send();
                     } catch (Throwable $e) {
-                        Notification::make()->title('Price updates were not queued')->body($e->getMessage())->danger()->persistent()->send();
+                        Notification::make()->title('Price and cost updates were not queued')->body($e->getMessage())->danger()->persistent()->send();
                     }
                 }),
             Actions\Action::make('checkShopifyInventory')

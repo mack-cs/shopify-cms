@@ -159,6 +159,8 @@ final class ProcurementSheetDatasetBuilder
                         'product_type' => $variant->product?->type,
                         'sibling_shapes' => $this->siblingShapes($variant, $collectionContext),
                         'bead_color_finish' => $this->beadColorFinish($variant),
+                        'current_cost' => $this->costPerItem($variant),
+                        'new_cost' => null,
                         'current_price' => $variant->price === null ? null : number_format((float) $variant->price, 2, '.', ''),
                         'new_price' => null,
                         'currently_on_sale' => $variant->compare_at_price !== null
@@ -256,6 +258,8 @@ final class ProcurementSheetDatasetBuilder
                         'product_type' => $draft->type,
                         'sibling_shapes' => $this->draftSiblingShapes($draft, $collection),
                         'bead_color_finish' => trim((string) ($draft->bead_colour_finish ?? '')),
+                        'current_cost' => $draft->material_cost === null ? null : number_format((float) $draft->material_cost, 2, '.', ''),
+                        'new_cost' => null,
                         'current_price' => $draft->variant_price === null ? null : number_format((float) $draft->variant_price, 2, '.', ''),
                         'new_price' => null,
                         'currently_on_sale' => $draft->variant_compare_at_price !== null
@@ -366,6 +370,36 @@ final class ProcurementSheetDatasetBuilder
             ->first();
 
         return trim((string) ($row?->get(HeaderStore::BEAD_COLOUR_FINISH, '') ?? ''));
+    }
+
+    private function costPerItem(Variant $variant): ?string
+    {
+        $product = $variant->product;
+        if (! $product) {
+            return null;
+        }
+
+        $variantRowCost = ShopifyRow::query()
+            ->where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'variant')
+            ->latest('id')
+            ->get()
+            ->first(fn (ShopifyRow $row): bool => strtoupper(trim((string) $row->get(HeaderStore::VARIANT_SKU, ''))) === strtoupper(trim((string) $variant->sku)))
+            ?->get(HeaderStore::COST_PER_ITEM);
+
+        $cost = trim((string) ($variantRowCost ?? ''));
+        if ($cost === '') {
+            $cost = trim((string) (ShopifyRow::query()
+                ->where('import_id', $product->import_id)
+                ->where('handle', $product->handle)
+                ->where('row_type', 'product_primary')
+                ->latest('id')
+                ->first()
+                ?->get(HeaderStore::COST_PER_ITEM, '') ?? ''));
+        }
+
+        return is_numeric($cost) ? number_format((float) $cost, 2, '.', '') : null;
     }
 
     private function collectionForDraft(NewProductDraft $draft): ?ProcurementCollectionConfig

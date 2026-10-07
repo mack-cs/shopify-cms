@@ -9,6 +9,8 @@ final class ProcurementSheetSchema
         'product_type' => 'Product Type',
         'sibling_shapes' => 'Sibling Shapes',
         'bead_color_finish' => 'Bead Color Finish',
+        'current_cost' => 'Current Cost',
+        'new_cost' => 'New Cost',
         'current_price' => 'Current Price',
         'new_price' => 'New Price',
         'currently_on_sale' => 'Currently on Sale',
@@ -42,7 +44,7 @@ final class ProcurementSheetSchema
     ];
 
     public const HUMAN_OWNED_FIELDS = [
-        'new_price', 'ignore', 'quantity_to_order',
+        'new_cost', 'new_price', 'ignore', 'quantity_to_order',
     ];
 
     /** @param array<int,mixed> $headers @return array<string,int> */

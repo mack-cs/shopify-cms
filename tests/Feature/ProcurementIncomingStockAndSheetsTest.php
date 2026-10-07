@@ -8,6 +8,7 @@ use App\Models\ProcurementPredictionRun;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Product;
+use App\Models\ShopifyRow;
 use App\Models\User;
 use App\Models\Variant;
 use App\Jobs\ApplyProcurementPriceUpdatesJob;
@@ -17,6 +18,7 @@ use App\Services\GoogleSheets\GoogleSheetsClient;
 use App\Services\GoogleSheets\ProcurementSheetDatasetBuilder;
 use App\Services\GoogleSheets\ProcurementSheetSchema;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
+use App\Services\HeaderStore;
 use App\Services\OperationalProcurementCollectionResolver;
 use App\Services\Procurement\ProcurementActionPolicy;
 use App\Services\Procurement\ProcurementPriceUpdateService;
@@ -159,7 +161,7 @@ it('keeps the required procurement column groups in the exact report order', fun
     $headers = array_values(ProcurementSheetSchema::FIELDS);
     expect($headers)->toBe([
         'SKU', 'Product', 'Vendor', 'Product Type', 'Sibling Shapes', 'Bead Color Finish',
-        'Current Price', 'New Price', 'Currently on Sale', 'Sale Percentage',
+        'Current Cost', 'New Cost', 'Current Price', 'New Price', 'Currently on Sale', 'Sale Percentage',
         'Available', 'On Hand', 'cms_movement_classification', 'Ignore',
         'Predicted Weekly Demand', 'Estimated Days of Stock Remaining', 'Predicted Runout Date',
         'Next Order ID', 'Replenishment Date', 'Stock Gap Status',
@@ -193,7 +195,7 @@ it('clears only the columns removed from the previous Google Sheet layout', func
     $requests = collect(Http::recorded())->pluck(0);
     expect($requests)->toHaveCount(2)
         ->and($requests->first()->url())->toContain('/values:batchUpdate')
-        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AK1:AL1");
+        ->and(urldecode($requests->last()->url()))->toContain("'pata-pata'!AM1:AN1");
 });
 
 it('upgrades legacy Current Inventory into Available without losing values', function (): void {
@@ -277,6 +279,44 @@ it('reads populated New Price values and queues one batch without changing the s
     });
 });
 
+it('reads populated New Cost values and queues them with price updates', function (): void {
+    Queue::fake();
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    ShopifyRow::query()->create([
+        'import_id' => $variant->product->import_id,
+        'row_index' => 1,
+        'handle' => $variant->product->handle,
+        'row_type' => 'product_primary',
+        'data' => [HeaderStore::COST_PER_ITEM => '63.00'],
+    ]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $map = (new ProcurementSheetSchema)->map($headers);
+    $row = array_fill(0, count($headers), '');
+    $row[$map['sku']] = $variant->sku;
+    $row[$map['new_cost']] = '75.25';
+    $row[$map['new_price']] = '125.50';
+    Http::fake(fn () => Http::response(['values' => [$headers, $row]]));
+
+    $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
+
+    expect($result['queued'])->toBe(1)
+        ->and($result['skipped_unready'])->toBe(0);
+    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($variant): bool {
+        return $job->updates === [[
+            'sku' => $variant->sku,
+            'variant_id' => $variant->id,
+            'new_price' => '125.50',
+            'new_cost' => '75.25',
+        ]];
+    });
+});
+
 it('queues active catalog price updates and skips unmatched draft SKUs', function (): void {
     Queue::fake();
     [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
@@ -344,6 +384,8 @@ it('keeps New Price human owned during normal row construction', function (): vo
     $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', $variant->sku);
 
     expect($record['current_price'])->toBe('100.00')
+        ->and($record['current_cost'])->toBeNull()
+        ->and($record['new_cost'])->toBeNull()
         ->and($record['new_price'])->toBeNull();
 });
 
@@ -391,7 +433,59 @@ it('records confirmed procurement price updates only after Shopify success', fun
 
     expect($variant->fresh()->price)->toBe('125.50')
         ->and($draft->fresh()->variant_price)->toBe('125.50')
-        ->and(ChangeLog::query()->where('source', 'PROCUREMENT_PRICE_UPDATE')->where('model_id', $variant->id)->exists())->toBeTrue();
+        ->and(ChangeLog::query()->where('source', 'PROCUREMENT_PRICE_COST_UPDATE')->where('model_id', $variant->id)->exists())->toBeTrue();
+});
+
+it('records confirmed procurement cost updates across Shopify rows and drafts', function (): void {
+    [$import, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    $user = User::factory()->create();
+    ShopifyRow::query()->create([
+        'import_id' => $variant->product->import_id,
+        'row_index' => 1,
+        'handle' => $variant->product->handle,
+        'row_type' => 'product_primary',
+        'data' => [HeaderStore::COST_PER_ITEM => '63.00'],
+    ]);
+    ShopifyRow::query()->create([
+        'import_id' => $variant->product->import_id,
+        'row_index' => 2,
+        'handle' => $variant->product->handle,
+        'row_type' => 'variant',
+        'data' => [
+            HeaderStore::VARIANT_SKU => $variant->sku,
+            HeaderStore::COST_PER_ITEM => '63.00',
+        ],
+    ]);
+    $draft = NewProductDraft::query()->create([
+        'handle' => $variant->product->handle,
+        'shopify_id' => $variant->product->shopify_id,
+        'sku' => $variant->sku,
+        'title' => $variant->product->title,
+        'material_cost' => '63.00',
+    ]);
+    config([
+        'services.shopify.shop' => 'example.myshopify.com',
+        'services.shopify.admin_access_token' => 'fake-shopify-token',
+    ]);
+    Http::fake(fn () => Http::response([
+        'data' => ['productVariantsBulkUpdate' => ['userErrors' => []]],
+    ]));
+    $updater = new \App\Services\ProductShopifyUpdater(
+        app(\App\Services\ShopifyApiClient::class),
+        app(\App\Services\ProductHandleService::class),
+        app(\App\Services\ProductPartialApprovalService::class),
+        app(\App\Services\SaleTagService::class),
+        app(\App\Services\ComplementaryProductAuditService::class),
+    );
+
+    (new ApplyProcurementPriceUpdatesJob([
+        ['sku' => $variant->sku, 'variant_id' => $variant->id, 'new_cost' => '75.25'],
+    ], $user->id))->handle($updater, procurementTestSheetSync());
+
+    expect(ShopifyRow::query()->where('row_type', 'product_primary')->firstOrFail()->get(HeaderStore::COST_PER_ITEM))->toBe('75.25')
+        ->and(ShopifyRow::query()->where('row_type', 'variant')->firstOrFail()->get(HeaderStore::COST_PER_ITEM))->toBe('75.25')
+        ->and($draft->fresh()->material_cost)->toBe('75.25')
+        ->and(ChangeLog::query()->where('source', 'PROCUREMENT_PRICE_COST_UPDATE')->where('field', 'cost_per_item')->exists())->toBeTrue();
 });
 
 it('does not mark predictions stale for a working Quantity To Order change', function (): void {
@@ -522,12 +616,13 @@ it('preserves human inputs but writes CMS-owned summary cells in brand rows and 
         ->filter()->values();
     expect($ranges->contains(fn (string $range): bool => str_starts_with($range, "'master-file'!A2:")))->toBeTrue()
         ->and($ranges)->not->toContain("'livi-road'!H2")
-        ->and($ranges)->not->toContain("'livi-road'!N2")
-        ->and($ranges)->not->toContain("'livi-road'!AG2")
-        ->and($ranges)->toContain("'livi-road'!J2")
-        ->and($ranges)->toContain("'livi-road'!V2")
-        ->and($ranges)->toContain("'livi-road'!W2")
-        ->and($ranges)->toContain("'livi-road'!U2");
+        ->and($ranges)->not->toContain("'livi-road'!J2")
+        ->and($ranges)->not->toContain("'livi-road'!P2")
+        ->and($ranges)->not->toContain("'livi-road'!AI2")
+        ->and($ranges)->toContain("'livi-road'!I2")
+        ->and($ranges)->toContain("'livi-road'!X2")
+        ->and($ranges)->toContain("'livi-road'!Y2")
+        ->and($ranges)->toContain("'livi-road'!W2");
 });
 
 it('publishes operational inventory and CMS orders without changing ML or Ignore cells', function (): void {
@@ -579,14 +674,11 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         ->and($ranges)->toContain("'master-file'!F2")
         ->and($ranges)->toContain("'master-file'!G2")
         ->and($ranges)->not->toContain("'master-file'!H2")
-        ->and($ranges)->not->toContain("'master-file'!I2")
         ->and($ranges)->not->toContain("'master-file'!J2")
-        ->and($ranges)->toContain("'master-file'!K2")
-        ->and($ranges)->toContain("'master-file'!L2")
-        ->and($ranges)->not->toContain("'master-file'!N2")
-        ->and($ranges)->toContain("'master-file'!Q2")
+        ->and($ranges)->toContain("'master-file'!I2")
+        ->and($ranges)->toContain("'master-file'!M2")
+        ->and($ranges)->not->toContain("'master-file'!P2")
         ->and($ranges)->toContain("'master-file'!S2")
-        ->and($ranges)->toContain("'master-file'!T2")
         ->and($ranges)->toContain("'master-file'!U2")
         ->and($ranges)->toContain("'master-file'!V2")
         ->and($ranges)->toContain("'master-file'!W2")
@@ -595,11 +687,13 @@ it('publishes operational inventory and CMS orders without changing ML or Ignore
         ->and($ranges)->toContain("'master-file'!Z2")
         ->and($ranges)->toContain("'master-file'!AA2")
         ->and($ranges)->toContain("'master-file'!AB2")
-        ->and($ranges)->toContain("'master-file'!AF2")
+        ->and($ranges)->toContain("'master-file'!AC2")
+        ->and($ranges)->toContain("'master-file'!AD2")
         ->and($ranges)->toContain("'master-file'!AH2")
-        ->and($ranges)->toContain("'master-file'!AI2")
-        ->and($ranges)->toContain("'livi-road'!AJ2")
-        ->and($ranges)->not->toContain("'master-file'!AG2");
+        ->and($ranges)->toContain("'master-file'!AJ2")
+        ->and($ranges)->toContain("'master-file'!AK2")
+        ->and($ranges)->toContain("'livi-road'!AL2")
+        ->and($ranges)->not->toContain("'master-file'!AI2");
 });
 
 it('can append a missing targeted operational row for local Sheet testing', function (): void {

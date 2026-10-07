@@ -383,6 +383,53 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * @return array{product_id:int,variant_id:int,shopify_product_id:string,shopify_variant_id:string,cost:string}
+     */
+    public function updateVariantCost(Variant $variant, string $cost): array
+    {
+        $variant->loadMissing('product');
+        $product = $variant->product;
+        if (! $product instanceof Product) {
+            throw new \RuntimeException('Variant has no linked product.');
+        }
+
+        $productId = $this->resolveProductId($product);
+        if ($productId === null) {
+            throw new \RuntimeException('Product has no Shopify ID and could not be resolved by handle.');
+        }
+
+        $variantId = trim((string) $variant->shopify_id);
+        if ($variantId === '') {
+            throw new \RuntimeException('Variant has no Shopify ID.');
+        }
+
+        $confirmedCost = number_format((float) $cost, 2, '.', '');
+        $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+            'productId' => $productId,
+            'variants' => [[
+                'id' => $variantId,
+                'inventoryItem' => [
+                    'cost' => (float) $confirmedCost,
+                ],
+            ]],
+        ]);
+
+        $errors = data_get($data, 'productVariantsBulkUpdate.userErrors', []);
+        if (is_array($errors) && $errors !== []) {
+            $messages = $this->formatUserErrors($errors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the procurement cost update.');
+        }
+
+        return [
+            'product_id' => (int) $product->id,
+            'variant_id' => (int) $variant->id,
+            'shopify_product_id' => $productId,
+            'shopify_variant_id' => $variantId,
+            'cost' => $confirmedCost,
+        ];
+    }
+
+    /**
      * @param Collection<int, Product> $products
      * @param array<int, string>|null $scopes
      * @param array<int, string>|null $coreFields

@@ -199,7 +199,7 @@ final class ProcurementSheetSyncService
             $records = $records->reject(fn (array $record): bool => $ambiguous->contains($record['sku']));
         }
         $fields = [
-            'sibling_shapes', 'bead_color_finish', 'current_price',
+            'sibling_shapes', 'bead_color_finish', 'current_cost', 'current_price',
             'current_inventory', 'total_quantity_on_order', 'number_of_wip_orders',
             'next_order_id', 'second_order_id', 'second_eta',
             'predicted_runout_date_after_replenishment',
@@ -264,7 +264,7 @@ final class ProcurementSheetSyncService
         return ['rows' => $updated, 'tabs' => count($tabs)];
     }
 
-    /** @return array<int,array{sku:string,new_price:string,tab:string,row:int}> */
+    /** @return array<int,array{sku:string,new_price:string,new_cost:string,tab:string,row:int}> */
     public function newPriceInputs(): array
     {
         if (! $this->enabled()) {
@@ -278,15 +278,22 @@ final class ProcurementSheetSyncService
             $seen = [];
             foreach ($values as $offset => $row) {
                 $sku = strtoupper(trim((string) ($row[$map['sku']] ?? '')));
+                $newCost = trim((string) ($row[$map['new_cost']] ?? ''));
                 $newPrice = trim((string) ($row[$map['new_price']] ?? ''));
-                if ($sku === '' || $newPrice === '') {
+                if ($sku === '' || ($newPrice === '' && $newCost === '')) {
                     continue;
                 }
                 if (isset($seen[$sku])) {
                     throw new \RuntimeException("Duplicate SKU [{$sku}] in Google Sheet tab [{$tab}].");
                 }
                 $seen[$sku] = true;
-                $inputs[] = ['sku' => $sku, 'new_price' => $newPrice, 'tab' => $tab, 'row' => $offset + 2];
+                $inputs[] = [
+                    'sku' => $sku,
+                    'new_price' => $newPrice,
+                    'new_cost' => $newCost,
+                    'tab' => $tab,
+                    'row' => $offset + 2,
+                ];
             }
         }
 
