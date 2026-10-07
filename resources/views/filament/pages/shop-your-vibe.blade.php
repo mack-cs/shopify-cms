@@ -1,6 +1,8 @@
 @once
     @push('styles')
-        <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}?v={{ filemtime(public_path('css/shop-your-vibe.css')) }}">
+        @php($shopYourVibeCss = public_path('css/shop-your-vibe.css'))
+        @php($shopYourVibeCssVersion = is_file($shopYourVibeCss) ? '?v='.filemtime($shopYourVibeCss) : '')
+        <link rel="stylesheet" href="{{ asset('css/shop-your-vibe.css') }}{{ $shopYourVibeCssVersion }}">
     @endpush
 @endonce
 

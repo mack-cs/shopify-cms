@@ -1594,6 +1594,28 @@ it('clears a stale pending banner after Shopify already confirmed a completed pu
         ->and($this->draft->fresh()->status)->toBe('synced');
 });
 
+it('does not throw a 500 while polling an unconfirmed Shopify preview layout', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    vibeEdit($this, 'reorder_cards', ['keys' => array_reverse($this->fake->references)]);
+    $this->draft->update([
+        'status' => 'pending',
+        'progress' => ['Preview card layout updated.'],
+        'remote_jobs' => [],
+    ]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->call('pollPush')
+        ->assertSee('Shopify has not confirmed the final preview layout. Some changes remain pending.');
+
+    expect($this->draft->fresh()->pending)->toBeTrue()
+        ->and($this->draft->fresh()->status)->toBe('failed')
+        ->and($this->draft->fresh()->last_error)->toBe('Shopify has not confirmed the final preview layout. Some changes remain pending.');
+});
+
 it('resumes a lost new collection creation response without duplicating the collection', function () {
     vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
     $this->fake->loseCreateResponse = true;

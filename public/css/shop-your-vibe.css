@@ -5,7 +5,7 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 1.25rem;
-    align-items: stretch;
+    align-items: start;
 }
 .syv-parent-grid > *, .syv-card-grid > * { min-width: 0; overflow: hidden; }
 .syv-parent-card .fi-section-content { padding: 1rem; }
