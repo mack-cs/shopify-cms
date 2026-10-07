@@ -7,46 +7,145 @@ use App\Models\ShopifyStackInventoryReservation;
 
 final class StackOrderFulfillmentInspector
 {
-    /** @var array<string, bool> */
-    private array $cache = [];
+    /** @var array<string, array{gid:string,name:?string,display_fulfillment_status:?string,cancelled_at:?string,fulfilled:bool,known:bool}> */
+    private array $snapshots = [];
 
     public function __construct(private readonly ShopifyGraphqlGateway $shopify) {}
 
     public function isFullyFulfilled(ShopifyStackInventoryReservation $reservation): bool
     {
-        $orderId = trim((string) $reservation->shopify_order_id);
-        if ($orderId === '') {
-            return false;
-        }
-        if (array_key_exists($orderId, $this->cache)) {
-            return $this->cache[$orderId];
-        }
+        $snapshot = $this->snapshotFor($reservation->shopify_order_id);
 
-        return $this->cache[$orderId] = $this->liveStatus($orderId) === true;
+        return (bool) ($snapshot['fulfilled'] ?? false);
     }
 
-    private function liveStatus(string $orderId): ?bool
+    /**
+     * @param  array<int, string>  $orderIds
+     * @return array<string, array{gid:string,name:?string,display_fulfillment_status:?string,cancelled_at:?string,fulfilled:bool,known:bool}>
+     */
+    public function snapshotsFor(array $orderIds): array
     {
-        $gid = str_starts_with($orderId, 'gid://shopify/')
-            ? $orderId
-            : 'gid://shopify/Order/'.$orderId;
+        $gids = [];
+        foreach ($orderIds as $orderId) {
+            $gid = $this->gid((string) $orderId);
+            if ($gid !== '') {
+                $gids[$gid] = $gid;
+            }
+        }
+        $missing = array_values(array_filter($gids, fn (string $gid): bool => ! array_key_exists($gid, $this->snapshots)));
+        foreach (array_chunk($missing, 50) as $chunk) {
+            $this->fetchChunk($chunk);
+        }
+
+        $out = [];
+        foreach ($orderIds as $orderId) {
+            $gid = $this->gid((string) $orderId);
+            $out[(string) $orderId] = $this->snapshots[$gid] ?? $this->unknownSnapshot($gid);
+        }
+
+        return $out;
+    }
+
+    /**
+     * @return array{gid:string,name:?string,display_fulfillment_status:?string,cancelled_at:?string,fulfilled:bool,known:bool}
+     */
+    public function snapshotFor(mixed $orderId): array
+    {
+        $gid = $this->gid((string) $orderId);
+        if ($gid === '') {
+            return $this->unknownSnapshot('');
+        }
+
+        return $this->snapshotsFor([$gid])[$gid];
+    }
+
+    /** @param array<int, string> $gids */
+    private function fetchChunk(array $gids): void
+    {
         try {
             $data = $this->shopify->graphql(<<<'GRAPHQL'
-query StackOrderFulfillmentStatus($id: ID!) {
-  order(id: $id) { displayFulfillmentStatus cancelledAt }
+query StackOrderFulfillmentStatuses($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Order {
+      id
+      name
+      displayFulfillmentStatus
+      cancelledAt
+    }
+  }
 }
-GRAPHQL, ['id' => $gid]);
+GRAPHQL, ['ids' => $gids]);
         } catch (\Throwable) {
-            return null;
+            foreach ($gids as $gid) {
+                $this->snapshots[$gid] = $this->unknownSnapshot($gid);
+            }
+
+            return;
         }
 
-        $status = data_get($data, 'order.displayFulfillmentStatus', data_get($data, 'data.order.displayFulfillmentStatus'));
-        if (! is_string($status) || trim($status) === '') {
-            return null;
+        $nodes = data_get($data, 'nodes', data_get($data, 'data.nodes', []));
+        $found = [];
+        foreach (is_array($nodes) ? $nodes : [] as $node) {
+            if (! is_array($node)) {
+                continue;
+            }
+            $gid = $this->gid((string) ($node['id'] ?? ''));
+            if ($gid === '') {
+                continue;
+            }
+            $status = $node['displayFulfillmentStatus'] ?? null;
+            $this->snapshots[$gid] = [
+                'gid' => $gid,
+                'name' => filled($node['name'] ?? null) ? (string) $node['name'] : null,
+                'display_fulfillment_status' => is_string($status) ? $status : null,
+                'cancelled_at' => filled($node['cancelledAt'] ?? null) ? (string) $node['cancelledAt'] : null,
+                'fulfilled' => $this->isFulfilledStatus($status),
+                'known' => is_string($status) && trim($status) !== '',
+            ];
+            $found[$gid] = true;
         }
+        foreach ($gids as $gid) {
+            if (! isset($found[$gid])) {
+                $this->snapshots[$gid] = $this->unknownSnapshot($gid);
+            }
+        }
+    }
 
-        $normalized = strtoupper(str_replace([' ', '-'], '_', trim($status)));
+    private function isFulfilledStatus(mixed $status): bool
+    {
+        $normalized = strtoupper(str_replace([' ', '-'], '_', trim((string) $status)));
 
         return in_array($normalized, ['FULFILLED', 'COMPLETE', 'SHIPPED'], true);
+    }
+
+    private function gid(string $orderId): string
+    {
+        $orderId = trim($orderId);
+        if ($orderId === '') {
+            return '';
+        }
+        if (str_starts_with($orderId, 'gid://shopify/')) {
+            return $orderId;
+        }
+        if (ctype_digit($orderId)) {
+            return 'gid://shopify/Order/'.$orderId;
+        }
+
+        return $orderId;
+    }
+
+    /**
+     * @return array{gid:string,name:?string,display_fulfillment_status:?string,cancelled_at:?string,fulfilled:bool,known:bool}
+     */
+    private function unknownSnapshot(string $gid): array
+    {
+        return [
+            'gid' => $gid,
+            'name' => null,
+            'display_fulfillment_status' => null,
+            'cancelled_at' => null,
+            'fulfilled' => false,
+            'known' => false,
+        ];
     }
 }
