@@ -17,29 +17,69 @@ final class ProcurementPriceUpdateService
     public function queueFromSheet(?int $userId = null): array
     {
         $inputs = $this->validatedInputs();
-        $summary = [
-            'queued' => count($inputs['updates']),
-            'skipped_unchanged' => $inputs['skipped_unchanged'],
-            'skipped_unready' => $inputs['skipped_unready'],
-            'unready_skus' => $inputs['unready_skus'],
-        ];
+        $summary = $this->summary($inputs, 'queued');
+        if ($inputs['confirmed_rows'] !== []) {
+            $this->sheets->updateConfirmedRows($inputs['confirmed_rows']);
+        }
         if ($inputs['updates'] === []) {
             return $summary;
         }
 
-        ApplyProcurementPriceUpdatesJob::dispatch($inputs['updates'], $userId)
-            ->onQueue((string) config('procurement.queue', 'procurement'));
+        dispatch(
+            (new ApplyProcurementPriceUpdatesJob($inputs['updates'], $userId))
+                ->onConnection((string) config('procurement.queue_connection', 'database'))
+                ->onQueue((string) config('procurement.queue', 'procurement'))
+        );
 
         return $summary;
     }
 
     /**
-     * @return array{updates:array<int,array{sku:string,variant_id:int,new_price?:string,new_cost?:string}>,skipped_unchanged:int,skipped_unready:int,unready_skus:array<int,string>}
+     * @return array{applied:int,skipped_unchanged:int,skipped_unready:int,unready_skus:array<int,string>}
+     */
+    public function applyFromSheetNow(?int $userId = null): array
+    {
+        $inputs = $this->validatedInputs();
+        $summary = $this->summary($inputs, 'applied');
+        if ($inputs['confirmed_rows'] !== []) {
+            $this->sheets->updateConfirmedRows($inputs['confirmed_rows']);
+        }
+        if ($inputs['updates'] === []) {
+            return $summary;
+        }
+
+        app()->call([
+            new ApplyProcurementPriceUpdatesJob($inputs['updates'], $userId),
+            'handle',
+        ]);
+
+        return $summary;
+    }
+
+    /**
+     * @param array{updates:array<int,array{sku:string,variant_id:int,new_price?:string,new_cost?:string}>,confirmed_rows:array<string,array<string,string>>,skipped_unchanged:int,skipped_unready:int,unready_skus:array<int,string>} $inputs
+     *
+     * @return array<string,mixed>
+     */
+    private function summary(array $inputs, string $countKey): array
+    {
+        return [
+            $countKey => count($inputs['updates']),
+            'queued' => count($inputs['updates']),
+            'skipped_unchanged' => $inputs['skipped_unchanged'],
+            'skipped_unready' => $inputs['skipped_unready'],
+            'unready_skus' => $inputs['unready_skus'],
+        ];
+    }
+
+    /**
+     * @return array{updates:array<int,array{sku:string,variant_id:int,new_price?:string,new_cost?:string}>,confirmed_rows:array<string,array<string,string>>,skipped_unchanged:int,skipped_unready:int,unready_skus:array<int,string>}
      */
     public function validatedInputs(): array
     {
         $bySku = [];
         $unready = [];
+        $confirmedRows = [];
         foreach ($this->sheets->newPriceInputs() as $input) {
             $sku = strtoupper(trim($input['sku']));
             $price = trim((string) ($input['new_price'] ?? '')) === ''
@@ -80,7 +120,13 @@ final class ProcurementPriceUpdateService
         if ($bySku === []) {
             $skus = array_values($unready);
 
-            return ['updates' => [], 'skipped_unchanged' => 0, 'skipped_unready' => count($skus), 'unready_skus' => $skus];
+            return [
+                'updates' => [],
+                'confirmed_rows' => [],
+                'skipped_unchanged' => 0,
+                'skipped_unready' => count($skus),
+                'unready_skus' => $skus,
+            ];
         }
 
         $variants = Variant::query()
@@ -108,11 +154,21 @@ final class ProcurementPriceUpdateService
             }
 
             $update = ['sku' => $sku, 'variant_id' => (int) $variant->id];
-            if (isset($requested['new_price']) && number_format((float) $variant->price, 2, '.', '') !== $requested['new_price']) {
+            $currentPrice = number_format((float) $variant->price, 2, '.', '');
+            $currentCost = $this->currentCost($variant);
+            if (isset($requested['new_price']) && $currentPrice !== $requested['new_price']) {
                 $update['new_price'] = $requested['new_price'];
             }
-            if (isset($requested['new_cost']) && $this->currentCost($variant) !== $requested['new_cost']) {
+            if (isset($requested['new_price']) && $currentPrice === $requested['new_price']) {
+                $confirmedRows[$sku]['current_price'] = $requested['new_price'];
+                $confirmedRows[$sku]['new_price'] = '';
+            }
+            if (isset($requested['new_cost']) && $currentCost !== $requested['new_cost']) {
                 $update['new_cost'] = $requested['new_cost'];
+            }
+            if (isset($requested['new_cost']) && $currentCost === $requested['new_cost']) {
+                $confirmedRows[$sku]['current_cost'] = $requested['new_cost'];
+                $confirmedRows[$sku]['new_cost'] = '';
             }
             if (count($update) === 2) {
                 $skipped++;
@@ -126,6 +182,7 @@ final class ProcurementPriceUpdateService
 
         return [
             'updates' => $updates,
+            'confirmed_rows' => $confirmedRows,
             'skipped_unchanged' => $skipped,
             'skipped_unready' => count($unreadySkus),
             'unready_skus' => $unreadySkus,

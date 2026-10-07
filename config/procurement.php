@@ -13,6 +13,7 @@ return [
     'python_executable' => env('PROCUREMENT_PYTHON_EXECUTABLE', 'python'),
     'pipeline_path' => env('PROCUREMENT_PIPELINE_PATH', 'D:\\python_projects\\leigh_ml_procurement_v1_with_incoming_stock'),
     'process_timeout_seconds' => (int) env('PROCUREMENT_PROCESS_TIMEOUT_SECONDS', 7200),
+    'queue_connection' => env('PROCUREMENT_QUEUE_CONNECTION', 'database'),
     'queue' => env('PROCUREMENT_QUEUE', 'procurement'),
     'movement_source_version' => env('PROCUREMENT_MOVEMENT_SOURCE_VERSION', 'product-movement-v2'),
     'pending_receipt_push_reminder_minutes' => (int) env('PROCUREMENT_PENDING_RECEIPT_PUSH_REMINDER_MINUTES', 30),

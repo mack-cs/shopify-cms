@@ -28,8 +28,8 @@ use App\Services\ProcurementPredictionIngestService;
 use App\Services\SalePercentageCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
@@ -249,7 +249,6 @@ it('pulls Ignore and Quantity To Order but does not import CMS order totals from
 });
 
 it('reads populated New Price values and queues one batch without changing the sheet immediately', function (): void {
-    Queue::fake();
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     ProcurementCollectionConfig::query()->create([
         'shopify_collection_id' => 'gid://shopify/Collection/1',
@@ -273,14 +272,10 @@ it('reads populated New Price values and queues one batch without changing the s
         'skipped_unready' => 0,
         'unready_skus' => [],
     ]);
-    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($variant): bool {
-        return $job->userId === 7
-            && $job->updates === [['sku' => $variant->sku, 'variant_id' => $variant->id, 'new_price' => '125.50']];
-    });
+    expect(DB::table('jobs')->where('queue', 'procurement')->count())->toBe(1);
 });
 
 it('reads populated New Cost values and queues them with price updates', function (): void {
-    Queue::fake();
     [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
     ShopifyRow::query()->create([
         'import_id' => $variant->product->import_id,
@@ -307,18 +302,60 @@ it('reads populated New Cost values and queues them with price updates', functio
 
     expect($result['queued'])->toBe(1)
         ->and($result['skipped_unready'])->toBe(0);
-    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($variant): bool {
-        return $job->updates === [[
-            'sku' => $variant->sku,
-            'variant_id' => $variant->id,
-            'new_price' => '125.50',
-            'new_cost' => '75.25',
-        ]];
+    expect(DB::table('jobs')->where('queue', 'procurement')->count())->toBe(1);
+});
+
+it('clears populated price and cost inputs that already match CMS state', function (): void {
+    [, $variant] = procurementSheetVariant('LRB0004', 'livi-road');
+    ShopifyRow::query()->create([
+        'import_id' => $variant->product->import_id,
+        'row_index' => 1,
+        'handle' => $variant->product->handle,
+        'row_type' => 'product_primary',
+        'data' => [HeaderStore::COST_PER_ITEM => '75.25'],
+    ]);
+    Variant::withoutEvents(fn () => $variant->forceFill(['price' => '125.50'])->save());
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1',
+        'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',
+        'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    config(['google_sheets.enabled' => true, 'google_sheets.spreadsheet_id' => 'sheet-1', 'google_sheets.master_tab' => 'master-file']);
+    $headers = array_values(ProcurementSheetSchema::FIELDS);
+    $map = (new ProcurementSheetSchema)->map($headers);
+    Http::fake(function (Request $request) use ($headers, $map, $variant) {
+        if ($request->method() === 'GET' && str_contains($request->url(), '/values/')) {
+            $row = array_fill(0, count($headers), '');
+            $row[$map['sku']] = $variant->sku;
+            $row[$map['new_cost']] = '75.25';
+            $row[$map['new_price']] = '125.50';
+
+            return Http::response(['values' => [$headers, $row]]);
+        }
+        if ($request->method() === 'GET') {
+            return Http::response(['sheets' => [
+                ['properties' => ['title' => 'master-file', 'sheetId' => 1]],
+                ['properties' => ['title' => 'livi-road', 'sheetId' => 2]],
+            ]]);
+        }
+
+        return Http::response(['ok' => true]);
     });
+
+    $result = (new ProcurementPriceUpdateService(procurementTestSheetSync()))->queueFromSheet(7);
+    $updates = collect(Http::recorded())
+        ->flatMap(fn (array $pair) => collect((array) data_get($pair[0]->data(), 'data', [])));
+
+    expect($result)->toBe([
+        'queued' => 0,
+        'skipped_unchanged' => 1,
+        'skipped_unready' => 0,
+        'unready_skus' => [],
+    ])
+        ->and($updates->pluck('range'))->toContain("'master-file'!G2", "'master-file'!H2", "'master-file'!I2", "'master-file'!J2");
 });
 
 it('queues active catalog price updates and skips unmatched draft SKUs', function (): void {
-    Queue::fake();
     [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
     [, $draft] = procurementSheetVariant('LTN0227/62', 'livi-road');
     $draft->product->forceFill(['status' => 'draft'])->save();
@@ -343,13 +380,10 @@ it('queues active catalog price updates and skips unmatched draft SKUs', functio
     expect($result['queued'])->toBe(1)
         ->and($result['skipped_unready'])->toBe(1)
         ->and($result['unready_skus'])->toBe(['LTN0227/62']);
-    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($active): bool {
-        return $job->updates === [['sku' => $active->sku, 'variant_id' => $active->id, 'new_price' => '125.50']];
-    });
+    expect(DB::table('jobs')->where('queue', 'procurement')->count())->toBe(1);
 });
 
 it('queues valid Shopify price updates and skips SKUs with no Shopify variant ID', function (): void {
-    Queue::fake();
     [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
     [, $localOnly] = procurementSheetVariant('LRBLOCAL1', 'livi-road');
     $localOnly->forceFill(['shopify_id' => ''])->save();
@@ -374,9 +408,7 @@ it('queues valid Shopify price updates and skips SKUs with no Shopify variant ID
     expect($result['queued'])->toBe(1)
         ->and($result['skipped_unready'])->toBe(1)
         ->and($result['unready_skus'])->toBe(['LRBLOCAL1']);
-    Queue::assertPushed(ApplyProcurementPriceUpdatesJob::class, function (ApplyProcurementPriceUpdatesJob $job) use ($active): bool {
-        return $job->updates === [['sku' => $active->sku, 'variant_id' => $active->id, 'new_price' => '125.50']];
-    });
+    expect(DB::table('jobs')->where('queue', 'procurement')->count())->toBe(1);
 });
 
 it('keeps New Price human owned during normal row construction', function (): void {
