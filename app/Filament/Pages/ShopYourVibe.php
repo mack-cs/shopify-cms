@@ -4,22 +4,34 @@ namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
+use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeProductSiblings;
+use App\Jobs\PushShopYourVibeProductTags;
+use App\Jobs\RefreshShopYourVibeDraft;
+use App\Jobs\RefreshShopYourVibeParents;
+use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ProductMovementReportRow;
+use App\Models\ProductMovementReportRun;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
+use App\Models\Variant;
 use App\Services\ShopYourVibeAssignmentService;
+use App\Services\ShopYourVibeComplementaryService;
+use App\Services\ShopYourVibeSiblingService;
+use App\Services\ShopYourVibeTagService;
 use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
+use Filament\Forms\Components\Grid;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Radio;
 use Filament\Actions\Action;
 use Filament\Forms\Get;
-use Filament\Forms\Set;
 use Filament\Forms\Form;
 use Illuminate\Database\Eloquent\Builder;
 use Filament\Pages\Page;
@@ -67,6 +79,8 @@ class ShopYourVibe extends Page
 
     public array $newCollection = [];
 
+    public bool $newCollectionHandleOverridden = false;
+
     public string $productSearch = '';
 
     public string $assignmentProductSearch = '';
@@ -102,6 +116,41 @@ class ShopYourVibe extends Page
     #[Locked]
     public array $originalSelectedVibes = [];
 
+    public ?string $managingSiblingProductGid = null;
+
+    public array $siblingOptions = [];
+
+    public array $selectedSiblings = [];
+
+    #[Locked]
+    public array $parentSiblingOptions = [];
+
+    public ?string $managingTagProductGid = null;
+
+    public ?string $managingComplementaryProductGid = null;
+
+    public array $complementarySelected = [];
+
+    public string $complementarySearch = '';
+
+    public array $complementarySearchResults = [];
+
+    public array $complementaryErrors = [];
+
+    public array $tagForm = [
+        'materials_and_dimensions' => '',
+        'color_string' => [],
+        'jewelry_material' => [],
+        'bead_colour_finish' => '',
+    ];
+
+    public array $tagOptions = [
+        'materials_and_dimensions' => [],
+        'color_string' => [],
+        'jewelry_material' => [],
+        'bead_colour_finish' => [],
+    ];
+
     public bool $confirmingAssignments = false;
 
     public array $mappingForm = [];
@@ -130,7 +179,14 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->attempt(function () use ($refresh): void {
             if ($refresh) {
-                Cache::forget($this->parentCacheKey());
+                RefreshShopYourVibeParents::dispatch($this->parentCacheKey(), auth()->id());
+                Notification::make()
+                    ->title('Shopify refresh queued')
+                    ->body('The collection list will refresh in the background.')
+                    ->success()
+                    ->send();
+
+                return;
             }
             $this->parents = Cache::remember($this->parentCacheKey(), 300, fn () => app(ShopYourVibeShopify::class)->parents());
             $this->loadError = null;
@@ -164,6 +220,21 @@ class ShopYourVibe extends Page
         $this->assignmentProductSearch = '';
         $this->vibeMappings = [];
         $this->managingProductGid = null;
+        $this->managingSiblingProductGid = null;
+        $this->managingTagProductGid = null;
+        $this->resetComplementaryModalState();
+        $this->tagForm = [
+            'materials_and_dimensions' => '',
+            'color_string' => [],
+            'jewelry_material' => [],
+            'bead_colour_finish' => '',
+        ];
+        $this->tagOptions = [
+            'materials_and_dimensions' => [],
+            'color_string' => [],
+            'jewelry_material' => [],
+            'bead_colour_finish' => [],
+        ];
         $this->loadParents();
     }
 
@@ -171,13 +242,15 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function () use ($discard): void {
-            $this->accept(app(ShopYourVibeWorkflow::class)->refresh($this->draftId, $this->revision, $discard));
             $this->activeCard = null;
             $this->cardForm = [];
             $this->confirmingPush = false;
-            $this->dispatch('vibe-form-saved');
-            Cache::forget($this->parentCacheKey());
-            $this->loadAssignmentOverview();
+            RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
+            Notification::make()
+                ->title('Shopify refresh queued')
+                ->body('This Shop Your Vibe draft will reload from Shopify in the background.')
+                ->success()
+                ->send();
         });
     }
 
@@ -203,6 +276,7 @@ class ShopYourVibe extends Page
         $this->addingCard = $forCard;
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
+        $this->newCollectionHandleOverridden = false;
         $this->newCollectionForm->fill(['image_mode' => 'none']);
         $this->loadError = null;
         $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
@@ -216,12 +290,51 @@ class ShopYourVibe extends Page
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
         $this->newCollection = [];
+        $this->newCollectionHandleOverridden = false;
         $this->resetValidation();
     }
 
     protected function getForms(): array
     {
-        return ['collectionPickerForm', 'newCollectionForm', 'mappingUploadForm'];
+        return ['collectionPickerForm', 'newCollectionForm', 'mappingUploadForm', 'productTagForm'];
+    }
+
+    public function productTagForm(Form $form): Form
+    {
+        return $form->statePath('tagForm')->schema([
+            Grid::make(2)->schema([
+                Select::make('materials_and_dimensions')
+                    ->label('Material & Dimensions')
+                    ->placeholder('Select option')
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['materials_and_dimensions'] ?? []),
+                Select::make('bead_colour_finish')
+                    ->label('Material Colour Finish')
+                    ->placeholder('Select option')
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['bead_colour_finish'] ?? []),
+                Select::make('color_string')
+                    ->label('Colour')
+                    ->placeholder('Select option')
+                    ->multiple()
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['color_string'] ?? []),
+                Select::make('jewelry_material')
+                    ->label('Jewelry Material')
+                    ->placeholder('Select option')
+                    ->multiple()
+                    ->native(false)
+                    ->searchable()
+                    ->preload()
+                    ->options(fn (): array => $this->tagOptions['jewelry_material'] ?? []),
+            ]),
+        ]);
     }
 
     public function mappingUploadForm(Form $form): Form
@@ -283,14 +396,18 @@ class ShopYourVibe extends Page
     public function newCollectionForm(Form $form): Form
     {
         return $form->statePath('newCollection')->schema([
-            TextInput::make('title')->label('Collection name')->required()->maxLength(255)->live(debounce: 300)
-                ->afterStateUpdated(function (Set $set, Get $get, ?string $state, ?string $old): void {
-                    if (blank($get('handle')) || $get('handle') === Str::slug($old ?? '')) {
-                        $set('handle', Str::slug($state ?? ''));
-                    }
-                }),
+            TextInput::make('title')->label('Collection name')->required()->maxLength(255)
+                ->extraInputAttributes([
+                    'x-on:input' => "const prefix = \$el.dataset.parentHandle || ''; const titleSlug = (\$event.target.value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-'); const slug = [prefix, titleSlug].filter(Boolean).join('-'); const handle = \$el.closest('[data-new-collection-form]')?.querySelector('[data-new-collection-handle]'); if (handle && (!handle.value || handle.dataset.autoSlug === 'true')) { handle.dataset.autoUpdating = 'true'; handle.value = slug; handle.dataset.autoSlug = 'true'; handle.dispatchEvent(new Event('input', { bubbles: true })); }",
+                    'data-parent-handle' => $this->newCollectionParentHandle(),
+                ]),
             TextInput::make('handle')->label('Slug (Shopify handle)')->required()->maxLength(255)
                 ->regex('/^[a-z0-9]+(?:-[a-z0-9]+)*$/')
+                ->extraInputAttributes([
+                    'data-new-collection-handle' => true,
+                    'data-auto-slug' => 'true',
+                    'x-on:input' => "if (\$el.dataset.autoUpdating === 'true') { \$el.dataset.autoUpdating = 'false'; \$el.dataset.autoSlug = 'true'; } else { \$el.dataset.autoSlug = 'false'; }",
+                ])
                 ->helperText('Automatically generated from the collection name. You can edit it; your changes will be kept. URL: /collections/your-slug'),
             Select::make('image_mode')->label('Collection image')->options([
                 'none' => 'No image', 'upload' => 'Upload a new image', 'existing' => 'Choose an image from Shopify',
@@ -343,6 +460,44 @@ class ShopYourVibe extends Page
             $this->closeCollectionPicker();
             $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
         });
+    }
+
+    public function updatedNewCollectionTitle(?string $value): void
+    {
+        if ($this->newCollectionHandleOverridden) {
+            return;
+        }
+
+        $this->newCollection['handle'] = $this->contextualCollectionHandle((string) $value);
+    }
+
+    public function updatedNewCollectionHandle(?string $value): void
+    {
+        $expected = $this->contextualCollectionHandle((string) ($this->newCollection['title'] ?? ''));
+        $this->newCollectionHandleOverridden = filled($value) && $value !== $expected;
+    }
+
+    private function contextualCollectionHandle(string $title): string
+    {
+        return collect([$this->newCollectionParentHandle(), Str::slug($title)])
+            ->filter()
+            ->implode('-');
+    }
+
+    private function newCollectionParentHandle(): string
+    {
+        $draft = $this->draft();
+        if (! $draft) {
+            return '';
+        }
+
+        $parent = $draft->desired['parent'] ?? $draft->snapshot['parent'] ?? [];
+        $handle = trim((string) ($parent['handle'] ?? ''));
+        if ($handle !== '') {
+            return Str::slug($handle);
+        }
+
+        return Str::slug((string) ($parent['title'] ?? ''));
     }
 
     public function collectionPickerForm(Form $form): Form
@@ -469,16 +624,16 @@ class ShopYourVibe extends Page
     {
         return Action::make('removeVibe')->color('danger')->requiresConfirmation()
             ->modalHeading('Remove vibe')->modalSubmitActionLabel('Confirm removal')
-            ->modalDescription('The selected removal will be saved to your draft and applied when you push changes to Shopify.')
+            ->modalDescription('Choose what should happen when you push changes.')
             ->form([
                 Radio::make('mode')->label('Removal option')->options([
-                    'layout' => 'Remove from this preview layout only',
-                    'permanent' => 'Permanently delete the vibe card from Shopify',
-                    'collection' => 'Delete the vibe card and its collection from Shopify — keep all products',
+                    'layout' => 'Remove locally from this preview',
+                    'permanent' => 'Delete the Shop Your Vibe card from Shopify',
+                    'collection' => 'Delete the Shop Your Vibe card and collection from Shopify',
                 ])->descriptions([
-                    'layout' => 'Keep the Shopify vibe card and its linked collection.',
-                    'permanent' => 'Delete the Shopify vibe card. Its linked collection, products and images are kept. This cannot be undone after pushing.',
-                    'collection' => 'Permanently delete the linked collection and its collection page, plus this vibe card. Every product stays in Shopify and in its other collections. Images are kept. Applied on the next push.',
+                    'layout' => 'Only removes it from this main collection preview. Shopify is kept.',
+                    'permanent' => 'Removes the SYV card in Shopify. The linked collection and products stay.',
+                    'collection' => 'Removes the SYV card and linked Shopify collection. Products stay in Shopify.',
                 ])->default('layout')->required(),
             ])
             ->action(function (array $arguments, array $data, Action $action): void {
@@ -496,6 +651,7 @@ class ShopYourVibe extends Page
                         $this->cardForm = [];
                     }
                     $this->confirmingPush = false;
+                    $this->dispatch('vibe-draft-saved');
                 });
                 if ($this->loadError) {
                     $action->halt();
@@ -511,6 +667,13 @@ class ShopYourVibe extends Page
     public function reorderProducts(string $gid, array $ids): void
     {
         $this->change('reorder_products', ['collection_gid' => $gid, 'ids' => $ids]);
+        if ($this->loadError) {
+            return;
+        }
+        if ($gid === $this->draft()?->collection_gid) {
+            $this->parentProducts = $this->reorderLocalProducts($this->parentProducts, $ids);
+        }
+        $this->skipRender();
     }
 
     public function enableManual(string $gid): void
@@ -557,6 +720,221 @@ class ShopYourVibe extends Page
         $this->dispatch('open-modal', id: 'manage-vibe-assignments');
     }
 
+    public function openProductSiblings(string $productGid): void
+    {
+        $this->guard();
+        $product = collect($this->parentProducts)->firstWhere('id', $productGid);
+        abort_unless($product, 404);
+        if ($this->parentSiblingOptions === []) {
+            $this->parentSiblingOptions = app(ShopYourVibeSiblingService::class)
+                ->optionsForParent($this->draft()?->desired['parent'] ?? []);
+        }
+        $this->siblingOptions = $this->parentSiblingOptions;
+        $selected = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $this->siblingOptions);
+        $this->managingSiblingProductGid = $productGid;
+        $this->selectedSiblings = collect($selected)->pluck('tag')->values()->all();
+        $this->dispatch('open-modal', id: 'manage-sibling-assignments');
+    }
+
+    public function saveProductSiblings(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingSiblingProductGid), 422);
+        $this->attempt(function (): void {
+            $parent = $this->draft()->desired['parent'] ?? [];
+            PushShopYourVibeProductSiblings::dispatch(
+                $parent,
+                $this->managingSiblingProductGid,
+                $this->selectedSiblings,
+                auth()->id(),
+            );
+            $selected = app(ShopYourVibeSiblingService::class)->selectedForTags(
+                $this->selectedSiblings,
+                $this->siblingOptions,
+            );
+            $selectedTags = collect($selected)->pluck('tag')->values()->all();
+            $managedTags = collect($this->siblingOptions)
+                ->pluck('tag')
+                ->map(fn (mixed $tag): string => mb_strtolower(trim((string) $tag)))
+                ->filter()
+                ->all();
+            foreach ($this->parentProducts as &$product) {
+                if ($product['id'] !== $this->managingSiblingProductGid) {
+                    continue;
+                }
+
+                $existingTags = collect((array) ($product['tags'] ?? []))
+                    ->reject(fn (mixed $tag): bool => in_array(mb_strtolower(trim((string) $tag)), $managedTags, true))
+                    ->values()
+                    ->all();
+                $product['tags'] = array_values(array_unique([...$existingTags, ...$selectedTags]));
+                $product['siblings'] = $selected;
+            }
+            unset($product);
+            $this->managingSiblingProductGid = null;
+            $this->selectedSiblings = [];
+            $this->siblingOptions = [];
+            $this->dispatch('close-modal', id: 'manage-sibling-assignments');
+            Notification::make()->title('Sibling assignments queued')->success()->send();
+        });
+    }
+
+    public function openProductTags(string $productGid): void
+    {
+        $this->guard();
+        abort_unless(collect($this->parentProducts)->contains('id', $productGid), 404);
+        $this->attempt(function () use ($productGid): void {
+            $service = app(ShopYourVibeTagService::class);
+            $product = $service->productForGid($productGid);
+            $state = $service->stateForProduct($product);
+
+            $this->managingTagProductGid = $productGid;
+            $this->tagForm = $state;
+            $this->tagOptions = $service->optionsForProduct($product, $state);
+            $this->productTagForm->fill($state);
+            $this->dispatch('open-modal', id: 'manage-tag-assignments');
+        });
+    }
+
+    public function saveProductTags(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingTagProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingTagProductGid), 422);
+        $this->attempt(function (): void {
+            $this->tagForm = $this->productTagForm->getState();
+            PushShopYourVibeProductTags::dispatch(
+                $this->managingTagProductGid,
+                $this->tagForm,
+                auth()->id(),
+            );
+
+            $this->managingTagProductGid = null;
+            $this->tagForm = [
+                'materials_and_dimensions' => '',
+                'color_string' => [],
+                'jewelry_material' => [],
+                'bead_colour_finish' => '',
+            ];
+            $this->tagOptions = [
+                'materials_and_dimensions' => [],
+                'color_string' => [],
+                'jewelry_material' => [],
+                'bead_colour_finish' => [],
+            ];
+            $this->dispatch('close-modal', id: 'manage-tag-assignments');
+            Notification::make()
+                ->title('Product metafield update queued')
+                ->body('Shopify will update in the background.')
+                ->success()
+                ->send();
+        });
+    }
+
+    public function openProductComplementary(string $productGid): void
+    {
+        $this->guard();
+        abort_unless(collect($this->parentProducts)->contains('id', $productGid), 404);
+        $this->attempt(function () use ($productGid): void {
+            $service = app(ShopYourVibeComplementaryService::class);
+            $state = $service->stateForProductGid($productGid);
+
+            $this->managingComplementaryProductGid = $productGid;
+            $this->complementarySelected = $state['selected'];
+            $this->complementarySearch = '';
+            $this->complementarySearchResults = [];
+            $this->complementaryErrors = [];
+            $this->dispatch('open-modal', id: 'manage-complementary-products');
+        });
+    }
+
+    public function updatedComplementarySearch(): void
+    {
+        $this->refreshComplementarySearch();
+    }
+
+    public function addComplementaryProduct(string $productGid): void
+    {
+        $this->guard();
+        abort_unless($this->managingComplementaryProductGid, 422);
+        if ($productGid === $this->managingComplementaryProductGid) {
+            $this->complementaryErrors = ['A product cannot complement itself.'];
+
+            return;
+        }
+        if (collect($this->complementarySelected)->contains('id', $productGid)) {
+            $this->complementaryErrors = ['This product is already selected.'];
+
+            return;
+        }
+
+        $service = app(ShopYourVibeComplementaryService::class);
+        $result = $service->addTokens(
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+            $productGid,
+        );
+        $this->complementarySelected = $result['selected'];
+        $this->complementaryErrors = $result['errors'];
+        $this->refreshComplementarySearch();
+    }
+
+    public function removeComplementaryProduct(string $productGid): void
+    {
+        $this->complementarySelected = collect($this->complementarySelected)
+            ->reject(fn (array $product): bool => ($product['id'] ?? null) === $productGid)
+            ->values()
+            ->all();
+        $this->refreshComplementarySelectionStatuses();
+        $this->refreshComplementarySearch();
+    }
+
+    public function moveComplementaryProduct(int $index, int $direction): void
+    {
+        $target = $index + $direction;
+        if (! isset($this->complementarySelected[$index], $this->complementarySelected[$target])) {
+            return;
+        }
+
+        $items = $this->complementarySelected;
+        [$items[$index], $items[$target]] = [$items[$target], $items[$index]];
+        $this->complementarySelected = array_values($items);
+        $this->refreshComplementarySelectionStatuses();
+    }
+
+    public function saveProductComplementary(): void
+    {
+        $this->guard();
+        abort_unless($this->draftId && $this->managingComplementaryProductGid, 422);
+        abort_unless(collect($this->parentProducts)->contains('id', $this->managingComplementaryProductGid), 422);
+        $this->attempt(function (): void {
+            $service = app(ShopYourVibeComplementaryService::class);
+            $result = $service->saveLocal(
+                $this->managingComplementaryProductGid,
+                collect($this->complementarySelected)->pluck('id')->all(),
+                auth()->id(),
+            );
+
+            PushShopYourVibeComplementaryProducts::dispatch($this->managingComplementaryProductGid, auth()->id());
+
+            foreach ($this->parentProducts as &$product) {
+                if ($product['id'] === $this->managingComplementaryProductGid) {
+                    $product['complementary_count'] = count($result['selected']);
+                }
+            }
+            unset($product);
+
+            $this->resetComplementaryModalState();
+            $this->dispatch('close-modal', id: 'manage-complementary-products');
+            Notification::make()
+                ->title('Complementary products queued')
+                ->body('The full list was saved locally. Shopify will receive the first three sellable products in the background.')
+                ->success()
+                ->send();
+        });
+    }
+
     public function reviewProductAssignments(): void
     {
         $this->guard();
@@ -598,13 +976,6 @@ class ShopYourVibe extends Page
             $this->dispatch('close-modal', id: 'manage-vibe-assignments');
             Notification::make()->title('Shop Your Vibe assignments updated')->success()->send();
         });
-    }
-
-    public function removeProductAssignment(string $productGid, string $collectionGid): void
-    {
-        $this->openProductAssignments($productGid);
-        $this->selectedVibes = array_values(array_filter($this->selectedVibes, fn ($gid) => $gid !== $collectionGid));
-        $this->reviewProductAssignments();
     }
 
     public function findImages(bool $more = false): void
@@ -653,10 +1024,42 @@ class ShopYourVibe extends Page
         });
     }
 
+    public function retryPush(): void
+    {
+        $this->guard();
+        $this->attempt(function (): void {
+            $draft = $this->draft();
+            if (! $draft || $draft->status !== 'pushing') {
+                return;
+            }
+
+            PushShopYourVibe::dispatch($draft->id);
+            Notification::make()
+                ->title('Push check queued')
+                ->body('Shopify confirmation is being retried. This page will update when the draft changes.')
+                ->success()
+                ->send();
+        });
+    }
+
     public function pollPush(): void
     {
         $this->guard();
         if ($draft = $this->draft()) {
+            if ($draft->pending && $draft->status === 'pending') {
+                try {
+                    $draft = app(ShopYourVibeWorkflow::class)->confirmCompletedPush($draft->id);
+                } catch (Throwable $e) {
+                    report($e);
+                    $draft->update([
+                        'pending' => true,
+                        'status' => 'failed',
+                        'last_error' => $e->getMessage(),
+                        'revision' => $draft->revision + 1,
+                    ]);
+                    $draft->refresh();
+                }
+            }
             $this->accept($draft);
         }
     }
@@ -667,6 +1070,7 @@ class ShopYourVibe extends Page
         $this->attempt(function () use ($operation, $input): void {
             $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, $operation, $input));
             $this->confirmingPush = false;
+            $this->dispatch('vibe-draft-saved');
         });
     }
 
@@ -712,13 +1116,18 @@ class ShopYourVibe extends Page
 
         $service = app(ShopYourVibeAssignmentService::class);
         $shopify = app(ShopYourVibeShopify::class);
+        $this->parentSiblingOptions = app(ShopYourVibeSiblingService::class)
+            ->optionsForParent($draft->desired['parent'] ?? []);
         $mappings = [];
         foreach ($draft->desired['cards'] as $card) {
             $gid = $card['collection_gid'] ?? null;
             if (! $gid || str_starts_with($gid, 'new:')) {
                 continue;
             }
-            $collection = $shopify->collection($gid);
+            if (isset($mappings[$gid])) {
+                continue;
+            }
+            $collection = $this->mappingCollectionSummary($draft, $gid, $card);
             $mapping = $service->syncMapping($draft->collection_gid, $card, $collection);
             // More than one preview card may link to the same Shopify collection.
             // Product assignment is collection-based, so show and process it only once.
@@ -728,8 +1137,294 @@ class ShopYourVibe extends Page
         $service->deactivateMissing($draft->collection_gid, array_column($mappings, 'shopify_collection_id'));
         $this->vibeMappings = $mappings;
         if ($refreshProducts || $this->parentProducts === []) {
-            $this->parentProducts = $shopify->parentProducts($draft->collection_gid);
+            $this->parentProducts = $this->decorateProductCards(
+                $draft->desired['collections'][$draft->collection_gid]['products']
+                    ?? $shopify->parentProducts($draft->collection_gid)
+            );
         }
+    }
+
+    private function mappingCollectionSummary(ShopYourVibeDraft $draft, string $gid, array $card): array
+    {
+        $collection = $draft->desired['collections'][$gid]
+            ?? $draft->snapshot['collections'][$gid]
+            ?? null;
+        if (is_array($collection)) {
+            return [
+                'gid' => $gid,
+                'title' => $collection['title'] ?? $card['name'],
+                'handle' => $collection['handle'] ?? basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+                'detected_membership_tag' => $collection['detected_membership_tag'] ?? null,
+                'product_count' => (int) ($collection['product_count'] ?? count($collection['products'] ?? [])),
+            ];
+        }
+
+        $local = ShopifyCollection::query()
+            ->where('shopify_id', $gid)
+            ->latest('id')
+            ->first();
+
+        return [
+            'gid' => $gid,
+            'title' => $local?->title ?: $card['name'],
+            'handle' => $local?->handle ?: basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
+            'detected_membership_tag' => null,
+            'product_count' => 0,
+        ];
+    }
+
+    private function decorateProductCards(array $products): array
+    {
+        $products = $this->withResolvedSkus($products);
+        $movementBySku = $this->movementClassificationsBySku($products);
+        $variantInventoryBySku = $this->variantInventoryBySku($products);
+        $beadColourFinishByGid = $this->beadColourFinishByGid($products);
+        $complementaryCountByGid = app(ShopYourVibeComplementaryService::class)->countsByGid($products);
+        $threshold = max(0, (int) config('shop_your_vibe.low_stock_threshold', 5));
+        $siblingOptions = $this->parentSiblingOptions;
+
+        return collect($products)->map(function (array $product) use ($movementBySku, $variantInventoryBySku, $beadColourFinishByGid, $complementaryCountByGid, $threshold, $siblingOptions): array {
+            $inventoryTracked = $product['inventory_tracked'] ?? null;
+            $quantity = $product['inventory_quantity'] ?? null;
+            if (($inventoryTracked === null || $quantity === null) && filled($product['sku'] ?? null)) {
+                $variant = $variantInventoryBySku[trim((string) $product['sku'])] ?? null;
+                $inventoryTracked ??= $variant['inventory_tracked'] ?? null;
+                $quantity ??= $variant['inventory_qty'] ?? null;
+            }
+
+            $tracked = $inventoryTracked === true || $inventoryTracked === 1 || $inventoryTracked === 'true';
+            $quantity = $quantity === null ? null : (int) $quantity;
+            $isSoldOut = $tracked && $quantity !== null && $quantity <= 0;
+
+            $product['inventory_tracked'] = $tracked;
+            $product['inventory_quantity'] = $quantity;
+            $product['is_sold_out'] = $isSoldOut;
+            $product['is_low_stock'] = $tracked && ! $isSoldOut && $quantity !== null && $quantity <= $threshold;
+            $product['movement_classification'] = $movementBySku[trim((string) ($product['sku'] ?? ''))] ?? null;
+            $product['siblings'] = app(ShopYourVibeSiblingService::class)->selectedForTags((array) ($product['tags'] ?? []), $siblingOptions);
+            $product['bead_colour_finish'] = $beadColourFinishByGid[$product['id'] ?? ''] ?? null;
+            $product['complementary_count'] = $complementaryCountByGid[$product['id'] ?? ''] ?? 0;
+            $product['is_prelaunch_draft'] = (bool) ($product['is_prelaunch_draft'] ?? str_starts_with((string) ($product['id'] ?? ''), 'draft:'));
+
+            return $product;
+        })->all();
+    }
+
+    private function withResolvedSkus(array $products): array
+    {
+        $missing = collect($products)
+            ->filter(fn (array $product): bool => blank($product['sku'] ?? null))
+            ->values();
+
+        if ($missing->isEmpty()) {
+            return $products;
+        }
+
+        $shopifyIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'gid://shopify/Product/'))
+            ->unique()
+            ->values();
+        $draftIds = $missing
+            ->pluck('id')
+            ->filter(fn (mixed $id): bool => is_string($id) && str_starts_with($id, 'draft:'))
+            ->map(fn (string $id): int => (int) substr($id, 6))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $skuByProductGid = $shopifyIds->isEmpty()
+            ? collect()
+            : Product::query()
+                ->whereIn('shopify_id', $shopifyIds->all())
+                ->with(['variants' => fn ($query) => $query->orderBy('id')])
+                ->get()
+                ->mapWithKeys(fn (Product $product): array => [
+                    (string) $product->shopify_id => trim((string) ($product->variants->first()?->sku ?? '')),
+                ]);
+
+        $skuByDraftId = $draftIds->isEmpty()
+            ? collect()
+            : NewProductDraft::query()
+                ->whereKey($draftIds->all())
+                ->pluck('sku', 'id')
+                ->map(fn (mixed $sku): string => trim((string) $sku));
+
+        return collect($products)->map(function (array $product) use ($skuByProductGid, $skuByDraftId): array {
+            if (filled($product['sku'] ?? null)) {
+                return $product;
+            }
+
+            $id = (string) ($product['id'] ?? '');
+            $sku = str_starts_with($id, 'draft:')
+                ? $skuByDraftId->get((int) substr($id, 6), '')
+                : $skuByProductGid->get($id, '');
+
+            if (filled($sku)) {
+                $product['sku'] = $sku;
+            }
+
+            return $product;
+        })->all();
+    }
+
+    private function withPlacementInfo(?ShopYourVibeDraft $draft, array $products): array
+    {
+        if (! $draft) {
+            return $products;
+        }
+        $collections = collect($draft->desired['collections'] ?? []);
+        $placements = $draft->desired['draft_placements'] ?? [];
+
+        return collect($products)->map(function (array $product) use ($collections, $placements): array {
+            $id = (string) ($product['id'] ?? '');
+            if ($id === '' || ! str_starts_with($id, 'draft:')) {
+                return $product;
+            }
+            $associated = $collections
+                ->filter(fn (array $collection): bool => collect($collection['products'] ?? [])->contains(fn (array $item): bool => ($item['id'] ?? null) === $id))
+                ->map(function (array $collection, string $gid) use ($placements, $id): array {
+                    return [
+                        'gid' => $gid,
+                        'name' => $collection['title'] ?? $collection['handle'] ?? $gid,
+                        'complete' => data_get($placements, "{$id}.{$gid}.status") === 'complete',
+                    ];
+                })
+                ->values()
+                ->all();
+
+            $product['collection_placements'] = $associated;
+            $product['placement_complete_count'] = collect($associated)->where('complete', true)->count();
+            $product['placement_total_count'] = count($associated);
+
+            return $product;
+        })->all();
+    }
+
+    private function resetComplementaryModalState(): void
+    {
+        $this->managingComplementaryProductGid = null;
+        $this->complementarySelected = [];
+        $this->complementarySearch = '';
+        $this->complementarySearchResults = [];
+        $this->complementaryErrors = [];
+    }
+
+    private function refreshComplementarySelectionStatuses(): void
+    {
+        if (! $this->managingComplementaryProductGid) {
+            return;
+        }
+
+        $result = app(ShopYourVibeComplementaryService::class)->addTokens(
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+            '',
+        );
+
+        $this->complementarySelected = $result['selected'];
+    }
+
+    private function refreshComplementarySearch(): void
+    {
+        if (! $this->managingComplementaryProductGid) {
+            $this->complementarySearchResults = [];
+
+            return;
+        }
+
+        $this->complementarySearchResults = app(ShopYourVibeComplementaryService::class)->search(
+            $this->complementarySearch,
+            $this->managingComplementaryProductGid,
+            collect($this->complementarySelected)->pluck('id')->all(),
+        );
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $products
+     * @return array<string, string>
+     */
+    private function beadColourFinishByGid(array $products): array
+    {
+        $gids = collect($products)
+            ->pluck('id')
+            ->filter()
+            ->map(fn ($gid): string => trim((string) $gid))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($gids->isEmpty()) {
+            return [];
+        }
+
+        return Product::query()
+            ->whereIn('shopify_id', $gids->all())
+            ->orderByDesc('id')
+            ->get()
+            ->unique('shopify_id')
+            ->mapWithKeys(function (Product $product): array {
+                $state = app(ShopYourVibeTagService::class)->stateForProduct($product);
+                $finish = trim((string) ($state['bead_colour_finish'] ?? ''));
+
+                return $finish !== '' ? [(string) $product->shopify_id => $finish] : [];
+            })
+            ->all();
+    }
+
+    private function variantInventoryBySku(array $products): array
+    {
+        $skus = collect($products)->pluck('sku')->filter()->map(fn ($sku) => trim((string) $sku))->unique()->values();
+        if ($skus->isEmpty()) {
+            return [];
+        }
+
+        return Variant::query()
+            ->whereIn('sku', $skus)
+            ->orderByDesc('id')
+            ->get(['sku', 'inventory_tracked', 'inventory_qty'])
+            ->unique('sku')
+            ->mapWithKeys(fn (Variant $variant): array => [
+                trim((string) $variant->sku) => [
+                    'inventory_tracked' => $variant->inventory_tracked,
+                    'inventory_qty' => $variant->inventory_qty,
+                ],
+            ])
+            ->all();
+    }
+
+    private function reorderLocalProducts(array $products, array $ids): array
+    {
+        $byId = collect($products)->keyBy('id');
+
+        return collect($ids)
+            ->map(fn (string $id) => $byId->get($id))
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function movementClassificationsBySku(array $products): array
+    {
+        $skus = collect($products)->pluck('sku')->filter()->map(fn ($sku) => trim((string) $sku))->unique()->values();
+        if ($skus->isEmpty()) {
+            return [];
+        }
+        $runId = ProductMovementReportRun::query()
+            ->where('status', ProductMovementReportRun::STATUS_COMPLETED)
+            ->latest('completed_at')
+            ->latest('id')
+            ->value('id');
+        if (! $runId) {
+            return [];
+        }
+
+        return ProductMovementReportRow::query()
+            ->where('product_movement_report_run_id', $runId)
+            ->whereIn('sku', $skus)
+            ->pluck('movement_classification', 'sku')
+            ->map(fn ($value) => strtoupper((string) $value))
+            ->all();
     }
 
     private function readMappingCsv(mixed $file): array
@@ -829,6 +1524,10 @@ class ShopYourVibe extends Page
         $parents = $parents->filter(fn ($parent) => $this->search === '' || str_contains(strtolower($parent['title'].' '.$parent['handle']), strtolower($this->search)));
         $card = $draft ? collect($draft->desired['cards'])->firstWhere('key', $this->activeCard) : null;
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
+        if ($collection) {
+            $collection['products'] = $this->decorateProductCards($collection['products'] ?? []);
+            $collection['products'] = $this->withPlacementInfo($draft, $collection['products']);
+        }
         $products = collect();
         if ($this->addingProducts && $collection && $collection['membership_supported']) {
             $products = Product::with(['images', 'variants'])->whereNotNull('shopify_id')
@@ -838,18 +1537,43 @@ class ShopYourVibe extends Page
                 ->orderBy('title')->limit(60)->get()->unique('shopify_id');
         }
 
+        $showProductList = $this->activeTab === 'products'
+            || filled($this->managingProductGid)
+            || filled($this->managingSiblingProductGid)
+            || filled($this->managingComplementaryProductGid);
         $managedProduct = $this->managingProductGid
             ? collect($this->parentProducts)->firstWhere('id', $this->managingProductGid)
             : null;
-        $needle = mb_strtolower(trim($this->assignmentProductSearch));
-        $filteredParentProducts = collect($this->parentProducts)->filter(function (array $product) use ($needle): bool {
-            if ($needle === '') {
-                return true;
-            }
+        $filteredParentProducts = [];
+        if ($showProductList) {
+            $membershipLabels = collect($this->vibeMappings)
+                ->filter(fn ($mapping): bool => filled($mapping['membership_tag'] ?? null))
+                ->mapWithKeys(fn ($mapping): array => [
+                    mb_strtolower(trim((string) $mapping['membership_tag'])) => $mapping['collection_name'],
+                ]);
+            $needle = mb_strtolower(trim($this->assignmentProductSearch));
+            $filteredParentProducts = collect($this->parentProducts)
+                ->filter(function (array $product) use ($needle): bool {
+                    if ($needle === '') {
+                        return true;
+                    }
 
-            return str_contains(mb_strtolower((string) ($product['title'] ?? '')), $needle)
-                || str_contains(mb_strtolower((string) ($product['sku'] ?? '')), $needle);
-        })->values()->all();
+                    return str_contains(mb_strtolower((string) ($product['title'] ?? '')), $needle)
+                        || str_contains(mb_strtolower((string) ($product['sku'] ?? '')), $needle);
+                })
+                ->map(function (array $product) use ($membershipLabels): array {
+                    $productTags = collect($product['tags'] ?? [])->map(fn ($tag): string => mb_strtolower(trim((string) $tag)));
+                    $product['vibe_assignments'] = $membershipLabels
+                        ->filter(fn ($_name, string $tag): bool => $productTags->contains($tag))
+                        ->values()
+                        ->all();
+
+                    return $product;
+                })
+                ->pipe(fn ($products) => collect($this->withPlacementInfo($draft, $products->all())))
+                ->values()
+                ->all();
+        }
         $selectedVibes = collect($this->selectedVibes);
         $originalVibes = collect($this->originalSelectedVibes);
         $assignmentAdds = collect($this->vibeMappings)
@@ -865,7 +1589,11 @@ class ShopYourVibe extends Page
         $assignmentRemovals = collect($this->vibeMappings)
             ->whereIn('shopify_collection_id', $originalVibes->diff($selectedVibes))->pluck('collection_name')->values();
 
-        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals') + [
+        $complementaryProduct = $this->managingComplementaryProductGid
+            ? collect($this->parentProducts)->firstWhere('id', $this->managingComplementaryProductGid)
+            : null;
+
+        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }

@@ -139,7 +139,9 @@ final class NewProductDraftRoundtripCsvService
             'siblings_collection_name' => trim((string) ($draft->siblings_collection_name ?? '')),
             'sibling_collection' => trim((string) ($draft->sibling_collection ?? '')),
             'uvp_short_paragraph' => trim((string) ($draft->uvp_short_paragraph ?? '')),
+            'bead_colour_finish' => trim((string) ($draft->bead_colour_finish ?? '')),
             'complementary_products' => $this->productReferencesAsHandles($draft->complementary_products),
+            'associated_products' => $this->associatedProductsAsHandles($draft->bundle_product_ids),
             'style_type' => trim((string) ($styleProfile?->style_type ?? '')),
             'draft_seo_title' => trim((string) ($styleProfile?->draft_seo_title ?? '')),
             'draft_seo_description' => trim((string) ($styleProfile?->draft_seo_description ?? '')),
@@ -187,7 +189,9 @@ final class NewProductDraftRoundtripCsvService
             'siblings_collection_name' => ['label' => 'Siblings Collection Name'],
             'sibling_collection' => ['label' => 'Sibling Collection'],
             'uvp_short_paragraph' => ['label' => 'UVP Short Paragraph'],
+            'bead_colour_finish' => ['label' => 'Bead Colour Finish'],
             'complementary_products' => ['label' => 'Complementary Products'],
+            'associated_products' => ['label' => 'Associated Products'],
             'style_type' => ['label' => 'Style'],
             'draft_seo_title' => ['label' => 'SEO Title'],
             'draft_seo_description' => ['label' => 'SEO Description'],
@@ -220,6 +224,55 @@ final class NewProductDraftRoundtripCsvService
         }
 
         return implode('; ', array_values(array_unique(array_filter($handles))));
+    }
+
+    /**
+     * @param  mixed  $value
+     */
+    private function associatedProductsAsHandles(mixed $value): string
+    {
+        $ids = $this->parseAssociatedProductIds($value);
+        if ($ids === []) {
+            return '';
+        }
+
+        $products = Product::query()
+            ->whereIn('id', $ids)
+            ->get(['id', 'handle'])
+            ->keyBy('id');
+
+        $handles = [];
+        foreach ($ids as $id) {
+            $handle = trim((string) ($products->get($id)?->handle ?? ''));
+            if ($handle !== '') {
+                $handles[] = $handle;
+            }
+        }
+
+        return implode('; ', array_values(array_unique($handles)));
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function parseAssociatedProductIds(mixed $value): array
+    {
+        if (is_array($value)) {
+            $items = $value;
+        } else {
+            $raw = trim((string) ($value ?? ''));
+            if ($raw === '') {
+                return [];
+            }
+
+            $decoded = json_decode($raw, true);
+            $items = is_array($decoded) ? $decoded : preg_split('/[;,]/', $raw);
+        }
+
+        return array_values(array_unique(array_filter(
+            array_map(static fn (mixed $item): int => (int) $item, $items ?: []),
+            static fn (int $id): bool => $id > 0
+        )));
     }
 
     /**

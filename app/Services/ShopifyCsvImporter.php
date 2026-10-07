@@ -21,7 +21,6 @@ class ShopifyCsvImporter
 
             // wipe previous processed data for this import (so re-processing works)
             ShopifyRow::where('import_id', $import->id)->delete();
-            Product::where('import_id', $import->id)->delete();
 
             $csv = Reader::createFromPath($absolutePath);
             $csv->setHeaderOffset(0);
@@ -57,7 +56,7 @@ class ShopifyCsvImporter
         });
 
         // build normalized tables from rows
-        $this->normalizer->buildNormalizedTables($import);
+        $this->normalizer->buildNormalizedTables($import, stageExistingProductUpdates: true);
 
         $import->update(['status' => 'ready']);
     }
@@ -66,7 +65,8 @@ class ShopifyCsvImporter
     {
         $out = [];
         foreach ($headers as $h) {
-            $out[$h] = $row[$h] ?? '';
+            $value = $row[$h] ?? '';
+            $out[$h] = app(ShopifyTaxonomyValueNormalizer::class)->normalize((string) $h, is_scalar($value) ? (string) $value : '');
         }
         return $out;
     }

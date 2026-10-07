@@ -162,3 +162,43 @@ it('removes previous collection architecture tags before applying a newly select
         ->and($updates['tags'])->not->toContain('livi-road-bracelets')
         ->and($updates['tags'])->not->toContain('bracelets');
 });
+
+it('resolves bundle tag names to matching stack collection rules', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-stacks',
+        'collection_name' => 'Elevated Basics Stacks',
+        'add_tags' => ['bundles', 'elevated-basics-bundles'],
+        'remove_tags' => [],
+        'auto_vendor' => 'Elevated Basics Bundles',
+    ]);
+
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'earthy-stack-shop-your-vibe',
+        'collection_name' => 'Shop Your Vibe Earthy Stack',
+        'add_tags' => ['bundles', 'earthy-bundle-shop-your-vibe'],
+        'remove_tags' => [],
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $service = app(PrepopulationRuleService::class);
+
+    expect($service->ruleForCollection('elevated-basics-bundles')?->handle)->toBe('elevated-basics-stacks')
+        ->and($service->ruleForCollection('earthy-bundle-shop-your-vibe')?->handle)->toBe('earthy-stack-shop-your-vibe');
+});
+
+it('keeps elevated basics bundle vendor when bundle rules use the base vendor', function (): void {
+    $rule = PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-bundles',
+        'collection_name' => 'Elevated Basics Bundles',
+        'add_tags' => ['all-products', 'elevated-basics', 'bundles', 'elevated-basics-bundles'],
+        'remove_tags' => [],
+        'auto_vendor' => 'Elevated Basics',
+    ]);
+
+    $updates = app(PrepopulationRuleService::class)->applyRule($rule, [], null);
+
+    expect($updates['vendor'])->toBe('Elevated Basics Bundles');
+});

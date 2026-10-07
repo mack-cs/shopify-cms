@@ -2,10 +2,12 @@
 
 namespace App\Services;
 
-use App\Models\Product;
 use App\Models\Import;
+use App\Models\NewProductDraft;
+use App\Models\Product;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeDraft;
+use App\Models\ShopYourVibeCollectionMapping;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -25,6 +27,8 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($gid);
+        $state['collections'][$gid] = $this->shopify->collection($gid);
+        $state = $this->hydrateDraftPlacements($gid, $state);
 
         return ShopYourVibeDraft::firstOrCreate(['collection_gid' => $gid], [
             'snapshot' => $state, 'desired' => $state, 'refreshed_at' => now(),
@@ -42,17 +46,23 @@ class ShopYourVibeWorkflow
         }
         $this->shopify->definition();
         $state = $this->shopify->parent($draft->collection_gid);
+        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
             $state['collections'][$gid] = $this->shopify->collection($gid);
         }
+        $state = $this->hydrateDraftPlacements($draft->collection_gid, $state, $draft->desired ?? []);
 
-        return DB::transaction(function () use ($id, $revision, $state) {
+        app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($state);
+
+        $refreshed = DB::transaction(function () use ($id, $revision, $state) {
             $draft = $this->editable($id, $revision, true);
             $draft->update(['snapshot' => $state, 'desired' => $state, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'progress' => [], 'remote_jobs' => [], 'revision' => $revision + 1, 'refreshed_at' => now()]);
 
             return $draft;
         });
+
+        return $refreshed;
     }
 
     public function loadProducts(int $id, int $revision, string $key): ShopYourVibeDraft
@@ -71,6 +81,8 @@ class ShopYourVibeWorkflow
             $desired = $draft->desired;
             $snapshot = $draft->snapshot;
             $desired['collections'][$gid] = $snapshot['collections'][$gid] = $collection;
+            $desired = $this->hydrateDraftPlacements($draft->collection_gid, $desired, $desired);
+            $snapshot = $this->hydrateDraftPlacements($draft->collection_gid, $snapshot, $desired);
             $draft->update(['desired' => $desired, 'snapshot' => $snapshot, 'revision' => $revision + 1]);
 
             return $draft;
@@ -106,9 +118,16 @@ class ShopYourVibeWorkflow
                     }
                     $key = (string) Str::uuid();
                     $gid = 'new:'.$key;
-                    $state['new_collections'][$key] = $fields + ['token' => $key, 'gid' => $gid, 'published' => false, 'import_id' => $importId];
+                    $state['new_collections'][$key] = $fields + [
+                        'token' => $key,
+                        'gid' => $gid,
+                        'published' => false,
+                        'import_id' => $importId,
+                        'membership_tag' => $fields['handle'],
+                    ];
                     $state['collections'][$gid] = ['gid' => $gid, 'title' => $fields['title'], 'handle' => $fields['handle'],
-                        'sort' => 'MANUAL', 'manual_supported' => true, 'membership_supported' => true,
+                        'sort' => 'MANUAL', 'manual_supported' => true, 'membership_supported' => false,
+                        'detected_membership_tag' => $fields['handle'],
                         'enable_manual' => false, 'products' => []];
                     $state['cards'][] = ['key' => $key, 'id' => null, 'handle' => 'cms-vibe-'.$key,
                         'name' => $fields['title'], 'image' => $fields['image'] ?? '', 'image_url' => $fields['image_url'] ?? null,
@@ -170,7 +189,7 @@ class ShopYourVibeWorkflow
                     }
                     $state['cards'] = array_values(array_filter($state['cards'], fn ($card) => $card['key'] !== $input['key']));
                     // Do not push product edits for a collection no longer represented in this layout.
-                    $gids = array_column($state['cards'], 'collection_gid');
+                    $gids = array_merge([$draft->collection_gid], array_column($state['cards'], 'collection_gid'));
                     $state['collections'] = array_intersect_key($state['collections'], array_flip(array_filter($gids)));
                     break;
                 case 'reorder_cards':
@@ -181,7 +200,7 @@ class ShopYourVibeWorkflow
                 case 'remove_product':
                 case 'reorder_products':
                     $gid = $input['collection_gid'];
-                    if (! in_array($gid, array_column($state['cards'], 'collection_gid'), true) || ! isset($state['collections'][$gid])) {
+                    if (($gid !== $draft->collection_gid && ! in_array($gid, array_column($state['cards'], 'collection_gid'), true)) || ! isset($state['collections'][$gid])) {
                         throw new RuntimeException('Open this vibe’s products first.');
                     }
                     $collection = &$state['collections'][$gid];
@@ -191,10 +210,15 @@ class ShopYourVibeWorkflow
                         }
                         $collection['enable_manual'] = $collection['sort'] !== 'MANUAL';
                     } elseif ($operation === 'reorder_products') {
-                        if (! $collection['manual_supported'] || ($collection['sort'] !== 'MANUAL' && ! $collection['enable_manual'])) {
-                            throw new RuntimeException('Explicitly enable manual sorting before reordering products.');
+                        if (! $this->manualSortingSupported($collection)) {
+                            throw new RuntimeException('Manual sorting is not supported for this collection.');
+                        }
+                        if ($collection['sort'] !== 'MANUAL') {
+                            $collection['manual_supported'] = true;
+                            $collection['enable_manual'] = true;
                         }
                         $collection['products'] = $this->reorder($collection['products'], $input['ids'], 'id');
+                        $this->markPlacedDrafts($state, $gid, $collection['products']);
                     } else {
                         if (! $collection['membership_supported']) {
                             throw new RuntimeException('Shopify rules control membership in this automated collection.');
@@ -223,7 +247,10 @@ class ShopYourVibeWorkflow
                 default:
                     throw new RuntimeException('Unknown workflow edit.');
             }
-            $represented = array_filter(array_column($state['cards'], 'collection_gid'));
+            $represented = array_values(array_unique(array_filter(array_merge(
+                [$draft->collection_gid],
+                array_column($state['cards'], 'collection_gid'),
+            ))));
             foreach ($state['delete_collections'] ?? [] as $gid => $deletion) {
                 if (in_array($gid, $represented, true)) {
                     throw new RuntimeException('Another vibe in this layout uses the collection selected for deletion. Remove that vibe first.');
@@ -252,6 +279,35 @@ class ShopYourVibeWorkflow
 
             return $draft;
         });
+    }
+
+    public function confirmCompletedPush(int $id): ShopYourVibeDraft
+    {
+        $draft = ShopYourVibeDraft::findOrFail($id);
+        if (! $draft->pending || $draft->status === 'pushing' || $draft->status === 'failed') {
+            return $draft;
+        }
+        if ($draft->remote_jobs || empty($draft->progress)) {
+            return $draft;
+        }
+
+        $state = $draft->desired;
+        if (collect($state['cards'] ?? [])->contains(fn ($card) => empty($card['id']) || str_starts_with((string) ($card['collection_gid'] ?? ''), 'new:'))) {
+            return $draft;
+        }
+        if (collect($state['new_collections'] ?? [])->contains(fn ($collection) => empty($collection['published']) || str_starts_with((string) ($collection['gid'] ?? ''), 'new:'))) {
+            return $draft;
+        }
+        if (collect($state['delete_cards'] ?? [])->contains(fn ($deletion) => empty($deletion['deleted']))
+            || collect($state['delete_collections'] ?? [])->contains(fn ($deletion) => empty($deletion['deleted']))) {
+            return $draft;
+        }
+
+        $confirmed = $this->confirmedState($draft, $state, array_column($state['cards'] ?? [], 'id'));
+        $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
+            'last_error' => null, 'remote_jobs' => [], 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
+
+        return $draft->refresh();
     }
 
     /** Called by the queue worker only after the explicit push action. */
@@ -328,7 +384,7 @@ class ShopYourVibeWorkflow
                 if (! $current['membership_supported'] && $this->membership($current) !== $this->membership($desiredCollection)) {
                     throw new RuntimeException('Shopify rules control membership in '.$current['title'].'.');
                 }
-                if (! $current['manual_supported'] && ($desiredCollection['enable_manual']
+                if (! $this->manualSortingSupported($current) && ($desiredCollection['enable_manual']
                     || ($current['sort'] === 'MANUAL' && array_column($current['products'], 'id') !== array_column($desiredCollection['products'], 'id')))) {
                     throw new RuntimeException('Manual sorting is not supported for '.$current['title'].'.');
                 }
@@ -350,7 +406,11 @@ class ShopYourVibeWorkflow
                 $gid = $created['id'];
                 $creation['gid'] = $gid;
                 $state['new_collections'][$token] = $creation;
-                $state['collections'][$gid] = array_replace($state['collections'][$oldGid], ['gid' => $gid, 'handle' => $created['handle']]);
+                $confirmedCollection = $this->shopify->collection($gid);
+                $state['collections'][$gid] = array_replace($state['collections'][$oldGid], $confirmedCollection, [
+                    'gid' => $gid,
+                    'handle' => $created['handle'],
+                ]);
                 unset($state['collections'][$oldGid]);
                 foreach ($state['cards'] as &$item) {
                     if ($item['collection_gid'] === $oldGid) {
@@ -362,7 +422,7 @@ class ShopYourVibeWorkflow
                 }
                 unset($item);
                 // Creation is checkpointed before publication or product changes can fail.
-                $baseline['collections'][$gid] = array_replace($state['collections'][$gid], ['products' => []]);
+                $baseline['collections'][$gid] = $state['collections'][$gid];
                 $currentCollections[$gid] = $baseline['collections'][$gid];
                 $progress[] = 'Collection created: '.$created['title'];
                 $draft->update(['desired' => $state, 'snapshot' => $baseline, 'progress' => $progress]);
@@ -400,7 +460,10 @@ class ShopYourVibeWorkflow
                     $draft->update(['snapshot' => $baseline]);
                     $progress[] = 'Manual sorting enabled: '.$current['title'];
                 }
-                $wantedIds = array_column($desired['products'], 'id');
+                $wantedIds = array_values(array_filter(
+                    array_column($desired['products'], 'id'),
+                    fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/Product/\d+$~', $id)
+                ));
                 $remove = array_diff(array_column($current['products'], 'id'), $wantedIds);
                 foreach (array_chunk($remove, 250) as $chunk) {
                     $job = $this->shopify->removeProducts($gid, $chunk);
@@ -431,10 +494,21 @@ class ShopYourVibeWorkflow
                         $this->checkpointCollection($draft, $baseline, $gid);
                     }
                 }
-                if ($this->collectionDifferent($current, $desired)) {
+                $confirmableDesired = array_replace($desired, [
+                    'products' => array_values(array_filter(
+                        $desired['products'],
+                        fn ($product): bool => is_string($product['id'] ?? null) && preg_match('~^gid://shopify/Product/\d+$~', $product['id'])
+                    )),
+                ]);
+                if ($this->collectionDifferent($current, $confirmableDesired)) {
                     throw new RuntimeException('Product sorting was not confirmed for '.$current['title'].'.');
                 }
-                $state['collections'][$gid] = $baseline['collections'][$gid] = $current;
+                $state['collections'][$gid] = array_replace($desired, [
+                    'sort' => $current['sort'],
+                    'enable_manual' => false,
+                    'product_count' => $current['product_count'] ?? count($current['products']),
+                ]);
+                $baseline['collections'][$gid] = $state['collections'][$gid];
                 $progress[] = 'Products synced: '.$current['title'];
                 $draft->update(['snapshot' => $baseline, 'desired' => $state, 'progress' => $progress]);
             }
@@ -468,11 +542,7 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
                 Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
             }
-            $confirmed = $this->shopify->parent($draft->collection_gid);
-            if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
-                throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
-            }
-            $confirmed['collections'] = $state['collections'];
+            $confirmed = $this->confirmedState($draft, $state, $ids);
             $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'remote_jobs' => [], 'progress' => $progress, 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
         } catch (Throwable $e) {
@@ -481,6 +551,22 @@ class ShopYourVibeWorkflow
         } finally {
             $lock->release();
         }
+    }
+
+    private function confirmedState(ShopYourVibeDraft $draft, array $state, array $ids): array
+    {
+        $confirmed = $this->shopify->parent($draft->collection_gid);
+        if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
+            throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
+        }
+        foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
+            if (preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
+                $state['collections'][$gid] = $this->shopify->collection($gid);
+            }
+        }
+        $confirmed['collections'] = $state['collections'];
+
+        return $confirmed;
     }
 
     private function trackJob(ShopYourVibeDraft $draft, string $gid, string $job): void
@@ -496,7 +582,7 @@ class ShopYourVibeWorkflow
         $collection = $draft->desired['collections'][$creation['gid']];
         ShopifyCollection::withoutEvents(fn () => ShopifyCollection::firstOrCreate(['shopify_id' => $creation['gid']], [
             'import_id' => $creation['import_id'],
-            'handle' => $collection['handle'], 'title' => $creation['title'],
+            'handle' => $collection['handle'], 'title' => $collection['title'] ?? $creation['title'],
             'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED, 'last_synced_at' => now(),
         ]));
     }
@@ -567,18 +653,167 @@ class ShopYourVibeWorkflow
     private function collectionDifferent(array $before, array $after): bool
     {
         $sort = $after['enable_manual'] ? 'MANUAL' : $after['sort'];
+        $beforeProducts = array_values(array_filter(
+            $before['products'] ?? [],
+            fn ($product): bool => is_string($product['id'] ?? null) && preg_match('~^gid://shopify/Product/\d+$~', $product['id'])
+        ));
+        $afterProducts = array_values(array_filter(
+            $after['products'] ?? [],
+            fn ($product): bool => is_string($product['id'] ?? null) && preg_match('~^gid://shopify/Product/\d+$~', $product['id'])
+        ));
 
         return $before['sort'] !== $sort || ($sort === 'MANUAL'
-            ? array_column($before['products'], 'id') !== array_column($after['products'], 'id')
+            ? array_column($beforeProducts, 'id') !== array_column($afterProducts, 'id')
             : $this->membership($before) !== $this->membership($after));
+    }
+
+    private function manualSortingSupported(array $collection): bool
+    {
+        return ($collection['manual_supported'] ?? true) !== false
+            || ($collection['sort'] ?? null) !== 'UNSUPPORTED';
     }
 
     private function membership(array $collection): array
     {
-        $ids = array_column($collection['products'], 'id');
+        $ids = array_values(array_filter(
+            array_column($collection['products'], 'id'),
+            fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/Product/\d+$~', $id)
+        ));
         sort($ids);
 
         return $ids;
+    }
+
+    private function hydrateDraftPlacements(string $parentGid, array $state, array $previous = []): array
+    {
+        $represented = array_values(array_unique(array_filter(array_merge(
+            [$parentGid],
+            array_column($state['cards'] ?? [], 'collection_gid'),
+        ))));
+        if ($represented === []) {
+            return $state;
+        }
+
+        $drafts = NewProductDraft::query()->get();
+        if ($drafts->isEmpty()) {
+            return $state;
+        }
+
+        $collections = $this->placementCollectionRules($parentGid, $state);
+        foreach ($represented as $gid) {
+            if (! isset($state['collections'][$gid], $collections[$gid])) {
+                continue;
+            }
+            $previousList = collect(data_get($previous, "collections.{$gid}.products", []))->values();
+            $previousProducts = $previousList->keyBy('id');
+            $products = collect($state['collections'][$gid]['products'] ?? [])->values();
+            foreach ($drafts as $draft) {
+                $draftId = $this->draftProductId($draft);
+                $id = $draftId;
+                $liveGid = trim((string) ($draft->shopify_id ?? ''));
+                if ($liveGid !== '' && preg_match('~^gid://shopify/Product/\d+$~', $liveGid)) {
+                    $id = $liveGid;
+                }
+                if (! $this->draftBelongsToCollection($draft, $collections[$gid])) {
+                    unset($state['draft_placements'][$draftId][$gid], $state['draft_placements'][$id][$gid]);
+                    continue;
+                }
+                $previousCard = $previousProducts->get($draftId) ?? $previousProducts->get($id);
+                if ($previousCard !== null) {
+                    $previousCard['id'] = $id;
+                }
+                if ($previousCard === null && $products->contains(fn (array $product): bool => ($product['id'] ?? null) === $id)) {
+                    continue;
+                }
+                $card = $previousCard ?? $this->draftProductCard($draft, $id);
+                $products = $products
+                    ->reject(fn (array $product): bool => in_array($product['id'] ?? null, [$draftId, $id], true))
+                    ->values();
+                $previousIndex = $previousList->search(fn (array $product): bool => in_array($product['id'] ?? null, [$draftId, $id], true));
+                if ($previousIndex === false) {
+                    $products->push($card);
+                } else {
+                    $products->splice(min((int) $previousIndex, $products->count()), 0, [$card]);
+                }
+            }
+            $state['collections'][$gid]['products'] = $products->values()->all();
+        }
+
+        return $state;
+    }
+
+    private function placementCollectionRules(string $parentGid, array $state): array
+    {
+        $rules = [];
+        foreach ($state['collections'] ?? [] as $gid => $collection) {
+            $rules[$gid] = [
+                'gid' => $gid,
+                'title' => $collection['title'] ?? '',
+                'handle' => $collection['handle'] ?? '',
+                'membership_tag' => $collection['detected_membership_tag'] ?? null,
+            ];
+        }
+        foreach (ShopYourVibeCollectionMapping::query()->where('parent_collection_id', $parentGid)->where('is_active', true)->get() as $mapping) {
+            $gid = $mapping->shopify_collection_id;
+            $rules[$gid]['membership_tag'] = $mapping->membership_tag ?: ($rules[$gid]['membership_tag'] ?? null);
+            $rules[$gid]['title'] = $mapping->collection_name ?: ($rules[$gid]['title'] ?? '');
+            $rules[$gid]['handle'] = $mapping->collection_handle ?: ($rules[$gid]['handle'] ?? '');
+        }
+
+        return $rules;
+    }
+
+    private function draftBelongsToCollection(NewProductDraft $draft, array $collection): bool
+    {
+        $tags = collect(TagNormalizer::parseTokens((string) $draft->tags))
+            ->map(fn (string $tag): string => mb_strtolower($tag));
+        $membershipTag = TagNormalizer::normalizeToken((string) ($collection['membership_tag'] ?? ''));
+        if ($membershipTag !== null && $tags->contains(mb_strtolower($membershipTag))) {
+            return true;
+        }
+        foreach ([$collection['handle'] ?? '', $collection['title'] ?? ''] as $value) {
+            $token = TagNormalizer::normalizeToken((string) $value);
+            if ($token !== null && $tags->contains(mb_strtolower($token))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function draftProductId(NewProductDraft $draft): string
+    {
+        return 'draft:'.$draft->id;
+    }
+
+    private function draftProductCard(NewProductDraft $draft, string $id): array
+    {
+        return [
+            'id' => $id,
+            'title' => (string) ($draft->title ?: $draft->handle ?: 'Draft product #'.$draft->id),
+            'status' => $draft->isApprovedByTwo() ? 'APPROVED - NOT LIVE' : ((string) ($draft->status ?: 'DRAFT')),
+            'tags' => TagNormalizer::parseTokens((string) $draft->tags),
+            'image' => $draft->imageUrl(),
+            'sku' => $draft->sku,
+            'is_prelaunch_draft' => true,
+            'draft_id' => $draft->id,
+        ];
+    }
+
+    private function markPlacedDrafts(array &$state, string $gid, array $products): void
+    {
+        foreach ($products as $position => $product) {
+            $id = (string) ($product['id'] ?? '');
+            if (! str_starts_with($id, 'draft:')) {
+                continue;
+            }
+            $state['draft_placements'][$id][$gid] = [
+                'status' => 'complete',
+                'position' => $position,
+                'positioned_at' => now()->toISOString(),
+                'synced' => false,
+            ];
+        }
     }
 
     private function fields(?array $card): array

@@ -63,7 +63,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
     public function product(int $id): array
     {
         return $this->products['gid://shopify/Product/'.$id] = ['id' => 'gid://shopify/Product/'.$id, 'title' => 'Product '.$id,
-            'status' => 'ACTIVE', 'tags' => [], 'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'],
+            'vendor' => 'Livi Road', 'productType' => 'Bracelets', 'status' => 'ACTIVE', 'tags' => [], 'featuredImage' => ['url' => 'https://cdn.shopify.com/product.jpg'],
+            'materialsAndDimensions' => null, 'colorPattern' => null, 'jewelryMaterial' => null, 'beadColourFinish' => null,
             'variants' => ['nodes' => [['sku' => 'SKU-'.$id]]]];
     }
 
@@ -144,7 +145,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             $id = 'gid://shopify/Collection/'.(count($this->collections) + 100);
             $this->collections[$id] = ['id' => $id, 'title' => $input['title'], 'handle' => $input['handle'],
                 'image' => isset($input['image']) ? ['url' => $input['image']['src']] : null, 'updatedAt' => '2026-09-09T12:00:00Z',
-                'sortOrder' => $input['sortOrder'], 'ruleSet' => null, 'metafield' => ['value' => $input['metafields'][0]['value']],
+                'sortOrder' => $input['sortOrder'], 'ruleSet' => $input['ruleSet'] ?? null, 'metafield' => ['value' => $input['metafields'][0]['value']],
+                'productsCount' => ['count' => 0],
                 'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
             if ($this->loseCreateResponse) {
                 $this->loseCreateResponse = false;
@@ -175,6 +177,10 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         }
         if (str_contains($query, 'query VibeParents')) {
             return ['collections' => ['nodes' => array_map(fn ($collection) => array_replace($collection, ['metafield' => $this->metafield($collection['id'])]), array_values($this->collections)),
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+        }
+        if (str_contains($query, 'query VibeSiblingCollections')) {
+            return ['collections' => ['nodes' => array_values($this->collections),
                 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
         }
         if (str_contains($query, 'query VibeParent(')) {

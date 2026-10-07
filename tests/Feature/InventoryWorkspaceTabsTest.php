@@ -88,6 +88,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionHidden('viewSupplierOrders', $variant)
         ->assertTableActionHidden('viewInventoryAdjustments', $variant)
         ->assertTableBulkActionVisible('exportSelectedInventory')
+        ->assertTableBulkActionVisible('updateInventoryPolicy')
         ->assertTableBulkActionHidden('exportSelectedOrders')
         ->assertTableBulkActionHidden('pushReceivedToShopify')
         ->assertSee('Check Shopify Inventory')
@@ -107,6 +108,7 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionHidden('updateStatus', $variant)
         ->assertTableActionHidden('pushToShopify', $variant)
         ->assertTableBulkActionHidden('exportSelectedInventory')
+        ->assertTableBulkActionHidden('updateInventoryPolicy')
         ->assertTableBulkActionVisible('exportSelectedOrders')
         ->assertTableBulkActionVisible('exportSelectedReceipts')
         ->assertTableBulkActionVisible('pushReceivedToShopify')
@@ -268,6 +270,91 @@ it('filters the inventory table using a pasted SKU list', function (): void {
         ->filterTable('sku_list', ['skus' => "missing-0,\nWANTED-1"])
         ->assertCanSeeTableRecords([$wanted])
         ->assertCanNotSeeTableRecords([$other]);
+});
+
+it('shows and filters variants that can sell when out of stock', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'sell-oos-filter.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'sell-oos-filter', 'title' => 'Sell OOS Filter', 'status' => 'active',
+    ]);
+    $sellOutOfStock = Variant::query()->create([
+        'product_id' => $product->id,
+        'sku' => 'SELL-OOS-ON',
+        'inventory_policy' => 'continue',
+    ]);
+    $normal = Variant::query()->create([
+        'product_id' => $product->id,
+        'sku' => 'SELL-OOS-OFF',
+        'inventory_policy' => 'deny',
+    ]);
+    $this->actingAs($user);
+
+    Livewire::test(ListInventories::class)
+        ->assertTableColumnVisible('inventory_policy')
+        ->assertTableFilterVisible('inventory_policy')
+        ->filterTable('inventory_policy', 'continue')
+        ->assertCanSeeTableRecords([$sellOutOfStock])
+        ->assertCanNotSeeTableRecords([$normal])
+        ->set('activeTab', 'orders')
+        ->assertTableColumnVisible('inventory_policy')
+        ->assertTableFilterVisible('inventory_policy')
+        ->filterTable('inventory_policy', 'deny')
+        ->assertCanSeeTableRecords([$normal])
+        ->assertCanNotSeeTableRecords([$sellOutOfStock]);
+});
+
+it('bulk updates sell when out of stock policy from the inventory workspace', function (): void {
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'bulk-sell-oos.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'bulk-sell-oos', 'title' => 'Bulk Sell OOS', 'status' => 'active',
+    ]);
+    $selected = Variant::query()->create([
+        'product_id' => $product->id,
+        'sku' => 'BULK-OOS-1',
+        'shopify_id' => 'gid://shopify/ProductVariant/1001',
+        'inventory_policy' => 'continue',
+        'inventory_local_dirty' => false,
+    ]);
+    $alsoSelected = Variant::query()->create([
+        'product_id' => $product->id,
+        'sku' => 'BULK-OOS-2',
+        'shopify_id' => 'gid://shopify/ProductVariant/1002',
+        'inventory_policy' => 'continue',
+        'inventory_local_dirty' => false,
+    ]);
+    $notSelected = Variant::query()->create([
+        'product_id' => $product->id,
+        'sku' => 'BULK-OOS-3',
+        'inventory_policy' => 'continue',
+        'inventory_local_dirty' => false,
+    ]);
+    Variant::withoutEvents(fn () => Variant::query()
+        ->whereKey([$selected->id, $alsoSelected->id, $notSelected->id])
+        ->update(['inventory_local_dirty' => false]));
+    $this->actingAs($user);
+
+    Livewire::test(ListInventories::class)
+        ->callTableBulkAction('updateInventoryPolicy', [$selected, $alsoSelected], data: [
+            'inventory_policy' => 'deny',
+            'push_to_shopify' => false,
+        ]);
+
+    expect($selected->fresh()->inventory_policy)->toBe('deny')
+        ->and($selected->fresh()->inventory_local_dirty)->toBeTrue()
+        ->and($alsoSelected->fresh()->inventory_policy)->toBe('deny')
+        ->and($alsoSelected->fresh()->inventory_local_dirty)->toBeTrue()
+        ->and($notSelected->fresh()->inventory_policy)->toBe('continue')
+        ->and($notSelected->fresh()->inventory_local_dirty)->toBeFalse();
 });
 
 it('shows only active products in the inventory workspace', function (): void {

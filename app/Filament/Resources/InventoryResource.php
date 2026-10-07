@@ -123,6 +123,21 @@ class InventoryResource extends Resource
                         default => 'warning',
                     })
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
+                TextColumn::make('inventory_policy')
+                    ->label('Sell OOS')
+                    ->state(fn (Variant $record): string => match (strtolower(trim((string) $record->inventory_policy))) {
+                        'continue' => 'On',
+                        'deny' => 'Off',
+                        default => 'Unknown',
+                    })
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        'On' => 'danger',
+                        'Unknown' => 'warning',
+                        default => 'gray',
+                    })
+                    ->sortable()
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true)),
                 TextColumn::make('inventory_qty')
                     ->label('Available')
                     ->state(fn (Variant $record): string => match ($record->inventory_tracked) {
@@ -585,6 +600,24 @@ class InventoryResource extends Resource
                     ->label('Pending Push')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday')
                     ->query(fn (Builder $query): Builder => $query->getModel() instanceof Variant ? $query->where('inventory_local_dirty', true) : $query),
+                SelectFilter::make('inventory_policy')
+                    ->label('Sell when out of stock')
+                    ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true))
+                    ->options([
+                        'continue' => 'On',
+                        'deny' => 'Off',
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        if (! ($query->getModel() instanceof Variant)) {
+                            return $query;
+                        }
+                        $value = strtolower(trim((string) ($data['value'] ?? '')));
+                        if (! in_array($value, ['continue', 'deny'], true)) {
+                            return $query;
+                        }
+
+                        return $query->whereRaw('LOWER(TRIM(inventory_policy)) = ?', [$value]);
+                    }),
                 SelectFilter::make('product_status')
                     ->label('Status')
                     ->visible(fn ($livewire): bool => in_array($livewire->activeTab, ['everyday', 'orders'], true))
@@ -986,6 +1019,102 @@ class InventoryResource extends Resource
                             }
 
                             $notification->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('updateInventoryPolicy')
+                        ->label('Set Sell When Out Of Stock')
+                        ->icon('heroicon-o-arrow-path-rounded-square')
+                        ->color('warning')
+                        ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                            && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                        ->requiresConfirmation()
+                        ->modalHeading('Update sell when out of stock?')
+                        ->modalDescription('This changes the selected variants locally and marks them pending for inventory push.')
+                        ->modalSubmitActionLabel('Update Selected')
+                        ->form([
+                            Forms\Components\Select::make('inventory_policy')
+                                ->label('Sell when out of stock')
+                                ->options([
+                                    'continue' => 'On',
+                                    'deny' => 'Off',
+                                ])
+                                ->required(),
+                            Forms\Components\Toggle::make('push_to_shopify')
+                                ->label('Push changed variants to Shopify after updating')
+                                ->helperText('Leave this off to review the local changes first. You can use the existing bulk Push To Shopify action later.')
+                                ->default(false),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $policy = strtolower(trim((string) ($data['inventory_policy'] ?? '')));
+                            if (! in_array($policy, ['continue', 'deny'], true)) {
+                                Notification::make()
+                                    ->title('Invalid inventory policy')
+                                    ->body('Choose On or Off before updating.')
+                                    ->danger()
+                                    ->send();
+
+                                return;
+                            }
+
+                            $updated = 0;
+                            $unchanged = 0;
+                            $changedVariantIds = [];
+                            $changedProductIds = [];
+
+                            foreach ($records as $record) {
+                                if (! $record instanceof Variant) {
+                                    continue;
+                                }
+
+                                if (strtolower(trim((string) $record->inventory_policy)) === $policy) {
+                                    $unchanged++;
+                                    continue;
+                                }
+
+                                InventoryOperationContext::run(function () use ($record, $policy): void {
+                                    $record->inventory_policy = $policy;
+                                    $record->inventory_sync_error = null;
+                                    $record->save();
+                                });
+
+                                $updated++;
+                                $changedVariantIds[] = (int) $record->id;
+                                $changedProductIds[(int) $record->product_id] = true;
+                            }
+
+                            foreach (array_keys($changedProductIds) as $productId) {
+                                $product = Product::query()->with('variants')->find($productId);
+                                if ($product instanceof Product) {
+                                    app(ProductInventoryHistoryRecorder::class)->record(
+                                        $product,
+                                        Auth::id(),
+                                        ProductInventorySnapshot::SOURCE_LOCAL_UPDATE,
+                                    );
+                                }
+                            }
+
+                            if (($data['push_to_shopify'] ?? false) && ! empty($changedVariantIds)) {
+                                InventorySyncJob::dispatch(
+                                    $changedVariantIds,
+                                    'push',
+                                    Auth::id(),
+                                    'inventory_'.now()->format('YmdHis'),
+                                );
+                            }
+
+                            $body = "Updated {$updated} variant(s).";
+                            if ($unchanged > 0) {
+                                $body .= " Already set: {$unchanged}.";
+                            }
+                            if (($data['push_to_shopify'] ?? false) && $updated > 0) {
+                                $body .= ' Shopify push queued.';
+                            }
+
+                            Notification::make()
+                                ->title($updated > 0 ? 'Sell when out of stock updated' : 'No variants changed')
+                                ->body($body)
+                                ->success()
+                                ->send();
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('refreshFromShopify')

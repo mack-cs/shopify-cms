@@ -51,6 +51,7 @@ use App\Services\ProductPartialApprovalService;
 use App\Services\SaleTagService;
 use App\Services\SaleProductUpdateImporter;
 use App\Services\PrepopulationRuleService;
+use App\Services\SiblingCollectionResolver;
 use Filament\Forms;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Actions;
@@ -532,7 +533,8 @@ class NewProductDraftResource extends Resource
                                         is_string($state) ? $state : null,
                                         $resolvedType,
                                         $get('title'),
-                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                        filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                     );
                                     $set('tags', $tags);
                                     self::applyCollectionPrepopulation(
@@ -610,7 +612,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             null,
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                         return;
                                     }
@@ -624,7 +627,8 @@ class NewProductDraftResource extends Resource
                                     $set('tags', self::defaultedDraftTags(
                                         self::normalizeTagList($get('tags')),
                                         $state,
-                                        self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                        self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                        filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                     ));
                                 }),
                             Select::make('product_category')
@@ -650,7 +654,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             null,
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                         return;
                                     }
@@ -662,7 +667,8 @@ class NewProductDraftResource extends Resource
                                         $set('tags', self::defaultedDraftTags(
                                             self::normalizeTagList($get('tags')),
                                             $mapping['type'],
-                                            self::saleStateFromForm($get('is_on_sale'), $get('tags'))
+                                            self::saleStateFromForm($get('is_on_sale'), $get('tags')),
+                                            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
                                         ));
                                     }
                                 }),
@@ -862,6 +868,28 @@ class NewProductDraftResource extends Resource
                                         $set('variant_price', null);
                                     }
                                 }),
+                            Forms\Components\Toggle::make('is_new_in')
+                                ->label('Mark as new in')
+                                ->default(true)
+                                ->inline(false)
+                                ->live()
+                                ->helperText('Adds the New In tags, including collection-specific New In tags. Turn off to remove New In tagging.')
+                                ->afterStateHydrated(function (Forms\Components\Toggle $component, ?NewProductDraft $record): void {
+                                    $tags = self::normalizeTagList($record?->tags);
+                                    $component->state($tags === [] || self::newInStateFromTags($tags));
+                                })
+                                ->afterStateUpdated(function ($state, callable $set, Get $get): void {
+                                    $isNewIn = filter_var($state, FILTER_VALIDATE_BOOLEAN);
+                                    $isOnSale = self::saleStateFromForm($get('is_on_sale'), $get('tags'));
+                                    $tags = self::defaultedDraftTags(
+                                        self::normalizeTagList($get('tags')),
+                                        $get('type'),
+                                        $isOnSale,
+                                        $isNewIn
+                                    );
+
+                                    $set('tags', $tags);
+                                }),
                         ])
                         ->columnSpanFull(),
                     Forms\Components\Grid::make(2)
@@ -913,22 +941,6 @@ class NewProductDraftResource extends Resource
                                         $get('bundle_component_quantities'),
                                         $state,
                                     ));
-
-                                    if (!self::shouldShowBundleImageTools($get, $record)) {
-                                        return;
-                                    }
-
-                                    $allowed = array_keys(self::bundleProductImageOptions($state));
-                                    $selected = array_values(array_intersect(
-                                        self::normalizeBundleImageUrls($get('bundle_image_urls')),
-                                        $allowed
-                                    ));
-
-                                    $set('bundle_image_urls', $selected);
-
-                                    if ($selected !== [] && blank($get('image_path'))) {
-                                        $set('image_url', $selected[0]);
-                                    }
                                 })
                                 ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleProductIds($state))),
                             Forms\Components\Repeater::make('bundle_component_quantities')
@@ -1222,7 +1234,7 @@ class NewProductDraftResource extends Resource
                                             ->integer()
                                             ->minValue(0)
                                             ->default(NewProductDraft::DEFAULT_VARIANT_INVENTORY_QTY)
-                                            ->helperText('Defaults to 40; change it when needed.')
+                                            ->helperText('Defaults to 15; change it when needed.')
                                             ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
                                                 if ($record === null || $state !== null) {
                                                     return;
@@ -1343,27 +1355,6 @@ class NewProductDraftResource extends Resource
                             }
                         })
                         ->visible(fn (Get $get, ?NewProductDraft $record): bool => !self::draftImageLocked($get, $record) && blank($get('image_path'))),
-                    CheckboxList::make('bundle_image_urls')
-                        ->label('Associated product image choices')
-                        ->helperText('Pick images from the associated products. The first selected image becomes the draft primary image URL.')
-                        ->columns(2)
-                        ->bulkToggleable()
-                        ->options(fn (Get $get): array => self::bundleProductImageOptions($get('bundle_product_ids')))
-                        ->visible(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record)
-                            && self::normalizeBundleProductIds($get('bundle_product_ids')) !== [])
-                        ->afterStateHydrated(function (CheckboxList $component, $state): void {
-                            $component->state(self::normalizeBundleImageUrls($state));
-                        })
-                        ->afterStateUpdated(function ($state, callable $set, Get $get): void {
-                            $selected = self::normalizeBundleImageUrls($state);
-                            if ($selected === [] || filled($get('image_path'))) {
-                                return;
-                            }
-
-                            $set('image_url', $selected[0]);
-                        })
-                        ->dehydrated(fn (Get $get, ?NewProductDraft $record): bool => self::shouldShowBundleImageTools($get, $record))
-                        ->dehydrateStateUsing(fn ($state): ?array => self::nullableArray(self::normalizeBundleImageUrls($state))),
                     Placeholder::make('image_locked_notice')
                         ->label('')
                         ->content(function (Get $get, ?NewProductDraft $record): ?string {
@@ -1486,6 +1477,39 @@ class NewProductDraftResource extends Resource
                     RichEditor::make('uvp_short_paragraph')
                         ->label('UVP Short Paragraph')
                         ->toolbarButtons(self::compactRichTextToolbarButtons()),
+                    Select::make('bead_colour_finish')
+                        ->label('Bead Colour Finish')
+                        ->helperText(fn (Get $get): ?HtmlString => self::invalidCollectionSelectionHint(
+                            $get,
+                            'bead_colour_finish',
+                            HeaderStore::BEAD_COLOUR_FINISH
+                        ))
+                        ->placeholder('Select option')
+                        ->options(fn (Get $get): array => self::dropdownOptionsForHeader(
+                            HeaderStore::BEAD_COLOUR_FINISH,
+                            tags: self::filterTags($get, $get('vendor'), $get('type'))
+                        ))
+                        ->searchable()
+                        ->reactive()
+                        ->createOptionForm(self::controlledDropdownCreateOptionForm())
+                        ->createOptionUsing(fn (array $data): ?string => self::createControlledDropdownOption(
+                            $data,
+                            HeaderStore::BEAD_COLOUR_FINISH
+                        ))
+                        ->rules([
+                            fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
+                                $invalid = self::invalidCollectionSelectionValues(
+                                    $value,
+                                    self::dropdownOptionsForHeader(
+                                        HeaderStore::BEAD_COLOUR_FINISH,
+                                        tags: self::filterTags($get, $get('vendor'), $get('type'))
+                                    )
+                                );
+                                if (!empty($invalid)) {
+                                    $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
+                                }
+                            },
+                        ]),
                     Forms\Components\Toggle::make('seo_deindex')
                         ->label('SEO: Deindex products')
                         ->helperText('Stored as the `seo.hide_from_google` metafield for this draft.')
@@ -1659,14 +1683,7 @@ class NewProductDraftResource extends Resource
         $filterByCollection = func_num_args() >= 2;
         $options = [
             NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection',
-        ] + self::siblingCollectionQuery(
-            $filterByCollection ? $selectedCollection : null,
-            $filterByCollection
-        )
-            ->limit(100)
-            ->get()
-            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
-            ->all();
+        ] + self::siblingCollectionOptionsForCollection($filterByCollection ? $selectedCollection : null);
 
         $current = self::normalizeSiblingCollectionValue(
             $filterByCollection ? $currentValue : $selectedCollection
@@ -1695,30 +1712,62 @@ class NewProductDraftResource extends Resource
     {
         $term = trim($search);
 
-        $query = self::siblingCollectionQuery(
-            $selectedCollection,
-            func_num_args() >= 2
+        $options = self::siblingCollectionOptionsForCollection(
+            func_num_args() >= 2 ? $selectedCollection : null
         );
 
         if ($term !== '') {
-            $query->where(function (Builder $query) use ($term): void {
-                $query->where('title', 'like', "%{$term}%")
-                    ->orWhere('handle', 'like', "%{$term}%")
-                    ->orWhere('shopify_id', 'like', "%{$term}%");
-            });
+            $needle = mb_strtolower($term);
+            $options = array_filter(
+                $options,
+                fn (string $label, string $value): bool => str_contains(mb_strtolower($label), $needle)
+                    || str_contains(mb_strtolower($value), $needle),
+                ARRAY_FILTER_USE_BOTH
+            );
         }
-
-        $options = $query
-            ->limit(50)
-            ->get()
-            ->mapWithKeys(fn (ShopifyCollection $collection): array => self::siblingCollectionOptionPair($collection))
-            ->all();
 
         if ($term === '' || str_contains('no sibling collection', strtolower($term))) {
             $options = [NewProductDraft::NO_SIBLING_COLLECTION => 'No sibling collection'] + $options;
         }
 
         return $options;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function siblingCollectionOptionsForCollection(mixed $selectedCollection): array
+    {
+        $collection = trim((string) ($selectedCollection ?? ''));
+        if ($collection === '') {
+            return [];
+        }
+
+        return collect(app(SiblingCollectionResolver::class)->optionsForParent([
+            'title' => $collection,
+            'handle' => $collection,
+        ]))
+            ->filter(fn (array $option): bool => trim((string) ($option['collection_gid'] ?? '')) !== '')
+            ->mapWithKeys(fn (array $option): array => [
+                (string) $option['collection_gid'] => self::siblingCollectionSharedOptionLabel($option),
+            ])
+            ->all();
+    }
+
+    /**
+     * @param array{tag?:string,label?:string,collection_gid?:string,collection_title?:string} $option
+     */
+    private static function siblingCollectionSharedOptionLabel(array $option): string
+    {
+        $title = trim((string) ($option['collection_title'] ?? ''));
+        $tag = trim((string) ($option['tag'] ?? ''));
+        $label = trim((string) ($option['label'] ?? ''));
+
+        if ($title !== '' && $tag !== '') {
+            return "{$title} ({$tag})";
+        }
+
+        return $title !== '' ? $title : ($label !== '' ? $label : $tag);
     }
 
     /**
@@ -1919,7 +1968,8 @@ class NewProductDraftResource extends Resource
         ?string $collection,
         mixed $type,
         mixed $title,
-        bool $isOnSale
+        bool $isOnSale,
+        bool $isNewIn = true
     ): array {
         $normalized = self::normalizeTagList($currentTags);
         $selectionTags = self::collectionTags($collection, forProductTags: false);
@@ -1939,7 +1989,8 @@ class NewProductDraftResource extends Resource
         return self::defaultedDraftTags(
             self::uniqueNormalizedTags(array_merge($kept, $collectionTags)),
             $type,
-            $isOnSale
+            $isOnSale,
+            $isNewIn
         );
     }
 
@@ -2418,7 +2469,7 @@ class NewProductDraftResource extends Resource
      * @param array<int, string> $tags
      * @return array<int, string>
      */
-    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale): array
+    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale, bool $isNewIn = true): array
     {
         $tags = self::normalizeBundleCollectionTags($tags);
         $tags = array_values(array_filter(
@@ -2444,7 +2495,27 @@ class NewProductDraftResource extends Resource
 
         $tags = self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
 
-        return app(NewInTagService::class)->tagsForNewProduct($tags, $type);
+        $service = app(NewInTagService::class);
+
+        return $isNewIn
+            ? $service->tagsForNewProduct($tags, $type)
+            : $service->removeManagedTags($tags);
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private static function newInStateFromTags(array $tags): bool
+    {
+        $normalized = self::uniqueNormalizedTags($tags);
+
+        foreach (NewInTagService::TAGS as $tag) {
+            if (in_array($tag, $normalized, true)) {
+                return true;
+            }
+        }
+
+        return app(NewInTagService::class)->tagsForNewProduct($normalized) !== $normalized;
     }
 
     /**
@@ -2618,12 +2689,6 @@ class NewProductDraftResource extends Resource
     private static function shouldShowBundleAssociationField(Get $get, ?NewProductDraft $record): bool
     {
         return self::isBundleOrStackDraft($get('type'), $get('tags'), $record);
-    }
-
-    private static function shouldShowBundleImageTools(Get $get, ?NewProductDraft $record): bool
-    {
-        return !self::draftImageLocked($get, $record)
-            && self::shouldShowBundleAssociationField($get, $record);
     }
 
     private static function isBundleOrStackDraft(mixed $type, mixed $tags = null, ?NewProductDraft $record = null): bool
@@ -2809,51 +2874,6 @@ class NewProductDraftResource extends Resource
         $options = [];
         foreach ($products as $product) {
             $options[(int) $product->id] = self::localProductReferenceLabel($product);
-        }
-
-        return $options;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private static function bundleProductImageOptions(mixed $productIds): array
-    {
-        $ids = self::normalizeBundleProductIds($productIds);
-        if ($ids === []) {
-            return [];
-        }
-
-        $order = array_flip($ids);
-        $products = Product::query()
-            ->whereIn('id', $ids)
-            ->with(['images' => fn ($query) => $query
-                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-                ->orderBy('position')
-                ->orderBy('id')])
-            ->get(['id', 'title', 'handle'])
-            ->sortBy(fn (Product $product): int => $order[(int) $product->id] ?? PHP_INT_MAX);
-
-        $options = [];
-        foreach ($products as $product) {
-            $productLabel = self::localProductReferenceLabel($product);
-
-            foreach ($product->images as $image) {
-                if (!$image instanceof Image) {
-                    continue;
-                }
-
-                $src = trim((string) ($image->src ?? ''));
-                if ($src === '' || isset($options[$src])) {
-                    continue;
-                }
-
-                $position = $image->position !== null ? '#' . $image->position : '#?';
-                $path = parse_url($src, PHP_URL_PATH);
-                $filename = is_string($path) ? basename($path) : '';
-
-                $options[$src] = trim($productLabel . ' ' . $position . ($filename !== '' ? " - {$filename}" : ''));
-            }
         }
 
         return $options;
@@ -4099,6 +4119,14 @@ class NewProductDraftResource extends Resource
                             ? ''
                             : ", Pricing batch: {$result['pricing_batch']}";
 
+                        $prepopulationPart = '';
+                        if (($result['prepopulation_applied'] ?? 0) > 0 || ($result['prepopulation_unmatched'] ?? 0) > 0) {
+                            $prepopulationPart = ", Collection prepopulation: " . ($result['prepopulation_applied'] ?? 0);
+                            if (($result['prepopulation_unmatched'] ?? 0) > 0) {
+                                $prepopulationPart .= ", Unmatched collection tags: {$result['prepopulation_unmatched']}";
+                            }
+                        }
+
                         $seoCorrectionPart = '';
                         if (($result['invalid_seo_count'] ?? 0) > 0) {
                             $corrections = array_slice($result['seo_corrections'] ?? [], 0, 5);
@@ -4121,6 +4149,7 @@ class NewProductDraftResource extends Resource
                                 $pendingApprovalPart .
                                 $protectedConflictPart .
                                 $pricingBatchPart .
+                                $prepopulationPart .
                                 $seoCorrectionPart
                             )
                             ->status(
@@ -6092,7 +6121,7 @@ class NewProductDraftResource extends Resource
 
     private static function draftHasLinkedProductErrors(NewProductDraft $record): bool
     {
-        return (bool) ($record->product?->has_errors ?? false);
+        return (bool) (self::linkedProductForDraft($record)?->has_errors ?? false);
     }
 
     private static function draftHasVariantClash(?NewProductDraft $record): bool
@@ -6421,7 +6450,7 @@ class NewProductDraftResource extends Resource
 
     private static function draftErrorFieldsSummary(NewProductDraft $record): string
     {
-        $fields = $record->product?->error_fields;
+        $fields = self::linkedProductForDraft($record)?->error_fields;
 
         if (is_array($fields)) {
             return empty($fields) ? 'All required fields are good.' : implode(', ', $fields);
@@ -6546,7 +6575,7 @@ class NewProductDraftResource extends Resource
         return $src !== '' ? $src : null;
     }
 
-    private static function linkedProductForDraft(NewProductDraft $record): ?Product
+    public static function linkedProductForDraft(NewProductDraft $record): ?Product
     {
         if ($record->relationLoaded('product') && $record->product instanceof Product) {
             $shopifyId = trim((string) ($record->shopify_id ?? ''));
@@ -6559,7 +6588,8 @@ class NewProductDraftResource extends Resource
 
         $product = self::findLinkedProduct(
             is_string($record->shopify_id ?? null) ? $record->shopify_id : null,
-            is_string($record->handle ?? null) ? $record->handle : null
+            is_string($record->handle ?? null) ? $record->handle : null,
+            sku: is_string($record->sku ?? null) ? $record->sku : null
         );
 
         return $product instanceof Product ? $product : null;
@@ -6569,11 +6599,17 @@ class NewProductDraftResource extends Resource
     {
         $shopifyId = trim((string) ($get('shopify_id') ?? $record?->shopify_id ?? ''));
         $handle = trim((string) ($get('handle') ?? $record?->handle ?? ''));
+        $sku = trim((string) ($get('sku') ?? $record?->sku ?? ''));
 
-        return self::findLinkedProduct($shopifyId !== '' ? $shopifyId : null, $handle !== '' ? $handle : null, $withImages);
+        return self::findLinkedProduct(
+            $shopifyId !== '' ? $shopifyId : null,
+            $handle !== '' ? $handle : null,
+            $withImages,
+            $sku !== '' ? $sku : null
+        );
     }
 
-    private static function findLinkedProduct(?string $shopifyId, ?string $handle, bool $withImages = false): ?Product
+    private static function findLinkedProduct(?string $shopifyId, ?string $handle, bool $withImages = false, ?string $sku = null): ?Product
     {
         $query = Product::query();
 
@@ -6592,8 +6628,18 @@ class NewProductDraftResource extends Resource
         }
 
         if ($handle !== null && trim($handle) !== '') {
-            return $query
+            $product = (clone $query)
                 ->where('handle', trim($handle))
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        if ($sku !== null && trim($sku) !== '') {
+            return $query
+                ->whereHas('allVariants', fn (Builder $variantQuery): Builder => $variantQuery->where('sku', trim($sku)))
                 ->first();
         }
 
@@ -6684,7 +6730,9 @@ class NewProductDraftResource extends Resource
             ? $title
             : null;
 
-        $data['payload'] = self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null);
+        $data['payload'] = self::applyDefaultExtraShopifyPayload(
+            self::payloadFromExtraShopifyFields($data['extra_shopify_fields'] ?? null)
+        );
         unset($data['extra_shopify_fields']);
 
         $data = self::applyDraftSaleAndBundleData($data);
@@ -6706,6 +6754,10 @@ class NewProductDraftResource extends Resource
         $isOnSale = array_key_exists('is_on_sale', $data)
             ? self::saleStateFromForm($data['is_on_sale'], null)
             : self::tagListContains($tags, self::SALE_TAG);
+        $isNewIn = array_key_exists('is_new_in', $data)
+            ? filter_var($data['is_new_in'], FILTER_VALIDATE_BOOLEAN)
+            : true;
+        unset($data['is_new_in']);
 
         if ($isOnSale) {
             $currentPrice = self::decimalStringFromState($data['variant_price'] ?? null);
@@ -6719,7 +6771,7 @@ class NewProductDraftResource extends Resource
 
         $data['is_on_sale'] = $isOnSale;
         $data['tags'] = TagNormalizer::normalizeFromArray(
-            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale)
+            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale, $isNewIn)
         );
 
         self::validateDraftSalePricing($data);
@@ -6823,6 +6875,20 @@ class NewProductDraftResource extends Resource
         }
 
         return $payload === [] ? null : $payload;
+    }
+
+    /**
+     * @param array<string, string>|null $payload
+     * @return array<string, string>
+     */
+    private static function applyDefaultExtraShopifyPayload(?array $payload): array
+    {
+        return ($payload ?? []) + [
+            HeaderStore::JEWELRY_TYPE => 'handcrafted-jewellery',
+            HeaderStore::TARGET_GENDER => 'Unisex',
+            HeaderStore::AGE_GROUP => 'Universal',
+            HeaderStore::GOOGLE_SHOPPING_AGE_GROUP => 'adult',
+        ];
     }
 
     /**
@@ -7191,6 +7257,7 @@ class NewProductDraftResource extends Resource
             HeaderStore::SIBLINGS_COLLECTION_NAME => 'siblings_collection_name',
             HeaderStore::SIBLING_COLLECTION => 'sibling_collection',
             HeaderStore::UVP_SHORT_PARAGRAPH => 'uvp_short_paragraph',
+            HeaderStore::BEAD_COLOUR_FINISH => 'bead_colour_finish',
             HeaderStore::COMPLEMENTARY_PRODUCTS => 'complementary_products',
             HeaderStore::SEO_DEINDEX => 'seo_deindex',
             default => null,
@@ -7547,6 +7614,7 @@ class NewProductDraftResource extends Resource
                 'variant_inventory_qty',
                 'material_cost',
                 'uvp_short_paragraph',
+                'bead_colour_finish',
                 'seo_deindex',
                 'batch',
             ], true);
@@ -7786,7 +7854,11 @@ class NewProductDraftResource extends Resource
     {
         $product = self::resolvedSeoDraftProduct($ownerRecord);
 
-        $data['handle'] = $ownerRecord?->handle;
+        $ownerHandle = trim((string) ($ownerRecord?->handle ?? ''));
+        $ownerSku = trim((string) ($ownerRecord?->sku ?? $data['sku'] ?? ''));
+        $data['handle'] = $ownerHandle !== ''
+            ? $ownerHandle
+            : (trim((string) ($product?->handle ?? '')) ?: \Illuminate\Support\Str::slug((string) ($ownerRecord?->title ?: $ownerSku)));
         $data['product_id'] = $product?->id;
         $data['sku'] = self::resolvedSeoDraftSku($ownerRecord) ?? self::nullIfEmpty($data['sku'] ?? null);
 
@@ -7809,8 +7881,8 @@ class NewProductDraftResource extends Resource
 
     public static function saveSeoDraft(NewProductDraft $record, array $data): StyleProfile
     {
-        if (blank(trim((string) ($record->handle ?? '')))) {
-            throw new \InvalidArgumentException('Draft needs a handle before an SEO draft can be saved.');
+        if (blank(trim((string) ($record->handle ?? ''))) && blank(trim((string) ($record->sku ?? '')))) {
+            throw new \InvalidArgumentException('Draft needs a SKU before an SEO draft can be saved.');
         }
 
         $normalized = self::normalizeSeoDraftFormData($record, $data);
@@ -7834,9 +7906,76 @@ class NewProductDraftResource extends Resource
 
         return self::seoDraftStyleProfile($record->fresh('styleProfiles') ?? $record)
             ?? StyleProfile::query()
-                ->where('handle', $record->handle)
+                ->when(
+                    filled(trim((string) ($record->handle ?? ''))),
+                    fn ($query) => $query->where('handle', $record->handle),
+                    fn ($query) => $query->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower(trim((string) $record->sku))])
+                )
                 ->latest('id')
                 ->firstOrFail();
+    }
+
+    public static function mirrorSeoDraftToProduct(NewProductDraft $record): bool
+    {
+        $styleProfile = self::seoDraftStyleProfile($record);
+        if (!$styleProfile instanceof StyleProfile) {
+            return false;
+        }
+
+        $product = self::linkedProductForDraft($record);
+        if (!$product instanceof Product) {
+            $product = self::resolvedSeoDraftProduct($record, $styleProfile);
+        }
+
+        if (!$product instanceof Product) {
+            return false;
+        }
+
+        $seoTitle = self::nullIfEmpty($styleProfile->draft_seo_title);
+        $seoDescription = self::nullIfEmpty($styleProfile->draft_seo_description);
+        if ($seoTitle === null && $seoDescription === null) {
+            return false;
+        }
+
+        $updates = [];
+        if ($seoTitle !== null && $product->seo_title !== $seoTitle) {
+            $updates['seo_title'] = $seoTitle;
+        }
+        if ($seoDescription !== null && $product->seo_description !== $seoDescription) {
+            $updates['seo_description'] = $seoDescription;
+        }
+
+        if ($updates !== []) {
+            $product->update($updates);
+            $product->refresh();
+        }
+
+        $row = ShopifyRow::where('import_id', $product->import_id)
+            ->where('handle', $product->handle)
+            ->where('row_type', 'product_primary')
+            ->first();
+
+        if ($row) {
+            $row->set(HeaderStore::SEO_TITLE, $seoTitle ?? '');
+            $row->set(HeaderStore::SEO_DESCRIPTION, $seoDescription ?? '');
+            $row->save();
+        }
+
+        $profileUpdates = [];
+        if ((int) ($styleProfile->product_id ?? 0) !== (int) $product->id) {
+            $profileUpdates['product_id'] = $product->id;
+        }
+        if (trim((string) ($styleProfile->handle ?? '')) !== trim((string) ($product->handle ?? ''))) {
+            $profileUpdates['handle'] = $product->handle;
+        }
+
+        if ($profileUpdates !== []) {
+            StyleProfile::withoutEvents(function () use ($styleProfile, $profileUpdates): void {
+                $styleProfile->forceFill($profileUpdates)->save();
+            });
+        }
+
+        return $updates !== [] || $row !== null || $profileUpdates !== [];
     }
 
     private static function draftStyleProfileAttribute(string $source, string $attribute): ?string
@@ -7859,9 +7998,22 @@ class NewProductDraftResource extends Resource
 
     private static function seoDraftStyleProfile(NewProductDraft $record): ?StyleProfile
     {
-        $profile = $record->relationLoaded('styleProfiles')
-            ? $record->styleProfiles->first()
-            : $record->styleProfiles()->first();
+        $handle = trim((string) ($record->handle ?? ''));
+        $sku = trim((string) ($record->sku ?? ''));
+
+        $profile = null;
+        if ($handle !== '') {
+            $profile = $record->relationLoaded('styleProfiles')
+                ? $record->styleProfiles->first()
+                : $record->styleProfiles()->first();
+        }
+
+        if (!$profile instanceof StyleProfile && $sku !== '') {
+            $profile = StyleProfile::query()
+                ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)])
+                ->orderBy('id')
+                ->first();
+        }
 
         return $profile instanceof StyleProfile ? $profile : null;
     }
@@ -7921,6 +8073,11 @@ class NewProductDraftResource extends Resource
 
     private static function resolvedSeoDraftSku(?NewProductDraft $ownerRecord, ?StyleProfile $styleProfile = null): ?string
     {
+        $sku = self::nullIfEmpty($ownerRecord?->sku);
+        if ($sku !== null) {
+            return $sku;
+        }
+
         $sku = self::nullIfEmpty($styleProfile?->sku);
         if ($sku !== null) {
             return $sku;
@@ -7929,7 +8086,6 @@ class NewProductDraftResource extends Resource
         $product = self::resolvedSeoDraftProduct($ownerRecord, $styleProfile);
         $sku = self::nullIfEmpty(
             $product?->variants()->orderBy('id')->value('sku')
-            ?? $ownerRecord?->sku
             ?? $ownerRecord?->handle
         );
 
@@ -7974,31 +8130,46 @@ class NewProductDraftResource extends Resource
     private static function upsertDraftStyleProfile(NewProductDraft $record, array $updates): void
     {
         $handle = trim((string) ($record->handle ?? ''));
-        if ($handle === '') {
+        $sku = trim((string) ($record->sku ?? ''));
+        if ($handle === '' && $sku === '') {
             return;
         }
 
         $product = self::linkedProductForDraft($record);
         $styleProfile = StyleProfile::query()
-            ->where('handle', $handle)
+            ->where(function ($query) use ($handle, $sku, $product): void {
+                if ($product instanceof Product) {
+                    $query->orWhere('product_id', $product->id);
+                }
+
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+
+                if ($sku !== '') {
+                    $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+                }
+            })
+            ->orderBy('id')
             ->first();
+
+        $styleHandle = $handle !== ''
+            ? $handle
+            : (trim((string) ($product?->handle ?? '')) ?: \Illuminate\Support\Str::slug((string) ($record->title ?: $sku)));
 
         if (!$styleProfile) {
             $styleProfile = new StyleProfile([
-                'handle' => $handle,
+                'handle' => $styleHandle,
             ]);
         }
 
         $styleProfile->product_id = $product?->id;
-        $styleProfile->handle = $handle;
-
-        if (!filled($styleProfile->sku)) {
-            $styleProfile->sku = trim((string) (
-                $record->sku
-                ?? $product?->variants()->orderBy('id')->value('sku')
-                ?? $handle
-            )) ?: null;
-        }
+        $styleProfile->handle = $styleHandle;
+        $styleProfile->sku = trim((string) (
+            $record->sku
+            ?? $product?->variants()->orderBy('id')->value('sku')
+            ?? $styleHandle
+        )) ?: null;
 
         if (!filled($styleProfile->image_url)) {
             $styleProfile->image_url = $product?->images()->orderBy('position')->value('src') ?? $record->imageUrl();
@@ -8524,15 +8695,15 @@ class NewProductDraftResource extends Resource
                 }
             ));
             if (!empty($headers)) {
-                $withHandle = array_merge(['Handle', 'SKU'], $headers);
+                $withHandle = array_merge(['SKU', 'Collection Tag'], $headers);
                 return array_values(array_unique($withHandle));
             }
         }
 
         return [
-            'Handle',
             'SKU',
             'Title',
+            'Collection Tag',
             'Description',
             'Product Image (Add location)',
             'Lifestyle Image (Add location)',
@@ -8553,7 +8724,11 @@ class NewProductDraftResource extends Resource
             'Siblings Option Name',
             'Sibling Collection',
             'UVP Short Paragraph',
+            'SEO Title',
+            'SEO Description',
+            'Draft Image Alt Text',
             'Complementary products (Finish the Set, And Get One Free)',
+            'Complementary Product SKUs',
         ];
     }
 

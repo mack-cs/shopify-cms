@@ -10,6 +10,7 @@ use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\User;
 use App\Services\DraftShopYourVibeSelection;
+use App\Services\HeaderStore;
 use App\Services\TagNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Validation\ValidationException;
@@ -152,4 +153,44 @@ it('updates the draft form selector and membership tags immediately when the col
         ->assertSet('data.tags', fn ($tags) => in_array('elevated-basics-bracelets', $tags) && ! in_array('eb-stack', $tags) && ! in_array('bundles', $tags))
         ->set('data.shop_your_vibe_collections', ['gid://shopify/Collection/11'])
         ->assertSet('data.tags', fn ($tags) => in_array('eb-pearl', $tags) && in_array('custom-gift', $tags));
+});
+
+it('loads bead colour finish options from the selected draft collection', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    DropdownOption::withoutEvents(fn () => DropdownOption::create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Metallic',
+        'collection_style' => 'Elevated Basics Bracelets',
+        'collection_tag_primary' => 'elevated-basics',
+        'collection_tag_secondary' => 'elevated-basics-bracelets',
+        'active' => true,
+    ]));
+    DropdownOption::withoutEvents(fn () => DropdownOption::create([
+        'header' => HeaderStore::BEAD_COLOUR_FINISH,
+        'value' => 'Colourful',
+        'collection_style' => 'Pata Pata',
+        'collection_tag_primary' => 'pata-pata',
+        'collection_tag_secondary' => 'pata-pata',
+        'active' => true,
+    ]));
+
+    $draft = NewProductDraft::create([
+        'title' => 'Elevated Bracelet',
+        'sku' => 'EBB-FINISH-1',
+        'type' => 'Bracelets',
+        'vendor' => 'Elevated Basics',
+        'sibling_collection' => NewProductDraft::NO_SIBLING_COLLECTION,
+        'tags' => 'elevated-basics, elevated-basics-bracelets',
+        'status' => 'draft',
+    ]);
+
+    Livewire::test(EditNewProductDraft::class, ['record' => $draft->id])
+        ->set('data.bead_colour_finish', 'Metallic')
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($draft->fresh()->bead_colour_finish)->toBe('Metallic');
 });

@@ -3,8 +3,10 @@
 namespace App\Filament\Resources\InventoryResource\Pages;
 
 use App\Filament\Resources\InventoryResource;
+use App\Filament\Resources\InventoryAdjustmentRequestResource;
 use App\Filament\Resources\InventoryResource\Widgets\InventoryRunBanner;
 use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Models\InventoryAdjustmentRequest;
 use App\Models\ProcurementIncomingStock;
 use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
@@ -12,6 +14,7 @@ use App\Models\ProcurementSupplierReceipt;
 use App\Models\Variant;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
+use App\Services\Procurement\ProcurementPriceUpdateService;
 use App\Services\Procurement\SupplierOrderCsvService;
 use App\Services\ProcurementPipelineService;
 use App\Services\ProductInventoryCsvImporter;
@@ -232,6 +235,36 @@ class ListInventories extends ListRecords
                         Notification::make()->title('Recalculation was not queued')->body($e->getMessage())->danger()->send();
                     }
                 }),
+            Actions\Action::make('applyPriceUpdates')
+                ->label('Apply Price Updates')
+                ->icon('heroicon-o-banknotes')
+                ->color('warning')
+                ->visible(fn (): bool => $this->activeTab === 'orders'
+                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->requiresConfirmation()
+                ->modalHeading('Apply Price Updates')
+                ->modalDescription('Populated New Price values are queued for Shopify. SKUs that are not an active catalog variant, have no Shopify ID, or have an invalid New Price are skipped and left in the sheet. Successful rows update Current Price and clear New Price only after Shopify confirms the change.')
+                ->modalSubmitActionLabel('Apply Price Updates')
+                ->action(function (ProcurementPriceUpdateService $prices): void {
+                    try {
+                        $result = $prices->queueFromSheet(Auth::id());
+                        $unready = $result['unready_skus'] ?? [];
+                        $body = "Queued {$result['queued']} price update(s). Skipped {$result['skipped_unchanged']} unchanged row(s).";
+                        if (($result['skipped_unready'] ?? 0) > 0) {
+                            $preview = implode(', ', array_slice($unready, 0, 8));
+                            $body .= " Skipped {$result['skipped_unready']} SKU(s) that cannot be sent to Shopify";
+                            $body .= $preview !== '' ? ": {$preview}." : '.';
+                            $body .= ' Valid SKUs were still queued. Unready New Price cells were left as-is.';
+                        }
+                        Notification::make()
+                            ->title($result['queued'] > 0 ? 'Price updates queued' : 'No price updates to queue')
+                            ->body($body)
+                            ->success()
+                            ->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('Price updates were not queued')->body($e->getMessage())->danger()->persistent()->send();
+                    }
+                }),
             Actions\Action::make('checkShopifyInventory')
                 ->label('Check Shopify Inventory')
                 ->icon('heroicon-o-arrow-path')
@@ -311,6 +344,13 @@ class ListInventories extends ListRecords
                     $skipped > 0 ? $notification->warning() : $notification->success();
                     $notification->send();
                 }),
+            Actions\Action::make('reviewMyInventoryApprovals')
+                ->label(fn (): string => 'Review My Approvals'.($this->pendingInventoryApprovalsCount() > 0 ? ' ('.$this->pendingInventoryApprovalsCount().')' : ''))
+                ->icon('heroicon-o-clipboard-document-check')
+                ->color('warning')
+                ->visible(fn (): bool => $this->activeTab === 'inventory_adjustments'
+                    && $this->pendingInventoryApprovalsCount() > 0)
+                ->url(fn (): string => InventoryAdjustmentRequestResource::getUrl()),
         ];
     }
 
@@ -371,6 +411,20 @@ class ListInventories extends ListRecords
         })->implode("\n");
 
         return "There are earlier pending supplier orders for one or more SKUs. Confirm that the receipt is correct and provide a reason before continuing.\n{$lines}";
+    }
+
+    private function pendingInventoryApprovalsCount(): int
+    {
+        $userId = Auth::id();
+
+        if ($userId === null) {
+            return 0;
+        }
+
+        return InventoryAdjustmentRequest::query()
+            ->where('status', InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL)
+            ->where('approver_id', $userId)
+            ->count();
     }
 
     public function getTabs(): array

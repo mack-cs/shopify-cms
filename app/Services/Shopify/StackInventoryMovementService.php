@@ -87,7 +87,7 @@ final class StackInventoryMovementService
             } elseif ($action === ShopifyStackInventoryMovement::ACTION_RELEASE) {
                 $locked->released_at = now();
             }
-            $this->refreshStatus($locked);
+            $locked->refreshLedgerStatus();
             $locked->save();
 
             $movement->forceFill([
@@ -99,24 +99,6 @@ final class StackInventoryMovementService
         });
 
         return $movement->fresh();
-    }
-
-    private function refreshStatus(ShopifyStackInventoryReservation $reservation): void
-    {
-        if ($reservation->remainingReserved() > 0) {
-            $reservation->status = ShopifyStackInventoryReservation::STATUS_PENDING;
-            $reservation->completed_at = null;
-
-            return;
-        }
-        if ((int) $reservation->consumed_quantity >= (int) $reservation->total_component_quantity_required) {
-            $reservation->status = ShopifyStackInventoryReservation::STATUS_COMPLETED;
-            $reservation->completed_at ??= now();
-
-            return;
-        }
-
-        $reservation->status = ShopifyStackInventoryReservation::STATUS_RELEASED;
     }
 
     private function fail(

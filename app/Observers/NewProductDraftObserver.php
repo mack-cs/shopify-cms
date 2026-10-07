@@ -35,10 +35,6 @@ class NewProductDraftObserver
 
     public function saved(NewProductDraft $draft): void
     {
-        if (!$draft->handle) {
-            return;
-        }
-
         if ($draft->isBlockedFromShopifyMissing()) {
             return;
         }

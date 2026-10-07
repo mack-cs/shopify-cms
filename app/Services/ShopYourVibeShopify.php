@@ -136,15 +136,21 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   id title handle sortOrder productsCount { count }
   ruleSet { appliedDisjunctively rules { column relation condition } }
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title featuredImage { url } variants(first: 1) { nodes { sku } } }
+    nodes {
+      id title vendor productType status tags featuredImage { url }
+      materialsAndDimensions: metafield(namespace: "custom", key: "materials_and_dimensions") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      variants(first: 20) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+    }
     pageInfo { hasNextPage endCursor }
   }
 } }
 GQL, ['id' => $gid, 'after' => $after]);
             $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
             foreach ($node['products']['nodes'] as $product) {
-                $products[] = ['id' => $product['id'], 'title' => $product['title'],
-                    'image' => data_get($product, 'featuredImage.url'), 'sku' => data_get($product, 'variants.nodes.0.sku')];
+                $products[] = $this->productCard($product);
             }
             $after = $this->cursor($node['products']);
         } while ($after !== null);
@@ -155,7 +161,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
 
         return ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'sort' => $node['sortOrder'],
-            'manual_supported' => in_array($node['sortOrder'], ['MANUAL', 'BEST_SELLING', 'ALPHA_ASC', 'ALPHA_DESC', 'PRICE_ASC', 'PRICE_DESC', 'CREATED', 'CREATED_DESC'], true),
+            'manual_supported' => $node['sortOrder'] !== 'UNSUPPORTED',
             'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false,
             'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
@@ -186,6 +192,48 @@ GQL, ['id' => $gid]);
         ];
     }
 
+    /**
+     * @return array<int, array{gid:string,title:string,handle:string,tag_rules:array<int,string>}>
+     */
+    public function siblingCollectionCandidates(): array
+    {
+        $result = [];
+        $after = null;
+        do {
+            $data = $this->client->graphql(<<<'GQL'
+query VibeSiblingCollections($after: String) { collections(first: 100, after: $after) {
+  nodes {
+    id title handle
+    ruleSet { rules { column relation condition } }
+  }
+  pageInfo { hasNextPage endCursor }
+} }
+GQL, ['after' => $after]);
+            foreach ($data['collections']['nodes'] as $node) {
+                $tagRules = collect(data_get($node, 'ruleSet.rules', []))
+                    ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG')
+                    ->pluck('condition')
+                    ->filter(fn ($tag) => trim((string) $tag) !== '')
+                    ->values()
+                    ->all();
+                $haystack = strtolower($node['title'].' '.$node['handle'].' '.implode(' ', $tagRules));
+                if (! preg_match('/(?:^|[\s_-])siblings?(?:$|[\s_-])/', $haystack)) {
+                    continue;
+                }
+
+                $result[] = [
+                    'gid' => $node['id'],
+                    'title' => $node['title'],
+                    'handle' => $node['handle'],
+                    'tag_rules' => $tagRules,
+                ];
+            }
+            $after = $this->cursor($data['collections']);
+        } while ($after !== null);
+
+        return $result;
+    }
+
     public function parentProducts(string $gid): array
     {
         $this->gid($gid, 'Collection');
@@ -195,7 +243,14 @@ GQL, ['id' => $gid]);
             $data = $this->client->graphql(<<<'GQL'
 query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
-    nodes { id title status tags featuredImage { url } variants(first: 1) { nodes { sku } } }
+    nodes {
+      id title vendor productType status tags featuredImage { url }
+      materialsAndDimensions: metafield(namespace: "custom", key: "materials_and_dimensions") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      colorPattern: metafield(namespace: "shopify", key: "color-pattern") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      jewelryMaterial: metafield(namespace: "shopify", key: "jewelry-material") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      beadColourFinish: metafield(namespace: "stiletto", key: "bead_colour_finish") { type value reference { ... on Metaobject { displayName handle } } references(first: 50) { nodes { ... on Metaobject { displayName handle } } } }
+      variants(first: 20) { nodes { sku inventoryQuantity availableForSale inventoryItem { tracked } } }
+    }
     pageInfo { hasNextPage endCursor }
   }
 } }
@@ -203,11 +258,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             $connection = data_get($data, 'collection.products')
                 ?? throw new RuntimeException('The selected collection is no longer available in Shopify.');
             foreach ($connection['nodes'] as $product) {
-                $products[] = [
-                    'id' => $product['id'], 'title' => $product['title'], 'status' => $product['status'] ?? null,
-                    'tags' => array_values($product['tags'] ?? []), 'image' => data_get($product, 'featuredImage.url'),
-                    'sku' => data_get($product, 'variants.nodes.0.sku'),
-                ];
+                $products[] = $this->productCard($product);
             }
             $after = $this->cursor($connection);
         } while ($after !== null);
@@ -223,6 +274,34 @@ query VibeProductTags($id: ID!) { product(id: $id) { id tags } }
 GQL, ['id' => $gid]);
 
         return $data['product'] ?? throw new RuntimeException('This product is no longer available in Shopify.');
+    }
+
+    private function productCard(array $product): array
+    {
+        $variants = collect(data_get($product, 'variants.nodes', []));
+        $variant = $variants->first(fn (mixed $node): bool => trim((string) data_get($node, 'sku')) !== '')
+            ?? $variants->first()
+            ?? [];
+
+        return [
+            'id' => $product['id'],
+            'title' => $product['title'],
+            'vendor' => $product['vendor'] ?? null,
+            'type' => $product['productType'] ?? null,
+            'status' => $product['status'] ?? null,
+            'tags' => array_values($product['tags'] ?? []),
+            'image' => data_get($product, 'featuredImage.url'),
+            'sku' => data_get($variant, 'sku'),
+            'inventory_quantity' => data_get($variant, 'inventoryQuantity'),
+            'inventory_tracked' => data_get($variant, 'inventoryItem.tracked'),
+            'available_for_sale' => data_get($variant, 'availableForSale'),
+            'shopify_metafields' => [
+                HeaderStore::MATERIALS_AND_DIMENSIONS => $product['materialsAndDimensions'] ?? null,
+                HeaderStore::COLOR_METAFIELD => $product['colorPattern'] ?? null,
+                HeaderStore::JEWELRY_MATERIAL => $product['jewelryMaterial'] ?? null,
+                HeaderStore::BEAD_COLOUR_FINISH => $product['beadColourFinish'] ?? null,
+            ],
+        ];
     }
 
     public function addProductTags(string $gid, array $tags): void
@@ -468,7 +547,13 @@ GQL, ['handle' => $creation['handle']]);
 
             return $collection;
         }
+        $membershipTag = trim((string) ($creation['membership_tag'] ?? $creation['handle']));
         $input = ['title' => $creation['title'], 'handle' => $creation['handle'], 'sortOrder' => 'MANUAL',
+            'ruleSet' => ['appliedDisjunctively' => false, 'rules' => [[
+                'column' => 'TAG',
+                'relation' => 'EQUALS',
+                'condition' => $membershipTag,
+            ]]],
             'metafields' => [['namespace' => 'custom', 'key' => 'syv_creation_token', 'type' => 'single_line_text_field', 'value' => $creation['token']]]];
         if ($imageUrl) {
             $input['image'] = ['src' => $imageUrl, 'altText' => $creation['title']];

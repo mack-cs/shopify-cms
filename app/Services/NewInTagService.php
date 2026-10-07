@@ -49,6 +49,19 @@ final class NewInTagService
     }
 
     /**
+     * @param array<int, string> $existing
+     * @return array<int, string>
+     */
+    public function removeManagedTags(array $existing): array
+    {
+        return array_values(array_filter(
+            TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($existing)),
+            fn (string $tag): bool => ! in_array($tag, self::TAGS, true)
+                && ! $this->isManagedCollectionNewInTag($tag)
+        ));
+    }
+
+    /**
      * @param  iterable<int, mixed>  $drafts
      * @return array{updated:int,already_marked:int,failed:int}
      */

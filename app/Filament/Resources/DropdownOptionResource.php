@@ -14,9 +14,11 @@ use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Actions\ExportAction;
+use Filament\Tables\Actions\ExportBulkAction;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
@@ -85,7 +87,11 @@ class DropdownOptionResource extends Resource
             ->modifyQueryUsing(fn (Builder $query): Builder => $query->orderBy('header')->orderBy('sort_order'))
             ->columns([
                 TextColumn::make('header')->searchable()->wrap(),
-                TextColumn::make('value')->searchable()->wrap(),
+                TextColumn::make('value')
+                    ->label('Dropdown value')
+                    ->searchable()
+                    ->wrap()
+                    ->copyable(),
                 TextColumn::make('vendor')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_type')->label('Product type')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('collection_style')->label('Collection')->searchable()->sortable(),
@@ -102,7 +108,8 @@ class DropdownOptionResource extends Resource
                         ->distinct()
                         ->orderBy('header')
                         ->pluck('header', 'header')
-                        ->all()),
+                        ->all())
+                    ->multiple(),
                 SelectFilter::make('collection_style')
                     ->label('Collection')
                     ->searchable()
@@ -112,12 +119,20 @@ class DropdownOptionResource extends Resource
                         ->distinct()
                         ->orderBy('collection_style')
                         ->pluck('collection_style', 'collection_style')
-                        ->all()),
+                        ->all())
+                    ->multiple(),
+                Filter::make('materials_colors_review')
+                    ->label('Materials, dimensions, jewelry materials, colors')
+                    ->query(fn (Builder $query): Builder => $query->whereIn('header', array_keys(self::reviewHeaders()))),
+                Filter::make('livi_elevated_stacks_review')
+                    ->label('Livi Road, Elevated Basics, Stacks')
+                    ->query(fn (Builder $query): Builder => $query->whereIn('collection_style', self::reviewCollections())),
                 Tables\Filters\TernaryFilter::make('active')
                     ->label('Status')
                     ->placeholder('All values')
                     ->trueLabel('Active values')
-                    ->falseLabel('Inactive values'),
+                    ->falseLabel('Inactive values')
+                    ->default(true),
                 SelectFilter::make('vendor')
                     ->label('Vendor')
                     ->options(fn () => DropdownOption::query()
@@ -149,6 +164,15 @@ class DropdownOptionResource extends Resource
             ->actions([
                 Tables\Actions\EditAction::make(),
                 Tables\Actions\DeleteAction::make(),
+            ])
+            ->bulkActions([
+                Tables\Actions\BulkActionGroup::make([
+                    ExportBulkAction::make()
+                        ->label('Export selected dropdown values')
+                        ->exporter(DropdownOptionExporter::class)
+                        ->formats([ExportFormat::Csv, ExportFormat::Xlsx]),
+                    Tables\Actions\DeleteBulkAction::make(),
+                ]),
             ]);
     }
 
@@ -184,5 +208,24 @@ class DropdownOptionResource extends Resource
     public static function canDeleteAny(): bool
     {
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    public static function reviewHeaders(): array
+    {
+        return [
+            HeaderStore::COLOR_METAFIELD => 'Color',
+            HeaderStore::JEWELRY_MATERIAL => 'Jewelry Material',
+            HeaderStore::MATERIALS_AND_DIMENSIONS => 'Materials and Dimensions',
+        ];
+    }
+
+    public static function reviewCollections(): array
+    {
+        return [
+            'Livi Road Bracelets',
+            'Elevated Basics Bracelets',
+            'Livi Road Bundles',
+            'Elevated Basics Bundles',
+        ];
     }
 }

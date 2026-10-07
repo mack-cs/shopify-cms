@@ -11,7 +11,7 @@ final class GoogleSheetsClient
 
     // Read through the widest historical layout so a layout upgrade can retain
     // values before removing obsolete columns.
-    private const DATA_COLUMNS = 'A:AJ';
+    private const DATA_COLUMNS = 'A:AN';
 
     public function __construct(private readonly GoogleServiceAccountTokenProvider $tokens) {}
 
@@ -68,16 +68,18 @@ final class GoogleSheetsClient
     public function replaceBody(string $tab, array $rows, int $existingRowCount): void
     {
         if ($rows !== []) {
+            $lastColumn = $this->columnName(max(0, max(array_map('count', $rows)) - 1));
             $this->batchUpdateValues([[
-                'range' => $this->range($tab, 'A2:AG'.(count($rows) + 1)),
+                'range' => $this->range($tab, 'A2:'.$lastColumn.(count($rows) + 1)),
                 'values' => $rows,
             ]]);
         }
         if ($existingRowCount > count($rows)) {
             $firstStaleRow = count($rows) + 2;
             $lastExistingRow = $existingRowCount + 1;
+            $lastColumn = $this->columnName(max(0, count($rows[0] ?? []) - 1));
             $clear = $this->request()->withBody('{}', 'application/json')
-                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:AG{$lastExistingRow}")).':clear');
+                ->post($this->valuesUrl($this->range($tab, "A{$firstStaleRow}:{$lastColumn}{$lastExistingRow}")).':clear');
             $this->ensureSuccess($clear->successful(), $clear->body(), 'clear stale Master rows');
         }
     }

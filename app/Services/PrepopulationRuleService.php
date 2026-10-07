@@ -63,7 +63,7 @@ final class PrepopulationRuleService
 
         $updates = [
             'tags' => $resolvedTags,
-            'vendor' => $rule->auto_vendor,
+            'vendor' => $this->resolvedVendor($rule, $resolvedTags),
             'type' => $rule->auto_type,
             'product_category' => $rule->auto_product_category,
             'google_product_category' => $rule->auto_google_product_category,
@@ -84,6 +84,36 @@ final class PrepopulationRuleService
         }
 
         return array_filter($updates, fn ($value): bool => $value !== null && $value !== '');
+    }
+
+    /**
+     * @param array<int, string> $resolvedTags
+     */
+    private function resolvedVendor(PrepopulationRule $rule, array $resolvedTags): ?string
+    {
+        $vendor = trim((string) ($rule->auto_vendor ?? ''));
+        if ($vendor === '') {
+            return null;
+        }
+
+        $isBundleRule = collect(array_merge(
+            $resolvedTags,
+            [(string) ($rule->handle ?? ''), (string) ($rule->collection_name ?? '')]
+        ))->contains(function (string $value): bool {
+            $slug = Str::slug($value);
+
+            return in_array($slug, ['bundles', 'stacks'], true)
+                || str_contains($slug, '-bundles')
+                || str_contains($slug, '-bundle')
+                || str_contains($slug, '-stacks')
+                || str_contains($slug, '-stack');
+        });
+
+        if ($isBundleRule && strcasecmp($vendor, 'Elevated Basics') === 0) {
+            return 'Elevated Basics Bundles';
+        }
+
+        return $vendor;
     }
 
     /** @param array<int, string> $add @param array<int, string> $remove */
@@ -116,15 +146,50 @@ final class PrepopulationRuleService
             return null;
         }
 
-        $slug = Str::slug($value);
+        $slugs = $this->collectionLookupSlugs($value);
+        $lowerSlugs = array_map('strtolower', $slugs);
 
         return PrepopulationRule::query()
             ->where('behavior', $behavior)
-            ->where(function ($query) use ($value, $slug): void {
-                $query->whereRaw('LOWER(handle) = ?', [strtolower($slug)])
+            ->where(function ($query) use ($value, $slugs, $lowerSlugs): void {
+                $query->whereRaw('LOWER(handle) IN (' . implode(',', array_fill(0, count($lowerSlugs), '?')) . ')', $lowerSlugs)
                     ->orWhereRaw('LOWER(collection_name) = ?', [strtolower($value)]);
+
+                foreach ($slugs as $slug) {
+                    $query->orWhereJsonContains('add_tags', $slug);
+                }
             })
             ->first();
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function collectionLookupSlugs(string $value): array
+    {
+        $slug = Str::slug($value);
+        $slugs = [$slug];
+
+        foreach ([
+            '-bundles' => '-stacks',
+            '-bundle' => '-stack',
+            '-stacks' => '-bundles',
+            '-stack' => '-bundle',
+        ] as $from => $to) {
+            if (str_ends_with($slug, $from)) {
+                $slugs[] = substr($slug, 0, -strlen($from)) . $to;
+            }
+        }
+
+        if (str_contains($slug, '-bundle-')) {
+            $slugs[] = str_replace('-bundle-', '-stack-', $slug);
+        }
+
+        if (str_contains($slug, '-stack-')) {
+            $slugs[] = str_replace('-stack-', '-bundle-', $slug);
+        }
+
+        return array_values(array_unique($slugs));
     }
 
     private function ensureDropdownOption(string $header, string $value, PrepopulationRule $rule): void

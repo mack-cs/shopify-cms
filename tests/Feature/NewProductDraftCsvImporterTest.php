@@ -2,12 +2,17 @@
 
 use App\Models\Import;
 use App\Models\NewProductDraft;
+use App\Models\PrepopulationRule;
 use App\Models\Product;
 use App\Models\StyleProfile;
 use App\Models\User;
 use App\Models\Variant;
+use App\Filament\Resources\NewProductDraftResource;
+use App\Services\HeaderStore;
 use App\Services\NewProductDraftCsvImporter;
+use App\Services\NewProductDraftRoundtripCsvService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
@@ -89,6 +94,344 @@ it('creates a sku-only draft from csv and reuses the sku for later details', fun
         ->and($draft->variant_price)->toBe('130.00');
 
     @unlink($path);
+});
+
+it('prepopulates draft fields from an imported collection tag', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'livi-road-bracelets',
+        'collection_name' => 'Livi Road Bracelets',
+        'add_tags' => [
+            'all-products',
+            'all-products-collections',
+            'livi-road',
+            'bracelets',
+            'bracelet',
+            'livi-road-bracelets',
+        ],
+        'remove_tags' => ['exclude-from-the-sale'],
+        'auto_vendor' => 'Livi Road',
+        'auto_type' => 'Bracelets',
+        'auto_product_category' => 'gid://shopify/TaxonomyCategory/aa-6-3',
+        'auto_google_product_category' => '191',
+        'auto_status' => 'draft',
+        'auto_design' => 'beaded',
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-collection-tag-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Collection Tag,Tags,Price\n"
+        ."COLL-001,Livi Road Test Bracelet,livi-road-bracelets,\"manual-tag, exclude-from-the-sale\",125\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'COLL-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['prepopulation_applied'])->toBe(1)
+        ->and($result['prepopulation_unmatched'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->vendor)->toBe('Livi Road')
+        ->and($draft->type)->toBe('Bracelets')
+        ->and($draft->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-3')
+        ->and($draft->google_product_category)->toBe('191')
+        ->and($draft->status)->toBe('draft')
+        ->and($draft->product_design)->toBe('beaded')
+        ->and($draft->colour_style)->toBe('solid')
+        ->and($draft->variant_price)->toBe('125.00')
+        ->and(App\Services\TagNormalizer::parseTokens($draft->tags))->toContain(
+            'manual-tag',
+            'livi-road',
+            'bracelets',
+            'bracelet',
+            'livi-road-bracelets'
+        );
+
+    @unlink($path);
+});
+
+it('prepopulates stack fields when the imported collection tag is a bundle tag added by a stack rule', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-stacks',
+        'collection_name' => 'Elevated Basics Stacks',
+        'add_tags' => [
+            'all-products',
+            'all-products-collections',
+            'bundles',
+            'elevated-basics-bundles',
+            'elevated-basics',
+            'bracelets',
+            'bracelet',
+        ],
+        'auto_vendor' => 'Elevated Basics Bundles',
+        'auto_type' => 'Bracelets',
+        'auto_product_category' => 'gid://shopify/TaxonomyCategory/aa-6-3',
+        'auto_google_product_category' => '191',
+        'auto_status' => 'draft',
+        'auto_design' => 'beaded',
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $component = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Pearls and Palms Bracelet',
+        'handle' => 'pearls-and-palms-bracelet',
+        'shopify_id' => 'gid://shopify/Product/720001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $component->id,
+        'sku' => 'LAB-COMP-001',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-bundle-tag-import-');
+    file_put_contents(
+        $path,
+        "SKU,Collection Tag,Title,Bead Colour Finish,Associated Product SKUs\n"
+        ."LAB0182TestStack,elevated-basics-bundles,Sunday in Bali Bracelet Test Stack,pearlised,LAB-COMP-001\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'LAB0182TestStack')->first();
+    $tags = App\Services\TagNormalizer::parseTokens($draft?->tags);
+
+    expect($result['created'])->toBe(1)
+        ->and($result['prepopulation_applied'])->toBe(1)
+        ->and($result['prepopulation_unmatched'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->vendor)->toBe('Elevated Basics Bundles')
+        ->and($draft->type)->toBe('Bracelets')
+        ->and($draft->bead_colour_finish)->toBe('pearlised')
+        ->and($tags)->toContain('bundles', 'elevated-basics-bundles')
+        ->and($draft->bundle_product_ids)->toBe([$component->id])
+        ->and($draft->payload[HeaderStore::JEWELRY_TYPE] ?? null)->toBe('handcrafted-jewellery')
+        ->and($draft->payload[HeaderStore::TARGET_GENDER] ?? null)->toBe('Unisex')
+        ->and($draft->payload[HeaderStore::AGE_GROUP] ?? null)->toBe('Universal')
+        ->and($draft->payload[HeaderStore::GOOGLE_SHOPPING_AGE_GROUP] ?? null)->toBe('adult');
+
+    @unlink($path);
+});
+
+it('upserts seo draft data for new product csv rows without a handle', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-bracelets',
+        'collection_name' => 'Elevated Basics Bracelets',
+        'add_tags' => [
+            'elevated-basics',
+            'elevated-basics-bracelets',
+            'bracelet',
+        ],
+        'auto_vendor' => 'Elevated Basics',
+        'auto_type' => 'Bracelets',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-no-handle-seo-import-');
+    $seoTitle = 'Sunday in Bali Bracelet | Gold Silver Beaded Jewelry';
+    $seoDescription = "The Sunday in Bali Bracelet combines delicate gold and silver beading with a relaxed holiday feel. A versatile women's bracelet for everyday layering.";
+    file_put_contents(
+        $path,
+        "SKU,Collection Tag,Title,Price,SEO Title,SEO Description\n"
+        ."LAB0182TestF,elevated-basics-bracelets,Test ProductDF 28 Sept,640,{$seoTitle},{$seoDescription}\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'LAB0182TestF')->first();
+    $profile = StyleProfile::query()->where('sku', 'LAB0182TestF')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['seo_drafts_upserted'])->toBe(1)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->handle)->toBeNull()
+        ->and($profile)->not->toBeNull()
+        ->and($profile->handle)->toBe('test-productdf-28-sept')
+        ->and($profile->draft_seo_title)->toBe($seoTitle)
+        ->and($profile->draft_seo_description)->toBe($seoDescription);
+
+    @unlink($path);
+});
+
+it('saves and reads seo drafts for sku only drafts without writing a draft handle', function (): void {
+    $draft = NewProductDraft::create([
+        'sku' => 'SKU-SEO-ONLY',
+        'title' => 'SKU SEO Only Product',
+    ]);
+
+    $seoTitle = 'SKU SEO Only Product | Gold Beaded Bracelet Gift';
+    $seoDescription = 'SKU SEO Only Product is a polished gold beaded bracelet with everyday styling appeal, made for gifting, stacking, and adding a refined finish.';
+
+    $profile = NewProductDraftResource::saveSeoDraft($draft, [
+        'draft_seo_title' => $seoTitle,
+        'draft_seo_description' => $seoDescription,
+    ]);
+
+    $draft->refresh();
+    $formData = NewProductDraftResource::seoDraftFormData($draft);
+
+    expect($draft->handle)->toBeNull()
+        ->and($profile->sku)->toBe('SKU-SEO-ONLY')
+        ->and($profile->handle)->toBe('sku-seo-only-product')
+        ->and($formData['draft_seo_title'])->toBe($seoTitle)
+        ->and($formData['draft_seo_description'])->toBe($seoDescription);
+});
+
+it('uses the current draft sku for seo draft display when a handle profile has a stale sku', function (): void {
+    $draft = NewProductDraft::create([
+        'sku' => 'TEST1P324',
+        'handle' => 'magic-drum-bracelet-copy',
+        'title' => 'Siblings Template Test',
+    ]);
+    StyleProfile::withoutEvents(fn () => StyleProfile::create([
+        'handle' => $draft->handle,
+        'sku' => 'magic-drum-bracelet-copy',
+        'draft_seo_title' => 'Magic Drum Bracelet | Livi Road Collection',
+        'draft_seo_description' => 'In the bracelet colourful earth inspired beads collide with blue, ivory and gold accents.',
+    ]));
+
+    $formData = NewProductDraftResource::seoDraftFormData($draft);
+    $profile = NewProductDraftResource::saveSeoDraft($draft, [
+        'draft_seo_title' => $formData['draft_seo_title'],
+        'draft_seo_description' => $formData['draft_seo_description'],
+    ]);
+
+    expect($formData['sku'])->toBe('TEST1P324')
+        ->and($profile->fresh()->sku)->toBe('TEST1P324');
+});
+
+it('resolves complementary product skus to existing product references', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Complementary Existing Necklace',
+        'handle' => 'complementary-existing-necklace',
+        'shopify_id' => 'gid://shopify/Product/555001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'COMP-EXISTING-001',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-complementary-sku-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Complementary Product SKUs\n"
+        ."MAIN-001,Main Bracelet,COMP-EXISTING-001\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'MAIN-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['resolved_product_references'])->toBe(1)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->complementary_products)->toBe('gid://shopify/Product/555001');
+
+    @unlink($path);
+});
+
+it('resolves complementary product skus to handles from the same csv import', function (): void {
+    $path = tempnam(sys_get_temp_dir(), 'draft-complementary-same-file-import-');
+    file_put_contents(
+        $path,
+        "Handle,SKU,Title,Complementary Product SKUs\n"
+        ."new-main-bracelet,NEW-MAIN-001,New Main Bracelet,NEW-COMP-001\n"
+        ."new-comp-necklace,NEW-COMP-001,New Complementary Necklace,\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'NEW-MAIN-001')->first();
+
+    expect($result['created'])->toBe(2)
+        ->and($result['resolved_product_references'])->toBe(1)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->complementary_products)->toBe('new-comp-necklace');
+
+    @unlink($path);
+});
+
+it('resolves associated product references from the product template into local product links', function (): void {
+    $first = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Associated First Bracelet',
+        'handle' => 'associated-first-bracelet',
+        'shopify_id' => 'gid://shopify/Product/700001',
+        'status' => 'active',
+    ]);
+    Variant::create([
+        'product_id' => $first->id,
+        'sku' => 'ASSOC-FIRST-001',
+    ]);
+
+    $second = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Associated Second Bracelet',
+        'handle' => 'associated-second-bracelet',
+        'shopify_id' => 'gid://shopify/Product/700002',
+        'status' => 'active',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-associated-import-');
+    file_put_contents(
+        $path,
+        "SKU,Title,Tags,Color Style,Associated Product SKUs,Associated Products\n"
+        ."STACK-001,Main Bracelet Stack,bundles,solid,ASSOC-FIRST-001,associated-second-bracelet\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft = NewProductDraft::query()->where('sku', 'STACK-001')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['resolved_product_references'])->toBe(2)
+        ->and($result['unresolved_product_references'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->colour_style)->toBe('solid')
+        ->and($draft->bundle_product_ids)->toBe([$second->id, $first->id]);
+
+    @unlink($path);
+});
+
+it('exports associated products as a populateable product template column', function (): void {
+    $first = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Export First Bracelet',
+        'handle' => 'export-first-bracelet',
+        'shopify_id' => 'gid://shopify/Product/710001',
+        'status' => 'active',
+    ]);
+    $second = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Export Second Bracelet',
+        'handle' => 'export-second-bracelet',
+        'shopify_id' => 'gid://shopify/Product/710002',
+        'status' => 'active',
+    ]);
+
+    $draft = NewProductDraft::create([
+        'handle' => 'export-stack',
+        'sku' => 'EXPORT-STACK',
+        'title' => 'Export Stack',
+        'tags' => 'bundles',
+        'bundle_product_ids' => [$first->id, $second->id],
+    ]);
+
+    $result = app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['associated_products']);
+
+    $csv = Storage::disk($result['disk'])->get($result['path']);
+
+    expect($csv)
+        ->toContain('Associated Products')
+        ->toContain('export-first-bracelet; export-second-bracelet');
 });
 
 it('still rejects an update when another product owns the same sku', function (): void {

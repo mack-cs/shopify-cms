@@ -36,7 +36,6 @@ final class ShopifyApiImporter
     public function importIntoExistingImport(Import $import): void
     {
         ShopifyRow::where('import_id', $import->id)->delete();
-        Product::where('import_id', $import->id)->delete();
         ShopifyCollection::where('import_id', $import->id)->delete();
         ShopifyMetafield::where('import_id', $import->id)->delete();
         $shopifyProductIdsByHandle = [];
@@ -712,7 +711,7 @@ GQL;
             return;
         }
 
-        $row[$header] = (string) $value;
+        $row[$header] = app(ShopifyTaxonomyValueNormalizer::class)->normalize($header, (string) $value);
     }
 
     private function resolveMetaobjectValues(array $product): array

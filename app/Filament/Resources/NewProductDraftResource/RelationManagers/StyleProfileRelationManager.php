@@ -28,7 +28,16 @@ class StyleProfileRelationManager extends RelationManager
 
     public function table(Table $table): Table
     {
-        return $table->columns([
+        return $table->modifyQueryUsing(function (Builder $query): Builder {
+            $owner = $this->getOwnerRecord();
+            $sku = trim((string) ($owner?->sku ?? ''));
+
+            if ($sku === '') {
+                return $query;
+            }
+
+            return $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+        })->columns([
             ImageColumn::make('image_url')
                 ->label('Image')
                 ->square()
@@ -43,7 +52,9 @@ class StyleProfileRelationManager extends RelationManager
 
                     return self::normalizeImageUrl($source);
                 }),
-            Tables\Columns\TextColumn::make('sku')->searchable(),
+            Tables\Columns\TextColumn::make('sku')
+                ->state(fn (StyleProfile $record): ?string => $this->resolvedSku($record))
+                ->searchable(),
             Tables\Columns\TextColumn::make('product.color_string')->label('Colors')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_title')->label('SEO Title')->limit(60)->wrap(),
             Tables\Columns\TextColumn::make('draft_seo_description')->label('SEO Desc')->limit(80)->wrap(),
@@ -65,8 +76,7 @@ class StyleProfileRelationManager extends RelationManager
                 }),
         ])->headerActions([
             Tables\Actions\CreateAction::make()
-                ->visible(fn (): bool => filled(trim((string) ($this->getOwnerRecord()?->handle ?? '')))
-                    && !(bool) $this->getOwnerRecord()?->styleProfiles()->exists())
+                ->visible(fn (): bool => $this->canCreateSeoDraft())
                 ->mutateFormDataUsing(function (array $data): array {
                     return NewProductDraftResource::normalizeSeoDraftFormData($this->getOwnerRecord(), $data);
                 }),
@@ -82,6 +92,32 @@ class StyleProfileRelationManager extends RelationManager
         ]);
     }
 
+    private function canCreateSeoDraft(): bool
+    {
+        $owner = $this->getOwnerRecord();
+        if (!$owner) {
+            return false;
+        }
+
+        $handle = trim((string) ($owner->handle ?? ''));
+        $sku = trim((string) ($owner->sku ?? ''));
+        if ($handle === '' && $sku === '') {
+            return false;
+        }
+
+        return !StyleProfile::query()
+            ->where(function (Builder $query) use ($handle, $sku): void {
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+
+                if ($sku !== '') {
+                    $query->orWhereRaw('LOWER(TRIM(sku)) = ?', [strtolower($sku)]);
+                }
+            })
+            ->exists();
+    }
+
     private function resolvedProduct(?StyleProfile $record): ?Product
     {
         $owner = $this->getOwnerRecord();
@@ -95,13 +131,36 @@ class StyleProfileRelationManager extends RelationManager
         }
 
         $handle = trim((string) ($record?->handle ?? $owner?->handle ?? ''));
-        if ($handle === '') {
+        if ($handle !== '') {
+            $product = Product::query()
+                ->where('handle', $handle)
+                ->first();
+
+            if ($product instanceof Product) {
+                return $product;
+            }
+        }
+
+        $sku = trim((string) ($owner?->sku ?? $record?->sku ?? ''));
+        if ($sku === '') {
             return null;
         }
 
         return Product::query()
-            ->where('handle', $handle)
+            ->whereHas('allVariants', fn (Builder $query): Builder => $query->where('sku', $sku))
             ->first();
+    }
+
+    private function resolvedSku(StyleProfile $record): ?string
+    {
+        $ownerSku = trim((string) ($this->getOwnerRecord()?->sku ?? ''));
+        if ($ownerSku !== '') {
+            return $ownerSku;
+        }
+
+        $profileSku = trim((string) ($record->sku ?? ''));
+
+        return $profileSku === '' ? null : $profileSku;
     }
 
     private static function normalizeImageUrl(?string $src): ?string
