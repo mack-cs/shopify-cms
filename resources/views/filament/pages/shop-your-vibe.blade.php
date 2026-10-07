@@ -291,19 +291,26 @@
                     @endif>
                     @foreach ($draft->desired['cards'] as $vibe)
                         <article wire:key="vibe-{{ md5($vibe['key']) }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ md5($vibe['key']) }}"
-                            class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-700 dark:bg-gray-900">
+                            class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-700 dark:bg-gray-900 {{ $activeCard === $vibe['key'] ? 'syv-vibe-card-active' : '' }}">
+                            @if ($activeCard === $vibe['key'])
+                                <span class="syv-vibe-active-pill">Editing</span>
+                            @endif
                             <button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">Drag</button>
                             <button type="button" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
                                 @if ($vibe['image_url'])<img src="{{ $vibe['image_url'] }}" alt="" draggable="false" class="syv-vibe-image" loading="lazy">@else<div class="syv-vibe-image syv-image-placeholder">Choose an image</div>@endif
                                 <h4 class="my-3 font-semibold">{{ $vibe['name'] }}</h4>
                                 @php($vibeMapping = collect($vibeMappings)->firstWhere('shopify_collection_id', $vibe['collection_gid']))
-                                @if ($vibeMapping)
+                                @php($vibeCollection = $draft->desired['collections'][$vibe['collection_gid'] ?? ''] ?? null)
+                                @php($fallbackHandle = $vibeCollection['handle'] ?? basename((string) parse_url($vibe['link'] ?? '', PHP_URL_PATH)))
+                                @php($fallbackTag = $vibeCollection['detected_membership_tag'] ?? null)
+                                @php($fallbackProductCount = $vibeCollection ? (($vibeCollection['product_count'] ?? null) ?? count($vibeCollection['products'] ?? [])) : null)
+                                @if ($vibeMapping || $fallbackHandle || $fallbackTag || $fallbackProductCount !== null)
                                     <dl class="space-y-1 text-xs text-gray-500">
-                                        <div><dt class="inline font-semibold">Handle:</dt> <dd class="inline">{{ $vibeMapping['collection_handle'] }}</dd></div>
-                                        <div><dt class="inline font-semibold">Membership Tag:</dt> <dd class="inline">{{ ($vibeMapping['membership_tag'] ?? null) ?: 'Requires configuration' }}</dd></div>
+                                        <div><dt class="inline font-semibold">Handle:</dt> <dd class="inline">{{ $vibeMapping['collection_handle'] ?? $fallbackHandle }}</dd></div>
+                                        <div><dt class="inline font-semibold">Membership Tag:</dt> <dd class="inline">{{ ($vibeMapping['membership_tag'] ?? null) ?: ($fallbackTag ?: 'Requires configuration') }}</dd></div>
                                         @if (filled($vibeMapping['design_value'] ?? null))<div><dt class="inline font-semibold">Design:</dt> <dd class="inline">{{ $vibeMapping['design_value'] }}</dd></div>@endif
                                         @if (filled($vibeMapping['colour_style_value'] ?? null))<div><dt class="inline font-semibold">Colour Style:</dt> <dd class="inline">{{ $vibeMapping['colour_style_value'] }}</dd></div>@endif
-                                        <div><dd>{{ $vibeMapping['product_count'] ?? 0 }} Products</dd></div>
+                                        <div><dd>{{ ($vibeMapping['product_count'] ?? $fallbackProductCount ?? 0) }} Products</dd></div>
                                     </dl>
                                 @endif
                             </button>

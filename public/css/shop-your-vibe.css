@@ -12,6 +12,22 @@
 .syv-parent-card h2 { margin-top: 0; font-size: 1rem; font-weight: 600; }
 .syv-parent-card p { overflow-wrap: anywhere; }
 .syv-parent-card .fi-badge { width: fit-content; margin-top: .75rem; }
+.syv-vibe-card-active {
+    border-color: #f59e0b;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, .45), 0 1px 2px rgba(15, 23, 42, .06);
+}
+.syv-vibe-active-pill {
+    float: right;
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.5rem;
+    padding: .1rem .5rem;
+    border-radius: 999px;
+    background: #fff7ed;
+    color: #c2410c;
+    font-size: .72rem;
+    font-weight: 700;
+}
 .syv-vibe-image, .syv-product-image {
     display: block;
     width: 100%;

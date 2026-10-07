@@ -39,6 +39,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Livewire\Attributes\Locked;
+use Livewire\Attributes\Url;
 use Throwable;
 
 class ShopYourVibe extends Page
@@ -72,6 +73,9 @@ class ShopYourVibe extends Page
     public ?string $imageAfter = null;
 
     public string $search = '';
+
+    #[Url(as: 'collection')]
+    public ?string $selectedCollection = null;
 
     public ?string $selectedCollectionGid = '';
 
@@ -172,6 +176,9 @@ class ShopYourVibe extends Page
     public function mount(): void
     {
         $this->loadParents();
+        if (filled($this->selectedCollection)) {
+            $this->manage($this->selectedCollection);
+        }
     }
 
     public function loadParents(bool $refresh = false): void
@@ -198,6 +205,7 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->attempt(function () use ($gid): void {
             $this->accept(app(ShopYourVibeWorkflow::class)->open($gid));
+            $this->selectedCollection = $gid;
             $this->activeTab = 'products';
             $this->assignmentProductSearch = '';
             $this->loadAssignmentOverview();
@@ -213,6 +221,7 @@ class ShopYourVibe extends Page
     public function back(): void
     {
         $this->guard();
+        $this->selectedCollection = null;
         $this->draftId = null;
         $this->activeCard = null;
         $this->cardForm = [];
@@ -245,6 +254,20 @@ class ShopYourVibe extends Page
             $this->activeCard = null;
             $this->cardForm = [];
             $this->confirmingPush = false;
+            if ($discard && ($draft = $this->draft()) && empty($draft->remote_jobs)) {
+                $snapshot = $draft->snapshot;
+                $draft->update([
+                    'desired' => $snapshot,
+                    'pending' => false,
+                    'status' => 'synced',
+                    'last_error' => null,
+                    'progress' => [],
+                    'remote_jobs' => [],
+                    'revision' => $draft->revision + 1,
+                ]);
+                $this->accept($draft->refresh());
+                $this->dispatch('vibe-form-saved');
+            }
             RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
             Notification::make()
                 ->title('Shopify refresh queued')

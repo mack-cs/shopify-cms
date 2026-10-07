@@ -910,11 +910,17 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
 
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
     $revision = $this->draft->fresh()->revision;
+    $page->call('reorderCards', array_reverse($this->fake->references))->assertSee('Pending changes');
+    $this->draft->refresh();
+    expect($this->draft->pending)->toBeTrue();
     $this->fake->calls = [];
 
-    $page->call('refreshDraft', true)->assertHasNoErrors();
+    $page->call('refreshDraft', true)->assertHasNoErrors()->assertSee('Up to date with Shopify');
 
-    expect($this->fake->calls)->toBe([]);
+    expect($this->fake->calls)->toBe([])
+        ->and($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->draft->fresh()->status)->toBe('synced')
+        ->and($this->draft->fresh()->last_error)->toBeNull();
     Bus::assertDispatched(RefreshShopYourVibeDraft::class, function (RefreshShopYourVibeDraft $job) use ($revision): bool {
         $reflection = new ReflectionClass($job);
         $draftId = $reflection->getProperty('draftId');
@@ -925,7 +931,7 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
         $discard->setAccessible(true);
 
         return $draftId->getValue($job) === $this->draft->id
-            && $jobRevision->getValue($job) === $revision
+            && $jobRevision->getValue($job) === $revision + 2
             && $discard->getValue($job) === true;
     });
 });
@@ -1172,6 +1178,21 @@ it('switches between the parent products and shop your vibes tabs', function () 
         ->call('setActiveTab', 'vibes')
         ->assertSet('activeTab', 'vibes')
         ->assertSee('Drag the grip to reorder. Reordering saves a pending draft.');
+});
+
+it('opens a collection editor directly from the collection query string', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    Livewire::withQueryParams(['collection' => 'gid://shopify/Collection/1'])
+        ->test(ShopYourVibe::class)
+        ->assertSet('selectedCollection', 'gid://shopify/Collection/1')
+        ->assertSet('activeTab', 'products')
+        ->assertSee('Necklaces - Shop Your Vibe')
+        ->call('back')
+        ->assertSet('selectedCollection', null)
+        ->assertSee('Add Shop Your Vibe');
 });
 
 it('sorts parent collection products locally and shows stock badges on product cards', function () {
