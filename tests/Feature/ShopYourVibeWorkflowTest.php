@@ -1688,6 +1688,55 @@ it('uploads a new collection image to Shopify and reuses it when processing is d
     Http::assertSentCount(1);
 });
 
+it('uploads an edited vibe card image to Shopify during push', function () {
+    Storage::fake('public');
+    Http::fake(['uploads.shopify.test/*' => Http::response('', 201)]);
+    $path = UploadedFile::fake()->image('updated-vibe.jpg')->store('shop-your-vibe', 'public');
+    $card = $this->draft->desired['cards'][0];
+
+    vibeEdit($this, 'edit_card', [
+        'key' => $card['key'],
+        'name' => $card['name'],
+        'link' => $card['link'],
+        'image' => '',
+        'image_path' => $path,
+        'image_url' => 'https://leighavenue.test/storage/'.$path,
+    ]);
+
+    expect($this->draft->fresh()->desired['cards'][0]['image_path'])->toBe($path)
+        ->and($this->fake->mutations())->toBe([]);
+
+    vibePush($this);
+
+    $saved = $this->draft->fresh()->desired['cards'][0];
+    expect($this->draft->status)->toBe('synced')
+        ->and($saved['image'])->toBe('gid://shopify/MediaImage/500')
+        ->and($saved)->not->toHaveKey('image_path')
+        ->and($this->fake->files)->toHaveCount(1);
+    Http::assertSentCount(1);
+});
+
+it('accepts an uploaded image in the existing vibe card editor without publishing it', function () {
+    Storage::fake('public');
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $card = $this->draft->desired['cards'][0];
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', 'gid://shopify/Collection/1')
+        ->call('editCard', $card['key'])
+        ->set('cardImageUpload', UploadedFile::fake()->image('updated-vibe.jpg'))
+        ->call('uploadCardImage')
+        ->assertHasNoErrors();
+
+    $saved = $this->draft->fresh()->desired['cards'][0];
+    Storage::disk('public')->assertExists($saved['image_path']);
+    expect($saved['image'])->toBe('')
+        ->and($saved['image_url'])->toContain('/storage/shop-your-vibe/')
+        ->and($this->fake->mutations())->toBe([]);
+});
+
 it('accepts an uploaded image in the new collection modal without publishing it', function () {
     Storage::fake('public');
     Role::findOrCreate(RolesEnum::Admin->value);

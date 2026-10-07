@@ -329,8 +329,23 @@
                             <label class="space-y-1"><span>Name</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.name" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
                             <label class="space-y-1"><span>Link</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.link" :disabled="str_starts_with($card['collection_gid'] ?? '', 'new:')" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
                             <div>
-                                @if ($cardForm['image_url'] ?? null)<img src="{{ $cardForm['image_url'] }}" alt="Card preview" class="syv-edit-image">@endif
-                                <x-filament::button color="gray" wire:click="findImages" wire:loading.attr="disabled">Choose image from Shopify</x-filament::button>
+                                @if ($cardImageUpload)
+                                    <img src="{{ $cardImageUpload->temporaryUrl() }}" alt="Uploaded card preview" class="syv-edit-image">
+                                @elseif ($cardForm['image_url'] ?? null)
+                                    <img src="{{ $cardForm['image_url'] }}" alt="Card preview" class="syv-edit-image">
+                                @else
+                                    <div class="syv-edit-image syv-image-placeholder">Choose an image</div>
+                                @endif
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <label class="inline-flex cursor-pointer items-center rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800">
+                                        <input type="file" class="sr-only" wire:model="cardImageUpload" accept="image/jpeg,image/png,image/webp">
+                                        Upload image
+                                    </label>
+                                    <x-filament::button color="gray" wire:click="findImages" wire:loading.attr="disabled">Choose image from Shopify</x-filament::button>
+                                    <x-filament::button color="gray" wire:click="uploadCardImage" wire:loading.attr="disabled" wire:target="cardImageUpload,uploadCardImage" :disabled="$cardImageUpload === null">Save uploaded image</x-filament::button>
+                                </div>
+                                <div wire:loading wire:target="cardImageUpload" class="mt-2 text-sm text-gray-500">Uploading image...</div>
+                                @error('cardImageUpload')<p class="mt-2 text-sm text-danger-600">{{ $message }}</p>@enderror
                             </div>
                             @if (!empty($mappingForm['id']))
                                 <label class="space-y-1"><span>Membership Tag</span><x-filament::input.wrapper><x-filament::input wire:model="mappingForm.membership_tag" x-on:input="formDirty = true" placeholder="Requires configuration" /></x-filament::input.wrapper><small class="text-gray-500">The Shopify tag that controls automated collection membership.</small></label>

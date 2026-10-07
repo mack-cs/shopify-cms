@@ -146,6 +146,7 @@ class ShopYourVibeWorkflow
                     $card = $this->card($state, $input['key']);
                     $fields = Validator::make($input, ['name' => 'required|string|max:255', 'link' => 'required|string|max:2048',
                         'image' => ['present', 'nullable', 'regex:~^gid://shopify/MediaImage/\d+$~'],
+                        'image_path' => ['nullable', 'regex:~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~'],
                         'image_url' => 'nullable|url:http,https|max:4096'])->validate();
                     $this->validateLink($fields['link']);
                     if (str_starts_with($fields['link'], '/')) {
@@ -161,6 +162,11 @@ class ShopYourVibeWorkflow
                         if ($fields['image'] !== $card['image']) {
                             $state['new_collections'][$card['key']]['image'] = $fields['image'];
                             unset($state['new_collections'][$card['key']]['image_path']);
+                        }
+                        if (! empty($fields['image_path'])) {
+                            $state['new_collections'][$card['key']]['image_path'] = $fields['image_path'];
+                            $state['new_collections'][$card['key']]['image_url'] = $fields['image_url'] ?? null;
+                            unset($state['new_collections'][$card['key']]['image']);
                         }
                     }
                     foreach ($state['cards'] as &$item) {
@@ -431,6 +437,14 @@ class ShopYourVibeWorkflow
                 $this->rememberCreatedCollection($draft, $creation);
             }
             foreach ($state['cards'] as $index => $card) {
+                if (! empty($card['image_path']) && empty($card['image'])) {
+                    $card['image'] = $this->shopify->uploadImage($card['image_path'], $card['key'], $card['name']);
+                    $image = $this->shopify->image($card['image'], true);
+                    $card['image_url'] = $image['image']['url'] ?? $card['image_url'] ?? null;
+                    unset($card['image_path']);
+                    $state['cards'][$index] = $card;
+                    $draft->update(['desired' => $state]);
+                }
                 $current = collect($remote['cards'])->firstWhere('id', $card['id'])
                     ?? collect($baseline['cards'])->firstWhere('id', $card['id']);
                 if (! $card['id'] || $this->fields($current) !== $this->fields($card)) {

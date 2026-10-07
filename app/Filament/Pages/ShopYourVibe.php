@@ -40,10 +40,14 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Url;
+use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
+use Livewire\WithFileUploads;
 use Throwable;
 
 class ShopYourVibe extends Page
 {
+    use WithFileUploads;
+
     protected static ?string $navigationIcon = 'heroicon-o-squares-2x2';
 
     protected static ?string $navigationGroup = 'Catalog';
@@ -104,6 +108,8 @@ class ShopYourVibe extends Page
     public array $selectedProducts = [];
 
     public array $cardForm = [];
+
+    public ?TemporaryUploadedFile $cardImageUpload = null;
 
     public string $activeTab = 'products';
 
@@ -596,7 +602,7 @@ class ShopYourVibe extends Page
             $card = collect($draft->desired['cards'])->firstWhere('key', $key);
             abort_unless($card, 404);
             $this->activeCard = $key;
-            $this->cardForm = array_intersect_key($card, array_flip(['name', 'image', 'image_url', 'link']));
+            $this->cardForm = array_intersect_key($card, array_flip(['name', 'image', 'image_path', 'image_url', 'link']));
             $mapping = collect($this->vibeMappings)->firstWhere('shopify_collection_id', $card['collection_gid']);
             $this->mappingForm = [
                 'id' => $mapping['id'] ?? null,
@@ -609,6 +615,7 @@ class ShopYourVibe extends Page
             }
             $this->addingProducts = false;
             $this->choosingImage = false;
+            $this->cardImageUpload = null;
         });
     }
 
@@ -1018,9 +1025,31 @@ class ShopYourVibe extends Page
         $image = collect($this->images)->firstWhere('id', $gid);
         abort_unless($image, 422);
         $this->cardForm['image'] = $gid;
+        unset($this->cardForm['image_path']);
         $this->cardForm['image_url'] = data_get($image, 'image.url');
         $this->choosingImage = false;
         $this->saveCard();
+    }
+
+    public function uploadCardImage(): void
+    {
+        $this->guard();
+        abort_unless($this->activeCard, 422);
+        $this->validate([
+            'cardImageUpload' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:10240'],
+        ]);
+        $this->attempt(function (): void {
+            $path = $this->cardImageUpload?->store('shop-your-vibe', 'public');
+            if (! $path) {
+                throw new \RuntimeException('The image could not be saved. Please upload it again.');
+            }
+            $this->cardForm['image'] = '';
+            $this->cardForm['image_path'] = $path;
+            $this->cardForm['image_url'] = url(Storage::disk('public')->url($path));
+            $this->cardImageUpload = null;
+            $this->choosingImage = false;
+            $this->saveCard();
+        });
     }
 
     public function reviewPush(): void
