@@ -621,7 +621,7 @@ it('matches pricing updates by sku first and protects the handle while replacing
         ->and($result['created'])->toBe(0)
         ->and($result['protected_conflict_count'])->toBe(1)
         ->and($result['protected_conflicts'][0])->toContain('Handle protected')
-        ->and($result['pricing_batch'])->toStartWith('pricing_')
+        ->and($result['pricing_batch'])->toStartWith('import_batch_')
         ->and($draft->title)->toBe('Changed Product Name')
         ->and($draft->handle)->toBe('protected-bracelet')
         ->and($draft->variant_price)->toBe('450.00')

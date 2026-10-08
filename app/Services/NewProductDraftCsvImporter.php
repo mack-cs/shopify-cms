@@ -188,7 +188,7 @@ final class NewProductDraftCsvImporter
             }
         }
 
-        $pricingBatch = $pricingImport ? 'pricing_'.now()->format('Y_m_d_His') : null;
+        $pricingBatch = $pricingImport ? 'import_batch_'.now()->format('Y_m_d_His') : null;
         $this->csvProductReferenceLookup = $this->csvProductReferenceLookup($csv, $draftMap);
 
         DB::transaction(function () use (
