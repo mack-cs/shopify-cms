@@ -832,7 +832,7 @@ class ShopYourVibeWorkflow
 
     private function fields(?array $card): array
     {
-        return array_map(fn ($key) => (string) ($card[$key] ?? ''), ['name', 'image', 'link']);
+        return array_map(fn ($key) => (string) ($card[$key] ?? ''), ['name', 'image', 'image_path', 'link']);
     }
 
     public function moves(array $current, array $desired): array

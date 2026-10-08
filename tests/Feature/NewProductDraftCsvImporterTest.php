@@ -485,7 +485,89 @@ it('still rejects an update when another product owns the same sku', function ()
     @unlink($path);
 });
 
-it('matches pricing updates by sku first and protects product name and handle', function (): void {
+it('updates an existing product from its sku when no draft exists yet', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Old Shopify Title',
+        'handle' => 'old-shopify-title',
+        'shopify_id' => 'gid://shopify/Product/3003',
+        'status' => 'active',
+        'tags' => 'old-tag',
+    ]);
+
+    Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'LRB0151',
+        'price' => '100.00',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-sku-owner-import-');
+    file_put_contents(
+        $path,
+        "Title,SKU,Tags,Price\n"
+        ."Matobo Sculpt Bracelet,LRB0151,livi-road; bracelets,790.00\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $product->refresh();
+    $draft = NewProductDraft::query()->where('sku', 'LRB0151')->first();
+
+    expect($result['created'])->toBe(1)
+        ->and($result['skipped_duplicate_sku'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->title)->toBe('Matobo Sculpt Bracelet')
+        ->and($draft->handle)->toBe('old-shopify-title')
+        ->and($draft->shopify_id)->toBe('gid://shopify/Product/3003')
+        ->and($product->title)->toBe('Matobo Sculpt Bracelet')
+        ->and($product->handle)->toBe('old-shopify-title')
+        ->and($product->tags)->toContain('livi-road', 'bracelets')
+        ->and($product->variants()->first()->price)->toBe('790.00');
+
+    @unlink($path);
+});
+
+it('adds shop your vibe and sibling collection values to the product tags', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Matobo Sculpt Bracelet',
+        'handle' => 'matobo-sculpt-bracelet',
+        'shopify_id' => 'gid://shopify/Product/4010',
+        'status' => 'active',
+        'tags' => 'old-tag',
+    ]);
+
+    Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'LRB0151',
+        'price' => '100.00',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-vibe-tags-');
+    file_put_contents(
+        $path,
+        "SKU,Tags,Sibling Collection,Shop Your Vibe,Type,Jewelry material\n"
+        ."LRB0151,livi-road; bracelets,livi-road-uneven-sibling,golds; solids,Bracelets,gold\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $product->refresh();
+    $draft = NewProductDraft::query()->where('sku', 'LRB0151')->first();
+    $tags = \App\Services\TagNormalizer::parseTokens($product->tags);
+
+    expect($result['skipped_duplicate_sku'])->toBe(0)
+        ->and($draft)->not->toBeNull()
+        ->and($draft->title)->toBe('Matobo Sculpt Bracelet')
+        ->and($draft->sibling_collection)->toBe('livi-road-uneven-sibling')
+        ->and($draft->jewelry_material)->toBe('gold')
+        ->and($tags)->toContain('livi-road', 'bracelets', 'livi-road-uneven-sibling', 'golds', 'solids')
+        ->and($product->title)->toBe('Matobo Sculpt Bracelet');
+
+    @unlink($path);
+});
+
+it('matches pricing updates by sku first and protects the handle while replacing the title', function (): void {
     $product = Product::create([
         'import_id' => $this->draftCsvImport->id,
         'title' => 'Protected Bracelet',
@@ -537,17 +619,16 @@ it('matches pricing updates by sku first and protects product name and handle', 
 
     expect($result['updated'])->toBe(1)
         ->and($result['created'])->toBe(0)
-        ->and($result['protected_conflict_count'])->toBe(2)
-        ->and($result['protected_conflicts'][0])->toContain('Product name protected')
-        ->and($result['protected_conflicts'][1])->toContain('Handle protected')
+        ->and($result['protected_conflict_count'])->toBe(1)
+        ->and($result['protected_conflicts'][0])->toContain('Handle protected')
         ->and($result['pricing_batch'])->toStartWith('pricing_')
-        ->and($draft->title)->toBe('Protected Bracelet')
+        ->and($draft->title)->toBe('Changed Product Name')
         ->and($draft->handle)->toBe('protected-bracelet')
         ->and($draft->variant_price)->toBe('450.00')
         ->and($draft->variant_compare_at_price)->toBeNull()
         ->and($draft->material_cost)->toBe('71.70')
         ->and($draft->batch)->toBe($result['pricing_batch'])
-        ->and($product->title)->toBe('Protected Bracelet')
+        ->and($product->title)->toBe('Changed Product Name')
         ->and($product->handle)->toBe('protected-bracelet')
         ->and($product->batch)->toBe($result['pricing_batch'])
         ->and($variant->price)->toBe('450.00')

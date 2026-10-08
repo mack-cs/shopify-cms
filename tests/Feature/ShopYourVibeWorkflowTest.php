@@ -1704,6 +1704,7 @@ it('uploads an edited vibe card image to Shopify during push', function () {
     ]);
 
     expect($this->draft->fresh()->desired['cards'][0]['image_path'])->toBe($path)
+        ->and($this->draft->fresh()->pending)->toBeTrue()
         ->and($this->fake->mutations())->toBe([]);
 
     vibePush($this);
@@ -1734,6 +1735,7 @@ it('accepts an uploaded image in the existing vibe card editor without publishin
     Storage::disk('public')->assertExists($saved['image_path']);
     expect($saved['image'])->toBe('')
         ->and($saved['image_url'])->toContain('/storage/shop-your-vibe/')
+        ->and($this->draft->fresh()->pending)->toBeTrue()
         ->and($this->fake->mutations())->toBe([]);
 });
 

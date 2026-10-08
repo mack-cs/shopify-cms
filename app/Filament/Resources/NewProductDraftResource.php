@@ -4112,7 +4112,7 @@ class NewProductDraftResource extends Resource
                             if ($conflicts !== []) {
                                 $protectedConflictPart .= ' (' . implode(' | ', $conflicts) . ')';
                             }
-                            $protectedConflictPart .= '. Product names and handles were not changed.';
+                            $protectedConflictPart .= '. Handles were not changed.';
                         }
 
                         $pricingBatchPart = empty($result['pricing_batch'])

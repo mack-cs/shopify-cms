@@ -434,10 +434,10 @@ final class NewProductDraftProductSync
             $updates[HeaderStore::PATTERN_CATEGORY] = trim((string) ($draft->colour_style ?? ''));
         }
         $this->addRowUpdate($updates, HeaderStore::SIZE, $draft->size, 'size', $attributes, $row);
-        if (
-            $this->shouldSyncDraftAttribute('siblings_collection_name', $attributes, $draft->title)
-            || $this->shouldSyncDraftAttribute('title', $attributes, $draft->title)
-        ) {
+        if ($this->shouldSyncDraftAttribute('title', $attributes, $draft->title)) {
+            $updates[HeaderStore::TITLE] = trim((string) ($draft->title ?? ''));
+            $updates[HeaderStore::SIBLINGS_COLLECTION_NAME] = trim((string) ($draft->title ?? ''));
+        } elseif ($this->shouldSyncDraftAttribute('siblings_collection_name', $attributes, $draft->title)) {
             $updates[HeaderStore::SIBLINGS_COLLECTION_NAME] = trim((string) ($draft->title ?? ''));
         }
         $siblingCollection = $draft->sibling_collection === NewProductDraft::NO_SIBLING_COLLECTION

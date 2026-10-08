@@ -93,6 +93,9 @@ final class NewProductDraftCsvImporter
             'material cost' => 'material_cost',
             'material cost use 19 00 not 19 00' => 'material_cost',
             'jewelry material' => 'jewelry_material',
+            'jewelry materials' => 'jewelry_material',
+            'jewellery material' => 'jewelry_material',
+            'jewellery materials' => 'jewelry_material',
             'product materials' => 'product_materials',
             'propduct materials' => 'product_materials',
             'propduct materials new metafield' => 'product_materials',
@@ -108,6 +111,8 @@ final class NewProductDraftCsvImporter
             'size' => 'size',
             'siblings collection name' => 'siblings_collection_name',
             'sibling collection' => 'sibling_collection',
+            'shop your vibe' => 'shop_your_vibe_tags',
+            'shop your vibe tags' => 'shop_your_vibe_tags',
             'uvp short paragraph' => 'uvp_short_paragraph',
             'bead colour finish' => 'bead_colour_finish',
             'bead color finish' => 'bead_colour_finish',
@@ -249,6 +254,7 @@ final class NewProductDraftCsvImporter
 
                 $data = $this->applyImportedTypeCategoryMapping($data);
                 [$data, $appliedCollectionRule] = $this->applyCollectionPrepopulation($data);
+                $data = $this->mergeImportedTagSources($data);
                 $payload = $this->applyDefaultExtraShopifyPayload($payload);
                 if ($appliedCollectionRule === true) {
                     $prepopulationApplied++;
@@ -264,14 +270,48 @@ final class NewProductDraftCsvImporter
                 $sku = $data['sku'] ?? null;
 
                 $draft = $this->findDraftForImport($sku, $shopifyId, $handle);
+                $skuOwnerProductIds = $this->productIdsForSku(is_string($sku) ? $sku : null);
+
+                if (! $draft && count($skuOwnerProductIds) === 1) {
+                    $owner = Product::query()->find($skuOwnerProductIds[0]);
+                    if ($owner instanceof Product) {
+                        $draft = $this->findDraftForLinkedProduct($owner);
+                        if (! $draft) {
+                            if (empty($data['handle']) && trim((string) $owner->handle) !== '') {
+                                $data['handle'] = $owner->handle;
+                                $handle = $owner->handle;
+                            }
+                            if (empty($data['shopify_id']) && trim((string) $owner->shopify_id) !== '') {
+                                $data['shopify_id'] = $owner->shopify_id;
+                                $shopifyId = $owner->shopify_id;
+                            }
+                            if (! array_key_exists('title', $data) && trim((string) $owner->title) !== '') {
+                                $data['title'] = $owner->title;
+                            }
+                        }
+                    }
+                }
 
                 if ($draft) {
                     foreach ($this->protectedFieldConflicts($draft, $data) as $conflict) {
                         $protectedConflicts[] = $conflict;
                     }
 
-                    unset($data['title'], $data['handle']);
+                    unset($data['handle']);
                     $handle = trim((string) ($draft->handle ?? '')) ?: null;
+
+                    if (count($skuOwnerProductIds) === 1) {
+                        $owner = Product::query()->find($skuOwnerProductIds[0]);
+                        if ($owner instanceof Product) {
+                            if ($handle === null && trim((string) $owner->handle) !== '') {
+                                $draft->handle = $owner->handle;
+                                $handle = $owner->handle;
+                            }
+                            if (trim((string) ($draft->shopify_id ?? '')) === '' && trim((string) $owner->shopify_id) !== '') {
+                                $draft->shopify_id = $owner->shopify_id;
+                            }
+                        }
+                    }
 
                     if ($pricingBatch !== null) {
                         $data['batch'] = $pricingBatch;
@@ -334,6 +374,9 @@ final class NewProductDraftCsvImporter
                     $variantQuery = Variant::query()
                         ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalizedSku]);
                     $linkedProductId = $draft ? $this->linkedProductId($draft) : null;
+                    if ($linkedProductId === null && count($skuOwnerProductIds) === 1) {
+                        $linkedProductId = $skuOwnerProductIds[0];
+                    }
                     if ($linkedProductId !== null) {
                         $variantQuery->where('product_id', '!=', $linkedProductId);
                     }
@@ -471,6 +514,46 @@ final class NewProductDraftCsvImporter
             'prepopulation_unmatched' => $prepopulationUnmatched,
             'pricing_batch' => $pricingBatch,
         ];
+    }
+
+    /**
+     * Shop Your Vibe and sibling collection are supplied as their own columns.
+     * Their values are also membership tags, so add them to the product tags.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function mergeImportedTagSources(array $data): array
+    {
+        $supplemental = [];
+
+        if (array_key_exists('shop_your_vibe_tags', $data)) {
+            $supplemental = array_merge(
+                $supplemental,
+                TagNormalizer::parseTokens(is_string($data['shop_your_vibe_tags']) ? $data['shop_your_vibe_tags'] : null)
+            );
+            unset($data['shop_your_vibe_tags']);
+        }
+
+        $sibling = trim((string) ($data['sibling_collection'] ?? ''));
+        if (
+            $sibling !== ''
+            && strcasecmp($sibling, 'no sibling collection') !== 0
+            && $sibling !== NewProductDraft::NO_SIBLING_COLLECTION
+        ) {
+            $supplemental = array_merge($supplemental, TagNormalizer::parseTokens($sibling));
+        }
+
+        if ($supplemental === []) {
+            return $data;
+        }
+
+        $data['tags'] = TagNormalizer::normalizeFromArray(array_merge(
+            TagNormalizer::parseTokens(is_string($data['tags'] ?? null) ? $data['tags'] : null),
+            $supplemental
+        ));
+
+        return $data;
     }
 
     /**
@@ -633,12 +716,6 @@ final class NewProductDraftCsvImporter
         $conflicts = [];
         $identity = trim((string) ($draft->sku ?: $draft->shopify_id ?: $draft->handle ?: "Draft #{$draft->id}"));
 
-        $incomingTitle = trim((string) ($data['title'] ?? ''));
-        $existingTitle = trim((string) ($draft->title ?? ''));
-        if ($incomingTitle !== '' && $incomingTitle !== $existingTitle) {
-            $conflicts[] = "{$identity}: Product name protected (file: {$incomingTitle}; existing: {$existingTitle})";
-        }
-
         $incomingHandle = trim((string) ($data['handle'] ?? ''));
         $existingHandle = trim((string) ($draft->handle ?? ''));
         if ($incomingHandle !== '' && strcasecmp($incomingHandle, $existingHandle) !== 0) {
@@ -646,6 +723,49 @@ final class NewProductDraftCsvImporter
         }
 
         return $conflicts;
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function productIdsForSku(?string $sku): array
+    {
+        $normalizedSku = strtolower(trim((string) $sku));
+        if ($normalizedSku === '') {
+            return [];
+        }
+
+        return Variant::query()
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [$normalizedSku])
+            ->pluck('product_id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function findDraftForLinkedProduct(Product $product): ?NewProductDraft
+    {
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($handle !== '') {
+            $draft = NewProductDraft::query()
+                ->whereRaw('LOWER(TRIM(handle)) = ?', [strtolower($handle)])
+                ->first();
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        if ($shopifyId === '') {
+            return null;
+        }
+
+        $draft = NewProductDraft::query()
+            ->where('shopify_id', $shopifyId)
+            ->first();
+
+        return $draft instanceof NewProductDraft ? $draft : null;
     }
 
     private function linkedProductId(NewProductDraft $draft): ?int
