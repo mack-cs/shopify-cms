@@ -270,7 +270,10 @@ final class NewProductDraftProductSync
             $updates['inventory_policy'] = $draft->variant_inventory_policy;
         }
 
-        if (array_key_exists('price', $updates) && $variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+        if (
+            (array_key_exists('price', $updates) || array_key_exists('compare_at_price', $updates))
+            && $variant->sync_state === Variant::SYNC_STATE_CONFLICT
+        ) {
             $updates['sync_state'] = Variant::SYNC_STATE_LOCAL_UPDATED;
             $updates['local_dirty'] = true;
         }

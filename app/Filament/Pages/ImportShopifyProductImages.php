@@ -72,12 +72,12 @@ class ImportShopifyProductImages extends Page implements HasForms
                                     $this->runImport($service);
                                 }),
                             Action::make('rebuildStackComponentImages')
-                                ->label('Rebuild Stack Component Images')
+                                ->label('Rebuild Stacks')
                                 ->icon('heroicon-o-arrow-path')
                                 ->color('gray')
                                 ->requiresConfirmation()
-                                ->modalHeading('Rebuild stack component images?')
-                                ->modalDescription('This queues a job for stacks with linked components. Position 1 stays as the lifestyle image and positions 2 onward are rebuilt from component first images.')
+                                ->modalHeading('Rebuild stack images and compare-at prices?')
+                                ->modalDescription('This queues a job for stacks with linked components. Position 1 stays as the lifestyle image and positions 2 onward are rebuilt from component first images. Each stack compare-at price is set to the total of its component prices in Products and New Products, and any compare-at clash on the stack is cleared.')
                                 ->action(function (ShopifyImageImportService $service): void {
                                     $this->runStackComponentRebuild($service);
                                 }),
@@ -161,8 +161,8 @@ class ImportShopifyProductImages extends Page implements HasForms
 
         AdminNotification::send(
             Notification::make()
-                ->title('Stack component image rebuild queued')
-                ->body('Batch #' . $batch->id . ' will rebuild component images for ' . count($stackProductIds) . ' stack(s).')
+                ->title('Stack rebuild queued')
+                ->body('Batch #' . $batch->id . ' will rebuild images and compare-at prices for ' . count($stackProductIds) . ' stack(s).')
                 ->success()
         );
     }

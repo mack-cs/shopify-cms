@@ -74,7 +74,7 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
             ])->save();
         }
 
-        $message = "Batch #{$batch->id}: rebuilt {$result['rebuilt']} stack(s), {$result['failed']} failed.";
+        $message = "Batch #{$batch->id}: rebuilt {$result['rebuilt']} stack image set(s), updated compare-at price on {$result['compare_at_updated']} stack(s), {$result['failed']} failed.";
 
         if (!empty($result['messages'])) {
             $message .= ' ' . collect($result['messages'])->take(4)->implode(' | ');

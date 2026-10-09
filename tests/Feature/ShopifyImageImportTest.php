@@ -170,6 +170,74 @@ it('targets parent stacks for rebuild when an imported component image changes',
         ->and(app(ShopifyImageImportService::class)->stackProductIdsForUpdatedComponents([$component->id]))->toBe([$stack->id]);
 });
 
+it('sets the stack compare-at price to the component total and clears the compare-at clash', function (): void {
+    $first = createImageImportProduct('COMP100', ['handle' => 'component-100']);
+    $second = createImageImportProduct('COMP050', ['handle' => 'component-050']);
+    $stack = createImageImportProduct('STACK100', [
+        'handle' => 'stack-100',
+        'type' => 'Bundle',
+        'is_bundle' => true,
+    ]);
+
+    Variant::withoutEvents(function () use ($first, $second, $stack): void {
+        $first->variants()->update(['price' => '100.00']);
+        $second->variants()->update(['price' => '49.50']);
+        $stack->variants()->update([
+            'shopify_id' => 'gid://shopify/ProductVariant/9001',
+            'price' => '120.00',
+            'compare_at_price' => '10.00',
+            'sync_state' => Variant::SYNC_STATE_CONFLICT,
+            'local_dirty' => true,
+        ]);
+    });
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'STACK100',
+        'shopify_id' => $stack->shopify_id,
+        'handle' => $stack->handle,
+        'title' => 'Stack 100',
+        'type' => 'Bundle',
+        'tags' => 'bundles',
+        'status' => 'active',
+        'variant_price' => '120.00',
+        'variant_compare_at_price' => '10.00',
+        'bundle_product_ids' => [$first->id, $second->id],
+        'shopify_sync_warnings' => [
+            [
+                'field' => 'variant_compare_at_price',
+                'label' => 'Compare-at price',
+                'draft_value' => '10.00',
+                'shopify_value' => '80.00',
+            ],
+            [
+                'field' => 'title',
+                'label' => 'Title',
+                'draft_value' => 'Stack 100',
+                'shopify_value' => 'Old stack',
+            ],
+        ],
+    ]));
+
+    $batch = ShopifyImageImportBatch::create([
+        's3_prefix' => 'manual-stack-component-rebuild',
+        'status' => ShopifyImageImportBatch::STATUS_PENDING,
+    ]);
+
+    $result = app(ShopifyImageImportService::class)->rebuildStacksForBatch($batch, [$stack->id]);
+
+    $draft->refresh();
+    $variant = $stack->variants()->first();
+    $warningFields = collect($draft->shopifySyncWarnings())->pluck('field')->all();
+
+    expect($result['compare_at_updated'])->toBe(1)
+        ->and($draft->variant_compare_at_price)->toEqual('149.50')
+        ->and($variant->compare_at_price)->toEqual('149.50')
+        ->and($variant->price)->toEqual('120.00')
+        ->and($variant->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_UPDATED)
+        ->and($warningFields)->not->toContain('variant_compare_at_price')
+        ->and($warningFields)->toContain('title');
+});
+
 it('filters products updated in the latest completed image import batch', function (): void {
     $older = ShopifyImageImportBatch::create([
         's3_prefix' => 'incoming/2026-07-05',

@@ -112,13 +112,14 @@ class ShopifyImageImportService
 
     /**
      * @param array<int, int> $stackProductIds
-     * @return array{rebuilt:int, failed:int, messages:array<int, string>}
+     * @return array{rebuilt:int, failed:int, compare_at_updated:int, messages:array<int, string>}
      */
     public function rebuildStacksForBatch(ShopifyImageImportBatch $batch, array $stackProductIds): array
     {
         $stackProductIds = array_values(array_unique(array_filter(array_map('intval', $stackProductIds))));
         $rebuilt = 0;
         $failed = 0;
+        $compareAtUpdated = 0;
         $messages = [];
 
         foreach ($stackProductIds as $stackProductId) {
@@ -154,11 +155,30 @@ class ShopifyImageImportService
                     'message' => $e->getMessage(),
                 ]);
             }
+
+            try {
+                $price = $this->rebuildStackCompareAtPrice($stack->fresh() ?? $stack);
+                if ($price['updated']) {
+                    $compareAtUpdated++;
+                }
+                if ($price['message'] !== '') {
+                    $messages[] = $price['message'];
+                }
+            } catch (\Throwable $e) {
+                $messages[] = "{$stack->handle}: compare-at price was not updated. {$e->getMessage()}";
+                logger()->error('Stack compare-at rebuild failed.', [
+                    'batch_id' => $batch->id,
+                    'product_id' => $stack->id,
+                    'handle' => $stack->handle,
+                    'message' => $e->getMessage(),
+                ]);
+            }
         }
 
         return [
             'rebuilt' => $rebuilt,
             'failed' => $failed,
+            'compare_at_updated' => $compareAtUpdated,
             'messages' => $messages,
         ];
     }
@@ -452,6 +472,127 @@ class ShopifyImageImportService
             'rebuilt' => true,
             'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . " component image(s) locally, renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s). Shopify sync left pending for approval.",
         ];
+    }
+
+    /**
+     * Set the stack compare-at price to the sum of its component prices.
+     *
+     * @return array{updated:bool, message:string}
+     */
+    private function rebuildStackCompareAtPrice(Product $stack): array
+    {
+        $components = $this->linkedComponentProducts($stack);
+        if ($components->isEmpty()) {
+            return ['updated' => false, 'message' => "{$stack->handle}: compare-at price was not updated because no linked components were found."];
+        }
+
+        $total = 0.0;
+        $missing = [];
+        foreach ($components as $component) {
+            if (!$component instanceof Product) {
+                continue;
+            }
+
+            $price = $component->variants()->orderBy('id')->value('price');
+            if ($price === null || trim((string) $price) === '') {
+                $missing[] = trim((string) ($component->variants()->orderBy('id')->value('sku') ?? ''))
+                    ?: ($component->handle ?: ('Product #'.$component->id));
+                continue;
+            }
+
+            $total += (float) $price;
+        }
+
+        if ($missing !== []) {
+            return [
+                'updated' => false,
+                'message' => "{$stack->handle}: compare-at price was not updated because these components have no price: ".implode(', ', $missing).'.',
+            ];
+        }
+
+        $compareAt = number_format($total, 2, '.', '');
+        $draft = $this->findStackDraft($stack);
+        if ($draft instanceof NewProductDraft) {
+            NewProductDraft::withoutEvents(function () use ($draft, $compareAt): void {
+                $draft->forceFill([
+                    'variant_compare_at_price' => $compareAt,
+                ])->save();
+            });
+            $this->clearCompareAtClash($draft->fresh() ?? $draft);
+            app(NewProductDraftProductSync::class)->syncToExistingProduct(
+                $draft->fresh() ?? $draft,
+                ensureApprovalReset: true,
+                attributes: ['variant_compare_at_price'],
+            );
+        }
+
+        foreach (($stack->fresh() ?? $stack)->variants()->orderBy('id')->get() as $variant) {
+            $updates = ['compare_at_price' => $compareAt];
+            if ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+                $updates['sync_state'] = Variant::SYNC_STATE_LOCAL_UPDATED;
+                $updates['local_dirty'] = true;
+            }
+            $variant->update($updates);
+        }
+
+        return [
+            'updated' => true,
+            'message' => "{$stack->handle}: compare-at price set to {$compareAt} from component prices.",
+        ];
+    }
+
+    private function findStackDraft(Product $stack): ?NewProductDraft
+    {
+        $shopifyId = trim((string) ($stack->shopify_id ?? ''));
+        $handle = trim((string) ($stack->handle ?? ''));
+        if ($shopifyId === '' && $handle === '') {
+            return null;
+        }
+
+        return NewProductDraft::query()
+            ->where(function ($query) use ($shopifyId, $handle): void {
+                if ($shopifyId !== '') {
+                    $query->where('shopify_id', $shopifyId);
+                }
+
+                if ($handle !== '') {
+                    $shopifyId !== ''
+                        ? $query->orWhere('handle', $handle)
+                        : $query->where('handle', $handle);
+                }
+            })
+            ->orderByDesc('updated_at')
+            ->first();
+    }
+
+    private function clearCompareAtClash(NewProductDraft $draft): void
+    {
+        if (!NewProductDraft::supportsShopifySyncWarningsColumn()) {
+            return;
+        }
+
+        $remaining = [];
+        foreach ($draft->shopifySyncWarnings() as $warning) {
+            if (!is_array($warning)) {
+                continue;
+            }
+
+            if (trim((string) ($warning['field'] ?? '')) === 'variant_compare_at_price') {
+                continue;
+            }
+
+            $remaining[] = $warning;
+        }
+
+        if (count($remaining) === count($draft->shopifySyncWarnings())) {
+            return;
+        }
+
+        NewProductDraft::withoutEvents(function () use ($draft, $remaining): void {
+            $draft->forceFill([
+                'shopify_sync_warnings' => $remaining === [] ? null : $remaining,
+            ])->save();
+        });
     }
 
     private function storeS3ImageAsAsset(string $key): ImageAsset
