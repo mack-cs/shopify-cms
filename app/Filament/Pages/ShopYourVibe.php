@@ -623,6 +623,7 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function (): void {
+            $before = collect($this->draft()?->snapshot['cards'] ?? [])->firstWhere('key', $this->activeCard);
             $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'edit_card',
                 array_merge($this->cardForm, ['key' => $this->activeCard])));
             if (! empty($this->mappingForm['id'])) {
@@ -636,6 +637,7 @@ class ShopYourVibe extends Page
             }
             $this->dispatch('vibe-form-saved');
             $this->confirmingPush = false;
+            $this->queueImagePush($before);
         });
     }
 
@@ -1062,18 +1064,48 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function (): void {
-            $draft = app(ShopYourVibeWorkflow::class)->queue($this->draftId, $this->revision);
-            $this->accept($draft);
-            try {
-                PushShopYourVibe::dispatch($draft->id);
-            } catch (Throwable $e) {
-                $draft->update(['status' => 'failed', 'last_error' => 'The push could not be queued. Please retry.']);
-                throw $e;
-            }
+            $this->queueDraftPush();
             $this->confirmingPush = false;
             $this->dispatch('vibe-form-saved');
             Cache::forget($this->parentCacheKey());
         });
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $before
+     */
+    private function queueImagePush(?array $before): void
+    {
+        $draft = $this->draft();
+        $card = collect($draft?->desired['cards'] ?? [])->firstWhere('key', $this->activeCard);
+        if (! $draft || ! $card || ! $draft->pending || $draft->status === 'pushing') {
+            return;
+        }
+
+        $imageChanged = (string) ($card['image'] ?? '') !== (string) ($before['image'] ?? '')
+            || (string) ($card['image_path'] ?? '') !== (string) ($before['image_path'] ?? '');
+        if (! $imageChanged) {
+            return;
+        }
+
+        $this->queueDraftPush();
+        Notification::make()
+            ->title('Image queued for Shopify')
+            ->body('The new image is being sent to Shopify now and will update this Shop Your Vibe card. You can change the image again after this update finishes.')
+            ->success()
+            ->send();
+    }
+
+    private function queueDraftPush(): void
+    {
+        $draft = app(ShopYourVibeWorkflow::class)->queue($this->draftId, $this->revision);
+        $this->accept($draft);
+        try {
+            PushShopYourVibe::dispatch($draft->id);
+        } catch (Throwable $e) {
+            $draft->update(['status' => 'failed', 'last_error' => 'The push could not be queued. Please retry.']);
+            throw $e;
+        }
     }
 
     public function retryPush(): void

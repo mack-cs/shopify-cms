@@ -130,6 +130,7 @@ class ProductPartialApprovalRequestResource extends Resource
                         ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS],
                         ProductShopifyUpdater::SYNC_SCOPE_VARIANTS => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_VARIANTS],
                         ProductShopifyUpdater::SYNC_SCOPE_PRICE => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_PRICE],
+                        ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT],
                         ProductShopifyUpdater::SYNC_SCOPE_IMAGES => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES],
                     ])
                     ->query(function (Builder $query, array $data): Builder {

@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Services\NewProductDraftProductSync;
 use App\Services\NewProductDraftSeeder;
 use App\Services\StackBundleSellabilityService;
+use App\Services\StackCompareAtPriceService;
 use App\Services\StackSellabilityShopifyPushService;
 use App\Services\StackSellabilitySlackNotifier;
 use Filament\Notifications\Notification;
@@ -32,6 +33,7 @@ class EditNewProductDraft extends EditRecord
         parent::mount($record);
 
         $this->refreshDraftFromLinkedProduct();
+        $this->refreshCalculatedStackCompareAt();
         $this->acquireEditLock();
 
         if ($this->record instanceof NewProductDraft && $this->record->isPendingApproval()) {
@@ -91,6 +93,7 @@ class EditNewProductDraft extends EditRecord
         }
 
         $this->refreshEditLock();
+        $this->refreshCalculatedStackCompareAt();
 
         $freshRecord = $this->record?->fresh();
         $linkedProduct = $freshRecord instanceof NewProductDraft
@@ -434,6 +437,30 @@ class EditNewProductDraft extends EditRecord
             $product,
             Auth::id()
         );
+    }
+
+    private function refreshCalculatedStackCompareAt(): void
+    {
+        if (! $this->record instanceof NewProductDraft || ! $this->recordHasStackComponents($this->record)) {
+            return;
+        }
+
+        $record = $this->record->fresh(['editingUser']) ?? $this->record;
+        app(StackCompareAtPriceService::class)->applyToDraft($record);
+        $this->record = $record->fresh(['editingUser']) ?? $record;
+        $this->form->model($this->record);
+        $this->fillForm();
+    }
+
+    private function recordHasStackComponents(NewProductDraft $record): bool
+    {
+        foreach ((array) $record->bundle_product_ids as $id) {
+            if (is_numeric($id) && (int) $id > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

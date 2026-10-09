@@ -23,6 +23,20 @@ it('includes price as its own partial approval choice', function (): void {
         ->and($service->requestFieldLabels($normalized['scopes'], $normalized['core_fields']))->toBe(['Price']);
 });
 
+it('includes compare-at price as its own partial approval choice', function (): void {
+    $service = app(ProductPartialApprovalService::class);
+
+    $normalized = $service->normalizeSelections(
+        [ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT],
+        [],
+        [],
+    );
+
+    expect(ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT])->toBe('Compare-at price')
+        ->and($normalized['scopes'])->toBe([ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT])
+        ->and($service->requestFieldLabels($normalized['scopes'], $normalized['core_fields']))->toBe(['Compare-at price']);
+});
+
 it('shows pending partial approval requests to all users while keeping individual requests read only for non-target users', function (): void {
     $requester = User::factory()->create();
     $targetApprover = User::factory()->create();

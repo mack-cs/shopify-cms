@@ -706,6 +706,10 @@ class ProductPartialApprovalService
             $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_PRICE];
         }
 
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT, $scopes, true)) {
+            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT];
+        }
+
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {
             $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES];
         }
@@ -803,6 +807,10 @@ class ProductPartialApprovalService
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRICE, $scopes, true)) {
             $labels[] = 'Price';
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT, $scopes, true)) {
+            $labels[] = 'Compare-at price';
         }
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {

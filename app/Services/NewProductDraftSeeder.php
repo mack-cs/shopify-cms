@@ -293,6 +293,10 @@ final class NewProductDraftSeeder
             $incomingValue = $this->normalizeStoredIncomingValue($key, $incomingValue);
             $currentValue = $draft->getAttribute($key);
 
+            if ($key === 'variant_compare_at_price' && $this->draftCompareAtIsCalculated($draft)) {
+                continue;
+            }
+
             if (in_array($key, $identityFields, true)) {
                 if (! $this->valuesMatch($key, $currentValue, $incomingValue)) {
                     $changes[$key] = $incomingValue;
@@ -351,6 +355,17 @@ final class NewProductDraftSeeder
         }
 
         return $changes;
+    }
+
+    private function draftCompareAtIsCalculated(NewProductDraft $draft): bool
+    {
+        foreach ((array) $draft->bundle_product_ids as $id) {
+            if (is_numeric($id) && (int) $id > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function isImportedNewProductPlaceholder(

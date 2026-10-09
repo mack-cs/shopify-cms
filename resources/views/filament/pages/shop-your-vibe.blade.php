@@ -342,7 +342,7 @@
                                         Upload image
                                     </label>
                                     <x-filament::button color="gray" wire:click="findImages" wire:loading.attr="disabled">Choose image from Shopify</x-filament::button>
-                                    <x-filament::button color="gray" wire:click="uploadCardImage" wire:loading.attr="disabled" wire:target="cardImageUpload,uploadCardImage" :disabled="$cardImageUpload === null">Save uploaded image</x-filament::button>
+                                    <x-filament::button color="gray" wire:click="uploadCardImage" wire:loading.attr="disabled" wire:target="cardImageUpload,uploadCardImage" :disabled="$cardImageUpload === null">Save and send to Shopify</x-filament::button>
                                 </div>
                                 <div wire:loading wire:target="cardImageUpload" class="mt-2 text-sm text-gray-500">Uploading image...</div>
                                 @error('cardImageUpload')<p class="mt-2 text-sm text-danger-600">{{ $message }}</p>@enderror

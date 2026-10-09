@@ -1717,11 +1717,12 @@ it('uploads an edited vibe card image to Shopify during push', function () {
     Http::assertSentCount(1);
 });
 
-it('accepts an uploaded image in the existing vibe card editor without publishing it', function () {
+it('queues a shopify update when an uploaded vibe card image is saved', function () {
     Storage::fake('public');
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibe::class]);
     $card = $this->draft->desired['cards'][0];
 
     Livewire::test(ShopYourVibe::class)
@@ -1736,7 +1737,8 @@ it('accepts an uploaded image in the existing vibe card editor without publishin
     expect($saved['image'])->toBe('')
         ->and($saved['image_url'])->toContain('/storage/shop-your-vibe/')
         ->and($this->draft->fresh()->pending)->toBeTrue()
-        ->and($this->fake->mutations())->toBe([]);
+        ->and($this->draft->fresh()->status)->toBe('pushing');
+    Bus::assertDispatched(PushShopYourVibe::class);
 });
 
 it('accepts an uploaded image in the new collection modal without publishing it', function () {

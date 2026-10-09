@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Models\NewProductDraft;
 use App\Services\NewProductDraftProductSync;
+use App\Services\StackCompareAtPriceService;
 
 class NewProductDraftObserver
 {
@@ -41,22 +42,26 @@ class NewProductDraftObserver
 
         $changedKeys = array_keys($draft->getChanges());
         $meaningfulChanges = array_diff($changedKeys, $this->ignoreForApprovalReset);
-        if (empty($meaningfulChanges)) {
+        if (empty($meaningfulChanges) && !$draft->wasRecentlyCreated) {
             return;
         }
 
-        $sync = app(NewProductDraftProductSync::class);
+        if (!empty($meaningfulChanges)) {
+            $sync = app(NewProductDraftProductSync::class);
 
-        // Existing products mirror draft edits immediately and require fresh approval in Products.
-        $mirroredToExisting = $sync->syncToExistingProduct(
-            $draft,
-            ensureApprovalReset: true,
-            attributes: array_values($meaningfulChanges)
-        );
+            // Existing products mirror draft edits immediately and require fresh approval in Products.
+            $mirroredToExisting = $sync->syncToExistingProduct(
+                $draft,
+                ensureApprovalReset: true,
+                attributes: array_values($meaningfulChanges)
+            );
 
-        // Keep create-from-draft behavior gated by draft approvals.
-        if (!$mirroredToExisting && $draft->isApprovedByTwo()) {
-            $sync->syncApprovedDrafts(collect([$draft]));
+            // Keep create-from-draft behavior gated by draft approvals.
+            if (!$mirroredToExisting && $draft->isApprovedByTwo()) {
+                $sync->syncApprovedDrafts(collect([$draft]));
+            }
         }
+
+        app(StackCompareAtPriceService::class)->syncFromDraftChange($draft);
     }
 }

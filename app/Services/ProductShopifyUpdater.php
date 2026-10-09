@@ -23,6 +23,7 @@ final class ProductShopifyUpdater
     public const SYNC_SCOPE_METAFIELDS = 'metafields';
     public const SYNC_SCOPE_VARIANTS = 'variants';
     public const SYNC_SCOPE_PRICE = 'price';
+    public const SYNC_SCOPE_COMPARE_AT = 'compare_at';
     public const SYNC_SCOPE_IMAGES = 'images';
     public const CORE_FIELD_TITLE = 'title';
     public const CORE_FIELD_VENDOR = 'vendor';
@@ -651,6 +652,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_METAFIELDS,
             self::SYNC_SCOPE_VARIANTS,
             self::SYNC_SCOPE_PRICE,
+            self::SYNC_SCOPE_COMPARE_AT,
             self::SYNC_SCOPE_IMAGES,
         ];
     }
@@ -666,6 +668,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_METAFIELDS => 'Metafields',
             self::SYNC_SCOPE_VARIANTS => 'Variants and inventory',
             self::SYNC_SCOPE_PRICE => 'Price',
+            self::SYNC_SCOPE_COMPARE_AT => 'Compare-at price',
             self::SYNC_SCOPE_IMAGES => 'Images',
         ];
     }
@@ -1280,6 +1283,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     $syncMetafields = $this->scopeEnabled($scopes, self::SYNC_SCOPE_METAFIELDS);
     $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
     $syncPrice = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRICE);
+    $syncCompareAt = $this->scopeEnabled($scopes, self::SYNC_SCOPE_COMPARE_AT);
     $syncImages = $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES);
     $selectedMetafieldHeaders = $this->selectedCoreMetafieldHeaders($coreFields);
 
@@ -1501,16 +1505,16 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         );
     }
 
-    // 5) Variants/inventory. Price alone sends only the variant price.
+    // 5) Variants/inventory. Price and compare-at price can each be sent on their own.
     if ($syncVariants) {
         $warnings = array_merge(
             $warnings,
             $this->updateVariantAndInventory($product, $productId, $variantRows, $details)
         );
-    } elseif ($syncPrice) {
+    } elseif ($syncPrice || $syncCompareAt) {
         $warnings = array_merge(
             $warnings,
-            $this->updateVariantPrices($product, $productId)
+            $this->updateVariantPrices($product, $productId, $syncPrice, $syncCompareAt)
         );
     }
 
@@ -1859,29 +1863,42 @@ private function updateProduct(Product $product, array $scopes, array $coreField
      * @return array<int, array{product_id:int, warning:string}>
      */
     /**
-     * Send the local variant price only. Inventory, SKU, and compare-at price stay unchanged.
+     * Send only the selected commerce fields. Inventory and SKU stay unchanged.
      *
      * @return array<int, array{product_id:int, warning:string}>
      */
-    private function updateVariantPrices(Product $product, string $productId): array
+    private function updateVariantPrices(Product $product, string $productId, bool $syncPrice = true, bool $syncCompareAt = false): array
     {
+        $label = match (true) {
+            $syncPrice && $syncCompareAt => 'Price and compare-at price',
+            $syncCompareAt => 'Compare-at price',
+            default => 'Price',
+        };
         $variants = [];
         foreach ($product->variants()->orderBy('id')->get() as $variant) {
             $shopifyVariantId = trim((string) $variant->shopify_id);
-            if ($shopifyVariantId === '' || $variant->price === null || trim((string) $variant->price) === '') {
+            if ($shopifyVariantId === '') {
                 continue;
             }
 
-            $variants[] = [
-                'id' => $shopifyVariantId,
-                'price' => number_format((float) $variant->price, 2, '.', ''),
-            ];
+            $payload = ['id' => $shopifyVariantId];
+            if ($syncPrice && $variant->price !== null && trim((string) $variant->price) !== '') {
+                $payload['price'] = number_format((float) $variant->price, 2, '.', '');
+            }
+            if ($syncCompareAt && $variant->compare_at_price !== null && trim((string) $variant->compare_at_price) !== '') {
+                $payload['compareAtPrice'] = number_format((float) $variant->compare_at_price, 2, '.', '');
+            }
+            if (count($payload) === 1) {
+                continue;
+            }
+
+            $variants[] = $payload;
         }
 
         if ($variants === []) {
             return [[
                 'product_id' => $product->id,
-                'warning' => 'Price: no Shopify variant with a local price was available to update.',
+                'warning' => $label.': no Shopify variant with a local value was available to update.',
             ]];
         }
 
@@ -1899,7 +1916,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
         return [[
             'product_id' => $product->id,
-            'warning' => 'Price: '.($messages !== '' ? $messages : 'Shopify rejected the price update.'),
+            'warning' => $label.': '.($messages !== '' ? $messages : 'Shopify rejected the update.'),
         ]];
     }
 
