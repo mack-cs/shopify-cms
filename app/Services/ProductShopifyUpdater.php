@@ -2760,6 +2760,27 @@ query ProductsSearch($query: String!) {
 GQL;
     }
 
+    public function archiveProduct(Product $product): void
+    {
+        $productId = $this->resolveProductId($product);
+        if ($productId === null) {
+            throw new \RuntimeException('Product has no Shopify ID.');
+        }
+
+        $data = $this->client->graphql($this->productUpdateMutation(), [
+            'input' => [
+                'id' => $productId,
+                'status' => 'ARCHIVED',
+            ],
+        ]);
+
+        $errors = data_get($data, 'productUpdate.userErrors', []);
+        if (is_array($errors) && $errors !== []) {
+            $messages = $this->formatUserErrors($errors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the archive.');
+        }
+    }
+
     private function mapStatus(string $status): string
     {
         $normalized = strtolower(trim($status));

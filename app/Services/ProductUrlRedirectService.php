@@ -2,9 +2,11 @@
 
 namespace App\Services;
 
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductUrlRedirect;
 use App\Models\User;
+use App\Models\Variant;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -287,6 +289,290 @@ class ProductUrlRedirectService
         }
 
         return $result;
+    }
+
+    /**
+     * Build a CSV the user can fill with the product each SKU should redirect to.
+     *
+     * @param array<int, string> $skus
+     * @return array{disk:string,path:string,filename:string,row_count:int,missing_skus:array<int, string>}
+     */
+    public function exportArchiveRedirectTemplate(array $skus): array
+    {
+        $writer = Writer::createFromFileObject(new SplTempFileObject());
+        $writer->insertOne(['SKU', 'Title', 'Current Handle', 'Redirect To SKU']);
+
+        $rowCount = 0;
+        $missing = [];
+        $seen = [];
+
+        foreach ($skus as $sku) {
+            $sku = trim((string) $sku);
+            if ($sku === '') {
+                continue;
+            }
+
+            $key = strtolower($sku);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+
+            $product = $this->findProductBySku($sku);
+            if (! $product instanceof Product) {
+                $missing[] = $sku;
+                $writer->insertOne([$sku, '', '', '']);
+            } else {
+                $writer->insertOne([
+                    $sku,
+                    (string) ($product->title ?? ''),
+                    (string) ($product->handle ?? ''),
+                    '',
+                ]);
+            }
+            $rowCount++;
+        }
+
+        $filename = 'archive-redirect-template-' . now()->format('Ymd_His') . '.csv';
+        $path = "redirect-exports/{$filename}";
+        Storage::disk('public')->put($path, $writer->toString());
+
+        return [
+            'disk' => 'public',
+            'path' => $path,
+            'filename' => $filename,
+            'row_count' => $rowCount,
+            'missing_skus' => array_slice($missing, 0, 8),
+        ];
+    }
+
+    /**
+     * Archive each source product and point its current URL at another product.
+     *
+     * @return array{
+     *   total:int,
+     *   archived:int,
+     *   created:int,
+     *   updated:int,
+     *   skipped_same_product:int,
+     *   skipped_missing_product:int,
+     *   skipped_invalid:int,
+     *   redirect_ids:array<int, int>,
+     *   archive_product_ids:array<int, int>,
+     *   missing_products:array<int, string>
+     * }
+     */
+    public function importRedirectsFromPath(string $absolutePath, ?int $userId = null): array
+    {
+        $csv = Reader::createFromPath($absolutePath);
+        $csv->setHeaderOffset(0);
+
+        $result = [
+            'total' => 0,
+            'archived' => 0,
+            'created' => 0,
+            'updated' => 0,
+            'skipped_same_product' => 0,
+            'skipped_missing_product' => 0,
+            'skipped_invalid' => 0,
+            'redirect_ids' => [],
+            'archive_product_ids' => [],
+            'missing_products' => [],
+        ];
+
+        foreach ($csv->getRecords() as $row) {
+            $result['total']++;
+            $normalized = $this->normalizeImportRow($row);
+            $sourceSku = $this->nullableString($normalized['sku'] ?? null);
+            $targetSku = $this->nullableString($normalized['target_sku'] ?? null);
+            $targetHandle = $this->handleFromImportValue($normalized['target_handle'] ?? null);
+
+            if ($sourceSku === null || ($targetSku === null && $targetHandle === null)) {
+                $result['skipped_invalid']++;
+                continue;
+            }
+
+            $source = $this->findProductBySku($sourceSku);
+            $target = null;
+            if ($targetSku !== null) {
+                $target = $this->findProductBySku($targetSku)
+                    ?? $this->findProductByHandle($this->handleFromImportValue($targetSku));
+            }
+            if (! $target instanceof Product && $targetHandle !== null) {
+                $target = $this->findProductByHandle($targetHandle);
+            }
+
+            if (! $source instanceof Product || ! $target instanceof Product) {
+                $result['skipped_missing_product']++;
+                if (count($result['missing_products']) < 8) {
+                    $missingSku = ! $source instanceof Product ? $sourceSku : ($targetSku ?? $targetHandle);
+                    $result['missing_products'][] = (string) $missingSku;
+                }
+                continue;
+            }
+
+            if ((int) $source->id === (int) $target->id) {
+                $result['skipped_same_product']++;
+                continue;
+            }
+
+            $oldHandle = $this->nullableString($source->handle);
+            $newHandle = $this->nullableString($target->handle);
+            if ($oldHandle === null || $newHandle === null) {
+                $result['skipped_invalid']++;
+                continue;
+            }
+
+            $this->archiveProductLocally($source, $sourceSku);
+            $result['archived']++;
+            $result['archive_product_ids'][] = (int) $source->id;
+
+            $path = "/products/{$oldHandle}";
+            $existing = ProductUrlRedirect::query()->where('path', $path)->exists();
+            $redirect = ProductUrlRedirect::query()->updateOrCreate(
+                ['path' => $path],
+                [
+                    'product_id' => $source->id,
+                    'created_by' => $userId,
+                    'old_handle' => $oldHandle,
+                    'new_handle' => $newHandle,
+                    'target' => "/products/{$newHandle}",
+                    'status' => ProductUrlRedirect::STATUS_PENDING,
+                    'shopify_redirect_id' => null,
+                    'last_error' => null,
+                    'synced_at' => null,
+                ]
+            );
+
+            $result['redirect_ids'][] = (int) $redirect->id;
+            if ($existing) {
+                $result['updated']++;
+            } else {
+                $result['created']++;
+            }
+        }
+
+        $result['redirect_ids'] = array_values(array_unique($result['redirect_ids']));
+        $result['archive_product_ids'] = array_values(array_unique($result['archive_product_ids']));
+
+        return $result;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function skusFromText(string $text): array
+    {
+        $parts = preg_split('/[\s,;]+/', $text) ?: [];
+
+        return array_values(array_filter(array_map(
+            fn (string $sku): string => trim($sku),
+            $parts
+        ), fn (string $sku): bool => $sku !== ''));
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, string>
+     */
+    private function normalizeImportRow(array $row): array
+    {
+        $aliases = [
+            'sku' => 'sku',
+            'product sku' => 'sku',
+            'archive sku' => 'sku',
+            'redirect to sku' => 'target_sku',
+            'redirect to product' => 'target_sku',
+            'target sku' => 'target_sku',
+            'to sku' => 'target_sku',
+            'redirect to handle' => 'target_handle',
+            'target handle' => 'target_handle',
+            'redirect to' => 'target_sku',
+        ];
+
+        $normalized = [];
+        foreach ($row as $header => $value) {
+            $key = $aliases[$this->normalizeHeader((string) $header)] ?? null;
+            if ($key === null) {
+                continue;
+            }
+
+            $trimmed = trim((string) $value);
+            if ($trimmed === '') {
+                continue;
+            }
+
+            $normalized[$key] = $trimmed;
+        }
+
+        return $normalized;
+    }
+
+    private function findProductBySku(string $sku): ?Product
+    {
+        $productId = Variant::query()
+            ->whereRaw('LOWER(TRIM(sku)) = ?', [strtolower(trim($sku))])
+            ->value('product_id');
+
+        $product = $productId ? Product::query()->find($productId) : null;
+
+        return $product instanceof Product ? $product : null;
+    }
+
+    private function findProductByHandle(?string $handle): ?Product
+    {
+        $handle = $this->nullableString($handle);
+        if ($handle === null) {
+            return null;
+        }
+
+        $product = Product::query()->where('handle', $handle)->first();
+
+        return $product instanceof Product ? $product : null;
+    }
+
+    private function archiveProductLocally(Product $product, string $sku): void
+    {
+        if (strtolower(trim((string) $product->status)) !== 'archived') {
+            Product::withoutEvents(function () use ($product): void {
+                $product->forceFill(['status' => 'archived'])->save();
+            });
+        }
+
+        NewProductDraft::query()
+            ->where(function ($query) use ($product, $sku): void {
+                $query->where('sku', $sku);
+                $handle = trim((string) $product->handle);
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+            })
+            ->update(['status' => 'archived']);
+    }
+
+    private function handleFromImportValue(mixed $value): ?string
+    {
+        $handle = $this->nullableString($value);
+        if ($handle === null) {
+            return null;
+        }
+
+        $handle = trim($handle, '/');
+        if (str_starts_with(strtolower($handle), 'products/')) {
+            $handle = substr($handle, strlen('products/'));
+        }
+
+        $handle = trim($handle, '/');
+
+        return $handle === '' ? null : $handle;
+    }
+
+    private function normalizeHeader(string $header): string
+    {
+        $header = strtolower(trim($header));
+        $header = preg_replace('/[^a-z0-9]+/', ' ', $header) ?? '';
+
+        return trim($header);
     }
 
     private function client(): ShopifyApiClient

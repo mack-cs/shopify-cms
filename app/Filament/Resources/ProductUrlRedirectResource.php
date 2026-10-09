@@ -9,6 +9,7 @@ use App\Services\AdminNotification;
 use App\Services\ProductUrlRedirectService;
 use Filament\Forms\Form;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Actions\Action as NotificationAction;
 use Filament\Notifications\Notification;
@@ -192,6 +193,79 @@ class ProductUrlRedirectResource extends Resource
                             ->get();
 
                         self::notifyHistoryExport($service, $redirects, 'all');
+                    }),
+                Action::make('exportArchiveTemplate')
+                    ->label('Export Template')
+                    ->icon('heroicon-o-document-arrow-down')
+                    ->color('gray')
+                    ->form([
+                        Textarea::make('skus')
+                            ->label('SKUs to archive')
+                            ->rows(8)
+                            ->helperText('Paste the SKUs that should be archived, one per line. The file comes back with the current title and handle, and a blank Redirect To SKU column for the product each one should point to. Leave this empty to download a blank template.'),
+                    ])
+                    ->action(function (array $data, ProductUrlRedirectService $service): void {
+                        $skus = $service->skusFromText((string) ($data['skus'] ?? ''));
+                        $export = $service->exportArchiveRedirectTemplate($skus);
+                        $url = Storage::disk($export['disk'])->url($export['path']);
+
+                        $body = $export['row_count'] === 0
+                            ? 'Blank template saved. Fill SKU and Redirect To SKU, then use Import Redirects.'
+                            : "Saved {$export['row_count']} product row(s). Fill Redirect To SKU, then use Import Redirects.";
+                        if ($export['missing_skus'] !== []) {
+                            $body .= ' Not found: '.implode(', ', $export['missing_skus']).'.';
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Archive redirect template created')
+                            ->body($body)
+                            ->success()
+                            ->actions([
+                                NotificationAction::make('download')
+                                    ->label('Download')
+                                    ->url($url, shouldOpenInNewTab: true),
+                            ])
+                        );
+                    }),
+                Action::make('importRedirects')
+                    ->label('Import Redirects')
+                    ->icon('heroicon-o-arrow-up-tray')
+                    ->color('primary')
+                    ->form([
+                        \Filament\Forms\Components\FileUpload::make('file')
+                            ->label('CSV File')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports')
+                            ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                            ->helperText('Use SKU and Redirect To SKU. SKU is the product to archive. Redirect To SKU is the other product its URL should point to. This archives the product and queues the existing Shopify redirect sync.'),
+                    ])
+                    ->action(function (array $data, ProductUrlRedirectService $service): void {
+                        $path = Storage::disk('local')->path($data['file']);
+                        $result = $service->importRedirectsFromPath($path, Auth::id());
+
+                        if ($result['archive_product_ids'] !== []) {
+                            \App\Jobs\ProductArchiveShopifyJob::dispatch($result['archive_product_ids'], Auth::id());
+                        }
+                        if ($result['redirect_ids'] !== []) {
+                            \App\Jobs\ProductUrlRedirectSyncJob::dispatch($result['redirect_ids'], Auth::id());
+                        }
+
+                        $parts = [
+                            "Total: {$result['total']}, Archived: {$result['archived']}, Redirects created: {$result['created']}, Redirects updated: {$result['updated']}, Same product: {$result['skipped_same_product']}, Missing product: {$result['skipped_missing_product']}, Invalid rows: {$result['skipped_invalid']}.",
+                        ];
+                        if ($result['archive_product_ids'] !== []) {
+                            $parts[] = 'Queued Shopify archive and redirect sync.';
+                        }
+                        if ($result['missing_products'] !== []) {
+                            $parts[] = 'Missing: '.implode(', ', $result['missing_products']).'.';
+                        }
+
+                        self::sendNotification(Notification::make()
+                            ->title('Redirect import complete')
+                            ->body(implode(' ', $parts))
+                            ->status($result['redirect_ids'] !== [] ? 'success' : 'warning')
+                        );
                     }),
                 Action::make('importHistory')
                     ->label('Import History CSV')
