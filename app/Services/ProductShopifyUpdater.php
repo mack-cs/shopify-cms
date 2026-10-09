@@ -22,6 +22,7 @@ final class ProductShopifyUpdater
     public const SYNC_SCOPE_SEO = 'seo';
     public const SYNC_SCOPE_METAFIELDS = 'metafields';
     public const SYNC_SCOPE_VARIANTS = 'variants';
+    public const SYNC_SCOPE_PRICE = 'price';
     public const SYNC_SCOPE_IMAGES = 'images';
     public const CORE_FIELD_TITLE = 'title';
     public const CORE_FIELD_VENDOR = 'vendor';
@@ -649,6 +650,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_SEO,
             self::SYNC_SCOPE_METAFIELDS,
             self::SYNC_SCOPE_VARIANTS,
+            self::SYNC_SCOPE_PRICE,
             self::SYNC_SCOPE_IMAGES,
         ];
     }
@@ -663,6 +665,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_SEO => 'SEO title and description',
             self::SYNC_SCOPE_METAFIELDS => 'Metafields',
             self::SYNC_SCOPE_VARIANTS => 'Variants and inventory',
+            self::SYNC_SCOPE_PRICE => 'Price',
             self::SYNC_SCOPE_IMAGES => 'Images',
         ];
     }
@@ -1276,6 +1279,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
     $syncMetafields = $this->scopeEnabled($scopes, self::SYNC_SCOPE_METAFIELDS);
     $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
+    $syncPrice = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRICE);
     $syncImages = $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES);
     $selectedMetafieldHeaders = $this->selectedCoreMetafieldHeaders($coreFields);
 
@@ -1497,11 +1501,16 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         );
     }
 
-    // 5) Variants/inventory
+    // 5) Variants/inventory. Price alone sends only the variant price.
     if ($syncVariants) {
         $warnings = array_merge(
             $warnings,
             $this->updateVariantAndInventory($product, $productId, $variantRows, $details)
+        );
+    } elseif ($syncPrice) {
+        $warnings = array_merge(
+            $warnings,
+            $this->updateVariantPrices($product, $productId)
         );
     }
 
@@ -1849,6 +1858,51 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     /**
      * @return array<int, array{product_id:int, warning:string}>
      */
+    /**
+     * Send the local variant price only. Inventory, SKU, and compare-at price stay unchanged.
+     *
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function updateVariantPrices(Product $product, string $productId): array
+    {
+        $variants = [];
+        foreach ($product->variants()->orderBy('id')->get() as $variant) {
+            $shopifyVariantId = trim((string) $variant->shopify_id);
+            if ($shopifyVariantId === '' || $variant->price === null || trim((string) $variant->price) === '') {
+                continue;
+            }
+
+            $variants[] = [
+                'id' => $shopifyVariantId,
+                'price' => number_format((float) $variant->price, 2, '.', ''),
+            ];
+        }
+
+        if ($variants === []) {
+            return [[
+                'product_id' => $product->id,
+                'warning' => 'Price: no Shopify variant with a local price was available to update.',
+            ]];
+        }
+
+        $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+            'productId' => $productId,
+            'variants' => $variants,
+        ]);
+
+        $errors = data_get($data, 'productVariantsBulkUpdate.userErrors', []);
+        if (! is_array($errors) || $errors === []) {
+            return [];
+        }
+
+        $messages = $this->formatUserErrors($errors);
+
+        return [[
+            'product_id' => $product->id,
+            'warning' => 'Price: '.($messages !== '' ? $messages : 'Shopify rejected the price update.'),
+        ]];
+    }
+
     private function updateVariantAndInventory(
         Product $product,
         string $productId,

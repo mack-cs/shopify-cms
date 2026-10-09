@@ -31,6 +31,7 @@ final class NewProductDraftCsvImporter
      *   skipped_missing_handle:int,
      *   skipped_duplicate_sku:int,
      *   skipped_reference_validation:int,
+     *   failed_skus:array<int,string>,
      *   resolved_product_references:int,
      *   unresolved_product_references:int,
      *   protected_conflict_count:int,
@@ -169,6 +170,7 @@ final class NewProductDraftCsvImporter
         $skippedMissingHandle = 0;
         $skippedDuplicateSku = 0;
         $skippedReferenceValidation = 0;
+        $failedSkus = [];
         $resolvedProductReferences = 0;
         $unresolvedProductReferences = 0;
         $protectedConflicts = [];
@@ -204,6 +206,7 @@ final class NewProductDraftCsvImporter
             &$skippedMissingHandle,
             &$skippedDuplicateSku,
             &$skippedReferenceValidation,
+            &$failedSkus,
             &$resolvedProductReferences,
             &$unresolvedProductReferences,
             &$protectedConflicts,
@@ -331,6 +334,7 @@ final class NewProductDraftCsvImporter
                 if ($draft instanceof NewProductDraft && $draft->isPendingApproval()) {
                     $skippedPendingApproval++;
                     $pendingApprovalHandles[] = trim((string) ($draft->handle ?: $draft->title ?: $draft->shopify_id ?: 'Draft #'.$draft->id));
+                    $this->recordFailedSku($failedSkus, is_string($sku) ? $sku : null);
 
                     continue;
                 }
@@ -357,6 +361,7 @@ final class NewProductDraftCsvImporter
 
                 if ($this->failsProductReferenceRules($data)) {
                     $skippedReferenceValidation++;
+                    $this->recordFailedSku($failedSkus, is_string($sku) ? $sku : null);
 
                     continue;
                 }
@@ -383,6 +388,7 @@ final class NewProductDraftCsvImporter
 
                     if ($draftQuery->exists() || $variantQuery->exists()) {
                         $skippedDuplicateSku++;
+                        $this->recordFailedSku($failedSkus, is_string($sku) ? $sku : null);
 
                         continue;
                     }
@@ -503,6 +509,7 @@ final class NewProductDraftCsvImporter
             'skipped_missing_handle' => $skippedMissingHandle,
             'skipped_duplicate_sku' => $skippedDuplicateSku,
             'skipped_reference_validation' => $skippedReferenceValidation,
+            'failed_skus' => array_values(array_unique($failedSkus)),
             'resolved_product_references' => $resolvedProductReferences,
             'unresolved_product_references' => $unresolvedProductReferences,
             'protected_conflict_count' => count($protectedConflicts),
@@ -514,6 +521,19 @@ final class NewProductDraftCsvImporter
             'prepopulation_unmatched' => $prepopulationUnmatched,
             'pricing_batch' => $pricingBatch,
         ];
+    }
+
+    /**
+     * @param  array<int, string>  $failedSkus
+     */
+    private function recordFailedSku(array &$failedSkus, ?string $sku): void
+    {
+        $sku = trim((string) $sku);
+        if ($sku === '') {
+            return;
+        }
+
+        $failedSkus[] = $sku;
     }
 
     /**
@@ -1283,6 +1303,47 @@ final class NewProductDraftCsvImporter
                 ->update($authoritativeAttributes);
             $draft->refresh();
         }
+
+        $this->acceptImportedValuesOverShopifyWarnings($draft, $attributes);
+    }
+
+    /**
+     * The uploaded file is the local source of truth. Drop Shopify clash warnings
+     * for fields this row just wrote so the new values are not left locked.
+     *
+     * @param  array<int, string>  $attributes
+     */
+    private function acceptImportedValuesOverShopifyWarnings(NewProductDraft $draft, array $attributes): void
+    {
+        if (! NewProductDraft::supportsShopifySyncWarningsColumn() || $attributes === []) {
+            return;
+        }
+
+        $draft->refresh();
+        $imported = array_fill_keys($attributes, true);
+        $remaining = [];
+        foreach ($draft->shopifySyncWarnings() as $warning) {
+            if (! is_array($warning)) {
+                continue;
+            }
+
+            $field = trim((string) ($warning['field'] ?? ''));
+            if ($field !== '' && isset($imported[$field])) {
+                continue;
+            }
+
+            $remaining[] = $warning;
+        }
+
+        if (count($remaining) === count($draft->shopifySyncWarnings())) {
+            return;
+        }
+
+        NewProductDraft::withoutEvents(function () use ($draft, $remaining): void {
+            $draft->forceFill([
+                'shopify_sync_warnings' => $remaining === [] ? null : $remaining,
+            ])->save();
+        });
     }
 
     /**

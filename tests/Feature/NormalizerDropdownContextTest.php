@@ -1,5 +1,6 @@
 <?php
 
+use App\Filament\Resources\NewProductDraftResource;
 use App\Models\RequiredField;
 use App\Models\DropdownOption;
 use App\Models\Import;
@@ -77,6 +78,41 @@ it('does not block approval for a controlled dropdown switched off in required f
 
     expect($headers)->not->toContain(HeaderStore::MATERIALS_AND_DIMENSIONS)
         ->and($headers)->toContain(HeaderStore::JEWELRY_MATERIAL);
+});
+
+it('ignores a new materials value on the draft when that required switch is off', function (): void {
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::MATERIALS_AND_DIMENSIONS,
+        'label' => HeaderStore::MATERIALS_AND_DIMENSIONS,
+        'required' => false,
+    ]);
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::JEWELRY_MATERIAL,
+        'label' => HeaderStore::JEWELRY_MATERIAL,
+        'required' => true,
+    ]);
+
+    $method = new ReflectionMethod(NewProductDraftResource::class, 'invalidCollectionSelectionValues');
+
+    $materials = $method->invoke(
+        null,
+        "• Premium UV-plated enamel on a metal alloy base\n• Elasticated with length of 18.5cm",
+        ['Enamel UV plated beads for a premium finish' => 'Enamel UV plated beads for a premium finish'],
+        HeaderStore::MATERIALS_AND_DIMENSIONS
+    );
+    $jewelry = $method->invoke(
+        null,
+        'not-a-real-material',
+        ['gold' => 'gold'],
+        HeaderStore::JEWELRY_MATERIAL
+    );
+
+    expect($materials)->toBe([])
+        ->and($jewelry)->toBe(['not-a-real-material']);
 });
 
 it('captures oversized pending dropdown options during shopify import normalization', function (): void {

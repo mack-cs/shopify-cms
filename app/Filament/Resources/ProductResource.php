@@ -2897,7 +2897,7 @@ class ProductResource extends Resource
                 ->required()
                 ->live()
                 ->columns(2)
-                ->helperText('Partial approval requests can be sent for active and draft products. Other statuses still need the existing full approval workflow.'),
+                ->helperText('Partial approval requests can be sent for active and draft products. Other statuses still need the existing full approval workflow. Price sends only the variant price.'),
             CheckboxList::make('core_fields')
                 ->label('Product core fields')
                 ->options(ProductShopifyUpdater::productCoreFieldLabels())

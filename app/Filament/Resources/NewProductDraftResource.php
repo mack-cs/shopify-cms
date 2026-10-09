@@ -755,7 +755,8 @@ class NewProductDraftResource extends Resource
                                                 vendor: $get('vendor'),
                                                 productType: $get('type'),
                                                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
+                                            ),
+                                            HeaderStore::COLOR_METAFIELD
                                         );
 
                                         if (!empty($invalid)) {
@@ -1001,7 +1002,8 @@ class NewProductDraftResource extends Resource
                                             self::dropdownOptionsForHeader(
                                                 HeaderStore::JEWELRY_MATERIAL,
                                                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
+                                            ),
+                                            HeaderStore::JEWELRY_MATERIAL
                                         );
                                         if (!empty($invalid)) {
                                             $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1054,7 +1056,8 @@ class NewProductDraftResource extends Resource
                                             self::dropdownOptionsForHeader(
                                                 HeaderStore::MATERIALS_AND_DIMENSIONS,
                                                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
+                                            ),
+                                            HeaderStore::MATERIALS_AND_DIMENSIONS
                                         );
                                         if (!empty($invalid)) {
                                             $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1413,7 +1416,8 @@ class NewProductDraftResource extends Resource
                                             self::dropdownOptionsForHeader(
                                                 HeaderStore::PATTERN_CATEGORY,
                                                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                            )
+                                            ),
+                                            HeaderStore::PATTERN_CATEGORY
                                         );
                                         if (!empty($invalid)) {
                                             $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1463,7 +1467,8 @@ class NewProductDraftResource extends Resource
                             fn (Get $get): \Closure => function (string $attribute, $value, $fail) use ($get): void {
                                 $invalid = self::invalidCollectionSelectionValues(
                                     $value,
-                                    self::allowedDesignOptionsForDraftState($get)
+                                    self::allowedDesignOptionsForDraftState($get),
+                                    self::designHeaderForDraftState($get)
                                 );
                                 if (!empty($invalid)) {
                                     $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1503,7 +1508,8 @@ class NewProductDraftResource extends Resource
                                     self::dropdownOptionsForHeader(
                                         HeaderStore::BEAD_COLOUR_FINISH,
                                         tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                    )
+                                    ),
+                                    HeaderStore::BEAD_COLOUR_FINISH
                                 );
                                 if (!empty($invalid)) {
                                     $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1541,7 +1547,8 @@ class NewProductDraftResource extends Resource
                                                     self::dropdownOptionsForHeader(
                                                         HeaderStore::PRODUCT_METALS,
                                                         tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                                    )
+                                                    ),
+                                                    HeaderStore::PRODUCT_METALS
                                                 );
                                                 if (!empty($invalid)) {
                                                     $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -1578,7 +1585,8 @@ class NewProductDraftResource extends Resource
                                                     self::dropdownOptionsForHeader(
                                                         HeaderStore::SIZE,
                                                         tags: self::filterTags($get, $get('vendor'), $get('type'))
-                                                    )
+                                                    ),
+                                                    HeaderStore::SIZE
                                                 );
                                                 if (!empty($invalid)) {
                                                     $fail('Invalid value(s) for selected collection: ' . implode('; ', $invalid));
@@ -3040,7 +3048,8 @@ class NewProductDraftResource extends Resource
 
         $invalid = self::invalidCollectionSelectionValues(
             $get('product_design'),
-            self::allowedDesignOptionsForDraftState($get)
+            self::allowedDesignOptionsForDraftState($get),
+            self::designHeaderForDraftState($get)
         );
 
         if (empty($invalid)) {
@@ -3267,11 +3276,45 @@ class NewProductDraftResource extends Resource
     }
 
     /**
-     * @param array<string, string> $options
+     * The Required Fields switch for a collection dropdown turns the allowed-value check off.
+     * A missing switch still enforces the dropdown list.
+     */
+    private static function collectionDropdownIsRequired(string $header): bool
+    {
+        if (! RequiredField::query()->exists()) {
+            return true;
+        }
+
+        if ($header === HeaderStore::COLOR_METAFIELD) {
+            return RequiredField::query()
+                ->where('required', true)
+                ->where('source', 'product')
+                ->whereIn('attribute', ['color', 'color_string', $header])
+                ->exists();
+        }
+
+        $field = RequiredField::query()
+            ->where('source', 'row')
+            ->where('attribute', $header)
+            ->first();
+
+        if (! $field instanceof RequiredField) {
+            return true;
+        }
+
+        return (bool) $field->required;
+    }
+
+    /**
+     * @param  array<string, string>  $options
      * @return array<int, string>
      */
-    private static function invalidCollectionSelectionValues(mixed $value, array $options): array
+    private static function invalidCollectionSelectionValues(mixed $value, array $options, ?string $header = null): array
     {
+        if ($header !== null && ! self::collectionDropdownIsRequired($header)) {
+            return [];
+        }
+
         $selected = self::normalizeSelectedOptionTokens($value);
         if (empty($selected)) {
             return [];
@@ -3331,7 +3374,8 @@ class NewProductDraftResource extends Resource
             self::dropdownOptionsForHeader(
                 $header,
                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-            )
+            ),
+            $header
         );
 
         if (empty($invalid)) {
@@ -3355,7 +3399,8 @@ class NewProductDraftResource extends Resource
                 vendor: $get('vendor'),
                 productType: $get('type'),
                 tags: self::filterTags($get, $get('vendor'), $get('type'))
-            )
+            ),
+            HeaderStore::COLOR_METAFIELD
         );
 
         if (!empty($invalid)) {
@@ -4115,9 +4160,17 @@ class NewProductDraftResource extends Resource
                             $protectedConflictPart .= '. Handles were not changed.';
                         }
 
+                        $failedSkus = array_values(array_filter(
+                            $result['failed_skus'] ?? [],
+                            fn (mixed $sku): bool => is_string($sku) && trim($sku) !== ''
+                        ));
+                        $failedSkuPart = $failedSkus === []
+                            ? ''
+                            : '. Failed SKUs: '.implode(', ', $failedSkus);
+
                         $pricingBatchPart = empty($result['pricing_batch'])
                             ? ''
-                            : ", Pricing batch: {$result['pricing_batch']}";
+                            : ", Import batch: {$result['pricing_batch']}";
 
                         $prepopulationPart = '';
                         if (($result['prepopulation_applied'] ?? 0) > 0 || ($result['prepopulation_unmatched'] ?? 0) > 0) {
@@ -4150,12 +4203,14 @@ class NewProductDraftResource extends Resource
                                 $protectedConflictPart .
                                 $pricingBatchPart .
                                 $prepopulationPart .
-                                $seoCorrectionPart
+                                $seoCorrectionPart .
+                                $failedSkuPart
                             )
                             ->status(
                                 ($result['skipped_pending_approval'] ?? 0) > 0
                                 || ($result['protected_conflict_count'] ?? 0) > 0
                                 || ($result['invalid_seo_count'] ?? 0) > 0
+                                || $failedSkus !== []
                                     ? 'warning'
                                     : 'success'
                             )

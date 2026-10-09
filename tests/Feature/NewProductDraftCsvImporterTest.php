@@ -480,6 +480,7 @@ it('still rejects an update when another product owns the same sku', function ()
 
     expect($result['updated'])->toBe(0)
         ->and($result['skipped_duplicate_sku'])->toBe(1)
+        ->and($result['failed_skus'])->toBe(['LAP041'])
         ->and(StyleProfile::query()->where('handle', $draft->handle)->exists())->toBeFalse();
 
     @unlink($path);
@@ -634,6 +635,69 @@ it('matches pricing updates by sku first and protects the handle while replacing
         ->and($variant->price)->toBe('450.00')
         ->and($variant->compare_at_price)->toBeNull()
         ->and($otherDraft->fresh()->sku)->toBe('OTHER-002');
+
+    @unlink($path);
+});
+
+it('overwrites the variant price and drops the shopify price clash', function (): void {
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id,
+        'title' => 'Clash Bracelet',
+        'handle' => 'clash-bracelet',
+        'shopify_id' => 'gid://shopify/Product/4500',
+        'status' => 'active',
+    ]);
+
+    $variant = Variant::create([
+        'product_id' => $product->id,
+        'sku' => 'CLASH-001',
+        'price' => '300.00',
+        'shopify_id' => 'gid://shopify/ProductVariant/4501',
+        'sync_state' => Variant::SYNC_STATE_CONFLICT,
+        'local_dirty' => true,
+    ]);
+
+    $draft = NewProductDraft::create([
+        'title' => 'Clash Bracelet',
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'sku' => 'CLASH-001',
+        'status' => 'active',
+        'variant_price' => '300.00',
+        'shopify_sync_warnings' => [
+            [
+                'field' => 'variant_price',
+                'label' => 'Price',
+                'draft_value' => '300.00',
+                'shopify_value' => '250.00',
+            ],
+            [
+                'field' => 'title',
+                'label' => 'Title',
+                'draft_value' => 'Clash Bracelet',
+                'shopify_value' => 'Old Shopify Title',
+            ],
+        ],
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-price-clash-');
+    file_put_contents(
+        $path,
+        "SKU,Price\n"
+        ."CLASH-001,450.00\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    $draft->refresh();
+    $variant->refresh();
+
+    expect($result['updated'])->toBe(1)
+        ->and($draft->variant_price)->toBe('450.00')
+        ->and($variant->price)->toBe('450.00')
+        ->and($variant->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_UPDATED)
+        ->and($draft->shopifySyncWarnings())->toHaveCount(1)
+        ->and($draft->shopifySyncWarnings()[0]['field'])->toBe('title');
 
     @unlink($path);
 });

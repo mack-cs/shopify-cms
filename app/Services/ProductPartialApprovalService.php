@@ -702,6 +702,10 @@ class ProductPartialApprovalService
             $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_VARIANTS];
         }
 
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRICE, $scopes, true)) {
+            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_PRICE];
+        }
+
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {
             $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES];
         }
@@ -795,6 +799,10 @@ class ProductPartialApprovalService
             foreach ($this->requiredLabelsForSource('variant') as $label) {
                 $labels[] = $label;
             }
+        }
+
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRICE, $scopes, true)) {
+            $labels[] = 'Price';
         }
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {

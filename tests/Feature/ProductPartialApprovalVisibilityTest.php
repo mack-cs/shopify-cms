@@ -4,9 +4,24 @@ use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\User;
 use App\Services\ProductPartialApprovalService;
+use App\Services\ProductShopifyUpdater;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+
+it('includes price as its own partial approval choice', function (): void {
+    $service = app(ProductPartialApprovalService::class);
+
+    $normalized = $service->normalizeSelections(
+        [ProductShopifyUpdater::SYNC_SCOPE_PRICE, ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS],
+        [],
+        [],
+    );
+
+    expect(ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_PRICE])->toBe('Price')
+        ->and($normalized['scopes'])->toBe([ProductShopifyUpdater::SYNC_SCOPE_PRICE, ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS])
+        ->and($service->requestFieldLabels($normalized['scopes'], $normalized['core_fields']))->toBe(['Price']);
+});
 
 it('shows pending partial approval requests to all users while keeping individual requests read only for non-target users', function (): void {
     $requester = User::factory()->create();
