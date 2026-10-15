@@ -273,6 +273,9 @@ class NewProductDraft extends Model
         }
 
         $tags = app(SaleTagService::class)->apply($tags, $isOnSale, $this->attributes['type'] ?? null);
+        if (self::hasBundleOrStackTag($tags)) {
+            $tags = TagNormalizer::withoutGenericProductTypeTags($tags);
+        }
 
         $this->attributes['is_on_sale'] = $isOnSale ? 1 : 0;
         $this->attributes['tags'] = TagNormalizer::normalizeFromArray(

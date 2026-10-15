@@ -59,6 +59,10 @@ final class PrepopulationRuleService
     /** @param array<int, string> $resolvedTags @return array<string, mixed> */
     private function updatesForRule(PrepopulationRule $rule, array $resolvedTags, ?string $currentType = null): array
     {
+        if ($this->isStackOrBundleContext($rule, $resolvedTags)) {
+            $resolvedTags = TagNormalizer::withoutGenericProductTypeTags($resolvedTags);
+        }
+
         $type = $rule->auto_type ?: $currentType;
 
         $updates = [
@@ -114,6 +118,20 @@ final class PrepopulationRuleService
         }
 
         return $vendor;
+    }
+
+    /**
+     * @param array<int, string> $tags
+     */
+    private function isStackOrBundleContext(PrepopulationRule $rule, array $tags): bool
+    {
+        $candidates = array_merge(
+            $tags,
+            array_map(static fn (mixed $tag): string => (string) $tag, $rule->add_tags ?? []),
+            [(string) ($rule->handle ?? ''), (string) ($rule->collection_name ?? '')]
+        );
+
+        return TagNormalizer::containsBundleOrStackTag(implode(',', $candidates));
     }
 
     /** @param array<int, string> $add @param array<int, string> $remove */

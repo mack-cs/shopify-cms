@@ -112,4 +112,29 @@ final class TagNormalizer
 
         return false;
     }
+
+    /**
+     * Tags that assign a product to the main Bracelet or Necklace collections.
+     * Stack/bundle products can still use those product types without these tags.
+     *
+     * @return array<int, string>
+     */
+    public static function genericProductTypeTags(): array
+    {
+        return ['bracelet', 'bracelets', 'necklace', 'necklaces'];
+    }
+
+    /**
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    public static function withoutGenericProductTypeTags(array $tags): array
+    {
+        $blocked = array_flip(self::genericProductTypeTags());
+
+        return array_values(array_filter(
+            $tags,
+            static fn (string $tag): bool => !isset($blocked[strtolower($tag)])
+        ));
+    }
 }

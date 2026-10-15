@@ -34,6 +34,7 @@ use App\Services\NewProductDraftAssignmentService;
 use App\Services\AdminNotification;
 use App\Services\AsyncJobStateService;
 use App\Services\CategoryTypeMap;
+use App\Services\ElevatedBasicsStackCatalog;
 use App\Services\DeletionRequestWorkflowService;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewInTagService;
@@ -488,7 +489,19 @@ class NewProductDraftResource extends Resource
                             Select::make('collection_filter')
                                 ->label('Collection')
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::collectionOptions())
+                                ->options(fn (): array => self::draftCollectionOptions())
+                                ->helperText(function (Get $get): ?string {
+                                    $tags = self::normalizeTagList($get('tags'));
+                                    if (ElevatedBasicsStackCatalog::hasAmbiguousIdentification($tags)) {
+                                        return 'This product has both Elevated Basics bracelet and necklace stack tags, so its stack type has not been changed.';
+                                    }
+
+                                    if (self::collectionFromTags(implode(', ', $tags)) === ElevatedBasicsStackCatalog::BASE_COLLECTION) {
+                                        return 'Choose Elevated Basics Bracelet Stacks or Elevated Basics Necklace Stacks.';
+                                    }
+
+                                    return null;
+                                })
                                 ->searchable()
                                 ->preload()
                                 ->reactive()
@@ -497,7 +510,9 @@ class NewProductDraftResource extends Resource
                                     if (!$record) {
                                         return;
                                     }
-                                    $component->state(self::collectionFromTags($record->tags));
+                                    $component->state(ElevatedBasicsStackCatalog::selectableCollection(
+                                        self::collectionFromTags($record->tags)
+                                    ));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                     if (!self::siblingCollectionMatchesSelection(
@@ -543,6 +558,7 @@ class NewProductDraftResource extends Resource
                                         $tags,
                                         $resolvedType
                                     );
+                                    self::applyElevatedBasicsStackSelection($set, $get, is_string($state) ? $state : null);
                                     self::refreshDraftVibeSelection($set, $get);
                                 }),
                             Select::make('vendor')
@@ -1686,6 +1702,14 @@ class NewProductDraftResource extends Resource
     /**
      * @return array<string, string>
      */
+    private static function draftCollectionOptions(): array
+    {
+        return ElevatedBasicsStackCatalog::collectionSelectOptions(self::collectionOptions());
+    }
+
+    /**
+     * @return array<string, string>
+     */
     private static function siblingCollectionOptions(mixed $selectedCollection = null, mixed $currentValue = null): array
     {
         $filterByCollection = func_num_args() >= 2;
@@ -1746,7 +1770,9 @@ class NewProductDraftResource extends Resource
      */
     private static function siblingCollectionOptionsForCollection(mixed $selectedCollection): array
     {
-        $collection = trim((string) ($selectedCollection ?? ''));
+        $collection = trim((string) (ElevatedBasicsStackCatalog::sourceCollection(
+            is_string($selectedCollection) ? $selectedCollection : null
+        ) ?? $selectedCollection ?? ''));
         if ($collection === '') {
             return [];
         }
@@ -1825,6 +1851,15 @@ class NewProductDraftResource extends Resource
             return null;
         }
 
+        if (ElevatedBasicsStackCatalog::hasAmbiguousIdentification($normalized)) {
+            return ElevatedBasicsStackCatalog::BASE_COLLECTION;
+        }
+
+        $identified = ElevatedBasicsStackCatalog::optionForTags($normalized);
+        if ($identified !== null) {
+            return $identified;
+        }
+
         $rows = DropdownOption::query()
             ->where(function ($query) use ($normalized): void {
                 $query->whereIn('collection_tag_primary', $normalized)
@@ -1869,6 +1904,7 @@ class NewProductDraftResource extends Resource
         bool $forceBundleTags = false
     ): array
     {
+        $collection = ElevatedBasicsStackCatalog::sourceCollection($collection);
         if ($collection === null || trim($collection) === '') {
             return [];
         }
@@ -1904,8 +1940,16 @@ class NewProductDraftResource extends Resource
         }
 
         $tags = self::uniqueNormalizedTags($tags);
+        if (!$forProductTags) {
+            return $tags;
+        }
 
-        return $forProductTags ? self::normalizeBundleCollectionTags($tags) : $tags;
+        $tags = self::normalizeBundleCollectionTags($tags);
+        if (self::hasBundleOrStackTag($tags)) {
+            $tags = TagNormalizer::withoutGenericProductTypeTags($tags);
+        }
+
+        return $tags;
     }
 
     private static function bundleContextCollectionTags(?string $collection, bool $forProductTags = true): array
@@ -1994,12 +2038,14 @@ class NewProductDraftResource extends Resource
                 && !self::hasBundleOrStackTag([$tag])
         ));
 
-        return self::defaultedDraftTags(
+        $tags = self::defaultedDraftTags(
             self::uniqueNormalizedTags(array_merge($kept, $collectionTags)),
             $type,
             $isOnSale,
             $isNewIn
         );
+
+        return ElevatedBasicsStackCatalog::finalizeTags($tags, $collection, $isNewIn);
     }
 
     private static function refreshDraftVibeSelection(callable $set, Get $get): void
@@ -2014,7 +2060,7 @@ class NewProductDraftResource extends Resource
     private static function applyCollectionPrepopulation(callable $set, ?string $collection, mixed $tags, mixed $type): void
     {
         $service = app(PrepopulationRuleService::class);
-        $rule = $service->ruleForCollection($collection);
+        $rule = $service->ruleForCollection(ElevatedBasicsStackCatalog::sourceCollection($collection) ?? $collection);
         if ($rule === null) {
             return;
         }
@@ -2064,10 +2110,49 @@ class NewProductDraftResource extends Resource
         }
     }
 
+    private static function applyElevatedBasicsStackSelection(callable $set, Get $get, ?string $collection): void
+    {
+        if (!ElevatedBasicsStackCatalog::isVariant($collection)) {
+            return;
+        }
+
+        $type = ElevatedBasicsStackCatalog::productType($collection);
+        $mapping = CategoryTypeMap::byType($type);
+        $set('type', $type);
+        if ($mapping !== null) {
+            $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
+            $set('google_product_category', $mapping['google_product_category']);
+        }
+
+        if ($type === 'Necklaces') {
+            $set('product_design', null);
+        }
+
+        $vendor = trim((string) ($get('vendor') ?? ''));
+        if (
+            $vendor === ''
+            || strcasecmp($vendor, ElevatedBasicsStackCatalog::BRACELET_OPTION) === 0
+            || strcasecmp($vendor, ElevatedBasicsStackCatalog::NECKLACE_OPTION) === 0
+        ) {
+            $set('vendor', ElevatedBasicsStackCatalog::VENDOR);
+        }
+
+        $set('tags', ElevatedBasicsStackCatalog::finalizeTags(
+            self::normalizeTagList($get('tags')),
+            $collection,
+            filter_var($get('is_new_in'), FILTER_VALIDATE_BOOLEAN)
+        ));
+    }
+
     private static function categoryMappingForCollection(?string $collection): ?array
     {
         if ($collection === null || trim($collection) === '') {
             return null;
+        }
+
+        $variantType = ElevatedBasicsStackCatalog::productType($collection);
+        if ($variantType !== null) {
+            return CategoryTypeMap::byType($variantType);
         }
 
         $tokens = self::uniqueNormalizedTags(array_merge(
@@ -2090,7 +2175,9 @@ class NewProductDraftResource extends Resource
 
     private static function expectedVendorForCollection(?string $collection): ?string
     {
-        return app(DropdownCollectionCatalog::class)->vendorForCollection($collection);
+        return app(DropdownCollectionCatalog::class)->vendorForCollection(
+            ElevatedBasicsStackCatalog::sourceCollection($collection)
+        );
     }
 
     private static function normalizeSiblingCollectionValue(mixed $value): ?string
@@ -2266,7 +2353,7 @@ class NewProductDraftResource extends Resource
     private static function siblingCollectionFamilyHandles(string $selectedCollection): array
     {
         $handles = DropdownOption::query()
-            ->where('collection_style', $selectedCollection)
+            ->where('collection_style', ElevatedBasicsStackCatalog::sourceCollection($selectedCollection) ?? $selectedCollection)
             ->whereNotNull('collection_tag_primary')
             ->where('collection_tag_primary', '!=', '')
             ->pluck('collection_tag_primary')
@@ -2504,10 +2591,15 @@ class NewProductDraftResource extends Resource
         $tags = self::normalizeBundleCollectionTags(self::uniqueNormalizedTags($tags));
 
         $service = app(NewInTagService::class);
-
-        return $isNewIn
+        $tags = $isNewIn
             ? $service->tagsForNewProduct($tags, $type)
             : $service->removeManagedTags($tags);
+
+        if (self::isBundleOrStackState($type, $tags)) {
+            $tags = TagNormalizer::withoutGenericProductTypeTags($tags);
+        }
+
+        return $tags;
     }
 
     /**
@@ -3066,7 +3158,7 @@ class NewProductDraftResource extends Resource
     {
         $selected = self::nullIfEmpty($get('collection_filter'));
         if ($selected !== null) {
-            return $selected;
+            return ElevatedBasicsStackCatalog::sourceCollection($selected) ?? $selected;
         }
 
         $tags = self::normalizeTagList($get('tags'));

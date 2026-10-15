@@ -25,6 +25,7 @@ final class NewInTagService
     public function tagsForNewProduct(array $existing, mixed $type = null, mixed $title = null): array
     {
         $existing = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($existing));
+        $original = $existing;
         $required = self::TAGS;
         $context = $this->collectionContextForTags($existing);
         $collectionTag = TagNormalizer::normalizeToken((string) ($context['tag_primary'] ?? ''));
@@ -34,15 +35,21 @@ final class NewInTagService
             fn (string $tag): bool => !$this->isManagedCollectionNewInTag($tag)
         ));
 
-        if ($collectionTag !== null) {
-            if ($this->isStack($existing, $type, $title)) {
-                $productType = $this->productTypeTag($type, $existing, $title);
-                if ($productType !== null) {
-                    $required[] = "{$collectionTag}-{$productType}-stacks-new-in";
-                }
-            } else {
-                $required[] = "{$collectionTag}-new-in";
+        $isStack = $this->isStack($original, $type, $title);
+        $isElevatedBasicsStack = $isStack && (
+            $collectionTag === 'elevated-basics'
+            || in_array(ElevatedBasicsStackCatalog::MEMBERSHIP_TAG, $original, true)
+        );
+
+        if ($isElevatedBasicsStack) {
+            array_push($required, ...$this->elevatedBasicsStackNewInTags($original));
+        } elseif ($collectionTag !== null && $isStack) {
+            $productType = $this->productTypeTag($type, $existing, $title);
+            if ($productType !== null) {
+                $required[] = "{$collectionTag}-{$productType}-stacks-new-in";
             }
+        } elseif ($collectionTag !== null) {
+            $required[] = "{$collectionTag}-new-in";
         }
 
         return TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray(array_merge($existing, $required)));
@@ -204,6 +211,32 @@ final class NewInTagService
         // The current bundle collections in Shopify are bracelet-stack
         // collections, even when the form's Type has not been selected yet.
         return 'bracelet';
+    }
+
+    /**
+     * Elevated Basics stacks share one New In tag. A product that already has
+     * only the legacy tag keeps that tag until a new stack option is selected.
+     *
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private function elevatedBasicsStackNewInTags(array $tags): array
+    {
+        $hasLegacy = in_array(ElevatedBasicsStackCatalog::LEGACY_NEW_IN_TAG, $tags, true);
+        $hasShared = in_array(ElevatedBasicsStackCatalog::NEW_IN_TAG, $tags, true);
+
+        if ($hasLegacy && !$hasShared) {
+            return [ElevatedBasicsStackCatalog::LEGACY_NEW_IN_TAG];
+        }
+
+        if ($hasLegacy && $hasShared) {
+            return [
+                ElevatedBasicsStackCatalog::LEGACY_NEW_IN_TAG,
+                ElevatedBasicsStackCatalog::NEW_IN_TAG,
+            ];
+        }
+
+        return [ElevatedBasicsStackCatalog::NEW_IN_TAG];
     }
 
     private function isManagedCollectionNewInTag(string $tag): bool

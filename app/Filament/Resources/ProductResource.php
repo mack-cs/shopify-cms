@@ -71,6 +71,7 @@ use App\Services\TagNormalizer;
 use App\Services\Normalizer;
 use App\Services\NewProductDraftSeeder;
 use App\Services\DropdownCollectionCatalog;
+use App\Services\ElevatedBasicsStackCatalog;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductSeoTracker;
@@ -186,7 +187,7 @@ class ProductResource extends Resource
                                     ->searchable()
                                     ->preload()
                                     ->reactive()
-                                    ->afterStateUpdated(function ($state, callable $set): void {
+                                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                         if (!$state) {
                                             $set('product_category', null);
                                             $set('google_product_category', null);
@@ -198,6 +199,8 @@ class ProductResource extends Resource
                                             $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
                                             $set('google_product_category', $mapping['google_product_category']);
                                         }
+
+                                        self::syncStackTagsAfterProductTypeChange($set, $get);
                                     }),
                                 TextInput::make('google_product_category')
                                     ->label('Google Product Category')
@@ -222,7 +225,7 @@ class ProductResource extends Resource
                                         $mapping = CategoryTypeMap::byCategoryValue($state);
                                         return $mapping['shopify_taxonomy_gid'] ?? $state;
                                     })
-                                    ->afterStateUpdated(function ($state, callable $set): void {
+                                    ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                         if (!$state) {
                                             $set('type', null);
                                             $set('google_product_category', null);
@@ -233,6 +236,7 @@ class ProductResource extends Resource
                                         if ($mapping) {
                                             $set('type', $mapping['type']);
                                             $set('google_product_category', $mapping['google_product_category']);
+                                            self::syncStackTagsAfterProductTypeChange($set, $get);
                                         }
                                     }),
                             Select::make('tags')
@@ -556,7 +560,7 @@ class ProductResource extends Resource
                                 ->label('Collection')
                                 ->disabled(fn (?Product $record): bool => self::isDraftOwnedLocked($record))
                                 ->placeholder('Select option')
-                                ->options(fn (): array => self::collectionOptions())
+                                ->options(fn (): array => ElevatedBasicsStackCatalog::collectionSelectOptions(self::collectionOptions()))
                                 ->searchable()
                                 ->reactive()
                                 ->dehydrated(false)
@@ -564,7 +568,9 @@ class ProductResource extends Resource
                                     if (!$record) {
                                         return;
                                     }
-                                    $component->state(self::collectionFromTags($record->tags));
+                                    $component->state(ElevatedBasicsStackCatalog::selectableCollection(
+                                        self::collectionFromTags($record->tags)
+                                    ));
                                 })
                                 ->afterStateUpdated(function ($state, callable $set, Get $get): void {
                                     $collectionTags = self::collectionTagsForBundleState(
@@ -592,6 +598,22 @@ class ProductResource extends Resource
                                     ));
 
                                     $merged = array_values(array_unique(array_merge($kept, $collectionTags)));
+                                    if (ElevatedBasicsStackCatalog::isVariant(is_string($state) ? $state : null)) {
+                                        $type = ElevatedBasicsStackCatalog::productType($state);
+                                        $mapping = CategoryTypeMap::byType($type);
+                                        $set('type', $type);
+                                        if ($mapping !== null) {
+                                            $set('product_category', $mapping['shopify_taxonomy_gid'] ?? $mapping['category']);
+                                            $set('google_product_category', $mapping['google_product_category']);
+                                        }
+
+                                        $isNewIn = array_intersect($merged, [
+                                            'new-in',
+                                            ElevatedBasicsStackCatalog::NEW_IN_TAG,
+                                            ElevatedBasicsStackCatalog::LEGACY_NEW_IN_TAG,
+                                        ]) !== [];
+                                        $merged = ElevatedBasicsStackCatalog::finalizeTags($merged, $state, $isNewIn);
+                                    }
                                     $set('tags', $merged);
                                 }),
 
@@ -647,7 +669,7 @@ class ProductResource extends Resource
                                     $data,
                                     HeaderStore::BRACELET_DESIGN
                                 ))
-                                ->visible(fn (Get $get): bool => in_array('bracelets', self::filterTags($get), true))
+                                ->visible(fn (Get $get): bool => self::showsDesignField($get, HeaderStore::BRACELET_DESIGN))
                                 ->columnSpanFull()
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
@@ -715,7 +737,7 @@ class ProductResource extends Resource
                                 ))
                                 ->searchable()
                                 ->reactive()
-                                ->visible(fn (Get $get): bool => in_array('necklaces', self::filterTags($get), true))
+                                ->visible(fn (Get $get): bool => self::showsDesignField($get, HeaderStore::NECKLACE_DESIGN))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
@@ -748,7 +770,7 @@ class ProductResource extends Resource
                                     $data,
                                     'Earring design (product.metafields.shopify.earring-design)'
                                 ))
-                                ->visible(fn (Get $get): bool => in_array('earrings', self::filterTags($get), true))
+                                ->visible(fn (Get $get): bool => self::showsDesignField($get, HeaderStore::EARRING_DESIGN))
                                 ->afterStateHydrated(function (Select $component, ?Product $record): void {
                                     if (!$record) {
                                         return;
@@ -4258,7 +4280,7 @@ class ProductResource extends Resource
     {
         $selected = self::nullIfEmpty(self::stateFromGet($get, 'collection_filter'));
         if ($selected !== null) {
-            return $selected;
+            return ElevatedBasicsStackCatalog::sourceCollection($selected) ?? $selected;
         }
 
         $tags = self::normalizeTagList(self::stateFromGet($get, 'tags'));
@@ -4612,6 +4634,7 @@ class ProductResource extends Resource
 
     private static function collectionTags(?string $collection): array
     {
+        $collection = ElevatedBasicsStackCatalog::sourceCollection($collection);
         if ($collection === null || trim($collection) === '') {
             return [];
         }
@@ -4649,7 +4672,9 @@ class ProductResource extends Resource
 
     private static function expectedVendorForCollection(?string $collection): ?string
     {
-        return app(DropdownCollectionCatalog::class)->vendorForCollection($collection);
+        return app(DropdownCollectionCatalog::class)->vendorForCollection(
+            ElevatedBasicsStackCatalog::sourceCollection($collection)
+        );
     }
 
     private static function vendorSelectionHint(mixed $collection, mixed $vendor): ?HtmlString
@@ -4810,12 +4835,12 @@ class ProductResource extends Resource
         if (TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
             $secondary = TagNormalizer::normalizeToken((string) ($tags[1] ?? ''));
 
-            return array_values(array_filter(['bundles', $secondary]));
+            return self::tagsAfterProductTypeChange(array_values(array_filter(['bundles', $secondary])));
         }
 
         $primary = TagNormalizer::normalizeToken((string) ($tags[0] ?? ''));
         if ($primary === null) {
-            return $tags;
+            return self::tagsAfterProductTypeChange($tags);
         }
 
         foreach (self::collectionContexts() as $context) {
@@ -4827,11 +4852,57 @@ class ProductResource extends Resource
                 && $candidateSecondary !== null
                 && TagNormalizer::containsBundleOrStackTag($candidateSecondary)
             ) {
-                return array_values(array_filter(['bundles', $candidateSecondary]));
+                return self::tagsAfterProductTypeChange(array_values(array_filter(['bundles', $candidateSecondary])));
             }
         }
 
-        return $tags;
+        return self::tagsAfterProductTypeChange($tags);
+    }
+
+    /**
+     * Stack and bundle products keep an accurate product type without the tags
+     * that also place them in the main Bracelet or Necklace collections.
+     *
+     * @param array<int, string> $tags
+     * @return array<int, string>
+     */
+    private static function tagsAfterProductTypeChange(array $tags): array
+    {
+        if (!TagNormalizer::containsBundleOrStackTag(implode(',', $tags))) {
+            return array_values($tags);
+        }
+
+        return TagNormalizer::withoutGenericProductTypeTags($tags);
+    }
+
+    private static function showsDesignField(Get $get, string $header): bool
+    {
+        $tags = self::filterTags($get);
+        $tagVisible = match ($header) {
+            HeaderStore::BRACELET_DESIGN => in_array('bracelets', $tags, true),
+            HeaderStore::NECKLACE_DESIGN => in_array('necklaces', $tags, true),
+            HeaderStore::EARRING_DESIGN => in_array('earrings', $tags, true),
+            default => false,
+        };
+
+        if ($tagVisible) {
+            return true;
+        }
+
+        return TagNormalizer::containsBundleOrStackTag(implode(',', $tags))
+            && HeaderStore::designHeaderForTypeAndTags(
+                is_string($get('type')) ? $get('type') : null,
+                $tags
+            ) === $header;
+    }
+
+    private static function syncStackTagsAfterProductTypeChange(callable $set, Get $get): void
+    {
+        $tags = self::normalizeTagList($get('tags'));
+        $next = self::tagsAfterProductTypeChange($tags);
+        if ($next !== $tags) {
+            $set('tags', $next);
+        }
     }
 
     public static function applyNeedsTitleUpdateFilter(Builder $query): Builder

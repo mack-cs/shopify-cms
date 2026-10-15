@@ -19,6 +19,7 @@ class DraftShopYourVibeSelection
         if (blank($collection) && blank($vendor)) {
             return collect();
         }
+        $collection = ElevatedBasicsStackCatalog::sourceCollection($collection) ?? $collection;
         $rows = DropdownOption::where('collection_style', $collection)->get();
         $specific = collect([$collection])->merge($rows->pluck('collection_tag_secondary'))->filter()
             ->map(fn ($value) => $this->contextKey($value))->unique();
@@ -75,6 +76,7 @@ class DraftShopYourVibeSelection
         if (blank($collection) && blank($vendor)) {
             return;
         }
+        $collection = ElevatedBasicsStackCatalog::sourceCollection($collection) ?? $collection;
         $parents = app(ShopYourVibeShopify::class)->parents();
         Cache::put('shop-your-vibe-parents:'.config('services.shopify.shop'), $parents, 300);
         $rows = DropdownOption::where('collection_style', $collection)->get();

@@ -235,10 +235,20 @@ final class HeaderStore
             ), static fn (string $tag): bool => $tag !== ''))
             : TagNormalizer::parseTokens((string) $tags);
 
-        if (in_array('bracelets', $tokens, true) || in_array('bracelet', $tokens, true)) {
-            return self::BRACELET_DESIGN;
+        $typeNormalized = strtolower(trim((string) ($type ?? '')));
+        $isStackOrBundle = TagNormalizer::containsBundleOrStackTag(implode(',', $tokens))
+            || str_contains($typeNormalized, 'bundle')
+            || str_contains($typeNormalized, 'stack');
+
+        if ($isStackOrBundle) {
+            return match (true) {
+                in_array($typeNormalized, ['necklace', 'necklaces'], true) => self::NECKLACE_DESIGN,
+                in_array($typeNormalized, ['earring', 'earrings'], true) => self::EARRING_DESIGN,
+                default => self::BRACELET_DESIGN,
+            };
         }
-        if (self::containsBundleToken($tokens)) {
+
+        if (in_array('bracelets', $tokens, true) || in_array('bracelet', $tokens, true)) {
             return self::BRACELET_DESIGN;
         }
         if (in_array('necklaces', $tokens, true) || in_array('necklace', $tokens, true)) {
@@ -248,11 +258,7 @@ final class HeaderStore
             return self::EARRING_DESIGN;
         }
 
-        $typeNormalized = strtolower(trim((string) ($type ?? '')));
         if (in_array($typeNormalized, ['bracelet', 'bracelets'], true)) {
-            return self::BRACELET_DESIGN;
-        }
-        if (str_contains($typeNormalized, 'bundle')) {
             return self::BRACELET_DESIGN;
         }
         if (in_array($typeNormalized, ['necklace', 'necklaces'], true)) {
@@ -263,20 +269,6 @@ final class HeaderStore
         }
 
         return null;
-    }
-
-    /**
-     * @param array<int, string> $tokens
-     */
-    private static function containsBundleToken(array $tokens): bool
-    {
-        foreach ($tokens as $token) {
-            if (str_contains($token, 'bundle')) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     public static function latestTemplatePath(): ?string
