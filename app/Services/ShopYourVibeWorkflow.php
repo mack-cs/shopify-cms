@@ -12,12 +12,101 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 use Throwable;
 
 class ShopYourVibeWorkflow
 {
+    public const PARENT_PREFIX_WARNING = "The collection name is added automatically. We've removed it from your vibe name.";
+
+    private const VIBE_SEPARATOR = '[\s\-–—:\/|]+';
+
     public function __construct(private readonly ShopYourVibeShopify $shopify) {}
+
+    /** Uppercase only. Standalone AND stays so it can still be typed. */
+    public static function typingVibeName(string $value): string
+    {
+        return mb_strtoupper($value, 'UTF-8');
+    }
+
+    /**
+     * @return array{name:string,removed_parent:bool,empty:bool,invalid:bool}
+     */
+    public static function normalizeVibeName(string $value, string $parentTitle): array
+    {
+        $name = self::typingVibeName(trim($value));
+        $removed = false;
+        $words = self::parentWords($parentTitle);
+        if ($words !== []) {
+            $body = implode(self::VIBE_SEPARATOR, array_map(fn (string $word): string => preg_quote($word, '/'), $words));
+            $pattern = '/^'.$body.'(?:'.self::VIBE_SEPARATOR.'(.*))?$/u';
+            if (preg_match($pattern, $name, $matches)) {
+                $removed = true;
+                $name = preg_replace('/^(?:'.self::VIBE_SEPARATOR.')+/u', '', trim((string) ($matches[1] ?? ''))) ?? '';
+            }
+        }
+        $name = trim(preg_replace('/\s+/u', ' ', $name) ?? '');
+        $name = trim(preg_replace('/\bAND\b/u', '&', $name) ?? '');
+        $name = trim(preg_replace('/\s+/u', ' ', $name) ?? '');
+        $slug = Str::slug(str_replace('&', ' and ', $name));
+
+        return [
+            'name' => $name,
+            'removed_parent' => $removed,
+            'empty' => $name === '',
+            'invalid' => $name !== '' && $slug === '',
+        ];
+    }
+
+    public static function vibeNameError(array $normalized): ?string
+    {
+        if (($normalized['removed_parent'] ?? false) && ($normalized['name'] ?? '') === '') {
+            return 'Please enter a vibe name only. The collection name is already included automatically.';
+        }
+        if ($normalized['invalid'] ?? false) {
+            return 'Enter a vibe name using letters or numbers.';
+        }
+        if (($normalized['name'] ?? '') === '') {
+            return 'A vibe name is required.';
+        }
+
+        return null;
+    }
+
+    public static function shopifyCollectionTitle(string $parentTitle, string $normalizedVibe): string
+    {
+        $parent = self::typingVibeName(trim($parentTitle));
+
+        return trim($parent.($normalizedVibe !== '' ? ' '.$normalizedVibe : ''));
+    }
+
+    public static function contextualHandle(string $parentHandle, string $normalizedVibe): string
+    {
+        $vibe = Str::slug(str_replace('&', ' and ', $normalizedVibe));
+
+        return collect([Str::slug($parentHandle), $vibe])->filter()->implode('-');
+    }
+
+    public static function parentHandle(array $parent): string
+    {
+        $handle = trim((string) ($parent['handle'] ?? ''));
+        if ($handle !== '') {
+            return Str::slug($handle);
+        }
+
+        return Str::slug((string) ($parent['title'] ?? ''));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function parentWords(string $parentTitle): array
+    {
+        $parts = preg_split('/'.self::VIBE_SEPARATOR.'/u', self::typingVibeName(trim($parentTitle)), -1, PREG_SPLIT_NO_EMPTY);
+
+        return array_values($parts ?: []);
+    }
 
     public function open(string $gid): ShopYourVibeDraft
     {
@@ -105,6 +194,8 @@ class ShopYourVibeWorkflow
                     if (! $importId) {
                         throw new RuntimeException('Synchronize the collection catalogue before creating a collection.');
                     }
+                    $input = $this->preparedCollectionInput($draft, $input);
+                    $vibeName = $input['vibe_name'] ?? null;
                     $fields = Validator::make($input, [
                         'title' => 'required|string|max:255',
                         'handle' => ['required', 'string', 'max:255', 'regex:/^[a-z0-9]+(?:-[a-z0-9]+)*$/'],
@@ -130,7 +221,7 @@ class ShopYourVibeWorkflow
                         'detected_membership_tag' => $fields['handle'],
                         'enable_manual' => false, 'products' => []];
                     $state['cards'][] = ['key' => $key, 'id' => null, 'handle' => 'cms-vibe-'.$key,
-                        'name' => $fields['title'], 'image' => $fields['image'] ?? '', 'image_url' => $fields['image_url'] ?? null,
+                        'name' => $vibeName ?: $fields['title'], 'image' => $fields['image'] ?? '', 'image_url' => $fields['image_url'] ?? null,
                         'link' => rtrim(config('services.shopify.storefront_url'), '/').'/collections/'.$fields['handle'],
                         'collection_gid' => $gid];
                     break;
@@ -903,6 +994,23 @@ class ShopYourVibeWorkflow
         if (! preg_match('~^https?://~i', $link) && ! preg_match('~^/collections/[^/]+/?(?:\?.*)?$~', $link)) {
             throw new RuntimeException('Use a collection path or a complete http or https URL.');
         }
+    }
+
+    private function preparedCollectionInput(ShopYourVibeDraft $draft, array $input): array
+    {
+        if (! array_key_exists('vibe_name', $input)) {
+            return $input;
+        }
+        $parent = $draft->desired['parent'] ?? $draft->snapshot['parent'] ?? [];
+        $normalized = self::normalizeVibeName((string) $input['vibe_name'], (string) ($parent['title'] ?? ''));
+        if ($message = self::vibeNameError($normalized)) {
+            throw ValidationException::withMessages(['vibe_name' => $message]);
+        }
+        $input['vibe_name'] = $normalized['name'];
+        $input['title'] = self::shopifyCollectionTitle((string) ($parent['title'] ?? ''), $normalized['name']);
+        $input['handle'] = self::contextualHandle(self::parentHandle($parent), $normalized['name']);
+
+        return $input;
     }
 
     private function localLink(string $link): ?string

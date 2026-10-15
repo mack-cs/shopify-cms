@@ -519,7 +519,7 @@
             @endif
             <x-slot name="footer">
                 @if ($addingCard && $collectionMode === 'new')
-                    <x-filament::button wire:click="createCollectionVibe" wire:loading.attr="disabled">Add new collection to draft</x-filament::button>
+                    <x-filament::button wire:click="createCollectionVibe" wire:loading.attr="disabled" :disabled="$vibeNameBlocked">Add new collection to draft</x-filament::button>
                 @else
                     <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
                 @endif
@@ -727,4 +727,77 @@
             </x-slot>
         </x-filament::modal>
     </div>
+    <script>
+        window.syvVibeSeparator = /[\s\-–—:\/|]+/;
+        window.syvEscapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        window.syvNormalizeVibe = (value, parentTitle) => {
+            let name = String(value || '').trim().toUpperCase();
+            let removed = false;
+            const words = String(parentTitle || '').trim().toUpperCase().split(window.syvVibeSeparator).filter(Boolean);
+            if (words.length) {
+                const separator = '[\\s\\-–—:\\/|]+';
+                const body = words.map(window.syvEscapeRegExp).join(separator);
+                const match = name.match(new RegExp('^' + body + '(?:' + separator + '([\\s\\S]*))?$'));
+                if (match) {
+                    removed = true;
+                    name = String(match[1] || '').trim().replace(/^[\s\-–—:\/|]+/, '');
+                }
+            }
+            name = name.replace(/\s+/g, ' ').trim().replace(/\bAND\b/g, '&').replace(/\s+/g, ' ').trim();
+            return { name, removed, empty: name === '' };
+        };
+        window.syvSlug = (value) => String(value || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        window.syvCollectionTitle = (parentTitle, name) => {
+            const parent = String(parentTitle || '').trim().toUpperCase();
+            return (parent + (name ? ' ' + name : '')).trim();
+        };
+        window.syvHandle = (parentHandle, name) => [window.syvSlug(parentHandle), window.syvSlug(name)].filter(Boolean).join('-');
+        window.syvSetPreview = (form, selector, value) => {
+            const field = form.querySelector(selector);
+            if (!field || field.value === value) {
+                return;
+            }
+            field.value = value;
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        window.syvUpdateVibePreview = (el) => {
+            const form = el.closest('[data-new-collection-form]');
+            if (!form) {
+                return;
+            }
+            const normalized = window.syvNormalizeVibe(el.value, el.dataset.parentTitle || '');
+            window.syvSetPreview(form, '[data-generated-title]', window.syvCollectionTitle(el.dataset.parentTitle || '', normalized.name));
+            window.syvSetPreview(form, '[data-generated-handle]', window.syvHandle(el.dataset.parentHandle || '', normalized.name));
+        };
+        window.syvVibeInput = (el, wire) => {
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            const next = el.value.toUpperCase();
+            if (next !== el.value) {
+                el.value = next;
+                if (typeof start === 'number' && typeof end === 'number') {
+                    el.setSelectionRange(start, end);
+                }
+            }
+            window.syvUpdateVibePreview(el);
+            if (el.dataset.vibeNotice === '1') {
+                el.dataset.vibeNotice = '0';
+                wire.clearVibeNameNotice();
+            }
+        };
+        window.syvVibeBlur = (el, wire) => {
+            const raw = el.value;
+            const normalized = window.syvNormalizeVibe(raw, el.dataset.parentTitle || '');
+            el.dataset.vibeNotice = '0';
+            if (el.value !== normalized.name) {
+                el.value = normalized.name;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            window.syvUpdateVibePreview(el);
+            if (normalized.removed && normalized.name !== '') {
+                el.dataset.vibeNotice = '1';
+            }
+            wire.commitNewVibeName(raw);
+        };
+    </script>
 </x-filament-panels::page>

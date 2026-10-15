@@ -37,7 +37,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Url;
 use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
@@ -87,7 +87,11 @@ class ShopYourVibe extends Page
 
     public array $newCollection = [];
 
-    public bool $newCollectionHandleOverridden = false;
+    public ?string $vibeNameWarning = null;
+
+    public bool $vibeNameBlocked = false;
+
+    private bool $committingVibeName = false;
 
     public string $productSearch = '';
 
@@ -305,8 +309,15 @@ class ShopYourVibe extends Page
         $this->addingCard = $forCard;
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
-        $this->newCollectionHandleOverridden = false;
-        $this->newCollectionForm->fill(['image_mode' => 'none']);
+        $this->vibeNameWarning = null;
+        $this->vibeNameBlocked = false;
+        $this->newCollectionForm->fill([
+            'image_mode' => 'none',
+            'parent_title' => $this->newCollectionParentTitle(),
+            'vibe_name' => '',
+            'generated_title' => '',
+            'handle' => '',
+        ]);
         $this->loadError = null;
         $this->dispatch('open-modal', id: 'shop-your-vibe-collections');
     }
@@ -319,7 +330,8 @@ class ShopYourVibe extends Page
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
         $this->newCollection = [];
-        $this->newCollectionHandleOverridden = false;
+        $this->vibeNameWarning = null;
+        $this->vibeNameBlocked = false;
         $this->resetValidation();
     }
 
@@ -425,19 +437,22 @@ class ShopYourVibe extends Page
     public function newCollectionForm(Form $form): Form
     {
         return $form->statePath('newCollection')->schema([
-            TextInput::make('title')->label('Collection name')->required()->maxLength(255)
+            TextInput::make('parent_title')->label('Collection name')->readOnly()->dehydrated(false)
+                ->extraInputAttributes(['data-parent-title' => $this->newCollectionParentTitle()]),
+            TextInput::make('vibe_name')->label('Vibe name')->required()->maxLength(255)
+                ->helperText(fn (): ?string => filled($this->vibeNameWarning) ? $this->vibeNameWarning : null)
                 ->extraInputAttributes([
-                    'x-on:input' => "const prefix = \$el.dataset.parentHandle || ''; const titleSlug = (\$event.target.value || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-'); const slug = [prefix, titleSlug].filter(Boolean).join('-'); const handle = \$el.closest('[data-new-collection-form]')?.querySelector('[data-new-collection-handle]'); if (handle && (!handle.value || handle.dataset.autoSlug === 'true')) { handle.dataset.autoUpdating = 'true'; handle.value = slug; handle.dataset.autoSlug = 'true'; handle.dispatchEvent(new Event('input', { bubbles: true })); }",
+                    'data-vibe-name' => true,
+                    'data-parent-title' => $this->newCollectionParentTitle(),
                     'data-parent-handle' => $this->newCollectionParentHandle(),
+                    'x-on:input' => 'window.syvVibeInput($el, $wire)',
+                    'x-on:blur' => 'window.syvVibeBlur($el, $wire)',
                 ]),
-            TextInput::make('handle')->label('Slug (Shopify handle)')->required()->maxLength(255)
-                ->regex('/^[a-z0-9]+(?:-[a-z0-9]+)*$/')
-                ->extraInputAttributes([
-                    'data-new-collection-handle' => true,
-                    'data-auto-slug' => 'true',
-                    'x-on:input' => "if (\$el.dataset.autoUpdating === 'true') { \$el.dataset.autoUpdating = 'false'; \$el.dataset.autoSlug = 'true'; } else { \$el.dataset.autoSlug = 'false'; }",
-                ])
-                ->helperText('Automatically generated from the collection name. You can edit it; your changes will be kept. URL: /collections/your-slug'),
+            TextInput::make('generated_title')->label('Generated Shopify collection name')->readOnly()->dehydrated(false)
+                ->extraInputAttributes(['data-generated-title' => true]),
+            TextInput::make('handle')->label('Generated Shopify handle')->readOnly()->dehydrated(false)
+                ->extraInputAttributes(['data-generated-handle' => true])
+                ->helperText('Generated from the collection and vibe name. URL: /collections/your-slug'),
             Select::make('image_mode')->label('Collection image')->options([
                 'none' => 'No image', 'upload' => 'Upload a new image', 'existing' => 'Choose an image from Shopify',
             ])->default('none')->required()->live(),
@@ -471,8 +486,17 @@ class ShopYourVibe extends Page
         $this->guard();
         abort_unless($this->addingCard && $this->collectionMode === 'new' && $this->draftId, 422);
         $data = $this->newCollectionForm->getState();
+        $rawVibe = (string) ($data['vibe_name'] ?? '');
+        $normalized = ShopYourVibeWorkflow::normalizeVibeName($rawVibe, $this->newCollectionParentTitle());
+        if ($message = ShopYourVibeWorkflow::vibeNameError($normalized)) {
+            $this->rejectVibeName($normalized, $message);
+
+            throw ValidationException::withMessages(['newCollection.vibe_name' => $message]);
+        }
+        $this->vibeNameBlocked = false;
+        $this->vibeNameWarning = null;
         $this->attempt(function () use ($data): void {
-            $input = ['title' => trim($data['title']), 'handle' => $data['handle']];
+            $input = ['vibe_name' => (string) ($data['vibe_name'] ?? '')];
             if ($data['image_mode'] === 'upload') {
                 $input['image_path'] = $data['upload']->store('shop-your-vibe', 'public');
                 if (! $input['image_path']) {
@@ -491,42 +515,94 @@ class ShopYourVibe extends Page
         });
     }
 
-    public function updatedNewCollectionTitle(?string $value): void
+    public function updatedNewCollectionVibeName(?string $value): void
     {
-        if ($this->newCollectionHandleOverridden) {
-            return;
+        $typed = ShopYourVibeWorkflow::typingVibeName((string) $value);
+        if ($typed !== (string) $value) {
+            $this->newCollection['vibe_name'] = $typed;
+            $value = $typed;
+        }
+        if (! $this->committingVibeName && ($this->vibeNameWarning !== null || $this->vibeNameBlocked)) {
+            $this->vibeNameWarning = null;
+            $this->vibeNameBlocked = false;
+            $this->resetValidation('newCollection.vibe_name');
+        }
+        $normalized = ShopYourVibeWorkflow::normalizeVibeName((string) $value, $this->newCollectionParentTitle());
+        $this->fillVibePreview($normalized['name']);
+    }
+
+    public function commitNewVibeName(?string $value = null): void
+    {
+        $this->guard();
+        abort_unless($this->addingCard && $this->collectionMode === 'new', 422);
+        $this->committingVibeName = true;
+        try {
+            $normalized = ShopYourVibeWorkflow::normalizeVibeName(
+                $value ?? (string) ($this->newCollection['vibe_name'] ?? ''),
+                $this->newCollectionParentTitle(),
+            );
+            $this->newCollection['vibe_name'] = $normalized['name'];
+            $this->fillVibePreview($normalized['name']);
+            if ($message = ShopYourVibeWorkflow::vibeNameError($normalized)) {
+                $this->rejectVibeName($normalized, $message);
+
+                return;
+            }
+            $this->vibeNameBlocked = false;
+            $this->resetValidation('newCollection.vibe_name');
+            $this->vibeNameWarning = $normalized['removed_parent'] ? ShopYourVibeWorkflow::PARENT_PREFIX_WARNING : null;
+        } finally {
+            $this->committingVibeName = false;
+        }
+    }
+
+    public function clearVibeNameNotice(): void
+    {
+        $this->guard();
+        $this->vibeNameWarning = null;
+        $this->vibeNameBlocked = false;
+        $this->resetValidation('newCollection.vibe_name');
+    }
+
+    private function rejectVibeName(array $normalized, string $message): void
+    {
+        $this->newCollection['vibe_name'] = $normalized['name'];
+        $this->fillVibePreview($normalized['name']);
+        $this->vibeNameWarning = null;
+        $this->vibeNameBlocked = (bool) $normalized['removed_parent'] && $normalized['name'] === '';
+        $this->addError('newCollection.vibe_name', $message);
+    }
+
+    private function fillVibePreview(string $normalizedVibe): void
+    {
+        $this->newCollection['generated_title'] = ShopYourVibeWorkflow::shopifyCollectionTitle(
+            $this->newCollectionParentTitle(),
+            $normalizedVibe,
+        );
+        $this->newCollection['handle'] = ShopYourVibeWorkflow::contextualHandle(
+            $this->newCollectionParentHandle(),
+            $normalizedVibe,
+        );
+    }
+
+    private function newCollectionParent(): array
+    {
+        $draft = $this->draft();
+        if (! $draft) {
+            return [];
         }
 
-        $this->newCollection['handle'] = $this->contextualCollectionHandle((string) $value);
+        return $draft->desired['parent'] ?? $draft->snapshot['parent'] ?? [];
     }
 
-    public function updatedNewCollectionHandle(?string $value): void
+    private function newCollectionParentTitle(): string
     {
-        $expected = $this->contextualCollectionHandle((string) ($this->newCollection['title'] ?? ''));
-        $this->newCollectionHandleOverridden = filled($value) && $value !== $expected;
-    }
-
-    private function contextualCollectionHandle(string $title): string
-    {
-        return collect([$this->newCollectionParentHandle(), Str::slug($title)])
-            ->filter()
-            ->implode('-');
+        return trim((string) ($this->newCollectionParent()['title'] ?? ''));
     }
 
     private function newCollectionParentHandle(): string
     {
-        $draft = $this->draft();
-        if (! $draft) {
-            return '';
-        }
-
-        $parent = $draft->desired['parent'] ?? $draft->snapshot['parent'] ?? [];
-        $handle = trim((string) ($parent['handle'] ?? ''));
-        if ($handle !== '') {
-            return Str::slug($handle);
-        }
-
-        return Str::slug((string) ($parent['title'] ?? ''));
+        return ShopYourVibeWorkflow::parentHandle($this->newCollectionParent());
     }
 
     public function collectionPickerForm(Form $form): Form

@@ -1523,7 +1523,7 @@ it('searches modal collections by title and handle beyond the initial results', 
     expect($search('striped-accessories'))->toBe(['gid://shopify/Collection/2000']);
 });
 
-it('creates a new collection draft from the modal and generates an editable contextual handle', function () {
+it('creates a new collection draft from the normalized vibe name', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
@@ -1535,18 +1535,28 @@ it('creates a new collection draft from the modal and generates an editable cont
     $this->draft->update(['desired' => $state, 'snapshot' => $state]);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->set('newCollection.title', 'Gold')
-        ->assertSet('newCollection.handle', 'elevated-basics-necklaces-gold')
-        ->set('newCollection.title', 'Silver and Gold')
-        ->assertSet('newCollection.handle', 'elevated-basics-necklaces-silver-and-gold')
-        ->set('newCollection.handle', 'summer-gold')->set('newCollection.title', 'Golden Summer Vibes')
-        ->assertSet('newCollection.handle', 'summer-gold');
+        ->assertSet('newCollection.parent_title', 'Elevated Basics Necklaces')
+        ->set('newCollection.vibe_name', 'gold and white')
+        ->assertSet('newCollection.vibe_name', 'GOLD AND WHITE')
+        ->assertSet('newCollection.generated_title', 'ELEVATED BASICS NECKLACES GOLD & WHITE')
+        ->assertSet('newCollection.handle', 'elevated-basics-necklaces-gold-and-white');
+    $fields = collect($page->instance()->getForm('newCollectionForm')->getFlatComponents(true))
+        ->keyBy(fn ($component) => $component->getStatePath());
+    expect($fields['newCollection.parent_title']->isReadOnly())->toBeTrue()
+        ->and($fields['newCollection.vibe_name']->isReadOnly())->toBeFalse()
+        ->and($fields['newCollection.generated_title']->isReadOnly())->toBeTrue()
+        ->and($fields['newCollection.handle']->isReadOnly())->toBeTrue();
     $this->fake->calls = [];
     $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false)
-        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Golden Summer Vibes');
+        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('GOLD & WHITE');
     $card = $this->draft->fresh()->desired['cards'][2];
+    $creation = array_values($this->draft->fresh()->desired['new_collections'])[0];
     $page->call('editCard', $card['key'])->assertSee('New collection');
-    expect($card['link'])->toBe('https://leighavenue.co.za/collections/summer-gold')
+    expect($card['name'])->toBe('GOLD & WHITE')
+        ->and($card['link'])->toBe('https://leighavenue.co.za/collections/elevated-basics-necklaces-gold-and-white')
+        ->and($creation['title'])->toBe('ELEVATED BASICS NECKLACES GOLD & WHITE')
+        ->and($creation['handle'])->toBe('elevated-basics-necklaces-gold-and-white')
+        ->and($creation['membership_tag'])->toBe('elevated-basics-necklaces-gold-and-white')
         ->and($this->fake->calls)->toBe([]);
 });
 
@@ -1563,8 +1573,9 @@ it('falls back to the parent title when generating a new collection handle witho
 
     Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->set('newCollection.title', 'Pearl')
-        ->assertSet('newCollection.handle', 'livi-road-bracelets-pearl');
+        ->set('newCollection.vibe_name', 'Pearl')
+        ->assertSet('newCollection.handle', 'livi-road-bracelets-pearl')
+        ->assertSet('newCollection.generated_title', 'LIVI ROAD BRACELETS PEARL');
 });
 
 it('creates and publishes a new automated vibe collection with its image only on push', function () {
@@ -1748,7 +1759,7 @@ it('accepts an uploaded image in the new collection modal without publishing it'
     $this->actingAs($this->user);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->fillForm(['title' => 'Summer Gold', 'handle' => 'summer-gold', 'image_mode' => 'upload',
+        ->fillForm(['vibe_name' => 'Summer Gold', 'image_mode' => 'upload',
             'upload' => UploadedFile::fake()->image('summer.jpg')], 'newCollectionForm');
     $this->fake->calls = [];
     $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('loadError', null)->assertSet('addingCard', false);
@@ -1763,7 +1774,7 @@ it('allows choosing an existing Shopify image for a new collection', function ()
     $this->actingAs($this->user);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
-        ->fillForm(['title' => 'Summer Gold', 'handle' => 'summer-gold', 'image_mode' => 'existing',
+        ->fillForm(['vibe_name' => 'Summer Gold', 'image_mode' => 'existing',
             'image_gid' => 'gid://shopify/MediaImage/1'], 'newCollectionForm');
     $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false);
     expect($this->draft->fresh()->desired['cards'][2]['image'])->toBe('gid://shopify/MediaImage/1')
@@ -1787,9 +1798,155 @@ it('validates new collection details and requires the chosen upload before savin
     $this->actingAs($this->user);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new');
-    $page->call('createCollectionVibe')->assertHasErrors(['newCollection.title', 'newCollection.handle'])
+    $page->call('createCollectionVibe')->assertHasErrors(['newCollection.vibe_name'])
         ->assertSet('addingCard', true);
-    $page->fillForm(['title' => 'Summer', 'handle' => 'Invalid Handle!', 'image_mode' => 'upload'], 'newCollectionForm')
-        ->call('createCollectionVibe')->assertHasErrors(['newCollection.handle', 'newCollection.upload']);
+    $page->fillForm(['vibe_name' => 'Summer', 'image_mode' => 'upload'], 'newCollectionForm')
+        ->call('createCollectionVibe')->assertHasErrors(['newCollection.upload']);
     expect($this->draft->fresh()->desired['cards'])->toHaveCount(2)->and($this->fake->mutations())->toBe([]);
+});
+
+it('removes a repeated parent prefix on blur and warns without blocking a real vibe name', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->set('newCollection.vibe_name', 'Elevated Basics Bracelets - Pearl')
+        ->assertSet('newCollection.vibe_name', 'ELEVATED BASICS BRACELETS - PEARL')
+        ->assertSet('newCollection.generated_title', 'ELEVATED BASICS BRACELETS PEARL')
+        ->call('commitNewVibeName')
+        ->assertSet('newCollection.vibe_name', 'PEARL')
+        ->assertSet('vibeNameWarning', ShopYourVibeWorkflow::PARENT_PREFIX_WARNING)
+        ->assertSet('vibeNameBlocked', false)
+        ->assertSee(ShopYourVibeWorkflow::PARENT_PREFIX_WARNING);
+
+    $page->set('newCollection.vibe_name', 'PEARL X')
+        ->assertSet('vibeNameWarning', null)
+        ->assertSet('vibeNameBlocked', false);
+});
+
+it('blocks saving when the vibe name is only the parent collection', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->set('newCollection.vibe_name', 'elevated basics bracelets')
+        ->call('commitNewVibeName')
+        ->assertSet('newCollection.vibe_name', '')
+        ->assertSet('vibeNameBlocked', true)
+        ->assertHasErrors(['newCollection.vibe_name'])
+        ->assertSee('Please enter a vibe name only. The collection name is already included automatically.')
+        ->call('createCollectionVibe')
+        ->assertHasErrors(['newCollection.vibe_name'])
+        ->assertSet('addingCard', true);
+
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(2);
+});
+
+it('normalizes a vibe name on save before the field is blurred', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)->set('collectionMode', 'new')
+        ->set('newCollection.vibe_name', 'gold and white')
+        ->assertSet('newCollection.vibe_name', 'GOLD AND WHITE')
+        ->call('createCollectionVibe')
+        ->assertHasNoErrors();
+
+    $draft = $this->draft->fresh();
+    $card = $draft->desired['cards'][2];
+    $creation = array_values($draft->desired['new_collections'])[0];
+    expect($card['name'])->toBe('GOLD & WHITE')
+        ->and($creation['title'])->toBe('ELEVATED BASICS BRACELETS GOLD & WHITE')
+        ->and($creation['handle'])->toBe('elevated-basics-bracelets-gold-and-white');
+});
+
+it('strips a parent prefix on the server before creating the draft', function () {
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+    $this->draft->refresh();
+
+    vibeEdit($this, 'create_collection', ['vibe_name' => 'ELEVATED   BASICS   BRACELETS: gold and white']);
+    $card = $this->draft->desired['cards'][2];
+    $creation = array_values($this->draft->desired['new_collections'])[0];
+
+    expect($card['name'])->toBe('GOLD & WHITE')
+        ->and($creation['title'])->toBe('ELEVATED BASICS BRACELETS GOLD & WHITE')
+        ->and(substr_count($creation['title'], 'ELEVATED BASICS BRACELETS'))->toBe(1)
+        ->and($creation['handle'])->toBe('elevated-basics-bracelets-gold-and-white')
+        ->and($creation['membership_tag'])->toBe('elevated-basics-bracelets-gold-and-white');
+});
+
+it('treats and and ampersand vibe names as the same collection handle', function () {
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+    $this->draft->refresh();
+
+    vibeEdit($this, 'create_collection', ['vibe_name' => 'Gold and White']);
+
+    expect(fn () => vibeEdit($this, 'create_collection', ['vibe_name' => 'Gold & White']))
+        ->toThrow(RuntimeException::class, 'handle already exists');
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(3);
+});
+
+it('publishes a normalized vibe with its short card name, image, and membership tag', function () {
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Elevated Basics Bracelets';
+    $state['parent']['handle'] = 'elevated-basics-bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state]);
+    $this->draft->refresh();
+
+    vibeEdit($this, 'create_collection', [
+        'vibe_name' => 'Gold and White',
+        'image' => 'gid://shopify/MediaImage/1',
+        'image_url' => 'https://cdn.shopify.com/image.jpg',
+    ]);
+    vibePush($this);
+
+    $card = $this->draft->desired['cards'][2];
+    $created = $this->fake->collections[$card['collection_gid']];
+    expect($this->draft->status)->toBe('synced')
+        ->and($card['name'])->toBe('GOLD & WHITE')
+        ->and($card['link'])->toBe('https://leighavenue.co.za/collections/elevated-basics-bracelets-gold-and-white')
+        ->and($created['title'])->toBe('ELEVATED BASICS BRACELETS GOLD & WHITE')
+        ->and($created['handle'])->toBe('elevated-basics-bracelets-gold-and-white')
+        ->and($created['image']['url'])->toBe('https://cdn.shopify.com/image.jpg')
+        ->and($created['ruleSet']['rules'][0])->toMatchArray([
+            'column' => 'TAG',
+            'relation' => 'EQUALS',
+            'condition' => 'elevated-basics-bracelets-gold-and-white',
+        ]);
+});
+
+it('keeps selecting an existing collection separate from new vibe naming', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+        ->call('openCollectionPicker', true)
+        ->assertSet('collectionMode', 'existing')
+        ->assertSee('Search by collection title or handle inside the dropdown.')
+        ->assertDontSee('Generated Shopify collection name');
 });
