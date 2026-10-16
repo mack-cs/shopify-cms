@@ -186,15 +186,11 @@ final class NewProductDraftShopifyCreator
         $mediaError = null;
 
         if ($product) {
-            $inventoryError = $this->configureInventoryTracking($draft, $product);
-            if ($inventoryError !== null) {
-                return [
-                    'id' => null,
-                    'handle' => null,
-                    'error' => $inventoryError,
-                    'media_error' => null,
-                ];
-            }
+            logger()->info('Shopify inventory write rejected', [
+                'origin' => 'new_products_draft',
+                'draft_id' => $draft->id,
+                'reason' => 'New product creation cannot write inventory. Inventory changes belong to the Inventory section.',
+            ]);
 
             $mediaSources = $this->mediaSources($draft);
             if ($mediaSources !== []) {
@@ -208,111 +204,6 @@ final class NewProductDraftShopifyCreator
             'error' => null,
             'media_error' => $mediaError,
         ];
-    }
-
-    /** @param array<string, mixed> $product */
-    private function configureInventoryTracking(NewProductDraft $draft, array $product): ?string
-    {
-        $inventoryItemId = trim((string) data_get($product, 'variants.nodes.0.inventoryItem.id', ''));
-        if ($inventoryItemId === '') {
-            return 'Shopify created the product without a resolvable default variant inventory item.';
-        }
-
-        $tracked = !$this->isStackOrBundle($draft);
-        $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
-            'id' => $inventoryItemId,
-            'input' => ['tracked' => $tracked],
-        ]);
-        $payload = $data['inventoryItemUpdate'] ?? null;
-        if (!is_array($payload)) {
-            return 'Missing inventoryItemUpdate payload after Shopify product creation.';
-        }
-
-        $errors = $payload['userErrors'] ?? [];
-        if (is_array($errors) && $errors !== []) {
-            $messages = collect($errors)
-                ->map(function (array $error): string {
-                    $field = isset($error['field']) ? implode('.', (array) $error['field']) : 'input';
-                    $message = $error['message'] ?? 'Unknown error';
-
-                    return "{$field}: {$message}";
-                })
-                ->implode('; ');
-
-            return $messages !== '' ? $messages : 'Shopify rejected the inventory tracking update.';
-        }
-
-        $confirmed = data_get($payload, 'inventoryItem.tracked');
-        if (!is_bool($confirmed) || $confirmed !== $tracked) {
-            return 'Shopify did not confirm the required inventory tracking state.';
-        }
-
-        if (!$tracked) {
-            return null;
-        }
-
-        $quantity = $draft->variant_inventory_qty ?? NewProductDraft::DEFAULT_VARIANT_INVENTORY_QTY;
-        if (!is_numeric($quantity) || (int) $quantity < 0) {
-            return 'Initial inventory must be zero or greater.';
-        }
-
-        return $this->setInitialInventoryQuantity($inventoryItemId, (int) $quantity, $draft);
-    }
-
-    private function setInitialInventoryQuantity(
-        string $inventoryItemId,
-        int $quantity,
-        NewProductDraft $draft
-    ): ?string {
-        $locationData = $this->client->graphql($this->locationsQuery());
-        $locationId = trim((string) data_get($locationData, 'locations.nodes.0.id', ''));
-        if ($locationId === '') {
-            return 'No Shopify location was available for the initial inventory quantity.';
-        }
-
-        $reference = $draft->id
-            ? 'logistics://shopify-editor/new-product-draft/' . $draft->id
-            : 'logistics://shopify-editor/new-product-draft';
-        $data = $this->client->graphql($this->inventorySetMutation(), [
-            'input' => [
-                'name' => 'available',
-                'reason' => 'correction',
-                'ignoreCompareQuantity' => true,
-                'referenceDocumentUri' => $reference,
-                'quantities' => [[
-                    'inventoryItemId' => $inventoryItemId,
-                    'locationId' => $locationId,
-                    'quantity' => $quantity,
-                ]],
-            ],
-        ]);
-
-        $errors = data_get($data, 'inventorySetQuantities.userErrors', []);
-        if (is_array($errors) && $errors !== []) {
-            $messages = collect($errors)
-                ->map(fn (array $error): string => (string) ($error['message'] ?? 'Unknown inventory error'))
-                ->filter()
-                ->implode('; ');
-
-            return $messages !== '' ? $messages : 'Shopify rejected the initial inventory quantity.';
-        }
-
-        return null;
-    }
-
-    private function isStackOrBundle(NewProductDraft $draft): bool
-    {
-        if (is_array($draft->bundle_product_ids) && $draft->bundle_product_ids !== []) {
-            return true;
-        }
-
-        foreach ([$draft->tags, $draft->type, $draft->title] as $value) {
-            if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -406,52 +297,6 @@ mutation ProductCreate($input: ProductInput!) {
     userErrors {
       field
       message
-    }
-  }
-}
-GQL;
-    }
-
-    private function inventoryItemUpdateMutation(): string
-    {
-        return <<<'GQL'
-mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
-  inventoryItemUpdate(id: $id, input: $input) {
-    inventoryItem {
-      id
-      tracked
-    }
-    userErrors {
-      field
-      message
-    }
-  }
-}
-GQL;
-    }
-
-    private function locationsQuery(): string
-    {
-        return <<<'GQL'
-query LocationsForNewProductInventory {
-  locations(first: 1) {
-    nodes {
-      id
-    }
-  }
-}
-GQL;
-    }
-
-    private function inventorySetMutation(): string
-    {
-        return <<<'GQL'
-mutation InventorySetNewProductQuantity($input: InventorySetQuantitiesInput!) {
-  inventorySetQuantities(input: $input) {
-    userErrors {
-      field
-      message
-      code
     }
   }
 }

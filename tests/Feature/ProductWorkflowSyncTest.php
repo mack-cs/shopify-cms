@@ -1368,6 +1368,24 @@ it('syncs only the first three complementary products to Shopify while keeping e
         ],
     ]);
 
+    foreach (array_slice($selectedComplementary, 0, 3) as $index => $gid) {
+        $related = Product::withoutEvents(fn (): Product => Product::create([
+            'import_id' => $product->import_id,
+            'shopify_id' => $gid,
+            'handle' => 'comp-'.$index,
+            'title' => 'Comp '.$index,
+            'status' => 'active',
+            'approval_version' => 1,
+        ]));
+        Variant::withoutEvents(fn (): Variant => Variant::create([
+            'product_id' => $related->id,
+            'sku' => 'COMP-'.$index,
+            'inventory_tracked' => false,
+            'sync_state' => Variant::SYNC_STATE_SYNCED,
+            'position' => 1,
+        ]));
+    }
+
     ShopifyMetafield::create([
         'import_id' => $product->import_id,
         'handle' => '',
@@ -1593,6 +1611,24 @@ it('prefers linked draft complementary products over stale row data during appro
     ]);
 
     approveWorkflowTestProduct($product);
+
+    foreach (['4001', '4002', '4003'] as $index => $id) {
+        $related = Product::withoutEvents(fn (): Product => Product::create([
+            'import_id' => $product->import_id,
+            'shopify_id' => 'gid://shopify/Product/'.$id,
+            'handle' => 'draft-comp-'.$index,
+            'title' => 'Draft Comp '.$index,
+            'status' => 'active',
+            'approval_version' => 1,
+        ]));
+        Variant::withoutEvents(fn (): Variant => Variant::create([
+            'product_id' => $related->id,
+            'sku' => 'DRAFT-COMP-'.$index,
+            'inventory_tracked' => false,
+            'sync_state' => Variant::SYNC_STATE_SYNCED,
+            'position' => 1,
+        ]));
+    }
 
     ShopifyRow::create([
         'import_id' => $product->import_id,
@@ -1907,16 +1943,17 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
     ]);
 
     $mediaInput = null;
-    $inventoryTrackingInput = null;
+    $queries = [];
 
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
 
-    Http::fake(function ($request) use (&$mediaInput, &$inventoryTrackingInput) {
+    Http::fake(function ($request) use (&$mediaInput, &$queries) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
         $variables = (array) ($payload['variables'] ?? []);
+        $queries[] = $query;
 
         if (str_contains($query, 'mutation ProductCreateMedia')) {
             $mediaInput = $variables['media'] ?? null;
@@ -1929,22 +1966,6 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
                             ['id' => 'gid://shopify/MediaImage/1402'],
                         ],
                         'mediaUserErrors' => [],
-                    ],
-                ],
-            ]);
-        }
-
-        if (str_contains($query, 'mutation InventoryItemUpdate')) {
-            $inventoryTrackingInput = $variables;
-
-            return Http::response([
-                'data' => [
-                    'inventoryItemUpdate' => [
-                        'inventoryItem' => [
-                            'id' => 'gid://shopify/InventoryItem/1401',
-                            'tracked' => false,
-                        ],
-                        'userErrors' => [],
                     ],
                 ],
             ]);
@@ -1978,10 +1999,7 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
 
     expect($result['created'])->toBe(1);
     expect($result['failed'])->toBe(0);
-    expect($inventoryTrackingInput)->toBe([
-        'id' => 'gid://shopify/InventoryItem/1401',
-        'input' => ['tracked' => false],
-    ]);
+    expect(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
     expect($mediaInput)->toBe([
         [
             'originalSource' => $firstImage,
@@ -1995,7 +2013,7 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
     expect($draft->fresh()->handle)->toBe('test-bracelet-stack');
 });
 
-it('enables inventory tracking when creating an ordinary product in Shopify', function (): void {
+it('does not set inventory when creating an ordinary product in Shopify', function (): void {
     $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
         'title' => 'Test Bracelet',
         'type' => 'Bracelets',
@@ -2014,58 +2032,16 @@ it('enables inventory tracking when creating an ordinary product in Shopify', fu
         ]);
     }
 
-    $inventoryTrackingInput = null;
-    $inventoryQuantityInput = null;
+    $queries = [];
 
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
 
-    Http::fake(function ($request) use (&$inventoryTrackingInput, &$inventoryQuantityInput) {
+    Http::fake(function ($request) use (&$queries) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
-        $variables = (array) ($payload['variables'] ?? []);
-
-        if (str_contains($query, 'mutation InventoryItemUpdate')) {
-            $inventoryTrackingInput = $variables;
-
-            return Http::response([
-                'data' => [
-                    'inventoryItemUpdate' => [
-                        'inventoryItem' => [
-                            'id' => 'gid://shopify/InventoryItem/1402',
-                            'tracked' => true,
-                        ],
-                        'userErrors' => [],
-                    ],
-                ],
-            ]);
-        }
-
-
-        if (str_contains($query, 'query LocationsForNewProductInventory')) {
-            return Http::response([
-                'data' => [
-                    'locations' => [
-                        'nodes' => [[
-                            'id' => 'gid://shopify/Location/1',
-                        ]],
-                    ],
-                ],
-            ]);
-        }
-
-        if (str_contains($query, 'mutation InventorySetNewProductQuantity')) {
-            $inventoryQuantityInput = $variables['input'] ?? null;
-
-            return Http::response([
-                'data' => [
-                    'inventorySetQuantities' => [
-                        'userErrors' => [],
-                    ],
-                ],
-            ]);
-        }
+        $queries[] = $query;
 
         if (str_contains($query, 'mutation ProductCreate')) {
             return Http::response([
@@ -2095,20 +2071,7 @@ it('enables inventory tracking when creating an ordinary product in Shopify', fu
 
     expect($result['created'])->toBe(1)
         ->and($result['failed'])->toBe(0)
-        ->and($inventoryTrackingInput)->toBe([
-            'id' => 'gid://shopify/InventoryItem/1402',
-            'input' => ['tracked' => true],
-        ])
-        ->and($inventoryQuantityInput)->toMatchArray([
-            'name' => 'available',
-            'reason' => 'correction',
-            'ignoreCompareQuantity' => true,
-            'quantities' => [[
-                'inventoryItemId' => 'gid://shopify/InventoryItem/1402',
-                'locationId' => 'gid://shopify/Location/1',
-                'quantity' => 15,
-            ]],
-        ]);
+        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
 });
 
 it('does not create an approved draft in Shopify when the title is missing', function (): void {
@@ -2140,92 +2103,105 @@ it('does not create an approved draft in Shopify when the title is missing', fun
         ->and($draft->fresh()->handle)->toBeNull();
 });
 
-it('forces existing ordinary products to tracked and stacks to untracked during approved sync', function (): void {
-    $ordinary = createWorkflowTestProduct([
+it('does not change inventory tracking during approved product sync', function (): void {
+    $product = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1451',
         'handle' => 'tracked-existing-bracelet',
         'title' => 'Tracked Existing Bracelet',
         'tags' => 'bracelets, livi-road',
+        'status' => 'active',
     ]);
-    $ordinaryVariant = createWorkflowTestVariant($ordinary, [
+    createWorkflowTestVariant($product, [
         'shopify_id' => 'gid://shopify/ProductVariant/1451',
         'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/1451',
         'inventory_tracked' => false,
-        'inventory_qty' => null,
+        'inventory_qty' => 12,
+        'sku' => 'TRACKED-SKU',
     ]);
-
-    $stack = createWorkflowTestProduct([
-        'shopify_id' => 'gid://shopify/Product/1452',
-        'handle' => 'untracked-existing-stack',
-        'title' => 'Untracked Existing Stack',
-        'tags' => 'bundles, livi-road-bundles',
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::VARIANT_INVENTORY_QTY => '12',
+            HeaderStore::TAGS => 'bracelets, livi-road',
+        ],
     ]);
-    $stackVariant = createWorkflowTestVariant($stack, [
-        'shopify_id' => 'gid://shopify/ProductVariant/1452',
-        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/1452',
-        'inventory_tracked' => true,
-        'inventory_qty' => 0,
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 2,
+        'handle' => $product->handle,
+        'row_type' => 'variant',
+        'data' => [
+            HeaderStore::VARIANT_SKU => 'TRACKED-SKU',
+            HeaderStore::VARIANT_INVENTORY_QTY => '12',
+            HeaderStore::VARIANT_PRICE => '10.00',
+        ],
     ]);
+    approveWorkflowTestProduct($product);
 
-    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
-    config()->set('services.shopify.admin_access_token', 'test-token');
-    config()->set('services.shopify.api_version', '2026-01');
+    $queries = [];
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$queries): array {
+        $queries[] = $query;
 
-    $trackingInputs = [];
-    Http::fake(function ($request) use (&$trackingInputs) {
-        $payload = $request->data();
-        $query = (string) ($payload['query'] ?? '');
-        $variables = (array) ($payload['variables'] ?? []);
-
-        if (!str_contains($query, 'mutation InventoryTrackingUpdate')) {
-            throw new RuntimeException('Unexpected Shopify GraphQL call in existing inventory tracking test.');
+        if (str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate') || str_contains($query, 'InventoryTrackingUpdate')) {
+            throw new RuntimeException('Product sync attempted an inventory write.');
         }
 
-        $trackingInputs[] = $variables;
+        if (str_contains($query, 'mutation ProductUpdate')) {
+            return ['productUpdate' => ['product' => ['id' => 'gid://shopify/Product/1451', 'handle' => 'tracked-existing-bracelet'], 'userErrors' => []]];
+        }
 
-        return Http::response([
-            'data' => [
-                'inventoryItemUpdate' => [
-                    'inventoryItem' => [
-                        'id' => $variables['id'],
-                        'tracked' => $variables['input']['tracked'],
-                    ],
-                    'userErrors' => [],
-                ],
-            ],
-        ]);
+        if (str_contains($query, 'query ProductByIdDetails') || str_contains($query, 'query ProductByHandleDetails')) {
+            $productPayload = [
+                'id' => 'gid://shopify/Product/1451',
+                'options' => [],
+                'category' => ['id' => 'gid://shopify/TaxonomyCategory/aa-6-3', 'name' => 'Jewelry'],
+                'productCategory' => null,
+                'variants' => ['nodes' => [[
+                    'id' => 'gid://shopify/ProductVariant/1451',
+                    'sku' => 'TRACKED-SKU',
+                    'inventoryItem' => ['id' => 'gid://shopify/InventoryItem/1451'],
+                    'selectedOptions' => [],
+                ]]],
+                'media' => ['nodes' => []],
+                'images' => ['nodes' => []],
+            ];
+
+            return str_contains($query, 'productByHandle')
+                ? ['productByHandle' => $productPayload]
+                : ['product' => $productPayload];
+        }
+
+        if (str_contains($query, 'Metafields')) {
+            return ['product' => ['metafields' => ['nodes' => []]], 'metafieldsSet' => ['metafields' => [], 'userErrors' => []]];
+        }
+
+        if (str_contains($query, 'productVariantsBulkUpdate')) {
+            expect($variables['variants'][0])->not->toHaveKey('inventoryQuantities')
+                ->and($variables['variants'][0]['barcode'])->toBe('TRACKED-SKU')
+                ->and($variables['variants'][0]['inventoryItem'])->toBe(['sku' => 'TRACKED-SKU'])
+                ->and(json_encode($variables['variants']))->not->toContain('tracked');
+
+            return ['productVariantsBulkUpdate' => ['productVariants' => [['id' => 'gid://shopify/ProductVariant/1451']], 'userErrors' => []]];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call: '.$query);
     });
 
-    $updater = app(ProductShopifyUpdater::class);
-    $trackingMethod = new ReflectionMethod($updater, 'updateInventoryTrackingForItem');
-    $shouldTrackMethod = new ReflectionMethod($updater, 'productShouldTrackInventory');
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product->fresh()]), [
+        ProductShopifyUpdater::SYNC_SCOPE_VARIANTS,
+    ], [
+        ProductShopifyUpdater::VARIANT_FIELD_SKU,
+    ]);
 
-    $trackingMethod->invoke(
-        $updater,
-        $ordinary,
-        $ordinaryVariant,
-        'gid://shopify/InventoryItem/1451',
-        $shouldTrackMethod->invoke($updater, $ordinary)
-    );
-    $trackingMethod->invoke(
-        $updater,
-        $stack,
-        $stackVariant,
-        'gid://shopify/InventoryItem/1452',
-        $shouldTrackMethod->invoke($updater, $stack)
-    );
-
-    expect($trackingInputs)->toBe([
-        [
-            'id' => 'gid://shopify/InventoryItem/1451',
-            'input' => ['tracked' => true],
-        ],
-        [
-            'id' => 'gid://shopify/InventoryItem/1452',
-            'input' => ['tracked' => false],
-        ],
-    ])->and($ordinaryVariant->fresh()->inventory_tracked)->toBeTrue()
-        ->and($stackVariant->fresh()->inventory_tracked)->toBeFalse();
+    expect($result['failures'])->toBe([])
+        ->and($result['skipped_not_approved'])->toBe(0)
+        ->and($result['skipped_blocked'])->toBe(0)
+        ->and($result['updated'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
 });
 
 it('does not create a fully approved product in shopify without three complementary products', function (): void {

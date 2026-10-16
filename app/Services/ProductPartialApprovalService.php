@@ -97,7 +97,7 @@ class ProductPartialApprovalService
      * @param array<int, string>|null $metafieldFields
      * @return array{scopes:array<int, string>,core_fields:array<int, string>}
      */
-    public function normalizeSelections(?array $scopes, ?array $coreFields, ?array $metafieldFields = null): array
+    public function normalizeSelections(?array $scopes, ?array $coreFields, ?array $metafieldFields = null, ?array $variantFields = null): array
     {
         $normalizedScopes = array_values(array_unique(array_filter(array_map(
             'strval',
@@ -114,6 +114,11 @@ class ProductPartialApprovalService
             $metafieldFields ?? []
         ), fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true))));
 
+        $normalizedVariantFields = array_values(array_unique(array_filter(array_map(
+            'strval',
+            $variantFields ?? []
+        ), fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableVariantFields(), true))));
+
         if (!in_array(ProductShopifyUpdater::SYNC_SCOPE_PRODUCT, $normalizedScopes, true)) {
             $normalizedCoreFields = [];
         }
@@ -122,9 +127,17 @@ class ProductPartialApprovalService
             $normalizedMetafieldFields = [];
         }
 
+        if (!in_array(ProductShopifyUpdater::SYNC_SCOPE_VARIANTS, $normalizedScopes, true)) {
+            $normalizedVariantFields = [];
+        }
+
         return [
             'scopes' => $normalizedScopes,
-            'core_fields' => array_values(array_unique(array_merge($normalizedCoreFields, $normalizedMetafieldFields))),
+            'core_fields' => array_values(array_unique(array_merge(
+                $normalizedCoreFields,
+                $normalizedMetafieldFields,
+                $normalizedVariantFields
+            ))),
         ];
     }
 
@@ -465,7 +478,8 @@ class ProductPartialApprovalService
         $allowedCoreFields = [];
         $allowedFieldUniverse = array_values(array_unique(array_merge(
             ProductShopifyUpdater::availableProductCoreFields(),
-            ProductShopifyUpdater::availableMetafieldFields()
+            ProductShopifyUpdater::availableMetafieldFields(),
+            ProductShopifyUpdater::availableVariantFields()
         )));
 
         foreach ($approved as $request) {
@@ -482,19 +496,20 @@ class ProductPartialApprovalService
             }
         }
 
-        if (!isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT])) {
-            $allowedCoreFields = array_filter(
-                $allowedCoreFields,
-                fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true)
-            );
-        }
+        $allowedCoreFields = array_filter(
+            $allowedCoreFields,
+            function (string $field) use ($allowedScopes): bool {
+                if (in_array($field, ProductShopifyUpdater::availableVariantFields(), true)) {
+                    return isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_VARIANTS]);
+                }
 
-        if (!isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS])) {
-            $allowedCoreFields = array_filter(
-                $allowedCoreFields,
-                fn (string $field): bool => in_array($field, ProductShopifyUpdater::availableProductCoreFields(), true)
-            );
-        }
+                if (in_array($field, ProductShopifyUpdater::availableMetafieldFields(), true)) {
+                    return isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS]);
+                }
+
+                return isset($allowedScopes[ProductShopifyUpdater::SYNC_SCOPE_PRODUCT]);
+            }
+        );
 
         return [
             'scopes' => array_values($allowedScopes),
@@ -699,7 +714,11 @@ class ProductPartialApprovalService
         }
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_VARIANTS, $scopes, true)) {
-            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_VARIANTS];
+            foreach ($coreFields as $field) {
+                if (in_array($field, ProductShopifyUpdater::availableVariantFields(), true)) {
+                    $labels[] = ProductShopifyUpdater::variantFieldLabels()[$field] ?? $field;
+                }
+            }
         }
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_PRICE, $scopes, true)) {
@@ -800,8 +819,28 @@ class ProductPartialApprovalService
         }
 
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_VARIANTS, $scopes, true)) {
-            foreach ($this->requiredLabelsForSource('variant') as $label) {
-                $labels[] = $label;
+            $variantAttributes = [
+                ProductShopifyUpdater::VARIANT_FIELD_SKU => ['sku'],
+                ProductShopifyUpdater::VARIANT_FIELD_BARCODE => ['barcode'],
+                ProductShopifyUpdater::VARIANT_FIELD_OPTIONS => ['option1', 'option2', 'option3'],
+                ProductShopifyUpdater::VARIANT_FIELD_WEIGHT => ['weight', 'grams', 'weight_unit'],
+                ProductShopifyUpdater::VARIANT_FIELD_COST => ['cost'],
+            ];
+
+            foreach ($coreFields as $field) {
+                foreach ($variantAttributes[$field] ?? [] as $attribute) {
+                    foreach ($this->requiredLabelsForSourceAndAttribute('variant', $attribute) as $label) {
+                        $labels[] = $label;
+                    }
+                }
+
+                if ($field === ProductShopifyUpdater::VARIANT_FIELD_COST) {
+                    foreach ($this->requiredLabelsForSourceAndAttribute('row', HeaderStore::COST_PER_ITEM) as $label) {
+                        $labels[] = $label;
+                    }
+                }
+
+                $labels[] = ProductShopifyUpdater::variantFieldLabels()[$field] ?? $field;
             }
         }
 

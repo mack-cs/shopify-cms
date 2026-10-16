@@ -2277,6 +2277,7 @@ class ProductResource extends Resource
                             $data['scopes'] ?? [],
                             $data['core_fields'] ?? [],
                             $data['metafield_fields'] ?? [],
+                            $data['variant_fields'] ?? [],
                         );
 
                         if ($normalized['scopes'] === []) {
@@ -2304,6 +2305,18 @@ class ProductResource extends Resource
                             self::sendNotification(Notification::make()
                                 ->title('No metafields selected')
                                 ->body('Choose at least one metafield or deselect Metafields.')
+                                ->warning()
+                            );
+                            return;
+                        }
+
+                        if (
+                            in_array(ProductShopifyUpdater::SYNC_SCOPE_VARIANTS, $normalized['scopes'], true)
+                            && empty(array_intersect($normalized['core_fields'], ProductShopifyUpdater::availableVariantFields()))
+                        ) {
+                            self::sendNotification(Notification::make()
+                                ->title('No variant fields selected')
+                                ->body('Choose SKU, barcode, options, weight, or cost on its own, or deselect Variants.')
                                 ->warning()
                             );
                             return;
@@ -2919,7 +2932,7 @@ class ProductResource extends Resource
                 ->required()
                 ->live()
                 ->columns(2)
-                ->helperText('Partial approval requests can be sent for active and draft products. Other statuses still need the existing full approval workflow. Price sends only the variant price. Compare-at price sends only the variant compare-at price.'),
+                ->helperText('Partial approval requests can be sent for active and draft products. Other statuses still need the existing full approval workflow. Price, compare-at price, SKU, barcode, options, weight, and cost are each approved on their own. This request never updates inventory.'),
             CheckboxList::make('core_fields')
                 ->label('Product core fields')
                 ->options(ProductShopifyUpdater::productCoreFieldLabels())
@@ -2936,6 +2949,16 @@ class ProductResource extends Resource
                 ->columns(5)
                 ->visible(fn (Get $get): bool => in_array(
                     ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS,
+                    array_values(array_filter($get('scopes') ?? [], 'is_string')),
+                    true
+                )),
+            CheckboxList::make('variant_fields')
+                ->label('Variant fields')
+                ->options(ProductShopifyUpdater::variantFieldLabels())
+                ->columns(5)
+                ->helperText('Each box is a separate Shopify update. Inventory quantity, tracking, and policy are not available here.')
+                ->visible(fn (Get $get): bool => in_array(
+                    ProductShopifyUpdater::SYNC_SCOPE_VARIANTS,
                     array_values(array_filter($get('scopes') ?? [], 'is_string')),
                     true
                 )),
@@ -3092,7 +3115,10 @@ class ProductResource extends Resource
         if ($record->isApprovedByTwo()) {
             return $service->requestFieldLabels(
                 ProductShopifyUpdater::availableSyncScopes(),
-                ProductShopifyUpdater::defaultCoreFields(),
+                array_values(array_unique(array_merge(
+                    ProductShopifyUpdater::defaultCoreFields(),
+                    ProductShopifyUpdater::availableVariantFields()
+                ))),
             );
         }
 
@@ -3137,6 +3163,7 @@ class ProductResource extends Resource
             $get('scopes') ?? [],
             $get('core_fields') ?? [],
             $get('metafield_fields') ?? [],
+            $get('variant_fields') ?? [],
         );
 
         if (($normalized['scopes'] ?? []) === []) {
@@ -3157,7 +3184,10 @@ class ProductResource extends Resource
         $service = app(ProductPartialApprovalService::class);
         $fullLabels = $service->requestFieldLabels(
             ProductShopifyUpdater::availableSyncScopes(),
-            ProductShopifyUpdater::defaultCoreFields(),
+            array_values(array_unique(array_merge(
+                ProductShopifyUpdater::defaultCoreFields(),
+                ProductShopifyUpdater::availableVariantFields()
+            ))),
         );
 
         $fullText = e(implode(', ', $fullLabels));

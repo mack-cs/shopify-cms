@@ -1,6 +1,8 @@
 <?php
 
+use App\Models\Import;
 use App\Models\Product;
+use App\Models\User;
 use App\Models\Variant;
 use App\Services\ProductInventorySyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -13,7 +15,16 @@ it('sets on hand and refreshes Shopify available committed and on hand quantitie
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
 
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'inventory.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+    ]);
     $product = Product::withoutEvents(fn (): Product => Product::query()->create([
+        'import_id' => $import->id,
         'shopify_id' => 'gid://shopify/Product/9001', 'handle' => 'inventory-state-test',
         'title' => 'Inventory State Test', 'status' => 'active',
     ]));

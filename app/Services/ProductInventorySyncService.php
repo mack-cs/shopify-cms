@@ -363,6 +363,13 @@ final class ProductInventorySyncService
             return;
         }
 
+        logger()->info('Shopify inventory write executed', [
+            'origin' => 'inventory',
+            'inventory_item_id' => $inventoryItemId,
+            'mutation' => 'inventoryItemUpdate',
+            'fields' => ['tracked'],
+        ]);
+
         $data = $this->client->graphql($this->inventoryItemTrackingMutation(), [
             'inventoryItemId' => $inventoryItemId,
             'tracked' => $tracked,
@@ -403,6 +410,14 @@ final class ProductInventorySyncService
         if ($locationId === null) {
             throw new \RuntimeException('No Shopify location found for inventory update.');
         }
+
+        logger()->info('Shopify inventory write executed', [
+            'origin' => 'inventory',
+            'inventory_item_id' => $inventoryItemId,
+            'variant_id' => $variantId,
+            'mutation' => 'inventorySetQuantities',
+            'fields' => ['on_hand'],
+        ]);
 
         $data = $this->client->graphql($this->inventorySetMutation(), [
             'input' => [

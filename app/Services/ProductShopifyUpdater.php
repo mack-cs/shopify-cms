@@ -50,6 +50,16 @@ final class ProductShopifyUpdater
     public const CORE_FIELD_BEAD_COLOUR_FINISH = 'bead_colour_finish';
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
 
+    public const VARIANT_FIELD_SKU = 'variant_sku';
+
+    public const VARIANT_FIELD_BARCODE = 'variant_barcode';
+
+    public const VARIANT_FIELD_OPTIONS = 'variant_options';
+
+    public const VARIANT_FIELD_WEIGHT = 'variant_weight';
+
+    public const VARIANT_FIELD_COST = 'variant_cost';
+
     /** @var array<string, string> */
     private const PATTERN_CATEGORY_METAOBJECT_GIDS = [
         'multicolour' => 'gid://shopify/Metaobject/205977026696',
@@ -516,38 +526,68 @@ final class ProductShopifyUpdater
                 continue;
             }
 
+            $approvalMode = $product->isApprovedByTwo() ? 'full' : 'partial';
+            $scopeSource = 'unresolved';
+
             if ($product->isApprovedByTwo()) {
                 if ($scopes === null) {
                     $effectiveScopes = $fullSyncScopes;
                     $effectiveCoreFields = $fullSyncCoreFields;
+                    $scopeSource = 'full_approval';
                 } else {
                     $effectiveScopes = $resolvedScopes;
-                    $effectiveCoreFields = $resolvedCoreFields;
+                    $effectiveCoreFields = $coreFields === null ? [] : $resolvedCoreFields;
+                    $scopeSource = 'explicit_full_request';
                 }
             } else {
-                $effectiveScopes = $resolvedScopes;
-                $effectiveCoreFields = $resolvedCoreFields;
-
                 if (!$this->partialApprovalService->isActiveProduct($product)) {
                     $skippedNotApproved++;
+                    logger()->warning('Shopify product sync rejected', [
+                        'origin' => 'products',
+                        'user_id' => $userId,
+                        'product_id' => $product->id,
+                        'approval_mode' => 'partial',
+                        'reason' => 'Partial approval sync only runs for active products.',
+                        'requested_scopes' => $scopes,
+                    ]);
                     continue;
                 }
 
                 $allowed = $this->partialApprovalService->allowedSelections($product, $resolvedScopes, $resolvedCoreFields);
-                $effectiveScopes = $allowed['scopes'];
-                $effectiveCoreFields = $allowed['core_fields'];
+                if ($scopes === null) {
+                    $effectiveScopes = $allowed['scopes'];
+                    $effectiveCoreFields = $allowed['core_fields'];
+                    $scopeSource = 'stored_partial_approval';
+                } else {
+                    $requestedFields = $coreFields === null ? [] : $resolvedCoreFields;
+                    $effectiveScopes = array_values(array_intersect($resolvedScopes, $allowed['scopes']));
+                    $effectiveCoreFields = array_values(array_intersect($requestedFields, $allowed['core_fields']));
+                    $scopeSource = 'explicit_partial_request';
+                }
 
                 if (
-                    $resolvedScopes === [self::SYNC_SCOPE_PRODUCT]
+                    $scopes !== null
+                    && $resolvedScopes === [self::SYNC_SCOPE_PRODUCT]
                     && $resolvedCoreFields === [self::CORE_FIELD_HANDLE]
                     && $this->partialApprovalService->hasApprovedTitleForCurrentVersion($product)
                 ) {
                     $effectiveScopes = [self::SYNC_SCOPE_PRODUCT];
                     $effectiveCoreFields = [self::CORE_FIELD_HANDLE];
+                    $scopeSource = 'approved_handle_change';
                 }
 
                 if ($effectiveScopes === []) {
                     $skippedNotApproved++;
+                    logger()->warning('Shopify product sync rejected', [
+                        'origin' => 'products',
+                        'user_id' => $userId,
+                        'product_id' => $product->id,
+                        'approval_mode' => 'partial',
+                        'scope_source' => $scopeSource,
+                        'reason' => 'No explicitly approved fields remained for this sync.',
+                        'requested_scopes' => $scopes,
+                        'requested_core_fields' => $coreFields,
+                    ]);
                     continue;
                 }
 
@@ -568,10 +608,37 @@ final class ProductShopifyUpdater
                     ));
                 }
 
+                if (
+                    in_array(self::SYNC_SCOPE_VARIANTS, $effectiveScopes, true)
+                    && empty(array_intersect($effectiveCoreFields, self::availableVariantFields()))
+                ) {
+                    $effectiveScopes = array_values(array_filter(
+                        $effectiveScopes,
+                        fn (string $scope): bool => $scope !== self::SYNC_SCOPE_VARIANTS
+                    ));
+                }
+
                 if ($effectiveScopes === []) {
                     $skippedNotApproved++;
+                    logger()->warning('Shopify product sync rejected', [
+                        'origin' => 'products',
+                        'user_id' => $userId,
+                        'product_id' => $product->id,
+                        'approval_mode' => 'partial',
+                        'scope_source' => $scopeSource,
+                        'reason' => 'No explicitly approved fields remained for this sync.',
+                        'requested_scopes' => $scopes,
+                        'requested_core_fields' => $coreFields,
+                    ]);
                     continue;
                 }
+            }
+
+            if ($scopeSource === 'full_approval' && in_array(self::SYNC_SCOPE_VARIANTS, $effectiveScopes, true)) {
+                $effectiveCoreFields = array_values(array_unique(array_merge(
+                    $effectiveCoreFields,
+                    self::availableVariantFields()
+                )));
             }
 
             if (in_array(self::SYNC_SCOPE_PRODUCT, $effectiveScopes, true) && empty($effectiveCoreFields)) {
@@ -586,9 +653,15 @@ final class ProductShopifyUpdater
             }
 
             logger()->info('Shopify product sync plan resolved', [
+                'origin' => 'products',
+                'user_id' => $userId,
                 'product_id' => $product->id,
                 'handle' => $product->handle,
                 'desired_handle' => $product->desiredHandle(),
+                'approval_mode' => $approvalMode,
+                'scope_source' => $scopeSource,
+                'requested_scopes' => $scopes,
+                'requested_core_fields' => $coreFields,
                 'effective_scopes' => $effectiveScopes,
                 'effective_core_fields' => $effectiveCoreFields,
                 'handle_only_sync' => $effectiveScopes === [self::SYNC_SCOPE_PRODUCT]
@@ -666,7 +739,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_PRODUCT => 'Product core fields',
             self::SYNC_SCOPE_SEO => 'SEO title and description',
             self::SYNC_SCOPE_METAFIELDS => 'Metafields',
-            self::SYNC_SCOPE_VARIANTS => 'Variants and inventory',
+            self::SYNC_SCOPE_VARIANTS => 'Variants',
             self::SYNC_SCOPE_PRICE => 'Price',
             self::SYNC_SCOPE_COMPARE_AT => 'Compare-at price',
             self::SYNC_SCOPE_IMAGES => 'Images',
@@ -789,6 +862,34 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => 'UVP short paragraph',
             self::CORE_FIELD_BEAD_COLOUR_FINISH => 'Bead Colour Finish',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public static function availableVariantFields(): array
+    {
+        return [
+            self::VARIANT_FIELD_SKU,
+            self::VARIANT_FIELD_BARCODE,
+            self::VARIANT_FIELD_OPTIONS,
+            self::VARIANT_FIELD_WEIGHT,
+            self::VARIANT_FIELD_COST,
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function variantFieldLabels(): array
+    {
+        return [
+            self::VARIANT_FIELD_SKU => 'SKU',
+            self::VARIANT_FIELD_BARCODE => 'Barcode',
+            self::VARIANT_FIELD_OPTIONS => 'Options',
+            self::VARIANT_FIELD_WEIGHT => 'Weight',
+            self::VARIANT_FIELD_COST => 'Cost',
         ];
     }
 
@@ -1280,7 +1381,6 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     $warnings = [];
     $syncProduct = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRODUCT) && !empty($coreFields);
     $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
-    $syncMetafields = $this->scopeEnabled($scopes, self::SYNC_SCOPE_METAFIELDS);
     $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
     $syncPrice = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRICE);
     $syncCompareAt = $this->scopeEnabled($scopes, self::SYNC_SCOPE_COMPARE_AT);
@@ -1394,6 +1494,12 @@ private function updateProduct(Product $product, array $scopes, array $coreField
     }
 
     if (count($input) > 1) {
+        logger()->info('Shopify mutation executed', [
+            'origin' => 'products',
+            'product_id' => $product->id,
+            'mutation' => 'productUpdate',
+            'fields' => array_values(array_diff(array_keys($input), ['id'])),
+        ]);
         // 1) Update product (and category if provided)
         $data = $this->client->graphql($this->productUpdateMutation(), [
             'input' => $input,
@@ -1472,24 +1578,20 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         ]);
     }
 
-    // 4) Metafields — pass $primaryData (now has GID if resolved)
-    if (($syncMetafields || !empty($selectedMetafieldHeaders)) && $primaryRow) {
-        $metafieldRowData = $primaryData;
-
-        if (!empty($selectedMetafieldHeaders)) {
-            $metafieldRowData = [];
-            foreach ($selectedMetafieldHeaders as $header) {
-                $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
-                if ($metafieldValue === null) {
-                    continue;
-                }
-
-                $metafieldRowData[$header] = $metafieldValue;
+    // Metafields are sent only for headers named in the approved field list.
+    if ($selectedMetafieldHeaders !== [] && $primaryRow) {
+        $metafieldRowData = [];
+        foreach ($selectedMetafieldHeaders as $header) {
+            $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
+            if ($metafieldValue === null) {
+                continue;
             }
 
-            if (array_key_exists(HeaderStore::PRODUCT_CATEGORY, $primaryData)) {
-                $metafieldRowData[HeaderStore::PRODUCT_CATEGORY] = $primaryData[HeaderStore::PRODUCT_CATEGORY];
-            }
+            $metafieldRowData[$header] = $metafieldValue;
+        }
+
+        if (array_key_exists(HeaderStore::PRODUCT_CATEGORY, $primaryData)) {
+            $metafieldRowData[HeaderStore::PRODUCT_CATEGORY] = $primaryData[HeaderStore::PRODUCT_CATEGORY];
         }
 
         $warnings = array_merge(
@@ -1505,11 +1607,13 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         );
     }
 
-    // 5) Variants/inventory. Price and compare-at price can each be sent on their own.
-    if ($syncVariants) {
+    // 5) Variant fields are approved one by one. Price and compare-at stay separate scopes.
+    // Inventory quantities, tracking, and policy are never written from this path.
+    $variantFields = array_values(array_intersect($coreFields, self::availableVariantFields()));
+    if ($syncVariants && $variantFields !== []) {
         $warnings = array_merge(
             $warnings,
-            $this->updateVariantAndInventory($product, $productId, $variantRows, $details)
+            $this->updateVariantAndInventory($product, $productId, $variantRows, $details, $syncPrice, $syncCompareAt, $variantFields)
         );
     } elseif ($syncPrice || $syncCompareAt) {
         $warnings = array_merge(
@@ -1526,7 +1630,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         );
     }
 
-    if ($syncVariants) {
+    if ($syncImages) {
         $warnings = array_merge(
             $warnings,
             $this->syncVariantMediaAssignments($product, $productId, $variantRows)
@@ -1924,7 +2028,10 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         Product $product,
         string $productId,
         array $rowDataList,
-        array $details
+        array $details,
+        bool $syncPrice = false,
+        bool $syncCompareAt = false,
+        array $variantFields = []
     ): array
     {
         $warnings = [];
@@ -1953,8 +2060,31 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             return $warnings;
         }
 
-        $details = $this->syncShopifyProductOptionsForVariants($product, $productId, $variantSources, $details, $warnings);
-        $details = $this->createMissingShopifyVariants($product, $productId, $variantSources, $details, $primaryCostPerItem, $primaryWeightUnit, $primaryGrams, $warnings);
+        $syncSku = in_array(self::VARIANT_FIELD_SKU, $variantFields, true);
+        $syncBarcode = in_array(self::VARIANT_FIELD_BARCODE, $variantFields, true);
+        $syncOptions = in_array(self::VARIANT_FIELD_OPTIONS, $variantFields, true);
+        $syncWeight = in_array(self::VARIANT_FIELD_WEIGHT, $variantFields, true);
+        $syncCost = in_array(self::VARIANT_FIELD_COST, $variantFields, true);
+
+        if ($syncOptions) {
+            $details = $this->syncShopifyProductOptionsForVariants($product, $productId, $variantSources, $details, $warnings);
+            $details = $this->createMissingShopifyVariants(
+                $product,
+                $productId,
+                $variantSources,
+                $details,
+                $primaryCostPerItem,
+                $primaryWeightUnit,
+                $primaryGrams,
+                $warnings,
+                $syncSku,
+                $syncBarcode,
+                $syncWeight,
+                $syncCost,
+                $syncPrice,
+                $syncCompareAt
+            );
+        }
 
         $variantNodes = data_get($details, 'variants.nodes', []);
         if (!is_array($variantNodes) || empty($variantNodes)) {
@@ -1976,10 +2106,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             }
         }
 
-        $locationId = null;
         $variantInputs = [];
-        $inventoryTrackingUpdated = [];
-        $trackInventory = $this->productShouldTrackInventory($product);
 
         foreach ($variantSources as $rowIndex => $variantSource) {
             $rowData = $variantSource['row'];
@@ -2016,21 +2143,6 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             }
 
             $variantId = $variantNode['id'] ?? null;
-            $inventoryItemId = data_get($variantNode, 'inventoryItem.id');
-
-            if ($variantId && !$inventoryItemId) {
-                throw new \RuntimeException("Shopify variant {$variantId} has no inventory item, so inventory tracking could not be configured.");
-            }
-
-            if ($inventoryItemId && !isset($inventoryTrackingUpdated[$inventoryItemId])) {
-                $this->updateInventoryTrackingForItem(
-                    $product,
-                    $localVariant,
-                    (string) $inventoryItemId,
-                    $trackInventory
-                );
-                $inventoryTrackingUpdated[$inventoryItemId] = true;
-            }
 
             if ($variantId) {
                 $input = ['id' => $variantId];
@@ -2087,24 +2199,24 @@ private function updateProduct(Product $product, array $scopes, array $coreField
 
                 $optionValues = $this->variantOptionValuesFromSource($rowData, $localVariant, $variantNode);
 
-                if ($desiredSku !== null) {
+                if ($syncSku && $desiredSku !== null) {
                     $inventoryItemInput['sku'] = $desiredSku;
                     // Keep Shopify Variant Barcode aligned with Variant SKU.
                     $barcode = $desiredSku;
                 }
-                if ($price !== null) {
+                if ($syncPrice && $price !== null) {
                     $input['price'] = number_format($price, 2, '.', '');
                 }
-                if ($compareAt !== null) {
+                if ($syncCompareAt && $compareAt !== null) {
                     $input['compareAtPrice'] = number_format($compareAt, 2, '.', '');
                 }
-                if ($barcode !== null) {
+                if (($syncBarcode || $syncSku) && $barcode !== null && trim((string) $barcode) !== '') {
                     $input['barcode'] = (string) $barcode;
                 }
-                if (!empty($optionValues)) {
+                if ($syncOptions && !empty($optionValues)) {
                     $input['optionValues'] = $optionValues;
                 }
-                if ($grams !== null || $weightUnit !== null) {
+                if ($syncWeight && ($grams !== null || $weightUnit !== null)) {
                     $unit = $this->mapWeightUnit($weightUnit);
                     $inventoryItemInput['measurement'] = [
                         'weight' => [
@@ -2112,7 +2224,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                             'value' => $grams !== null ? $this->weightFromGrams($grams, $unit) : 0.0,
                         ],
                     ];
-                } else {
+                } elseif ($syncWeight) {
                     logger()->warning('Shopify variant weight skipped (no grams and no weight unit)', [
                         'product_id' => $product->id,
                         'handle' => $product->handle,
@@ -2134,7 +2246,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                     'resolved_cost_per_item_raw' => $costPerItemRaw,
                     'resolved_cost_per_item_numeric' => $costPerItem,
                 ]);
-                if ($costPerItem !== null) {
+                if ($syncCost && $costPerItem !== null) {
                     $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
                 }
 
@@ -2163,44 +2275,27 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             $inventoryQty = $this->normalizeNumeric(
                 $this->valueFromRow($rowData, HeaderStore::VARIANT_INVENTORY_QTY, $localVariant?->inventory_qty)
             );
-            if ($trackInventory && $inventoryItemId && $inventoryQty !== null) {
-                $locationId = $locationId ?? $this->firstLocationId();
-                if ($locationId) {
-                    $data = $this->client->graphql($this->inventorySetMutation(), [
-                        'input' => [
-                            'name' => 'available',
-                            'reason' => 'correction',
-                            'ignoreCompareQuantity' => true,
-                            'referenceDocumentUri' => sprintf(
-                                'logistics://shopify-editor/product/%d/variant/%s',
-                                (int) $product->id,
-                                rawurlencode((string) $variantId)
-                            ),
-                            'quantities' => [[
-                                'inventoryItemId' => $inventoryItemId,
-                                'locationId' => $locationId,
-                                'quantity' => (int) $inventoryQty,
-                            ]],
-                        ],
-                    ]);
-                    $errors = data_get($data, 'inventorySetQuantities.userErrors', []);
-                    if (is_array($errors) && !empty($errors)) {
-                        $messages = $this->formatUserErrors($errors);
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => $messages !== '' ? $messages : 'Shopify inventory update failed.',
-                        ];
-                    }
-                } else {
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => 'No Shopify location found for inventory update.',
-                    ];
-                }
+            if ($inventoryQty !== null) {
+                logger()->info('Shopify inventory write rejected', [
+                    'origin' => 'products',
+                    'product_id' => $product->id,
+                    'handle' => $product->handle,
+                    'variant_id' => $variantId,
+                    'reason' => 'Product synchronization cannot write inventory. Inventory changes belong to the Inventory section.',
+                ]);
             }
         }
 
         if (!empty($variantInputs)) {
+            logger()->info('Shopify mutation executed', [
+                'origin' => 'products',
+                'product_id' => $product->id,
+                'mutation' => 'productVariantsBulkUpdate',
+                'fields' => array_values(array_unique(array_merge(...array_map(
+                    static fn (array $variantInput): array => array_values(array_diff(array_keys($variantInput), ['id'])),
+                    $variantInputs
+                )))),
+            ]);
             logger()->info('Shopify variant bulk update start', [
                 'product_id' => $product->id,
                 'handle' => $product->handle,
@@ -2235,99 +2330,6 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         }
 
         return $warnings;
-    }
-
-    private function firstLocationId(): ?string
-    {
-        $data = $this->client->graphql($this->locationsQuery(), []);
-        return data_get($data, 'locations.nodes.0.id');
-    }
-
-    private function updateInventoryTrackingForItem(
-        Product $product,
-        ?Variant $localVariant,
-        string $inventoryItemId,
-        bool $tracked
-    ): void {
-        $data = $this->client->graphql($this->inventoryItemUpdateMutation(), [
-            'id' => $inventoryItemId,
-            'input' => ['tracked' => $tracked],
-        ]);
-        $payload = $data['inventoryItemUpdate'] ?? null;
-        if (!is_array($payload)) {
-            throw new \RuntimeException('Shopify did not return an inventory tracking update result.');
-        }
-
-        $errors = $payload['userErrors'] ?? [];
-        if (is_array($errors) && $errors !== []) {
-            $messages = $this->formatUserErrors($errors, 'inventoryItemUpdate');
-            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the inventory tracking update.');
-        }
-
-        $confirmed = data_get($payload, 'inventoryItem.tracked');
-        if (!is_bool($confirmed) || $confirmed !== $tracked) {
-            throw new \RuntimeException('Shopify did not confirm the required inventory tracking state.');
-        }
-
-        if ($localVariant instanceof Variant && $localVariant->inventory_tracked !== $tracked) {
-            Variant::withoutEvents(function () use ($localVariant, $tracked): void {
-                $localVariant->forceFill([
-                    'inventory_tracked' => $tracked,
-                    'inventory_sync_error' => null,
-                    'inventory_last_synced_at' => now(),
-                ])->save();
-            });
-        }
-
-        logger()->info('Shopify inventory tracking state confirmed', [
-            'product_id' => $product->id,
-            'handle' => $product->handle,
-            'inventory_item_id' => $inventoryItemId,
-            'tracked' => $tracked,
-        ]);
-    }
-
-    private function productShouldTrackInventory(Product $product): bool
-    {
-        foreach ([$product->tags, $product->type, $product->title] as $value) {
-            if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
-                return false;
-            }
-        }
-
-        $shopifyId = trim((string) ($product->shopify_id ?? ''));
-        $handle = trim((string) ($product->handle ?? ''));
-        if ($shopifyId === '' && $handle === '') {
-            return true;
-        }
-
-        $draft = NewProductDraft::query()
-            ->where(function ($query) use ($product): void {
-                $shopifyId = trim((string) ($product->shopify_id ?? ''));
-                $handle = trim((string) ($product->handle ?? ''));
-
-                if ($shopifyId !== '') {
-                    $query->where('shopify_id', $shopifyId);
-                }
-                if ($handle !== '') {
-                    $shopifyId !== '' ? $query->orWhere('handle', $handle) : $query->where('handle', $handle);
-                }
-            })
-            ->first(['bundle_product_ids', 'tags', 'type', 'title']);
-
-        if ($draft instanceof NewProductDraft) {
-            if (is_array($draft->bundle_product_ids) && $draft->bundle_product_ids !== []) {
-                return false;
-            }
-
-            foreach ([$draft->tags, $draft->type, $draft->title] as $value) {
-                if (TagNormalizer::containsBundleOrStackTag(is_string($value) ? $value : null)) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
     }
 
     private function shopifyVariantIdForSaleUpdate(SaleProductUpdate $saleUpdate, array $details): ?string
@@ -2660,46 +2662,6 @@ mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
       field
       message
     }
-  }
-}
-GQL;
-    }
-
-    private function inventoryItemUpdateMutation(): string
-    {
-        return <<<'GQL'
-mutation InventoryTrackingUpdate($id: ID!, $input: InventoryItemInput!) {
-  inventoryItemUpdate(id: $id, input: $input) {
-    inventoryItem {
-      id
-      tracked
-    }
-    userErrors {
-      field
-      message
-    }
-  }
-}
-GQL;
-    }
-
-    private function inventorySetMutation(): string
-    {
-        return <<<'GQL'
-mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-  inventorySetQuantities(input: $input) {
-    userErrors { field message code }
-  }
-}
-GQL;
-    }
-
-    private function locationsQuery(): string
-    {
-        return <<<'GQL'
-query Locations {
-  locations(first: 1) {
-    nodes { id }
   }
 }
 GQL;
@@ -5764,7 +5726,13 @@ GQL;
         ?string $primaryCostPerItem,
         ?string $primaryWeightUnit,
         ?string $primaryGrams,
-        array &$warnings
+        array &$warnings,
+        bool $syncSku = false,
+        bool $syncBarcode = false,
+        bool $syncWeight = false,
+        bool $syncCost = false,
+        bool $syncPrice = false,
+        bool $syncCompareAt = false
     ): array {
         $variantNodes = data_get($details, 'variants.nodes', []);
         if (!is_array($variantNodes)) {
@@ -5816,25 +5784,26 @@ GQL;
 
             $priceRaw = $this->variantDesiredValue($localVariant, $rowData, 'price', HeaderStore::VARIANT_PRICE);
             $price = $this->normalizeNumeric($priceRaw);
-            if ($price !== null) {
+            if ($syncPrice && $price !== null) {
                 $input['price'] = (float) number_format($price, 2, '.', '');
             }
 
             $compareAtRaw = $this->variantDesiredValue($localVariant, $rowData, 'compare_at_price', HeaderStore::VARIANT_COMPARE_AT);
             $compareAt = $this->normalizeNumeric($compareAtRaw);
-            if ($compareAt !== null) {
+            if ($syncCompareAt && $compareAt !== null) {
                 $input['compareAtPrice'] = (float) number_format($compareAt, 2, '.', '');
             }
 
             $barcode = $this->variantDesiredValue($localVariant, $rowData, 'barcode', HeaderStore::VARIANT_BARCODE);
             $inventoryItemInput = [];
 
-            if ($desiredSku !== null) {
+            if ($syncSku && $desiredSku !== null) {
                 $inventoryItemInput['sku'] = $desiredSku;
+                // Keep Shopify Variant Barcode aligned with Variant SKU.
                 $barcode = $desiredSku;
             }
 
-            if ($barcode !== null) {
+            if (($syncBarcode || $syncSku) && $barcode !== null && trim((string) $barcode) !== '') {
                 $input['barcode'] = $barcode;
             }
 
@@ -5842,7 +5811,7 @@ GQL;
             $grams = $this->normalizeNumeric(
                 $this->variantDesiredValue($localVariant, $rowData, 'weight', HeaderStore::VARIANT_GRAMS, $primaryGrams)
             );
-            if ($grams !== null || $weightUnit !== null) {
+            if ($syncWeight && ($grams !== null || $weightUnit !== null)) {
                 $unit = $this->mapWeightUnit($weightUnit);
                 $inventoryItemInput['measurement'] = [
                     'weight' => [
@@ -5854,7 +5823,7 @@ GQL;
 
             $costPerItemRaw = $this->valueFromRow($rowData, HeaderStore::COST_PER_ITEM, $primaryCostPerItem);
             $costPerItem = $this->normalizeNumeric($costPerItemRaw);
-            if ($costPerItem !== null) {
+            if ($syncCost && $costPerItem !== null) {
                 $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
             }
 
@@ -6088,7 +6057,11 @@ GQL;
             return self::defaultCoreFields();
         }
 
-        $allowed = array_fill_keys(self::availableCoreFields(), true);
+        $allowed = array_fill_keys(array_values(array_unique(array_merge(
+            self::availableCoreFields(),
+            self::availableMetafieldFields(),
+            self::availableVariantFields()
+        ))), true);
         $normalized = [];
 
         foreach ($coreFields as $field) {
