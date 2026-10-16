@@ -113,7 +113,9 @@ final class NewProductDraftCsvImporter
             'siblings collection name' => 'siblings_collection_name',
             'sibling collection' => 'sibling_collection',
             'shop your vibe' => 'shop_your_vibe_tags',
+            'shop your vibe tag' => 'shop_your_vibe_tags',
             'shop your vibe tags' => 'shop_your_vibe_tags',
+            'siblings tag' => 'sibling_collection',
             'uvp short paragraph' => 'uvp_short_paragraph',
             'bead colour finish' => 'bead_colour_finish',
             'bead color finish' => 'bead_colour_finish',
@@ -588,31 +590,59 @@ final class NewProductDraftCsvImporter
         }
 
         $service = app(PrepopulationRuleService::class);
+        $stackOption = ElevatedBasicsStackCatalog::optionForTags(array_filter([
+            TagNormalizer::normalizeToken($collection) ?? '',
+        ]));
         $rule = $service->ruleForCollection($collection);
-        if ($rule === null) {
+        if ($rule === null && $stackOption === null) {
             return [$data, false];
         }
 
         $explicit = array_flip(array_keys($data));
-        $updates = $service->applyCollectionRuleReplacingManagedTags(
-            $rule,
-            $data['tags'] ?? null,
-            is_string($data['type'] ?? null) ? $data['type'] : null
-        );
+        if ($rule !== null) {
+            $updates = $service->applyCollectionRuleReplacingManagedTags(
+                $rule,
+                $data['tags'] ?? null,
+                is_string($data['type'] ?? null) ? $data['type'] : null
+            );
 
-        foreach ($updates as $field => $value) {
-            if ($field === 'tags') {
-                $data['tags'] = TagNormalizer::normalizeFromArray(
-                    is_array($value) ? $value : TagNormalizer::parseTokens((string) $value)
-                );
-                continue;
+            foreach ($updates as $field => $value) {
+                if ($field === 'tags') {
+                    $data['tags'] = TagNormalizer::normalizeFromArray(
+                        is_array($value) ? $value : TagNormalizer::parseTokens((string) $value)
+                    );
+                    continue;
+                }
+
+                if (isset($explicit[$field])) {
+                    continue;
+                }
+
+                $data[$field] = $value;
             }
+        }
 
-            if (isset($explicit[$field])) {
-                continue;
+        if ($stackOption !== null) {
+            $data['tags'] = TagNormalizer::normalizeFromArray(ElevatedBasicsStackCatalog::finalizeTags(
+                TagNormalizer::parseTokens(is_string($data['tags'] ?? null) ? $data['tags'] : null),
+                $stackOption,
+                false
+            ));
+            $mapping = CategoryTypeMap::byType(ElevatedBasicsStackCatalog::productType($stackOption));
+            if (is_array($mapping)) {
+                if (! isset($explicit['type'])) {
+                    $data['type'] = $mapping['type'];
+                }
+                if (! isset($explicit['product_category'])) {
+                    $data['product_category'] = $mapping['shopify_taxonomy_gid'] ?? ($data['product_category'] ?? null);
+                }
+                if (! isset($explicit['google_product_category'])) {
+                    $data['google_product_category'] = $mapping['google_product_category'] ?? ($data['google_product_category'] ?? null);
+                }
             }
-
-            $data[$field] = $value;
+            if (! isset($explicit['vendor']) && blank($data['vendor'] ?? null)) {
+                $data['vendor'] = ElevatedBasicsStackCatalog::VENDOR;
+            }
         }
 
         return [$data, true];

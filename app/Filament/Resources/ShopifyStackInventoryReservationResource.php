@@ -4,8 +4,8 @@ namespace App\Filament\Resources;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages;
+use App\Jobs\CancelShopifyStackReservationsJob;
 use App\Models\ShopifyStackInventoryReservation;
-use App\Services\Shopify\StackOrderReservationService;
 use App\Services\Shopify\StackReservationFulfillmentAuditService;
 use Filament\Forms\Form;
 use Filament\Notifications\Notification;
@@ -90,7 +90,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->color('warning')
                     ->visible(fn (): bool => self::canCancelReservations())
                     ->modalHeading('Scan leftover stack reservations?')
-                    ->modalDescription('This asks Shopify live for fulfillment status on every reservation that still holds component stock. You get a CSV of leftover rows, including orders Shopify already shows as fulfilled.')
+                    ->modalDescription('This asks Shopify live for fulfillment status on every reservation that still holds component stock and downloads a CSV. It does not change Shopify inventory or reservation rows. Stale rows are fixed manually.')
                     ->requiresConfirmation()
                     ->modalSubmitActionLabel('Scan and download CSV')
                     ->action(function (StackReservationFulfillmentAuditService $audit) {
@@ -114,36 +114,6 @@ final class ShopifyStackInventoryReservationResource extends Resource
                             'Content-Type' => 'text/csv',
                         ]);
                     }),
-                Action::make('releaseFulfilledLeftovers')
-                    ->label('Release fulfilled leftovers')
-                    ->icon('heroicon-o-lock-open')
-                    ->color('danger')
-                    ->visible(fn (): bool => self::canCancelReservations())
-                    ->requiresConfirmation()
-                    ->modalHeading('Release leftover stock on fulfilled Shopify orders?')
-                    ->modalDescription('This asks Shopify live again. Only leftover reserved component stock on fully fulfilled orders is released. Open and partial orders are skipped. Consumed units are not reversed.')
-                    ->modalSubmitActionLabel('Release fulfilled leftovers')
-                    ->action(function (
-                        StackReservationFulfillmentAuditService $audit,
-                        StackOrderReservationService $reservations,
-                    ): void {
-                        $ids = $audit->report()['fulfilled_reservation_ids'];
-                        if ($ids === []) {
-                            Notification::make()
-                                ->title('No fulfilled leftovers')
-                                ->body('Shopify did not show leftover reserved stock on fully fulfilled orders.')
-                                ->success()
-                                ->send();
-
-                            return;
-                        }
-
-                        self::notifyCancelResult(
-                            $reservations->cancelManually(
-                                ShopifyStackInventoryReservation::query()->whereIn('id', $ids)->get()
-                            )
-                        );
-                    }),
             ])
             ->actions([
                 Action::make('cancelReservation')
@@ -152,12 +122,17 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Cancel this stack reservation?')
-                    ->modalDescription('This asks Shopify live for fulfillment status. Cancel only runs when Shopify shows the order as fully fulfilled. CMS Order Data is ignored. Unfulfilled, partial, and unknown Shopify statuses are skipped. Already consumed units are not reversed.')
+                    ->modalDescription('This closes the reservation in the background. It does not depend on a saved fulfillment status. If live Shopify still holds the reserved units, they move back to available. If Shopify no longer holds them, the row is closed and no extra quantity is added. Already consumed units are not reversed.')
                     ->modalSubmitActionLabel('Cancel reservation')
                     ->visible(fn (): bool => self::canCancelReservations())
                     ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
                     ->action(function (ShopifyStackInventoryReservation $record): void {
-                        self::notifyCancelResult(app(StackOrderReservationService::class)->cancelManually([$record]));
+                        CancelShopifyStackReservationsJob::dispatch([$record->id], Auth::id());
+                        Notification::make()
+                            ->title('Stack reservation cancel queued')
+                            ->body('The reservation closes in the background. No extra Shopify quantity is added when the reserved units are no longer held.')
+                            ->success()
+                            ->send();
                     }),
             ])
             ->bulkActions([
@@ -168,11 +143,19 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ->color('danger')
                         ->requiresConfirmation()
                         ->modalHeading('Cancel the selected stack reservations?')
-                        ->modalDescription('This asks Shopify live for fulfillment status. Cancel only runs when Shopify shows the order as fully fulfilled. CMS Order Data is ignored. Unfulfilled, partial, and unknown Shopify statuses in the selection are skipped. Already consumed units are not reversed.')
+                        ->modalDescription('This closes the selected reservations in the background. It does not depend on a saved fulfillment status. Reserved units move back to available only when live Shopify still holds them. Already consumed units are not reversed.')
                         ->modalSubmitActionLabel('Cancel reservations')
                         ->visible(fn (): bool => self::canCancelReservations())
                         ->action(function (Collection $records): void {
-                            self::notifyCancelResult(app(StackOrderReservationService::class)->cancelManually($records));
+                            CancelShopifyStackReservationsJob::dispatch(
+                                $records->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+                                Auth::id(),
+                            );
+                            Notification::make()
+                                ->title('Stack reservation cancel queued')
+                                ->body('The selected reservations close in the background.')
+                                ->success()
+                                ->send();
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),
@@ -217,25 +200,4 @@ final class ShopifyStackInventoryReservationResource extends Resource
         ], true) && $record->remainingReserved() <= 0;
     }
 
-    /** @param array{cancelled:int,skipped:int,failed:int,errors:array<int,string>} $result */
-    private static function notifyCancelResult(array $result): void
-    {
-        $body = "Cancelled {$result['cancelled']}. Skipped {$result['skipped']}. Failed {$result['failed']}.";
-        if ($result['errors'] !== []) {
-            $body .= ' '.implode(' ', array_slice($result['errors'], 0, 5));
-        }
-        $notification = Notification::make()->title('Stack reservation cancel')->body($body);
-        if ($result['failed'] > 0) {
-            $notification->danger()->send();
-
-            return;
-        }
-        if ($result['cancelled'] === 0) {
-            $notification->warning()->send();
-
-            return;
-        }
-
-        $notification->success()->send();
-    }
 }

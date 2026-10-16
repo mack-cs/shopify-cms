@@ -18,6 +18,7 @@ use App\Services\AsyncJobStateService;
 use App\Services\ShopifyApiClient;
 use App\Services\Shopify\StackOrderLineMapper;
 use App\Services\Shopify\StackOrderReservationService;
+use App\Services\Shopify\StackReservationStaleAlertService;
 use App\Services\ComplementaryProductMaintenanceService;
 use App\Services\StackBundleSellabilityService;
 use App\Services\StackSellabilityShopifyPushService;
@@ -534,7 +535,7 @@ Artisan::command('shopify:reconcile-stack-reservations {--include-fulfilled : Al
 ): int {
     $includeFulfilled = (bool) $this->option('include-fulfilled');
     $reprocess = (bool) $this->option('reprocess');
-    $this->warn('This command snapshots current Shopify quantities. It will not undo leftover reserved stock from an earlier bad backfill; cancel those rows as Super Admin.');
+    $this->warn('Fully fulfilled Shopify orders are not reserved. Stale reservations are never corrected automatically; cancel those rows yourself as Super Admin.');
     $query = $includeFulfilled
         ? 'status:open'
         : 'status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial)';
@@ -634,6 +635,33 @@ GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
 
     return self::SUCCESS;
 })->purpose('Backfill current unfulfilled/partial Shopify Stack orders into the component reservation ledger.');
+
+Artisan::command('shopify:alert-stale-stack-reservations', function (StackReservationStaleAlertService $alerts): int {
+    $result = $alerts->send();
+
+    if ($result['stale_rows'] === 0) {
+        $this->info('No stale stack reservations were found. No email was sent.');
+
+        return self::SUCCESS;
+    }
+
+    $this->info(
+        "Found {$result['stale_rows']} stale stack reservation row(s). "
+        .'Email: '.($result['email_sent'] ? 'sent' : 'not sent').'. Nothing was reserved, released, or deleted.'
+    );
+    foreach ($result['errors'] as $error) {
+        $this->error($error);
+    }
+
+    return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
+})->purpose('Email stale stack reservations for a manual fix. Does not change Shopify inventory or reservation rows.');
+
+Schedule::command('shopify:alert-stale-stack-reservations')
+    ->dailyAt('08:00')
+    ->timezone('Africa/Johannesburg')
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-stale-stack-reservation-alert');
 
 Schedule::command('notifications:send-daily-task-reminders')
     ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))

@@ -2,9 +2,11 @@
 
 Configured Stack products are not inventory tracked. Their tracked component variants are reserved automatically:
 
-- order create/update: Shopify `inventoryMoveQuantities` moves `available` to `reserved`;
+- order create/update: the background job asks live Shopify for the order. Fulfilled orders are not reserved. Open orders move `available` to `reserved` for the live unfulfilled quantity only;
 - fulfilment: an idempotent `inventoryAdjustQuantities` decreases `reserved`, which decreases `on_hand` while leaving `available` unchanged;
-- cancellation or quantity decrease: `inventoryMoveQuantities` moves the remaining `reserved` quantity back to `available`.
+- cancellation or an unfulfilled quantity decrease: `inventoryMoveQuantities` moves the remaining `reserved` quantity back to `available`.
+
+Saved order rows are not used to decide whether an order is fulfilled. A daily check emails `shonayimack@gmail.com` when leftover reservations belong to fulfilled, cancelled, or unknown Shopify orders. That check does not change inventory or reservation rows. Those rows are cancelled manually by a Super Admin.
 
 Every order/component reservation and every Shopify movement is retained in the database. The CMS **Stack Reservations** page under **Shopify Sync** exposes pending, completed, released, and failed rows. Normal products are ignored.
 
@@ -22,7 +24,9 @@ php artisan shopify:reconcile-stack-reservations
 php artisan queue:restart
 ```
 
-The reconciliation command is the one-time cutover step: it queries open Shopify orders, snapshots already fulfilled quantities, and reserves only their unfulfilled Stack components. It is safe to rerun because each order has a deterministic backfill event.
+The reconciliation command is the one-time cutover step: it queries open Shopify orders and reserves only Stack components that live Shopify still shows as unfulfilled. Fully fulfilled orders are skipped. It does not release stale reservations. It is safe to rerun because each order has a deterministic backfill event.
+
+`php artisan shopify:alert-stale-stack-reservations` runs daily at 08:00 Africa/Johannesburg. It only sends the alert email.
 
 Keep the normal Laravel queue worker running. Failed Shopify calls are retried with the same persisted Shopify idempotency key. After retries are exhausted, inspect **Stack Reservations** and `failed_jobs`, correct the underlying inventory/configuration issue, then retry the failed job.
 

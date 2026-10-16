@@ -89,6 +89,7 @@ return [
         'secret_region' => env('AWS_SHOPIFY_SECRET_REGION', env('AWS_DEFAULT_REGION', 'us-east-1')),
         'secret_version' => env('AWS_SHOPIFY_SECRET_VERSION', 'latest'),
         'secret_profile' => env('AWS_SHOPIFY_SECRET_PROFILE'),
+        'stale_reservation_alert_email' => env('STACK_RESERVATION_ALERT_EMAIL', 'shonayimack@gmail.com'),
     ],
 
 ];

@@ -30,7 +30,7 @@ final class StackReservationFulfillmentAuditService
      *     fulfilled_reservation_ids: array<int, int>
      * }
      */
-    public function report(): array
+    public function report(bool $strict = false): array
     {
         $reservations = ShopifyStackInventoryReservation::query()
             ->withLeftoverReserved()
@@ -39,7 +39,8 @@ final class StackReservationFulfillmentAuditService
             ->get();
 
         $snapshots = $this->fulfillment->snapshotsFor(
-            $reservations->pluck('shopify_order_id')->filter()->unique()->values()->all()
+            $reservations->pluck('shopify_order_id')->filter()->unique()->values()->all(),
+            $strict,
         );
 
         $rows = [];

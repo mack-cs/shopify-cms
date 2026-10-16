@@ -63,6 +63,44 @@ GRAPHQL, ['id' => $inventoryItemId]);
             'on_hand' => (int) $quantities->get('on_hand', 0), 'committed' => (int) $quantities->get('committed', 0)];
     }
 
+    public function reservedQuantity(Variant $variant, ?string $locationId = null): int
+    {
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        if ($inventoryItemId === '') {
+            throw new \RuntimeException("Variant {$variant->id} has no Shopify inventory item ID.");
+        }
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        $data = $this->client->graphql(<<<'GRAPHQL'
+query StackReservedQuantity($id: ID!) {
+  inventoryItem(id: $id) {
+    inventoryLevels(first: 50) {
+      nodes { location { id } quantities(names: ["reserved"]) { name quantity } }
+    }
+  }
+}
+GRAPHQL, ['id' => $inventoryItemId]);
+        $wanted = $this->locationGid($locationId);
+        $level = collect(data_get($data, 'inventoryItem.inventoryLevels.nodes', []))->first(
+            fn ($node): bool => is_array($node) && $this->locationGid((string) data_get($node, 'location.id')) === $wanted
+        );
+        if (! is_array($level)) {
+            throw new \RuntimeException("Shopify reserved quantity was unavailable at location {$locationId}.");
+        }
+        $row = collect($level['quantities'] ?? [])->firstWhere('name', 'reserved');
+
+        return max(0, (int) (is_array($row) ? ($row['quantity'] ?? 0) : 0));
+    }
+
+    private function locationGid(string $id): string
+    {
+        $id = trim($id);
+        if ($id === '' || str_starts_with($id, 'gid://shopify/')) {
+            return $id;
+        }
+
+        return ctype_digit($id) ? 'gid://shopify/Location/'.$id : $id;
+    }
+
     /** @return array<string, mixed> */
     public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null): array
     {

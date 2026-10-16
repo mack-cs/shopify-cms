@@ -220,6 +220,61 @@ it('prepopulates stack fields when the imported collection tag is a bundle tag a
     @unlink($path);
 });
 
+it('matches elevated basics bracelet and necklace stack collection tags to stack prepopulation', function (): void {
+    PrepopulationRule::query()->create([
+        'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,
+        'handle' => 'elevated-basics-stacks',
+        'collection_name' => 'Elevated Basics Stacks',
+        'add_tags' => [
+            'all-products',
+            'all-products-collections',
+            'bundles',
+            'elevated-basics-bundles',
+            'elevated-basics',
+            'bracelets',
+            'bracelet',
+            'exclude-from-the-sale',
+        ],
+        'auto_vendor' => 'Elevated Basics',
+        'auto_type' => 'Bracelets',
+        'auto_product_category' => 'gid://shopify/TaxonomyCategory/aa-6-3',
+        'auto_google_product_category' => '191',
+        'auto_status' => 'draft',
+        'auto_design' => 'beaded',
+        'auto_colour_style' => 'solid',
+    ]);
+
+    $path = tempnam(sys_get_temp_dir(), 'eb-stack-tags-');
+    file_put_contents(
+        $path,
+        "SKU,Collection Tag,Title,Shop Your Vibe Tag\n"
+        ."EBBM01TEST01,elevated-basics-necklace-stacks,EB Necklace Stack Test,eb-necklaces-gold-silver\n"
+        ."EBBM02TEST01,elevated-basics-bracelet-stacks,EB Bracelet Stack Test,elevated-basics-bracelets-silver\n"
+    );
+
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+    $necklace = NewProductDraft::query()->where('sku', 'EBBM01TEST01')->first();
+    $bracelet = NewProductDraft::query()->where('sku', 'EBBM02TEST01')->first();
+    $necklaceTags = App\Services\TagNormalizer::parseTokens($necklace?->tags);
+    $braceletTags = App\Services\TagNormalizer::parseTokens($bracelet?->tags);
+
+    expect($result['created'])->toBe(2)
+        ->and($result['prepopulation_applied'])->toBe(2)
+        ->and($result['prepopulation_unmatched'])->toBe(0)
+        ->and($necklace->vendor)->toBe('Elevated Basics Bundles')
+        ->and($necklace->type)->toBe('Necklaces')
+        ->and($necklace->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-8')
+        ->and($necklace->google_product_category)->toBe('189')
+        ->and($necklaceTags)->toContain('bundles', 'elevated-basics-bundles', 'elevated-basics-necklace-stacks', 'eb-necklaces-gold-silver')
+        ->and($necklaceTags)->not->toContain('bracelet', 'bracelets', 'necklace', 'necklaces', 'elevated-basics-bracelet-stacks')
+        ->and($bracelet->type)->toBe('Bracelets')
+        ->and($bracelet->product_category)->toBe('gid://shopify/TaxonomyCategory/aa-6-3')
+        ->and($braceletTags)->toContain('bundles', 'elevated-basics-bundles', 'elevated-basics-bracelet-stacks', 'elevated-basics-bracelets-silver')
+        ->and($braceletTags)->not->toContain('necklace', 'necklaces', 'elevated-basics-necklace-stacks');
+
+    @unlink($path);
+});
+
 it('upserts seo draft data for new product csv rows without a handle', function (): void {
     PrepopulationRule::query()->create([
         'behavior' => PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION,

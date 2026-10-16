@@ -1140,6 +1140,7 @@ class NewProductDraftResource extends Resource
                         ->columnSpanFull(),
                             ])->columns(2),
                         Section::make('Variant Defaults')
+                            ->description('Inventory is managed in the Inventory section.')
                             ->schema([
                                 Placeholder::make('variant_clash_notice')
                                     ->label('')
@@ -1171,7 +1172,7 @@ class NewProductDraftResource extends Resource
                                 ])
                                     ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
                                     ->columnSpanFull(),
-                                Forms\Components\Grid::make(5)
+                                Forms\Components\Grid::make(4)
                                     ->schema([
                                         TextInput::make('variant_price')
                                             ->label('Price')
@@ -1245,22 +1246,6 @@ class NewProductDraftResource extends Resource
                                                 $defaults = self::resolvedVariantDefaultsForDraft($record);
                                                 if ($defaults['variant_compare_at_price'] !== null) {
                                                     $component->state($defaults['variant_compare_at_price']);
-                                                }
-                                            }),
-                                        TextInput::make('variant_inventory_qty')
-                                            ->label('Inventory')
-                                            ->numeric()
-                                            ->integer()
-                                            ->minValue(0)
-                                            ->default(NewProductDraft::DEFAULT_VARIANT_INVENTORY_QTY)
-                                            ->helperText('Defaults to 15; change it when needed.')
-                                            ->afterStateHydrated(function (TextInput $component, $state, ?NewProductDraft $record): void {
-                                                if ($record === null || $state !== null) {
-                                                    return;
-                                                }
-                                                $defaults = self::resolvedVariantDefaultsForDraft($record);
-                                                if ($defaults['variant_inventory_qty'] !== null) {
-                                                    $component->state($defaults['variant_inventory_qty']);
                                                 }
                                             }),
                                         TextInput::make('variant_weight')

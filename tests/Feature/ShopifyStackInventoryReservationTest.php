@@ -3,7 +3,9 @@
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages\ListShopifyStackInventoryReservations;
+use App\Jobs\CancelShopifyStackReservationsJob;
 use App\Jobs\ProcessShopifyStackOrderEventJob;
+use App\Mail\StaleStackReservationAlertMail;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -21,7 +23,9 @@ use App\Services\Shopify\StackOrderFulfillmentInspector;
 use App\Services\Shopify\StackOrderLineMapper;
 use App\Services\Shopify\StackOrderReservationService;
 use App\Services\Shopify\StackReservationFulfillmentAuditService;
+use App\Services\Shopify\StackReservationStaleAlertService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
@@ -196,7 +200,7 @@ it('lets a super admin cancel leftover reservations on fulfilled orders without 
     $inventory = stackInventoryMock();
     $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
     $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory, 'FULFILLED');
+    $service = stackOrderService($inventory);
     $service->process(stackOrderEvent(8010, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 2],
     ]));
@@ -218,7 +222,7 @@ it('does not reserve again after a manual cancel when the same open order is upd
     stackReservationRecords();
     $inventory = stackInventoryMock();
     $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory, 'FULFILLED');
+    $service = stackOrderService($inventory);
     $service->process(stackOrderEvent(8011, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
     ]));
@@ -263,11 +267,11 @@ it('marks snapshot-only reservations released without a Shopify inventory move',
         ->and($reservation->fresh()->error_message)->toContain('Manually cancelled');
 });
 
-it('does not let a super admin cancel reservations for unfulfilled stack orders', function (): void {
+it('lets a super admin cancel a reservation while Shopify still shows the order as unfulfilled', function (): void {
     stackReservationRecords();
     stackShopifyOrder(8014, 'FULFILLED');
     $inventory = stackInventoryMock();
-    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
     $service = stackOrderService($inventory, 'UNFULFILLED');
     $service->process(stackOrderEvent(8014, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
@@ -275,67 +279,56 @@ it('does not let a super admin cancel reservations for unfulfilled stack orders'
 
     $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
 
-    expect($result['cancelled'])->toBe(0)
-        ->and($result['skipped'])->toBe(2)
-        ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_PENDING])
-        ->and(ShopifyStackInventoryReservation::query()->sum('released_quantity'))->toBe(0)
-        ->and(ShopifyStackInventoryReservation::query()->first()->error_message)->toContain('live Shopify');
-});
-
-it('cancels using live Shopify even when CMS order data is still unfulfilled', function (): void {
-    stackReservationRecords();
-    stackShopifyOrder(8015, 'UNFULFILLED');
-    $inventory = stackInventoryMock();
-    $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory, 'FULFILLED');
-    $service->process(stackOrderEvent(8015, [
-        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
-    ]));
-
-    $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
-
     expect($result['cancelled'])->toBe(2)
+        ->and($result['skipped'])->toBe(0)
         ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_RELEASED]);
+        ->toBe([ShopifyStackInventoryReservation::STATUS_RELEASED])
+        ->and(ShopifyStackInventoryReservation::query()->sum('released_quantity'))->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->first()->error_message)->not->toContain('does not show this order as fully fulfilled');
 });
 
-it('does not cancel when live Shopify fulfillment status cannot be loaded', function (): void {
+it('reserves from live Shopify and ignores a local fulfilled order record', function (): void {
     stackReservationRecords();
+    stackShopifyOrder(8015, 'FULFILLED');
     $inventory = stackInventoryMock();
     $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory, lookupFails: true);
-    $service->process(stackOrderEvent(8016, [
+    stackOrderService($inventory, 'UNFULFILLED')->process(stackOrderEvent(8015, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
     ]));
 
-    $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
-
-    expect($result['cancelled'])->toBe(0)
-        ->and($result['skipped'])->toBe(2)
-        ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_PENDING]);
+    expect(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(3);
 });
 
-it('snapshots a fully fulfilled stack line without moving Shopify inventory', function (): void {
+it('does not reserve when live Shopify status cannot be loaded', function (): void {
     stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldNotReceive('moveQuantity');
+    $event = stackOrderEvent(8016, [
+        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
+    ]);
+
+    expect(fn () => stackOrderService($inventory, lookupFails: true)->process($event))
+        ->toThrow(RuntimeException::class, 'Shopify fulfillment lookup failed.');
+
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(0)
+        ->and($event->fresh()->status)->toBe(ShopifyStackOrderEvent::STATUS_FAILED);
+});
+
+it('does not reserve an order live Shopify shows as fulfilled', function (): void {
+    stackReservationRecords();
+    stackShopifyOrder(8020, 'UNFULFILLED');
     $inventory = stackInventoryMock();
     $inventory->shouldNotReceive('moveQuantity');
     $event = stackOrderEvent(8020, [[
         'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1,
-        'current_quantity' => 1, 'unfulfilled_quantity' => 0,
+        'current_quantity' => 1, 'unfulfilled_quantity' => 1,
     ]], 'orders/updated', 'backfill-8020');
 
-    $summary = stackOrderService($inventory)->process($event);
+    $summary = stackOrderService($inventory, 'FULFILLED')->process($event);
 
     expect($summary['reserved'])->toBe(0)
-        ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_COMPLETED])
-        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
-        ->and(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(3)
-        ->and(ShopifyStackInventoryReservation::query()->first()->shopify_order_created_at?->eq(
-            \Illuminate\Support\Carbon::parse('2026-08-19T10:41:00+02:00')
-        ))->toBeTrue();
+        ->and(ShopifyStackInventoryReservation::query()->count())->toBe(0)
+        ->and($event->fresh()->error_message)->toContain('fulfilled');
 });
 
 it('reserves only the unfulfilled remainder when backfilling a partial stack order', function (): void {
@@ -363,7 +356,7 @@ it('does not reserve a late order update when Shopify unfulfilled quantity is un
     $inventory = stackInventoryMock();
     $inventory->shouldNotReceive('moveQuantity');
 
-    $summary = stackOrderService($inventory)->process(stackOrderEvent(8022, [[
+    $summary = stackOrderService($inventory, liveLinesUnknown: true)->process(stackOrderEvent(8022, [[
         'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1,
     ]], 'orders/updated', 'late-update-8022'));
 
@@ -381,8 +374,7 @@ it('uses REST fulfillable quantity so fulfilled updates do not reserve again', f
         'fulfillable_quantity' => 0, 'fulfillment_status' => 'fulfilled',
     ]], 'orders/updated', 'rest-fulfilled-8023'));
 
-    expect(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_COMPLETED])
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(0)
         ->and(ShopifyStackInventoryMovement::query()->count())->toBe(0);
 });
 
@@ -431,8 +423,7 @@ it('shows stack reservation cancel actions only to super admins', function (): v
         ->assertCanSeeTableRecords([$reservation])
         ->assertTableActionHidden('cancelReservation', $reservation)
         ->assertTableBulkActionHidden('cancelReservations')
-        ->assertTableActionHidden('scanLeftoverReservations')
-        ->assertTableActionHidden('releaseFulfilledLeftovers');
+        ->assertTableActionHidden('scanLeftoverReservations');
 
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
@@ -440,8 +431,7 @@ it('shows stack reservation cancel actions only to super admins', function (): v
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->assertTableActionVisible('cancelReservation', $reservation)
         ->assertTableBulkActionVisible('cancelReservations')
-        ->assertTableActionVisible('scanLeftoverReservations')
-        ->assertTableActionVisible('releaseFulfilledLeftovers');
+        ->assertTableActionVisible('scanLeftoverReservations');
 });
 
 it('reports leftover reserved stock on fulfilled Shopify orders without including open orders as fulfilled leftovers', function (): void {
@@ -488,12 +478,12 @@ it('reports leftover reserved stock on fulfilled Shopify orders without includin
         ->and($report['unknown_rows'])->toBe(0);
 });
 
-it('releases leftover reserved stock only for orders Shopify shows as fulfilled', function (): void {
+it('cancels selected reservations without a live fulfillment gate', function (): void {
     $records = stackReservationRecords();
     $fulfilled = stackLeftoverReservation($records, 9013, 2, 0);
     $open = stackLeftoverReservation($records, 9014, 1, 0);
     $inventory = stackInventoryMock();
-    $inventory->shouldReceive('moveQuantity')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
     $service = stackOrderService($inventory, lookupByOrder: [
         'gid://shopify/Order/9013' => 'FULFILLED',
         'gid://shopify/Order/9014' => 'UNFULFILLED',
@@ -501,10 +491,102 @@ it('releases leftover reserved stock only for orders Shopify shows as fulfilled'
 
     $result = $service->cancelManually([$fulfilled, $open]);
 
-    expect($result['cancelled'])->toBe(1)
-        ->and($result['skipped'])->toBe(1)
+    expect($result['cancelled'])->toBe(2)
+        ->and($result['skipped'])->toBe(0)
         ->and($fulfilled->fresh()->remainingReserved())->toBe(0)
-        ->and($open->fresh()->remainingReserved())->toBe(1);
+        ->and($open->fresh()->remainingReserved())->toBe(0);
+});
+
+it('closes a reservation without adding Shopify quantity when live reserved stock is already zero', function (): void {
+    $records = stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('reservedQuantity')->andReturn(0);
+    $inventory->shouldNotReceive('moveQuantity');
+    $reservation = stackLeftoverReservation($records, 8032, 1, 0);
+
+    $result = stackOrderService($inventory)->cancelManually([$reservation]);
+
+    expect($result['cancelled'])->toBe(1)
+        ->and($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_RELEASED)
+        ->and($reservation->fresh()->remainingReserved())->toBe(0)
+        ->and($reservation->fresh()->error_message)->toContain('no extra quantity');
+});
+
+it('does not release fulfilled units that the fulfillment job has not consumed', function (): void {
+    stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $service = stackOrderService($inventory);
+    $service->process(stackOrderEvent(8031, [[
+        'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 3,
+    ]]));
+    $service->process(stackOrderEvent(8031, [[
+        'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 3,
+        'current_quantity' => 3, 'unfulfilled_quantity' => 1,
+    ]], 'orders/updated', 'partial-8031'));
+
+    expect(ShopifyStackInventoryMovement::query()->where('action', 'release')->count())->toBe(0)
+        ->and(ShopifyStackInventoryReservation::query()->where('component_sku', 'COMP-X')->first()->remainingReserved())->toBe(3);
+});
+
+it('emails stale fulfilled reservations and does not change them', function (): void {
+    Mail::fake();
+    $records = stackReservationRecords();
+    $fulfilled = stackLeftoverReservation($records, 9020, 2, 0);
+    stackLeftoverReservation($records, 9021, 1, 0);
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->andReturn(['nodes' => [
+        ['id' => 'gid://shopify/Order/9020', 'name' => '#9020', 'displayFulfillmentStatus' => 'FULFILLED', 'cancelledAt' => null],
+        ['id' => 'gid://shopify/Order/9021', 'name' => '#9021', 'displayFulfillmentStatus' => 'UNFULFILLED', 'cancelledAt' => null],
+    ]]);
+
+    $result = (new StackReservationStaleAlertService(
+        new StackReservationFulfillmentAuditService(new StackOrderFulfillmentInspector($gateway))
+    ))->send();
+
+    expect($result['stale_rows'])->toBe(1)
+        ->and($result['email_sent'])->toBeTrue()
+        ->and($fulfilled->fresh()->reserved_quantity)->toBe(2)
+        ->and($fulfilled->fresh()->released_quantity)->toBe(0)
+        ->and($fulfilled->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
+    Mail::assertSent(StaleStackReservationAlertMail::class, function (StaleStackReservationAlertMail $mail): bool {
+        return $mail->hasTo('shonayimack@gmail.com') && count($mail->rows) === 1;
+    });
+});
+
+it('does not email when every leftover reservation is still open', function (): void {
+    Mail::fake();
+    $records = stackReservationRecords();
+    stackLeftoverReservation($records, 9022, 1, 0);
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->andReturn(['nodes' => [
+        ['id' => 'gid://shopify/Order/9022', 'name' => '#9022', 'displayFulfillmentStatus' => 'UNFULFILLED', 'cancelledAt' => null],
+    ]]);
+
+    $result = (new StackReservationStaleAlertService(
+        new StackReservationFulfillmentAuditService(new StackOrderFulfillmentInspector($gateway))
+    ))->send();
+
+    expect($result['stale_rows'])->toBe(0)->and($result['email_sent'])->toBeFalse();
+    Mail::assertNothingSent();
+});
+
+it('queues a manual reservation cancel', function (): void {
+    Queue::fake();
+    Role::findOrCreate(RolesEnum::SuperAdmin->value);
+    $records = stackReservationRecords();
+    $reservation = stackLeftoverReservation($records, 8035, 1, 0);
+    $super = User::factory()->create();
+    $super->assignRole(RolesEnum::SuperAdmin->value);
+    $this->actingAs($super);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->callTableAction('cancelReservation', $reservation);
+
+    Queue::assertPushed(CancelShopifyStackReservationsJob::class, function (CancelShopifyStackReservationsJob $job) use ($reservation, $super): bool {
+        return $job->reservationIds === [$reservation->id] && $job->userId === $super->id;
+    });
+    expect($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
 });
 
 it('uses Shopify state movement and consumes reserved without changing available', function (): void {
@@ -534,6 +616,7 @@ function stackInventoryMock(): ShopifyInventoryAdjustmentService
 {
     $inventory = Mockery::mock(ShopifyInventoryAdjustmentService::class);
     $inventory->shouldReceive('resolveLocationId')->zeroOrMoreTimes()->andReturn('gid://shopify/Location/6001');
+    $inventory->shouldReceive('reservedQuantity')->byDefault()->andReturn(999);
 
     return $inventory;
 }
@@ -543,6 +626,7 @@ function stackOrderService(
     string $shopifyFulfillmentStatus = 'UNFULFILLED',
     bool $lookupFails = false,
     array $lookupByOrder = [],
+    bool $liveLinesUnknown = false,
 ): StackOrderReservationService {
     $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
     if ($lookupFails) {
@@ -550,7 +634,53 @@ function stackOrderService(
             ->andThrow(new RuntimeException('Shopify fulfillment lookup failed.'));
     } else {
         $gateway->shouldReceive('graphql')->zeroOrMoreTimes()->andReturnUsing(
-            function (string $query, array $variables) use ($shopifyFulfillmentStatus, $lookupByOrder): array {
+            function (string $query, array $variables) use ($shopifyFulfillmentStatus, $lookupByOrder, $liveLinesUnknown): array {
+                if (str_contains($query, 'StackOrderLiveLines') || str_contains($query, 'StackOrderLiveStatus') || str_contains($query, 'unfulfilledQuantity')) {
+                    $orderId = (string) ($variables['id'] ?? '');
+                    $status = $lookupByOrder[$orderId] ?? $shopifyFulfillmentStatus;
+                    $lineNodes = [];
+                    if (! $liveLinesUnknown) {
+                        $event = ShopifyStackOrderEvent::query()->where('shopify_order_id', $orderId)->latest('id')->first();
+                        foreach ((array) data_get($event?->payload, 'line_items', []) as $line) {
+                            if (! is_array($line)) {
+                                continue;
+                            }
+                            $current = max(0, (int) ($line['current_quantity'] ?? $line['quantity'] ?? 0));
+                            if (array_key_exists('unfulfilled_quantity', $line) || array_key_exists('unfulfilledQuantity', $line)) {
+                                $unfulfilled = (int) ($line['unfulfilled_quantity'] ?? $line['unfulfilledQuantity']);
+                            } elseif (array_key_exists('fulfillable_quantity', $line) || array_key_exists('fulfillableQuantity', $line)) {
+                                $unfulfilled = (int) ($line['fulfillable_quantity'] ?? $line['fulfillableQuantity']);
+                            } else {
+                                $unfulfilled = $status === 'FULFILLED' ? 0 : $current;
+                            }
+                            if ($status === 'FULFILLED') {
+                                $unfulfilled = 0;
+                            }
+                            $lineId = (string) ($line['admin_graphql_api_id'] ?? $line['id'] ?? '');
+                            if ($lineId !== '' && ! str_starts_with($lineId, 'gid://')) {
+                                $lineId = 'gid://shopify/LineItem/'.$lineId;
+                            }
+                            $lineNodes[] = [
+                                'id' => $lineId,
+                                'currentQuantity' => $current,
+                                'unfulfilledQuantity' => $unfulfilled,
+                            ];
+                        }
+                    }
+                    $page = ['nodes' => $lineNodes, 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]];
+                    if (str_contains($query, 'StackOrderLiveLines')) {
+                        return ['order' => ['lineItems' => $page]];
+                    }
+
+                    return ['order' => [
+                        'id' => $orderId,
+                        'name' => null,
+                        'displayFulfillmentStatus' => $status,
+                        'cancelledAt' => null,
+                        'lineItems' => $page,
+                    ]];
+                }
+
                 $ids = $variables['ids'] ?? (isset($variables['id']) ? [$variables['id']] : []);
                 $nodes = [];
                 foreach ($ids as $id) {

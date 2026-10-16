@@ -10,7 +10,25 @@ final class PrepopulationRuleService
 {
     public function ruleForCollection(?string $collection): ?PrepopulationRule
     {
+        $token = TagNormalizer::normalizeToken((string) $collection);
+        if (ElevatedBasicsStackCatalog::optionForTags(array_filter([$token ?? ''])) !== null) {
+            return $this->elevatedBasicsStackRule()
+                ?? $this->ruleFor($collection, PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION);
+        }
+
         return $this->ruleFor($collection, PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION);
+    }
+
+    public function elevatedBasicsStackRule(): ?PrepopulationRule
+    {
+        return PrepopulationRule::query()
+            ->where('behavior', PrepopulationRule::BEHAVIOR_AUTO_ON_COLLECTION_SELECTION)
+            ->where(function ($query): void {
+                $query->whereRaw('LOWER(handle) IN (?, ?)', ['elevated-basics-stacks', 'elevated-basics-bundles'])
+                    ->orWhereRaw('LOWER(collection_name) IN (?, ?)', ['elevated basics stacks', 'elevated basics bundles']);
+            })
+            ->orderByRaw("CASE LOWER(handle) WHEN 'elevated-basics-stacks' THEN 0 WHEN 'elevated-basics-bundles' THEN 1 ELSE 2 END")
+            ->first();
     }
 
     public function shopYourVibeRuleForHandle(?string $handle): ?PrepopulationRule
