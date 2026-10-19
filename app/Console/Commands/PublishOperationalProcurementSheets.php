@@ -74,7 +74,7 @@ class PublishOperationalProcurementSheets extends Command
             if ($draftCandidateSkus->isNotEmpty()) {
                 $drafts = NewProductDraft::query()
                     ->whereIn(\DB::raw('UPPER(TRIM(sku))'), $draftCandidateSkus->all())
-                    ->get(['id', 'sku', 'title', 'handle', 'status']);
+                    ->get(['id', 'sku', 'title', 'handle', 'status', 'type', 'tags']);
                 $eligibleDrafts = $drafts->filter(fn (NewProductDraft $draft): bool => $this->draftIsProcurementEligible($draft));
                 $draftIds = $draftIds->merge($eligibleDrafts->pluck('id'));
                 $draftSkus = $drafts
@@ -158,6 +158,9 @@ class PublishOperationalProcurementSheets extends Command
         $reasons = [];
         if (! in_array($status, ['active', 'draft'], true)) {
             $reasons[] = "draft status is {$status}";
+        }
+        if ($draft->isBundleOrStack()) {
+            $reasons[] = 'product is a stack/bundle';
         }
         if (str_contains($haystack, 'test') && ! (bool) config('procurement.include_test_products', false)) {
             $reasons[] = 'PROCUREMENT_INCLUDE_TEST_PRODUCTS is false';

@@ -353,6 +353,9 @@ final class SupplierOrderCsvService
                 $errors[] = 'eta is not a valid date';
             }
         }
+        if ($sku !== '') {
+            $this->orders->linkOpenLinesToMatchingVariant($sku);
+        }
         if ($type === 'order' && $sku !== '' && trim((string) ($row['order_id'] ?? '')) !== '') {
             $orderId = trim((string) $row['order_id']);
             $alreadyInOrder = ProcurementSupplierOrderLine::query()
@@ -414,7 +417,7 @@ final class SupplierOrderCsvService
                 ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
                 ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
                 ->get()
-                ->reject(fn (NewProductDraft $draft) => $this->draftMirrorsVariant($draft, $variants))
+                ->reject(fn (NewProductDraft $draft): bool => $draft->isBundleOrStack() || $this->draftMirrorsVariant($draft, $variants))
                 ->count()
             : 0;
 

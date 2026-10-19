@@ -82,6 +82,10 @@ final class SupplierOrderService
 
     public function createForDraft(NewProductDraft $draft, string $orderNumber, mixed $quantity, mixed $eta, ?int $userId = null, string $source = 'cms', bool $allowExistingOrder = false): ProcurementSupplierOrderLine
     {
+        if ($draft->isBundleOrStack()) {
+            throw ValidationException::withMessages(['sku' => 'Stack products cannot be added to procurement orders.']);
+        }
+
         $sku = strtoupper(trim((string) ($draft->sku ?? '')));
         if ($sku === '') {
             throw ValidationException::withMessages(['sku' => 'Draft SKU is required.']);
@@ -146,7 +150,7 @@ final class SupplierOrderService
             ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
             ->get()
-            ->reject(fn (NewProductDraft $draft) => $this->draftMirrorsVariant($draft, $matches))
+            ->reject(fn (NewProductDraft $draft): bool => $draft->isBundleOrStack() || $this->draftMirrorsVariant($draft, $matches))
             ->values();
         $matchCount = $matches->count() + $drafts->count();
         if ($matchCount !== 1) {
@@ -166,6 +170,58 @@ final class SupplierOrderService
             $row['quantity_ordered'] ?? null, $row['eta'] ?? null,
             $userId, $source, allowExistingOrder: true,
         );
+    }
+
+    public function linkOpenLinesToMatchingVariant(string $sku): void
+    {
+        $sku = strtoupper(trim($sku));
+        if ($sku === '') {
+            return;
+        }
+
+        $variants = Variant::query()->active()
+            ->whereHas('product', function ($query): void {
+                $query->inventoryEditableStatus()->nonBundle();
+
+                if (! (bool) config('procurement.include_test_products', false)) {
+                    $query->excludeTestProducts();
+                }
+            })
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+            ->get();
+        if ($variants->count() !== 1) {
+            return;
+        }
+
+        $variant = $variants->first();
+        $linked = false;
+        DB::transaction(function () use ($sku, $variant, &$linked): void {
+            $lines = ProcurementSupplierOrderLine::query()
+                ->where('status', 'open')
+                ->whereNull('variant_id')
+                ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($lines as $line) {
+                $alreadyOnVariant = ProcurementSupplierOrderLine::query()
+                    ->where('supplier_order_id', $line->supplier_order_id)
+                    ->where('variant_id', $variant->id)
+                    ->where('id', '!=', $line->id)
+                    ->exists();
+                if ($alreadyOnVariant) {
+                    continue;
+                }
+
+                $line->variant_id = $variant->id;
+                $line->save();
+                $linked = true;
+            }
+        });
+
+        if ($linked) {
+            $this->summary->refreshVariant($variant->fresh(['product', 'procurementIncomingStock']), null, 'cms:link-existing-order');
+        }
     }
 
     public function amendLine(ProcurementSupplierOrderLine $line, array $data, ?int $userId = null, ?string $reason = null): ProcurementSupplierOrderLine

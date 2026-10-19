@@ -227,7 +227,7 @@ final class ProcurementSheetDatasetBuilder
             ->chunkById(500, function ($drafts) use (&$records, $pendingDraftOrders, $variantSkus): void {
                 foreach ($drafts as $draft) {
                     $sku = strtoupper(trim((string) $draft->sku));
-                    if ($variantSkus->has($sku) || $this->isExcludedTestDraft($draft)) {
+                    if ($variantSkus->has($sku) || $this->isExcludedTestDraft($draft) || $draft->isBundleOrStack()) {
                         continue;
                     }
 

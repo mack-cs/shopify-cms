@@ -511,6 +511,26 @@ it('previews pasted tab-separated orders and clears quantity to order after conf
         ->and($variant->product->fresh()->vendor)->toBe($originalVendor);
 });
 
+it('rejects supplier orders for active stack rows', function (): void {
+    config(['google_sheets.enabled' => false]);
+    NewProductDraft::query()->create([
+        'sku' => 'LRBU08',
+        'title' => 'Safari Luxe Gold Bracelet Stack',
+        'status' => 'active',
+        'type' => 'Bracelets',
+        'tags' => 'bundles, livi-road-bundles',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]);
+
+    $batch = app(SupplierOrderCsvService::class)
+        ->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tLRBU08\t12\tLA2618\t07/09/2026");
+
+    expect($batch->valid_count)->toBe(0)
+        ->and($batch->invalid_count)->toBe(1)
+        ->and($batch->errors['2'][0])->toContain('SKU must match exactly one')
+        ->and(ProcurementSupplierOrderLine::query()->where('sku', 'LRBU08')->exists())->toBeFalse();
+});
+
 it('previews and confirms supplier orders for draft skus', function (): void {
     config(['google_sheets.enabled' => false]);
     $draft = NewProductDraft::create([
@@ -533,6 +553,32 @@ it('previews and confirms supplier orders for draft skus', function (): void {
         ->and($line->variant_id)->toBeNull()
         ->and($line->new_product_draft_id)->toBe($draft->id)
         ->and($line->quantity_ordered)->toBe(18);
+});
+
+it('attaches an order captured before the product was active once the variant exists', function (): void {
+    config(['google_sheets.enabled' => false]);
+    NewProductDraft::query()->create([
+        'sku' => 'LAB0186',
+        'title' => 'Monsoon Afternoon Bracelet',
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]);
+    $csv = app(SupplierOrderCsvService::class);
+    $batch = $csv->previewPastedOrder("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date\n1\tLAB0186\t10\tLA2617\t19/10/2026");
+    expect($batch->valid_count)->toBe(1);
+    $csv->confirm($batch->uuid);
+
+    $line = ProcurementSupplierOrderLine::query()->where('sku', 'LAB0186')->first();
+    expect($line)->not->toBeNull()->and($line->variant_id)->toBeNull();
+
+    $variant = supplierWorkflowVariant('LAB0186');
+    $receipt = $csv->previewPastedReceipt("Order ID\tSKU\tQuantity Received\nLA2617\tLAB0186\t4");
+
+    expect($receipt->valid_count)->toBe(1)
+        ->and($receipt->invalid_count)->toBe(0)
+        ->and($line->fresh()->variant_id)->toBe($variant->id)
+        ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(10)
+        ->and($variant->procurementIncomingStock()->value('number_of_wip_orders'))->toBe(1);
 });
 
 it('rejects supplier orders when a sku matches both a draft and an active product', function (): void {

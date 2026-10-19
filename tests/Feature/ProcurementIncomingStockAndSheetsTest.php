@@ -794,6 +794,29 @@ it('includes prelaunch drafts in procurement records while excluding test drafts
         ->and($draft['action_reason'])->toContain('Prelaunch draft');
 });
 
+it('skips active stack rows when building procurement records', function (): void {
+    config(['procurement.include_test_products' => false]);
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'LRBU08', 'title' => 'Safari Luxe Gold Bracelet Stack', 'handle' => 'safari-luxe-gold-bracelet-stack',
+        'status' => 'active', 'vendor' => 'Livi Road Bundles', 'type' => 'Bracelets',
+        'tags' => 'bundles, livi-road-bundle, livi-road-bundles', 'variant_price' => 1450,
+    ]);
+    NewProductDraft::query()->create([
+        'sku' => 'DRAFT-001', 'title' => 'Prelaunch Bracelet', 'handle' => 'prelaunch-bracelet',
+        'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',
+        'tags' => 'livi-road', 'variant_price' => 540, 'variant_inventory_qty' => 15,
+    ]);
+
+    $records = collect(app(ProcurementSheetDatasetBuilder::class)->records());
+
+    expect($records->pluck('sku'))->toContain('DRAFT-001')
+        ->not->toContain('LRBU08');
+});
+
 it('allows test drafts in procurement records when the local test-products flag is enabled', function (): void {
     config(['procurement.include_test_products' => true]);
     ProcurementCollectionConfig::query()->create([
