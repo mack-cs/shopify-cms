@@ -882,7 +882,7 @@ class InventoryResource extends Resource
                         && app(InventoryAccessService::class)->canAccess(Auth::user()))
                     ->requiresConfirmation()
                     ->modalHeading('Push Inventory To Shopify')
-                    ->modalDescription('This will set Shopify On Hand to the staged physical count, update tracking and product status, then refresh Shopify inventory states.')
+                    ->modalDescription('This will set Shopify On Hand to the staged physical count and update tracking. It does not change the product publication status.')
                     ->modalSubmitActionLabel('Confirm Push')
                     ->action(function (Variant $record): void {
                         InventorySyncJob::dispatch(

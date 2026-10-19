@@ -113,6 +113,11 @@ class Product extends Model
         return $query->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['active']);
     }
 
+    public function scopeInventoryEditableStatus(Builder $query): Builder
+    {
+        return $query->whereRaw('LOWER(TRIM(COALESCE(status, ""))) in (?, ?)', ['active', 'draft']);
+    }
+
     public function scopeNonBundle(Builder $query): Builder
     {
         return $query->where(fn (Builder $product): Builder => $product

@@ -35,6 +35,23 @@ class ListInventories extends ListRecords
 {
     protected static string $resource = InventoryResource::class;
 
+    protected function notifyPreviouslyCapturedOrder(ProcurementSupplierImportBatch $batch): bool
+    {
+        if ($batch->status !== 'completed') {
+            return false;
+        }
+
+        $orders = collect($batch->preview_rows)->pluck('order_id')->filter()->unique()->implode(', ');
+        Notification::make()
+            ->title('Purchase order already captured')
+            ->body("These exact rows were processed previously for order(s): {$orders}. No new order lines were created. Check the existing orders in Supplier Orders.")
+            ->warning()
+            ->persistent()
+            ->send();
+
+        return true;
+    }
+
     protected function getHeaderActions(): array
     {
         return [
@@ -50,6 +67,9 @@ class ListInventories extends ListRecords
                     try {
                         $path = Storage::disk('local')->path((string) $data['file']);
                         $batch = $csv->preview($path, 'order', Auth::id(), basename((string) $data['file']));
+                        if ($this->notifyPreviouslyCapturedOrder($batch)) {
+                            return;
+                        }
                         if ($batch->invalid_count > 0) {
                             Notification::make()->title('Order upload needs corrections')->body($this->supplierPreviewBody($batch))->warning()->persistent()->send();
 
@@ -127,6 +147,9 @@ class ListInventories extends ListRecords
                 ->action(function (array $data, SupplierOrderCsvService $csv): void {
                     try {
                         $batch = $csv->previewPastedOrder((string) $data['pasted_rows'], Auth::id());
+                        if ($this->notifyPreviouslyCapturedOrder($batch)) {
+                            return;
+                        }
 
                         if ($batch->invalid_count > 0) {
                             Notification::make()

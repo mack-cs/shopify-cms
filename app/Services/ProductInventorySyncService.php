@@ -205,7 +205,6 @@ final class ProductInventorySyncService
             $this->markInventorySynced($variant, $syncBatchId);
         }
 
-        $this->updateShopifyProductStatus($productId, (string) $product->status);
         $this->refreshComplementaryParents($product, $userId, $warnings);
         $this->refreshProductVariants($product->fresh(), $variants, $userId);
     }
@@ -344,13 +343,23 @@ final class ProductInventorySyncService
             }
         }
 
+        $inventoryItemId = trim((string) ($variant->shopify_inventory_item_id ?? ''));
+        if ($inventoryItemId !== '') {
+            $matches = $remoteVariants
+                ->filter(fn (array $node): bool => trim((string) data_get($node, 'inventoryItem.id', '')) === $inventoryItemId)
+                ->values();
+            if ($matches->count() === 1 && is_array($matches->first())) {
+                return $matches->first();
+            }
+        }
+
         $sku = trim((string) ($variant->sku ?? ''));
         if ($sku !== '') {
-            $matched = $remoteVariants->first(
-                fn (array $node): bool => trim((string) ($node['sku'] ?? '')) === $sku
-            );
-            if (is_array($matched)) {
-                return $matched;
+            $matches = $remoteVariants
+                ->filter(fn (array $node): bool => trim((string) ($node['sku'] ?? '')) === $sku)
+                ->values();
+            if ($matches->count() === 1 && is_array($matches->first())) {
+                return $matches->first();
             }
         }
 
@@ -436,27 +445,6 @@ final class ProductInventorySyncService
         $errors = data_get($data, 'inventorySetQuantities.userErrors', []);
         if (is_array($errors) && !empty($errors)) {
             throw new \RuntimeException($this->formatUserErrors($errors, 'inventorySetQuantities'));
-        }
-    }
-
-    private function updateShopifyProductStatus(string $productId, string $status): void
-    {
-        $mappedStatus = match (strtolower(trim($status))) {
-            'active' => 'ACTIVE',
-            'archived' => 'ARCHIVED',
-            default => 'DRAFT',
-        };
-
-        $data = $this->client->graphql($this->productStatusMutation(), [
-            'input' => [
-                'id' => $productId,
-                'status' => $mappedStatus,
-            ],
-        ]);
-
-        $errors = data_get($data, 'productUpdate.userErrors', []);
-        if (is_array($errors) && !empty($errors)) {
-            throw new \RuntimeException($this->formatUserErrors($errors, 'productUpdate'));
         }
     }
 
@@ -609,6 +597,11 @@ final class ProductInventorySyncService
 
     private function firstLocationId(): ?string
     {
+        $configured = trim((string) config('services.shopify.inventory_location_id'));
+        if ($configured !== '') {
+            return $configured;
+        }
+
         $data = $this->client->graphql($this->locationsQuery(), []);
 
         $id = trim((string) data_get($data, 'locations.nodes.0.id', ''));
@@ -699,23 +692,6 @@ query ProductInventoryByHandle($handle: String!) {
           }
         }
       }
-    }
-  }
-}
-GQL;
-    }
-
-    private function productStatusMutation(): string
-    {
-        return <<<'GQL'
-mutation ProductStatusUpdate($input: ProductInput!) {
-  productUpdate(input: $input) {
-    product {
-      id
-    }
-    userErrors {
-      field
-      message
     }
   }
 }

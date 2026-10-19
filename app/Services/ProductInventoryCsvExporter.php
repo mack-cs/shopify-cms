@@ -39,7 +39,7 @@ final class ProductInventoryCsvExporter
         $query = Variant::query()
             ->active()
             ->with('product')
-            ->whereHas('product', fn (Builder $query): Builder => $query->activeStatus());
+            ->whereHas('product', fn (Builder $query): Builder => $query->inventoryEditableStatus());
         if ($variantIds !== []) {
             $query->whereKey($variantIds);
         }

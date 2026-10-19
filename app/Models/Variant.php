@@ -136,6 +136,6 @@ class Variant extends Model
 
     public function scopeInventoryWorkspaceEligible(Builder $query): Builder
     {
-        return $query->whereHas('product', fn (Builder $product): Builder => $product->activeStatus());
+        return $query->whereHas('product', fn (Builder $product): Builder => $product->inventoryEditableStatus());
     }
 }

@@ -36,6 +36,8 @@ final class NewProductDraftProductSync
             return false;
         }
 
+        $this->linkDraftToProduct($draft, $product);
+
         $initialApprovalVersion = (int) ($product->approval_version ?? 1);
         $attributes = $this->normalizeAttributes($attributes);
         $data = $this->mapDraftToProduct($draft, $attributes);
@@ -138,6 +140,7 @@ final class NewProductDraftProductSync
                 ['import_id' => $import->id, 'handle' => $draft->handle],
                 $data
             ));
+            $this->syncToExistingProduct($draft, ensureApprovalReset: false);
             $created++;
         }
 
@@ -179,13 +182,56 @@ final class NewProductDraftProductSync
 
         $sku = trim((string) ($draft->sku ?? ''));
 
-        if ($sku === '') {
+        if ($sku !== '') {
+            $product = Product::query()
+                ->whereHas('allVariants', fn ($query) => $query->where('sku', $sku))
+                ->first();
+
+            if ($product) {
+                return $product;
+            }
+        }
+
+        return $this->findUniqueProductByTitle($draft->title);
+    }
+
+    private function linkDraftToProduct(NewProductDraft $draft, Product $product): void
+    {
+        $draftHandle = trim((string) ($draft->handle ?? ''));
+        $draftShopifyId = trim((string) ($draft->shopify_id ?? ''));
+        $productHandle = trim((string) ($product->handle ?? ''));
+        $productShopifyId = trim((string) ($product->shopify_id ?? ''));
+
+        $updates = [];
+        if ($draftHandle === '' && $productHandle !== '') {
+            $updates['handle'] = $productHandle;
+        }
+        if ($draftShopifyId === '' && $productShopifyId !== '') {
+            $updates['shopify_id'] = $productShopifyId;
+        }
+
+        if ($updates === []) {
+            return;
+        }
+
+        NewProductDraft::withoutEvents(function () use ($draft, $updates): void {
+            $draft->forceFill($updates)->save();
+        });
+    }
+
+    private function findUniqueProductByTitle(mixed $title): ?Product
+    {
+        $title = trim((string) ($title ?? ''));
+        if ($title === '') {
             return null;
         }
 
-        return Product::query()
-            ->whereHas('allVariants', fn ($query) => $query->where('sku', $sku))
-            ->first();
+        $matches = Product::query()
+            ->where('title', $title)
+            ->limit(2)
+            ->get();
+
+        return $matches->count() === 1 ? $matches->first() : null;
     }
 
     /**

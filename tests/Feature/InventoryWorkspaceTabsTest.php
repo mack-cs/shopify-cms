@@ -19,6 +19,58 @@ use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
 
+it('reports a repeated purchase order paste without claiming to create another order', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'repeat-order.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'repeat-order', 'title' => 'Repeat order', 'status' => 'active',
+    ]);
+    $variant = Variant::query()->create(['product_id' => $product->id, 'sku' => 'REPEAT-PO']);
+    $this->actingAs($user);
+    $rows = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nREPEAT-PO\t10\tPO-REPEAT\t20/10/2026";
+
+    Livewire::test(ListInventories::class)
+        ->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertNotified('Purchase order created');
+
+    Livewire::test(ListInventories::class)
+        ->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertNotified('Purchase order already captured');
+
+    expect($variant->supplierOrderLines()->count())->toBe(1);
+});
+
+it('accepts a supplier order for a draft shopify product', function (): void {
+    config(['google_sheets.enabled' => false]);
+    $user = User::factory()->create();
+    Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
+    $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
+    $import = Import::query()->create([
+        'filename' => 'draft-supplier.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
+    ]);
+    $product = Product::query()->create([
+        'import_id' => $import->id, 'handle' => 'draft-supplier', 'title' => 'Draft supplier bracelet', 'status' => 'draft',
+    ]);
+    $variant = Variant::query()->create(['product_id' => $product->id, 'sku' => 'DRAFT-PO']);
+    $this->actingAs($user);
+    $rows = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nDRAFT-PO\t4\tPO-DRAFT\t20/10/2026";
+
+    Livewire::test(ListInventories::class)
+        ->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertNotified('Purchase order created');
+
+    expect($variant->supplierOrderLines()->count())->toBe(1)
+        ->and($product->fresh()->status)->toBe('draft');
+});
+
 it('separates everyday inventory controls from supplier order controls', function (): void {
     $user = User::factory()->create();
 
@@ -357,7 +409,7 @@ it('bulk updates sell when out of stock policy from the inventory workspace', fu
         ->and($notSelected->fresh()->inventory_local_dirty)->toBeFalse();
 });
 
-it('shows only active products in the inventory workspace', function (): void {
+it('shows active and draft products in everyday and supplier inventory', function (): void {
     $user = User::factory()->create();
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
@@ -386,13 +438,16 @@ it('shows only active products in the inventory workspace', function (): void {
     $unlisted = $variant('unlisted', 'UNLISTED-STOCK', 10);
 
     expect(Variant::query()->inventoryWorkspaceEligible()->pluck('id')->all())
-        ->toContain($active->id)
-        ->not->toContain($draftWithoutInventory->id, $draftWithInventory->id, $archived->id, $unlisted->id);
+        ->toContain($active->id, $draftWithoutInventory->id, $draftWithInventory->id)
+        ->not->toContain($archived->id, $unlisted->id);
 
     $this->actingAs($user);
     Livewire::test(ListInventories::class)
-        ->assertCanSeeTableRecords([$active])
-        ->assertCanNotSeeTableRecords([$draftWithoutInventory, $draftWithInventory, $archived, $unlisted]);
+        ->assertCanSeeTableRecords([$active, $draftWithoutInventory, $draftWithInventory])
+        ->assertCanNotSeeTableRecords([$archived, $unlisted])
+        ->set('activeTab', 'orders')
+        ->assertCanSeeTableRecords([$active, $draftWithoutInventory, $draftWithInventory])
+        ->assertCanNotSeeTableRecords([$archived, $unlisted]);
 });
 
 it('filters products by placed, planned, and multiple WIP order summaries', function (): void {

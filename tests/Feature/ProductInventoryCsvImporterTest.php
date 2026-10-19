@@ -179,3 +179,39 @@ it('exports local stock in a csv that can be edited and imported back', function
     expect($variant->current_on_hand_quantity)->toBe(12);
     expect($variant->inventory_local_dirty)->toBeTrue();
 });
+
+it('imports stock for a draft product and leaves the product draft', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'draft-inventory.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+    ]);
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'handle' => 'draft-stock-product',
+        'shopify_id' => 'gid://shopify/Product/1801',
+        'title' => 'Draft Stock Product',
+        'status' => 'draft',
+        'approval_version' => 1,
+    ]));
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id,
+        'shopify_id' => 'gid://shopify/ProductVariant/2801',
+        'sku' => 'DRAFT-STOCK',
+        'inventory_tracked' => true,
+        'inventory_qty' => 0,
+        'current_on_hand_quantity' => 0,
+        'inventory_local_dirty' => false,
+    ]));
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-inventory-import-');
+    file_put_contents($path, "sku,on_hand\nDRAFT-STOCK,6\n");
+
+    $result = app(ProductInventoryCsvImporter::class)->importFromPath($path, $user->id);
+
+    expect($result['updated'])->toBe(1)
+        ->and($variant->fresh()->current_on_hand_quantity)->toBe(6)
+        ->and($product->fresh()->status)->toBe('draft');
+});

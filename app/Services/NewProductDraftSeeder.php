@@ -180,15 +180,38 @@ final class NewProductDraftSeeder
         }
 
         $shopifyId = trim((string) ($product->shopify_id ?? ''));
-        if ($shopifyId === '') {
+        if ($shopifyId !== '') {
+            $draft = NewProductDraft::query()
+                ->where('shopify_id', $shopifyId)
+                ->first();
+
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $sku = trim((string) ($product->allVariants()->orderBy('id')->value('sku') ?? ''));
+        if ($sku !== '') {
+            $draft = NewProductDraft::query()
+                ->where('sku', $sku)
+                ->first();
+
+            if ($draft instanceof NewProductDraft) {
+                return $draft;
+            }
+        }
+
+        $title = trim((string) ($product->title ?? ''));
+        if ($title === '') {
             return null;
         }
 
-        $draft = NewProductDraft::query()
-            ->where('shopify_id', $shopifyId)
-            ->first();
+        $drafts = NewProductDraft::query()
+            ->where('title', $title)
+            ->limit(2)
+            ->get();
 
-        return $draft instanceof NewProductDraft ? $draft : null;
+        return $drafts->count() === 1 ? $drafts->first() : null;
     }
 
     private function isEmptyValue(mixed $value): bool

@@ -1087,6 +1087,10 @@ final class Normalizer
                 }
             }
 
+            if ($this->normalizeValue($rowValue) === null && $attribute === HeaderStore::UVP_SHORT_PARAGRAPH) {
+                $rowValue = $product->uvp_short_paragraph;
+            }
+
             if ($this->normalizeValue($rowValue) === null) {
                 $errors[] = "missing:{$label}";
             }

@@ -363,6 +363,18 @@ class NewProductDraft extends Model
     /**
      * @param  array<int, string>  $tags
      */
+    public function isBundleOrStack(): bool
+    {
+        $tags = TagNormalizer::parseTokens((string) ($this->attributes['tags'] ?? ''));
+        if (self::hasBundleOrStackTag($tags)) {
+            return true;
+        }
+
+        $type = TagNormalizer::normalizeToken((string) ($this->type ?? ''));
+
+        return in_array($type, ['bundle', 'bundles', 'stack', 'stacks'], true);
+    }
+
     private static function hasBundleOrStackTag(array $tags): bool
     {
         foreach (TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags)) as $tag) {

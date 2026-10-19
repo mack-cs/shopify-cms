@@ -1915,7 +1915,7 @@ it('reuses the existing Shopify media when only an image filename changes', func
     expect($image->needs_shopify_image_sync)->toBeFalse();
 });
 
-it('sends every selected bundle image when creating a stack in Shopify', function (): void {
+it('creates a stack in Shopify without sending its images', function (): void {
     $firstImage = 'https://cdn.shopify.com/s/files/1/test/stack-01.jpg';
     $secondImage = 'https://cdn.shopify.com/s/files/1/test/stack-02.jpg';
 
@@ -1924,6 +1924,8 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
         'type' => 'Bracelets',
         'tags' => 'bundles',
         'status' => 'draft',
+        'variant_price' => '250.00',
+        'variant_inventory_qty' => 15,
         'image_url' => $firstImage,
         'bundle_image_urls' => [$firstImage, $secondImage],
         'complementary_products' => 'gid://shopify/Product/201; gid://shopify/Product/202; gid://shopify/Product/203',
@@ -1942,54 +1944,31 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
         'approval_version' => 1,
     ]);
 
-    $mediaInput = null;
+    $productSetInput = null;
     $queries = [];
 
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
 
-    Http::fake(function ($request) use (&$mediaInput, &$queries) {
+    Http::fake(function ($request) use (&$productSetInput, &$queries, $draft) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
         $variables = (array) ($payload['variables'] ?? []);
         $queries[] = $query;
 
-        if (str_contains($query, 'mutation ProductCreateMedia')) {
-            $mediaInput = $variables['media'] ?? null;
-
-            return Http::response([
-                'data' => [
-                    'productCreateMedia' => [
-                        'media' => [
-                            ['id' => 'gid://shopify/MediaImage/1401'],
-                            ['id' => 'gid://shopify/MediaImage/1402'],
-                        ],
-                        'mediaUserErrors' => [],
-                    ],
-                ],
-            ]);
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
         }
 
-        if (str_contains($query, 'mutation ProductCreate')) {
-            return Http::response([
-                'data' => [
-                    'productCreate' => [
-                        'product' => [
-                            'id' => 'gid://shopify/Product/1401',
-                            'handle' => 'test-bracelet-stack',
-                            'variants' => [
-                                'nodes' => [[
-                                    'inventoryItem' => [
-                                        'id' => 'gid://shopify/InventoryItem/1401',
-                                    ],
-                                ]],
-                            ],
-                        ],
-                        'userErrors' => [],
-                    ],
-                ],
-            ]);
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetInput = $variables['input'] ?? null;
+            expect($query)->not->toContain('identifier:');
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct($draft, 'gid://shopify/Product/1401', 'test-bracelet-stack', 'gid://shopify/ProductVariant/1401', 'gid://shopify/InventoryItem/1401'),
+                'userErrors' => [],
+            ]]]);
         }
 
         throw new RuntimeException('Unexpected Shopify GraphQL call in stack image create test.');
@@ -1999,26 +1978,28 @@ it('sends every selected bundle image when creating a stack in Shopify', functio
 
     expect($result['created'])->toBe(1);
     expect($result['failed'])->toBe(0);
+    expect($productSetInput['status'])->toBe('DRAFT');
+    expect($productSetInput['variants'][0]['price'])->toBe('250.00');
+    expect($productSetInput['variants'][0])->not->toHaveKey('inventoryQuantities');
+    expect(json_encode($productSetInput['variants'][0]))->not->toContain('tracked');
+    expect(json_encode($productSetInput))->not->toContain('15');
     expect(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
-    expect($mediaInput)->toBe([
-        [
-            'originalSource' => $firstImage,
-            'mediaContentType' => 'IMAGE',
-        ],
-        [
-            'originalSource' => $secondImage,
-            'mediaContentType' => 'IMAGE',
-        ],
-    ]);
+    expect($productSetInput)->not->toHaveKey('files');
+    expect(json_encode($productSetInput))->not->toContain($firstImage);
+    expect(json_encode($productSetInput))->not->toContain($secondImage);
     expect($draft->fresh()->handle)->toBe('test-bracelet-stack');
 });
 
-it('does not set inventory when creating an ordinary product in Shopify', function (): void {
+it('prices a new normal product and initializes tracked inventory to zero when the handle is created', function (): void {
     $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
         'title' => 'Test Bracelet',
         'type' => 'Bracelets',
         'tags' => 'bracelet, livi-road',
         'status' => 'draft',
+        'sku' => 'BRACELET-1402',
+        'variant_price' => '189.50',
+        'variant_compare_at_price' => '220.00',
+        'variant_inventory_qty' => 15,
         'complementary_products' => 'gid://shopify/Product/301; gid://shopify/Product/302; gid://shopify/Product/303',
         'approval_version' => 1,
         'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
@@ -2033,35 +2014,42 @@ it('does not set inventory when creating an ordinary product in Shopify', functi
     }
 
     $queries = [];
+    $productSetCalls = 0;
+    $variantPayload = null;
 
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
+    config()->set('services.shopify.inventory_location_id', 'gid://shopify/Location/7');
 
-    Http::fake(function ($request) use (&$queries) {
+    Http::fake(function ($request) use (&$queries, &$productSetCalls, &$variantPayload, $draft) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
         $queries[] = $query;
 
-        if (str_contains($query, 'mutation ProductCreate')) {
-            return Http::response([
-                'data' => [
-                    'productCreate' => [
-                        'product' => [
-                            'id' => 'gid://shopify/Product/1402',
-                            'handle' => 'test-bracelet',
-                            'variants' => [
-                                'nodes' => [[
-                                    'inventoryItem' => [
-                                        'id' => 'gid://shopify/InventoryItem/1402',
-                                    ],
-                                ]],
-                            ],
-                        ],
-                        'userErrors' => [],
-                    ],
-                ],
-            ]);
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetCalls++;
+            $variantPayload = $variables['input']['variants'][0] ?? null;
+            expect($query)->not->toContain('identifier:');
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct(
+                    $draft,
+                    'gid://shopify/Product/1402',
+                    'test-bracelet',
+                    'gid://shopify/ProductVariant/1402',
+                    'gid://shopify/InventoryItem/1402',
+                    tracked: true,
+                    onHand: 0,
+                    compareAt: '220.00',
+                ),
+                'userErrors' => [],
+            ]]]);
         }
 
         throw new RuntimeException('Unexpected Shopify GraphQL call in inventory tracking create test.');
@@ -2071,7 +2059,22 @@ it('does not set inventory when creating an ordinary product in Shopify', functi
 
     expect($result['created'])->toBe(1)
         ->and($result['failed'])->toBe(0)
-        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
+        ->and($result['warnings'])->toBe([])
+        ->and($productSetCalls)->toBe(1)
+        ->and($variantPayload['price'])->toBe('189.50')
+        ->and($variantPayload['compareAtPrice'])->toBe('220.00')
+        ->and($variantPayload['sku'])->toBe('BRACELET-1402')
+        ->and($variantPayload['barcode'])->toBe('BRACELET-1402')
+        ->and($variantPayload['inventoryItem'])->toMatchArray(['sku' => 'BRACELET-1402', 'tracked' => true])
+        ->and($variantPayload['inventoryQuantities'][0])->toMatchArray([
+            'locationId' => 'gid://shopify/Location/7',
+            'name' => 'on_hand',
+            'quantity' => 0,
+        ])
+        ->and(json_encode($variantPayload))->not->toContain('15')
+        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse()
+        ->and($draft->fresh()->status)->toBe('draft')
+        ->and($draft->fresh()->handle)->toBe('test-bracelet');
 });
 
 it('does not create an approved draft in Shopify when the title is missing', function (): void {
@@ -2585,6 +2588,733 @@ function fakeWorkflowShopifyGraphql(callable $handler): void
     });
 }
 
+it('treats the product UVP column as present when the Shopify row cell is blank', function (): void {
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::UVP_SHORT_PARAGRAPH,
+        'label' => HeaderStore::UVP_SHORT_PARAGRAPH,
+        'required' => true,
+    ]);
+
+    $product = createWorkflowTestProduct([
+        'uvp_short_paragraph' => '<p>Sunshine, Sangria and Secrets.</p>',
+    ]);
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::UVP_SHORT_PARAGRAPH => '',
+        ],
+    ]);
+
+    app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
+
+    expect($product->fresh()->error_fields)
+        ->not->toContain('missing:' . HeaderStore::UVP_SHORT_PARAGRAPH);
+});
+
+it('copies a draft UVP and SKU onto a product matched by title', function (): void {
+    RequiredField::create([
+        'scope' => 'extra',
+        'source' => 'row',
+        'attribute' => HeaderStore::UVP_SHORT_PARAGRAPH,
+        'label' => HeaderStore::UVP_SHORT_PARAGRAPH,
+        'required' => true,
+    ]);
+    RequiredField::create([
+        'scope' => 'variant',
+        'source' => 'variant',
+        'attribute' => 'barcode',
+        'label' => HeaderStore::VARIANT_BARCODE,
+        'required' => true,
+    ]);
+
+    $product = createWorkflowTestProduct([
+        'handle' => 'eb-bracelet-stack-test',
+        'title' => 'EB Bracelet Stack Test',
+        'uvp_short_paragraph' => null,
+    ]);
+    $variant = createWorkflowTestVariant($product, [
+        'sku' => null,
+        'barcode' => null,
+    ]);
+    $row = ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::UVP_SHORT_PARAGRAPH => '',
+            HeaderStore::VARIANT_BARCODE => '',
+        ],
+    ]);
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => null,
+        'shopify_id' => null,
+        'title' => 'EB Bracelet Stack Test',
+        'sku' => 'EBBM02TEST01',
+        'uvp_short_paragraph' => '<p>Sunshine, Sangria &amp; Secrets Stack.</p>',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    $synced = app(NewProductDraftProductSync::class)->syncToExistingProduct(
+        $draft,
+        ensureApprovalReset: false,
+        attributes: ['uvp_short_paragraph', 'sku']
+    );
+
+    expect($synced)->toBeTrue()
+        ->and($draft->fresh()->handle)->toBe('eb-bracelet-stack-test')
+        ->and($product->fresh()->uvp_short_paragraph)->toBe('<p>Sunshine, Sangria &amp; Secrets Stack.</p>')
+        ->and($row->fresh()->get(HeaderStore::UVP_SHORT_PARAGRAPH))->toBe('<p>Sunshine, Sangria &amp; Secrets Stack.</p>')
+        ->and($variant->fresh()->sku)->toBe('EBBM02TEST01')
+        ->and($variant->fresh()->barcode)->toBe('EBBM02TEST01')
+        ->and($row->fresh()->get(HeaderStore::VARIANT_BARCODE))->toBe('EBBM02TEST01')
+        ->and($product->fresh()->error_fields)
+            ->not->toContain('missing:' . HeaderStore::UVP_SHORT_PARAGRAPH)
+            ->not->toContain('missing:' . HeaderStore::VARIANT_BARCODE);
+});
+
+it('sends the draft UVP and SKU when creating the Shopify product', function (): void {
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'EB Bracelet Stack Test',
+        'sku' => 'EBBM02TEST01',
+        'tags' => 'bundles',
+        'variant_price' => '310.00',
+        'uvp_short_paragraph' => '<p>Sunshine, Sangria &amp; Secrets Stack.</p>',
+        'status' => 'draft',
+        'complementary_products' => 'gid://shopify/Product/301; gid://shopify/Product/302; gid://shopify/Product/303',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    foreach ([User::factory()->create(), User::factory()->create()] as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    $metafields = null;
+    $variant = null;
+
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use (&$metafields, &$variant, $draft) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $metafields = $payload['variables']['input']['metafields'] ?? null;
+            $variant = $payload['variables']['input']['variants'][0] ?? null;
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct($draft, 'gid://shopify/Product/1403', 'eb-bracelet-stack-test', 'gid://shopify/ProductVariant/1403', 'gid://shopify/InventoryItem/1403'),
+                'userErrors' => [],
+            ]]]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in draft copy create test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+    $uvp = collect($metafields)->firstWhere('key', 'uvp_short_paragraph');
+    $draftMarker = collect($metafields)->firstWhere('key', 'draft_id');
+
+    expect($result['created'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($result['warnings'])->toBe([])
+        ->and($uvp['namespace'])->toBe('custom')
+        ->and($uvp['value'])->toContain('Sunshine, Sangria & Secrets Stack.')
+        ->and($draftMarker)->toMatchArray(['namespace' => 'cms', 'key' => 'draft_id', 'value' => (string) $draft->id])
+        ->and($variant['price'])->toBe('310.00')
+        ->and($variant['sku'])->toBe('EBBM02TEST01')
+        ->and($variant['barcode'])->toBe('EBBM02TEST01')
+        ->and($variant['inventoryItem']['sku'])->toBe('EBBM02TEST01')
+        ->and($variant)->not->toHaveKey('inventoryQuantities')
+        ->and($draft->fresh()->handle)->toBe('eb-bracelet-stack-test');
+});
+
+it('rejects Shopify creation when the approved price is missing or zero', function (): void {
+    Http::fake(function () {
+        throw new RuntimeException('Shopify should not be called without a valid price.');
+    });
+
+    $users = User::factory()->count(2)->create();
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Unpriced Bracelet',
+        'sku' => 'UNPRICED-1',
+        'variant_price' => '0.00',
+        'variant_inventory_qty' => 15,
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+        'complementary_products' => 'gid://shopify/Product/301; gid://shopify/Product/302; gid://shopify/Product/303',
+    ]));
+
+    foreach ($users as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(0)
+        ->and($result['failed'])->toBe(0)
+        ->and($result['skipped_has_errors'])->toBe(1)
+        ->and($result['failures'][0]['reason'])->toBe('invalid_price')
+        ->and($draft->fresh()->handle)->toBeNull()
+        ->and($draft->fresh()->shopify_id)->toBeNull();
+});
+
+it('does not reset inventory when handle creation is retried after the handle exists', function (): void {
+    Http::fake(function () {
+        throw new RuntimeException('A draft that already has a handle must not be sent to Shopify again.');
+    });
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Already Created Bracelet',
+        'handle' => 'already-created-bracelet',
+        'shopify_id' => 'gid://shopify/Product/1500',
+        'sku' => 'CREATED-1',
+        'variant_price' => '150.00',
+        'variant_inventory_qty' => 15,
+        'status' => 'draft',
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        'approval_version' => 1,
+    ]));
+
+    foreach ([User::factory()->create(), User::factory()->create()] as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(0)
+        ->and($result['skipped_has_handle'])->toBe(1)
+        ->and($draft->fresh()->handle)->toBe('already-created-bracelet');
+});
+
+it('does not send inventory when a partial price approval updates an existing product', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1551',
+        'handle' => 'partial-price-bracelet',
+        'title' => 'Partial Price Bracelet',
+        'status' => 'active',
+    ]);
+    $variant = createWorkflowTestVariant($product, [
+        'shopify_id' => 'gid://shopify/ProductVariant/1551',
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/1551',
+        'inventory_tracked' => true,
+        'inventory_qty' => 9,
+        'current_on_hand_quantity' => 9,
+        'sku' => 'PARTIAL-PRICE',
+        'price' => '210.00',
+    ]);
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::VARIANT_INVENTORY_QTY => '15',
+            HeaderStore::VARIANT_PRICE => '210.00',
+        ],
+    ]);
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 2,
+        'handle' => $product->handle,
+        'row_type' => 'variant',
+        'data' => [
+            HeaderStore::VARIANT_SKU => 'PARTIAL-PRICE',
+            HeaderStore::VARIANT_INVENTORY_QTY => '15',
+            HeaderStore::VARIANT_PRICE => '210.00',
+        ],
+    ]);
+    approveWorkflowTestProduct($product);
+
+    $queries = [];
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$queries): array {
+        $queries[] = $query;
+
+        if (str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate') || str_contains($query, 'InventoryTrackingUpdate')) {
+            throw new RuntimeException('Partial approval attempted an inventory write.');
+        }
+
+        if (str_contains($query, 'mutation ProductUpdate')) {
+            return ['productUpdate' => ['product' => ['id' => 'gid://shopify/Product/1551', 'handle' => 'partial-price-bracelet'], 'userErrors' => []]];
+        }
+
+        if (str_contains($query, 'query ProductByIdDetails') || str_contains($query, 'query ProductByHandleDetails')) {
+            $productPayload = [
+                'id' => 'gid://shopify/Product/1551',
+                'options' => [],
+                'category' => ['id' => 'gid://shopify/TaxonomyCategory/aa-6-3', 'name' => 'Jewelry'],
+                'productCategory' => null,
+                'variants' => ['nodes' => [[
+                    'id' => 'gid://shopify/ProductVariant/1551',
+                    'sku' => 'PARTIAL-PRICE',
+                    'inventoryItem' => ['id' => 'gid://shopify/InventoryItem/1551'],
+                    'selectedOptions' => [],
+                ]]],
+                'media' => ['nodes' => []],
+                'images' => ['nodes' => []],
+            ];
+
+            return str_contains($query, 'productByHandle')
+                ? ['productByHandle' => $productPayload]
+                : ['product' => $productPayload];
+        }
+
+        if (str_contains($query, 'Metafields')) {
+            return ['product' => ['metafields' => ['nodes' => []]], 'metafieldsSet' => ['metafields' => [], 'userErrors' => []]];
+        }
+
+        if (str_contains($query, 'productVariantsBulkUpdate')) {
+            expect(json_encode($variables['variants']))->not->toContain('tracked')
+                ->and(json_encode($variables['variants']))->not->toContain('inventoryQuantities')
+                ->and($variables['variants'][0]['price'])->toBe('210.00');
+
+            return ['productVariantsBulkUpdate' => ['productVariants' => [['id' => 'gid://shopify/ProductVariant/1551']], 'userErrors' => []]];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call: '.$query);
+    });
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product->fresh()]), [
+        ProductShopifyUpdater::SYNC_SCOPE_PRICE,
+    ]);
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($variant->fresh()->current_on_hand_quantity)->toBe(9)
+        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
+});
+
+it('replaces a plain-text draft id definition before creating the product', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Definition Bracelet',
+        'sku' => 'DEF-1',
+        'variant_price' => '150.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $deletedId = null;
+    $createdType = null;
+    Http::fake(function ($request) use (&$deletedId, &$createdType, $draft) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if (str_contains($query, 'metafieldDefinitions')) {
+            return Http::response(['data' => ['metafieldDefinitions' => ['nodes' => [[
+                'id' => 'gid://shopify/MetafieldDefinition/44',
+                'type' => ['name' => 'single_line_text_field'],
+            ]]]]]);
+        }
+
+        if (str_contains($query, 'metafieldDefinitionDelete')) {
+            $deletedId = $variables['id'] ?? null;
+
+            return Http::response(['data' => ['metafieldDefinitionDelete' => [
+                'deletedDefinitionId' => $deletedId,
+                'userErrors' => [],
+            ]]]);
+        }
+
+        if (str_contains($query, 'metafieldDefinitionCreate')) {
+            $createdType = $variables['definition']['type'] ?? null;
+
+            return Http::response(['data' => ['metafieldDefinitionCreate' => [
+                'createdDefinition' => ['id' => 'gid://shopify/MetafieldDefinition/45'],
+                'userErrors' => [],
+            ]]]);
+        }
+
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            expect($variables['input']['metafields'][0]['type'])->toBe('id');
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct(
+                    $draft,
+                    'gid://shopify/Product/1901',
+                    'definition-bracelet',
+                    'gid://shopify/ProductVariant/1901',
+                    'gid://shopify/InventoryItem/1901',
+                    tracked: true,
+                    onHand: 0,
+                ),
+                'userErrors' => [],
+            ]]]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in definition replacement test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1)
+        ->and($deletedId)->toBe('gid://shopify/MetafieldDefinition/44')
+        ->and($createdType)->toBe('id')
+        ->and($draft->fresh()->handle)->toBe('definition-bracelet');
+});
+
+it('does not create a product when the SKU already belongs to another Shopify product', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Duplicate SKU Bracelet',
+        'sku' => 'DUP-SKU',
+    ]);
+    configureDraftShopify();
+
+    $productSetCalls = 0;
+    Http::fake(function ($request) use (&$productSetCalls, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetCalls++;
+        }
+
+        return draftCreationLookupResponse($query, variantNodes: [[
+            'id' => 'gid://shopify/ProductVariant/900',
+            'sku' => 'DUP-SKU',
+            'product' => [
+                'id' => 'gid://shopify/Product/900',
+                'handle' => 'existing-bracelet',
+                'status' => 'ACTIVE',
+                'metafield' => null,
+                'variants' => ['nodes' => []],
+            ],
+        ]]) ?? throw new RuntimeException('Unexpected Shopify GraphQL call in duplicate SKU test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+    $warning = collect($draft->fresh()->shopifySyncWarnings())->firstWhere('field', 'shopify_creation_review');
+
+    expect($result['created'])->toBe(0)
+        ->and($result['failed'])->toBe(1)
+        ->and($result['failures'][0]['reason'])->toBe('duplicate_sku')
+        ->and($productSetCalls)->toBe(0)
+        ->and($draft->fresh()->handle)->toBeNull()
+        ->and($warning['draft_value'])->toBe('duplicate_sku');
+});
+
+it('recovers a lost productSet response without creating the product again', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Lost Response Bracelet',
+        'sku' => 'LOST-1',
+        'variant_price' => '175.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $identifierCalls = 0;
+    $productSetCalls = 0;
+    Http::fake(function ($request) use (&$identifierCalls, &$productSetCalls, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+
+        if (str_contains($query, 'metafieldDefinitions')) {
+            return Http::response(['data' => ['metafieldDefinitions' => ['nodes' => [['id' => 'gid://shopify/MetafieldDefinition/1', 'type' => ['name' => 'id']]]]]]);
+        }
+
+        if (str_contains($query, 'productByIdentifier')) {
+            $identifierCalls++;
+
+            return Http::response(['data' => ['productByIdentifier' => $identifierCalls === 1 ? null : createdDraftProduct(
+                $draft,
+                'gid://shopify/Product/1601',
+                'lost-response-bracelet',
+                'gid://shopify/ProductVariant/1601',
+                'gid://shopify/InventoryItem/1601',
+                tracked: true,
+                onHand: 6,
+            )]]);
+        }
+
+        if (str_contains($query, 'query VariantsBySku')) {
+            return Http::response(['data' => ['productVariants' => ['nodes' => []]]]);
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetCalls++;
+
+            return Http::response(['errors' => [['message' => 'response lost']]], 500);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in lost response test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($productSetCalls)->toBe(1)
+        ->and($draft->fresh()->handle)->toBe('lost-response-bracelet')
+        ->and($draft->fresh()->shopify_id)->toBe('gid://shopify/Product/1601');
+});
+
+it('saves the handle for a previously created product without sending inventory', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Retry Bracelet',
+        'sku' => 'RETRY-1',
+        'variant_price' => '160.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $productSetCalls = 0;
+    $queries = [];
+    Http::fake(function ($request) use (&$productSetCalls, &$queries, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+        $queries[] = $query;
+
+        if (str_contains($query, 'mutation ProductSetCreate') || str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')) {
+            $productSetCalls++;
+        }
+
+        return draftCreationLookupResponse($query, createdDraftProduct(
+            $draft,
+            'gid://shopify/Product/1602',
+            'retry-bracelet',
+            'gid://shopify/ProductVariant/1602',
+            'gid://shopify/InventoryItem/1602',
+            tracked: true,
+            onHand: 6,
+        )) ?? throw new RuntimeException('Unexpected Shopify GraphQL call in creation retry test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1)
+        ->and($productSetCalls)->toBe(0)
+        ->and($draft->fresh()->handle)->toBe('retry-bracelet')
+        ->and(collect($queries)->contains(fn (string $query): bool => str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')))->toBeFalse();
+});
+
+it('flags an incomplete Shopify product for review and does not update it', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Incomplete Bracelet',
+        'sku' => 'INCOMPLETE-1',
+        'variant_price' => '140.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $product = createdDraftProduct(
+        $draft,
+        'gid://shopify/Product/1603',
+        'incomplete-bracelet',
+        'gid://shopify/ProductVariant/1603',
+        'gid://shopify/InventoryItem/1603',
+        tracked: false,
+        onHand: 4,
+    );
+    $product['variants']['nodes'][0]['price'] = '1.00';
+
+    $productSetCalls = 0;
+    Http::fake(function ($request) use (&$productSetCalls, $product) {
+        $query = (string) ($request->data()['query'] ?? '');
+        if (str_contains($query, 'mutation ProductSetCreate') || str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')) {
+            $productSetCalls++;
+        }
+
+        return draftCreationLookupResponse($query, $product)
+            ?? throw new RuntimeException('Unexpected Shopify GraphQL call in incomplete creation test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+    $warning = collect($draft->fresh()->shopifySyncWarnings())->firstWhere('field', 'shopify_creation_review');
+
+    expect($result['created'])->toBe(0)
+        ->and($result['failed'])->toBe(1)
+        ->and($result['failures'][0]['reason'])->toBe('manual_review')
+        ->and($productSetCalls)->toBe(0)
+        ->and($draft->fresh()->handle)->toBeNull()
+        ->and($warning['label'])->toBe('Shopify creation needs review');
+});
+
+it('does not send a second productSet when Shopify returns no product', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Missing Product Bracelet',
+        'sku' => 'MISSING-SET',
+        'variant_price' => '155.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $productSetCalls = 0;
+    Http::fake(function ($request) use (&$productSetCalls, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetCalls++;
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => null,
+                'userErrors' => [[
+                    'field' => ['input'],
+                    'message' => 'Product could not be created.',
+                    'code' => 'INVALID',
+                ]],
+            ]]]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in missing productSet response test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(0)
+        ->and($result['failed'])->toBe(1)
+        ->and($result['failures'][0]['reason'])->toBe('shopify_user_error')
+        ->and($productSetCalls)->toBe(1)
+        ->and($draft->fresh()->handle)->toBeNull();
+});
+
+it('omits inventory quantities when creating a stack or bundle', function (string $type): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => $type.' Create',
+        'type' => $type,
+        'tags' => 'gift',
+        'sku' => null,
+        'variant_price' => '240.00',
+        'variant_compare_at_price' => null,
+        'variant_inventory_qty' => 15,
+    ]);
+    configureDraftShopify();
+
+    $variant = null;
+    Http::fake(function ($request) use (&$variant, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+        $variables = (array) ($request->data()['variables'] ?? []);
+
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $variant = $variables['input']['variants'][0] ?? null;
+            expect($variables)->not->toHaveKey('identifier')
+                ->and($query)->not->toContain('identifier:');
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct($draft, 'gid://shopify/Product/1701', 'stack-or-bundle', 'gid://shopify/ProductVariant/1701', 'gid://shopify/InventoryItem/1701'),
+                'userErrors' => [],
+            ]]]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in stack or bundle create test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+
+    expect($result['created'])->toBe(1)
+        ->and($variant)->not->toHaveKey('inventoryQuantities')
+        ->and($variant)->not->toHaveKey('inventoryItem')
+        ->and(json_encode($variant))->not->toContain('15')
+        ->and($draft->fresh()->handle)->toBe('stack-or-bundle');
+})->with(['Stacks', 'Bundles']);
+
+it('does not overwrite inventory when the created product does not start at zero', function (): void {
+    $draft = createApprovedShopifyDraft([
+        'title' => 'Stocked Bracelet',
+        'sku' => 'STOCKED-1',
+        'variant_price' => '190.00',
+        'variant_compare_at_price' => null,
+    ]);
+    configureDraftShopify();
+
+    $created = false;
+    $productSetCalls = 0;
+    Http::fake(function ($request) use (&$created, &$productSetCalls, $draft) {
+        $query = (string) ($request->data()['query'] ?? '');
+
+        if (str_contains($query, 'metafieldDefinitions')) {
+            return Http::response(['data' => ['metafieldDefinitions' => ['nodes' => [['id' => 'gid://shopify/MetafieldDefinition/1', 'type' => ['name' => 'id']]]]]]);
+        }
+
+        if (str_contains($query, 'productByIdentifier')) {
+            return Http::response(['data' => ['productByIdentifier' => $created ? createdDraftProduct(
+                $draft,
+                'gid://shopify/Product/1801',
+                'stocked-bracelet',
+                'gid://shopify/ProductVariant/1801',
+                'gid://shopify/InventoryItem/1801',
+                tracked: true,
+                onHand: 5,
+            ) : null]]);
+        }
+
+        if (str_contains($query, 'query VariantsBySku')) {
+            return Http::response(['data' => ['productVariants' => ['nodes' => []]]]);
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetCalls++;
+            $created = true;
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct(
+                    $draft,
+                    'gid://shopify/Product/1801',
+                    'stocked-bracelet',
+                    'gid://shopify/ProductVariant/1801',
+                    'gid://shopify/InventoryItem/1801',
+                    tracked: true,
+                    onHand: 5,
+                ),
+                'userErrors' => [],
+            ]]]);
+        }
+
+        if (str_contains($query, 'inventorySetQuantities') || str_contains($query, 'inventoryItemUpdate')) {
+            throw new RuntimeException('Creation attempted to overwrite inventory.');
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in existing inventory protection test.');
+    });
+
+    $first = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft->fresh()]));
+
+    expect($first['created'])->toBe(0)
+        ->and($first['failed'])->toBe(1)
+        ->and($first['failures'][0]['reason'])->toBe('manual_review')
+        ->and($productSetCalls)->toBe(1)
+        ->and($draft->fresh()->handle)->toBeNull();
+
+    $second = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft->fresh()]));
+
+    expect($second['created'])->toBe(1)
+        ->and($productSetCalls)->toBe(1)
+        ->and($draft->fresh()->handle)->toBe('stocked-bracelet');
+});
+
 function createWorkflowTestProduct(array $overrides = []): Product
 {
     $user = User::factory()->create();
@@ -2644,4 +3374,119 @@ function createWorkflowTestVariant(Product $product, array $overrides = []): Var
         'weight_unit' => 'g',
         'position' => 1,
     ], $overrides)));
+}
+
+function createApprovedShopifyDraft(array $overrides = []): NewProductDraft
+{
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create(array_merge([
+        'title' => 'Created Bracelet',
+        'type' => 'Bracelets',
+        'tags' => 'bracelet',
+        'status' => 'draft',
+        'sku' => 'CREATE-1',
+        'variant_price' => '180.00',
+        'variant_compare_at_price' => '210.00',
+        'variant_inventory_qty' => 15,
+        'complementary_products' => 'gid://shopify/Product/301; gid://shopify/Product/302; gid://shopify/Product/303',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ], $overrides)));
+
+    foreach ([User::factory()->create(), User::factory()->create()] as $user) {
+        NewProductDraftApproval::create([
+            'new_product_draft_id' => $draft->id,
+            'user_id' => $user->id,
+            'approval_version' => 1,
+        ]);
+    }
+
+    return $draft;
+}
+
+function configureDraftShopify(): void
+{
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+    config()->set('services.shopify.inventory_location_id', 'gid://shopify/Location/7');
+}
+
+function draftCreationLookupResponse(string $query, mixed $productByIdentifier = null, array $variantNodes = []): mixed
+{
+    if (str_contains($query, 'metafieldDefinitions')) {
+        return Http::response([
+            'data' => [
+                'metafieldDefinitions' => [
+                    'nodes' => [['id' => 'gid://shopify/MetafieldDefinition/1', 'type' => ['name' => 'id']]],
+                ],
+            ],
+        ]);
+    }
+
+    if (str_contains($query, 'productByIdentifier')) {
+        return Http::response([
+            'data' => [
+                'productByIdentifier' => $productByIdentifier,
+            ],
+        ]);
+    }
+
+    if (str_contains($query, 'query VariantsBySku')) {
+        return Http::response([
+            'data' => [
+                'productVariants' => [
+                    'nodes' => $variantNodes,
+                ],
+            ],
+        ]);
+    }
+
+    return null;
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function createdDraftProduct(
+    NewProductDraft $draft,
+    string $productId,
+    string $handle,
+    string $variantId,
+    string $inventoryItemId,
+    bool $tracked = false,
+    ?int $onHand = null,
+    ?string $price = null,
+    ?string $compareAt = null,
+): array {
+    $sku = trim((string) ($draft->sku ?? ''));
+    $inventoryItem = [
+        'id' => $inventoryItemId,
+        'tracked' => $tracked,
+        'sku' => $sku,
+    ];
+    if ($onHand !== null) {
+        $inventoryItem['inventoryLevel'] = [
+            'quantities' => [[
+                'name' => 'on_hand',
+                'quantity' => $onHand,
+            ]],
+        ];
+    }
+
+    return [
+        'id' => $productId,
+        'handle' => $handle,
+        'status' => 'DRAFT',
+        'metafield' => ['value' => (string) $draft->id],
+        'variants' => [
+            'nodes' => [[
+                'id' => $variantId,
+                'sku' => $sku,
+                'barcode' => $sku,
+                'price' => $price ?? number_format((float) $draft->variant_price, 2, '.', ''),
+                'compareAtPrice' => $compareAt,
+                'inventoryItem' => $inventoryItem,
+            ]],
+        ],
+    ];
 }

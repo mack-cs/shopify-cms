@@ -48,7 +48,7 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
 
             Product::query()
                 ->select(['id', 'handle', 'shopify_id'])
-                ->activeStatus()
+                ->inventoryEditableStatus()
                 ->where(function ($query): void {
                     $query->whereNotNull('shopify_id')
                         ->where('shopify_id', '!=', '')

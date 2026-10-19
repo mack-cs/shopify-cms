@@ -373,7 +373,7 @@ final class ProductInventoryCsvImporter
 
     private function activeProductQuery(Builder $query): Builder
     {
-        return $query->activeStatus();
+        return $query->inventoryEditableStatus();
     }
 
     /**
