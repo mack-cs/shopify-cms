@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductResource\Pages;
 
+use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
@@ -9,13 +10,16 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Services\DuplicateSkuCsvExporter;
 use App\Services\DuplicateSkuAuditService;
+use App\Services\ImageAltTextBackfillService;
 use App\Services\LocalCatalogResetService;
+use Filament\Forms\Components\FileUpload;
 use Filament\Notifications\Notification;
 use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
@@ -32,6 +36,51 @@ class ListProducts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('downloadImageAltTextTemplate')
+                ->label('Download Alt Text Template')
+                ->icon('heroicon-o-arrow-down-tray')
+                ->color('gray')
+                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
+                ->tooltip('Download an Excel file of images with no alt text. The preview uses the Shopify image link. Fill Alt Text and upload the same file.')
+                ->action(fn (ImageAltTextBackfillService $backfill) => $backfill->downloadMissing()),
+            Actions\Action::make('backfillImageAltText')
+                ->label('Backfill Image Alt Text')
+                ->icon('heroicon-o-language')
+                ->color('info')
+                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
+                ->modalDescription('Upload the Excel template or a CSV with columns SKU, Position, and Alt Text. Position 1 can be omitted. A SKU ending in -2, such as LA0550-2, fills image position 2. Existing alt text is replaced. Blank alt text is skipped.')
+                ->form([
+                    FileUpload::make('file')
+                        ->label('Alt text file')
+                        ->required()
+                        ->disk('local')
+                        ->directory('imports/image-alt-text')
+                        ->acceptedFileTypes([
+                            'text/csv',
+                            'text/plain',
+                            'application/vnd.ms-excel',
+                            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                            'application/zip',
+                        ]),
+                ])
+                ->action(function (array $data, ImageAltTextBackfillService $backfill): void {
+                    $path = Storage::disk('local')->path((string) $data['file']);
+                    $result = $backfill->importFromPath($path);
+                    $unmatched = collect($result['unmatched'])->take(8)->map(
+                        fn (array $row): string => "Row {$row['row']}: {$row['reason']}"
+                    )->implode("\n");
+                    $body = "Updated {$result['updated']}. Unchanged {$result['unchanged']}. Blank alt text skipped {$result['skipped_blank']}. Unmatched ".count($result['unmatched']).'.';
+                    if ($unmatched !== '') {
+                        $body .= "\n".$unmatched;
+                    }
+
+                    $notification = Notification::make()
+                        ->title('Image alt text backfill complete')
+                        ->body($body)
+                        ->persistent();
+                    $result['unmatched'] === [] ? $notification->success() : $notification->warning();
+                    $notification->send();
+                }),
             Actions\Action::make('exportDuplicateSkus')
                 ->label('Export Duplicate SKUs')
                 ->icon('heroicon-o-arrow-down-tray')

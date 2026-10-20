@@ -112,6 +112,44 @@ it('imports only direct image files in the normalized S3 folder and records the 
         ->and($item->status)->toBe(ShopifyImageImportItem::STATUS_UPDATED);
 });
 
+it('imports a filename position suffix as that image position on the base sku', function (): void {
+    Storage::fake('shopify_product_images');
+    Storage::fake('public');
+    config()->set('shopify_image_import.disk', 'shopify_product_images');
+    Http::preventStrayRequests();
+
+    Storage::disk('shopify_product_images')->put('incoming/2026-10-16/LA0550-2.jpg', 'second-image');
+    Storage::disk('shopify_product_images')->put('incoming/2026-10-16/LA0550.jpg', 'first-image');
+    Storage::disk('shopify_product_images')->put('incoming/2026-10-16/KEEP-2.jpg', 'literal-sku');
+
+    $product = createImageImportProduct('LA0550');
+    $literal = createImageImportProduct('KEEP-2');
+
+    $batch = ShopifyImageImportBatch::create([
+        's3_prefix' => '2026-10-16',
+        'status' => ShopifyImageImportBatch::STATUS_PENDING,
+    ]);
+
+    $result = app(ShopifyImageImportService::class)->runBatch($batch);
+
+    $first = $product->images()->where('position', 1)->first();
+    $second = $product->images()->where('position', 2)->first();
+
+    expect($result['failed_count'])->toBe(0)
+        ->and($result['updated_count'])->toBe(3)
+        ->and($first)->not->toBeNull()
+        ->and($second)->not->toBeNull()
+        ->and($first->imageAsset?->original_filename)->toBe('LA0550.jpg')
+        ->and($second->imageAsset?->original_filename)->toBe('LA0550-2.jpg')
+        ->and($literal->images()->where('position', 1)->count())->toBe(1)
+        ->and($literal->images()->where('position', 2)->count())->toBe(0);
+
+    expect(ShopifyImageImportItem::query()->where('s3_key', 'incoming/2026-10-16/LA0550-2.jpg')->first())
+        ->sku->toBe('LA0550')
+        ->status->toBe(ShopifyImageImportItem::STATUS_UPDATED)
+        ->message->toContain('Image position 2');
+});
+
 it('targets parent stacks for rebuild when an imported component image changes', function (): void {
     Storage::fake('shopify_product_images');
     Storage::fake('public');

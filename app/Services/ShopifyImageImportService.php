@@ -224,7 +224,17 @@ class ShopifyImageImportService
             ->map(fn (string $key): string => trim(str_replace('\\', '/', $key), '/'))
             ->filter(fn (string $key): bool => dirname($key) === $normalizedPrefix)
             ->filter(fn (string $key): bool => $this->isSupportedImageKey($key))
-            ->sort()
+            ->sortBy(function (string $key): array {
+                $stem = trim((string) pathinfo($key, PATHINFO_FILENAME));
+                $base = $stem;
+                $position = 1;
+                if (preg_match('/^(.+)-(\d+)$/', $stem, $matches) === 1) {
+                    $base = $matches[1];
+                    $position = max(1, (int) $matches[2]);
+                }
+
+                return [mb_strtolower($base), $position, $key];
+            })
             ->values()
             ->all();
     }
@@ -234,7 +244,9 @@ class ShopifyImageImportService
      */
     private function processImageKey(ShopifyImageImportBatch $batch, string $key): array
     {
-        $sku = $this->skuFromKey($key);
+        $identity = $this->imageIdentityFromKey($key);
+        $sku = $identity['sku'];
+        $position = $identity['position'];
         $item = ShopifyImageImportItem::query()->updateOrCreate(
             [
                 'batch_id' => $batch->id,
@@ -265,7 +277,7 @@ class ShopifyImageImportService
 
         try {
             $asset = $this->storeS3ImageAsAsset($key);
-            $prepared = $this->prepareFirstImageForImport($product, $asset, basename($key));
+            $prepared = $this->prepareImageForImport($product, $asset, basename($key), $position);
             $image = $prepared['image'];
             $alreadySynced = $prepared['already_synced'];
             $product = $product->fresh() ?? $product;
@@ -276,9 +288,10 @@ class ShopifyImageImportService
             $this->pointImageSrcAtManagedRoute($image->fresh() ?? $image);
             $this->markProductImportStatus($product, $batch, 'updated');
 
+            $positionLabel = $position <= 1 ? 'First image' : "Image position {$position}";
             $message = ($alreadySynced && $renamedCount === 0 && $duplicateCleanupCount === 0)
                 ? 'Image already matched the latest imported asset; Shopify sync left pending for approval.'
-                : 'First image replaced locally, filenames normalized, and duplicate positions cleaned. Shopify sync left pending for approval.';
+                : "{$positionLabel} replaced locally, filenames normalized, and duplicate positions cleaned. Shopify sync left pending for approval.";
 
             $this->markItem($item, ShopifyImageImportItem::STATUS_UPDATED, $message);
 
@@ -308,16 +321,18 @@ class ShopifyImageImportService
     /**
      * @return array{image:Image, already_synced:bool}
      */
-    private function prepareFirstImageForImport(Product $product, ImageAsset $asset, string $filename): array
+    private function prepareImageForImport(Product $product, ImageAsset $asset, string $filename, int $position = 1): array
     {
-        return DB::transaction(function () use ($product, $asset, $filename): array {
-            $image = $this->firstActiveImage($product);
+        $position = max(1, $position);
+
+        return DB::transaction(function () use ($product, $asset, $filename, $position): array {
+            $image = $this->imageForImportPosition($product, $position);
             $alreadySynced = false;
 
             if (!$image instanceof Image) {
                 $image = new Image([
                     'product_id' => $product->id,
-                    'position' => 1,
+                    'position' => $position,
                 ]);
             } else {
                 $alreadySynced = (int) ($image->image_asset_id ?? 0) === (int) $asset->id
@@ -330,7 +345,7 @@ class ShopifyImageImportService
             $hasShopifyId = filled(trim((string) ($image->shopify_id ?? '')));
             $needsSync = !$alreadySynced;
 
-            Image::withoutEvents(function () use ($image, $asset, $filename, $hasShopifyId, $needsSync, $alreadySynced): void {
+            Image::withoutEvents(function () use ($image, $asset, $filename, $hasShopifyId, $needsSync, $alreadySynced, $position): void {
                 $image->forceFill([
                     'image_asset_id' => $asset->id,
                     'image_path' => null,
@@ -339,7 +354,7 @@ class ShopifyImageImportService
                     'backup_error' => null,
                     'approved_filename' => $this->safeFilename($filename),
                     'filename_mode' => Image::FILENAME_MODE_MANUAL,
-                    'position' => 1,
+                    'position' => $position,
                     'sync_state' => $alreadySynced
                         ? Image::SYNC_STATE_SYNCED
                         : ($hasShopifyId ? Image::SYNC_STATE_LOCAL_UPDATED : Image::SYNC_STATE_LOCAL_NEW),
@@ -354,7 +369,7 @@ class ShopifyImageImportService
                 ])->save();
             });
 
-            $this->removeExtraActivePositionOneImages($product, $image);
+            $this->removeExtraActiveImagesAtPosition($product, $image, $position);
 
             return [
                 'image' => $image->fresh() ?? $image,
@@ -857,11 +872,41 @@ class ShopifyImageImportService
             ->first();
     }
 
-    private function removeExtraActivePositionOneImages(Product $product, Image $primary): void
+    private function imageForImportPosition(Product $product, int $position): ?Image
+    {
+        if ($position <= 1) {
+            $image = $this->firstActiveImage($product);
+            if ($image instanceof Image && ($image->position === null || (int) $image->position <= 1)) {
+                return $image;
+            }
+
+            return $this->activeImageAtPosition($product, 1);
+        }
+
+        return $this->activeImageAtPosition($product, $position);
+    }
+
+    private function activeImageAtPosition(Product $product, int $position): ?Image
+    {
+        return $product->allImages()
+            ->where('position', $position)
+            ->whereNotIn('sync_state', [
+                Image::SYNC_STATE_LOCAL_DELETED,
+                Image::SYNC_STATE_REMOTE_DELETED,
+            ])
+            ->where(function ($query): void {
+                $query->whereNull('is_duplicate_hidden')
+                    ->orWhere('is_duplicate_hidden', false);
+            })
+            ->orderBy('id')
+            ->first();
+    }
+
+    private function removeExtraActiveImagesAtPosition(Product $product, Image $primary, int $position): void
     {
         $product->allImages()
             ->whereKeyNot($primary->id)
-            ->where('position', 1)
+            ->where('position', $position)
             ->whereNotIn('sync_state', [
                 Image::SYNC_STATE_LOCAL_DELETED,
                 Image::SYNC_STATE_REMOTE_DELETED,
@@ -1145,9 +1190,29 @@ class ShopifyImageImportService
         return in_array($this->extensionFromName($key), self::SUPPORTED_EXTENSIONS, true);
     }
 
-    private function skuFromKey(string $key): string
+    /**
+     * @return array{sku:string, position:int}
+     */
+    private function imageIdentityFromKey(string $key): array
     {
-        return trim((string) pathinfo($key, PATHINFO_FILENAME));
+        $stem = trim((string) pathinfo($key, PATHINFO_FILENAME));
+        if ($stem === '') {
+            return ['sku' => '', 'position' => 1];
+        }
+
+        if ($this->findProductBySku($stem) instanceof Product) {
+            return ['sku' => $stem, 'position' => 1];
+        }
+
+        if (preg_match('/^(.+)-(\d+)$/', $stem, $matches) === 1) {
+            $position = (int) $matches[2];
+            $base = trim($matches[1]);
+            if ($position >= 1 && $base !== '' && $this->findProductBySku($base) instanceof Product) {
+                return ['sku' => $base, 'position' => $position];
+            }
+        }
+
+        return ['sku' => $stem, 'position' => 1];
     }
 
     private function diskName(): string
