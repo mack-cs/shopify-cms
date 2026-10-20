@@ -15,6 +15,7 @@ class ShopYourVibeDraft extends Model
         'desired' => 'array',
         'progress' => 'array',
         'remote_jobs' => 'array',
+        'operation' => 'array',
         'pending' => 'boolean',
         'revision' => 'integer',
         'refreshed_at' => 'datetime',

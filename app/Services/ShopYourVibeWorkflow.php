@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\ShopYourVibeBusyException;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -21,6 +22,8 @@ class ShopYourVibeWorkflow
     public const PARENT_PREFIX_WARNING = "The collection name is added automatically. We've removed it from your vibe name.";
 
     private const VIBE_SEPARATOR = '[\s\-–—:\/|]+';
+
+    private ?string $lockToken = null;
 
     public function __construct(private readonly ShopYourVibeShopify $shopify) {}
 
@@ -133,20 +136,23 @@ class ShopYourVibeWorkflow
         if ($draft->remote_jobs) {
             throw new RuntimeException('A Shopify operation is still awaiting confirmation. Retry the push before refreshing.');
         }
-        $this->shopify->definition();
-        $state = $this->shopify->parent($draft->collection_gid);
-        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
-        foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
-            $state['collections'][$gid] = $this->shopify->collection($gid);
+        if (! empty($draft->operation) && ! $discard) {
+            throw new RuntimeException('A Shopify operation is still awaiting confirmation. Retry it before refreshing.');
         }
-        $state = $this->hydrateDraftPlacements($draft->collection_gid, $state, $draft->desired ?? []);
-
+        $state = $this->pullState($draft);
         app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($state);
 
-        $refreshed = DB::transaction(function () use ($id, $revision, $state) {
+        $refreshed = DB::transaction(function () use ($id, $revision, $state, $discard) {
             $draft = $this->editable($id, $revision, true);
+            if ($draft->pending && ! $discard) {
+                throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
+            }
+            if (! empty($draft->operation) && ! $discard) {
+                throw new RuntimeException('A Shopify operation is still awaiting confirmation. Retry it before refreshing.');
+            }
             $draft->update(['snapshot' => $state, 'desired' => $state, 'pending' => false, 'status' => 'synced',
-                'last_error' => null, 'progress' => [], 'remote_jobs' => [], 'revision' => $revision + 1, 'refreshed_at' => now()]);
+                'last_error' => null, 'progress' => [], 'remote_jobs' => [], 'operation' => null,
+                'revision' => $draft->revision + 1, 'refreshed_at' => now()]);
 
             return $draft;
         });
@@ -172,7 +178,7 @@ class ShopYourVibeWorkflow
             $desired['collections'][$gid] = $snapshot['collections'][$gid] = $collection;
             $desired = $this->hydrateDraftPlacements($draft->collection_gid, $desired, $desired);
             $snapshot = $this->hydrateDraftPlacements($draft->collection_gid, $snapshot, $desired);
-            $draft->update(['desired' => $desired, 'snapshot' => $snapshot, 'revision' => $revision + 1]);
+            $draft->update(['desired' => $desired, 'snapshot' => $snapshot, 'revision' => $draft->revision + 1]);
 
             return $draft;
         });
@@ -359,7 +365,7 @@ class ShopYourVibeWorkflow
             }
             $pending = $this->different($draft->snapshot, $state);
             $draft->update(['desired' => $state, 'pending' => $pending, 'status' => $pending ? 'pending' : 'synced',
-                'last_error' => null, 'revision' => $revision + 1]);
+                'last_error' => null, 'revision' => $draft->revision + 1]);
 
             return $draft;
         });
@@ -369,13 +375,167 @@ class ShopYourVibeWorkflow
     {
         return DB::transaction(function () use ($id, $revision) {
             $draft = $this->editable($id, $revision, true);
+            if (! empty($draft->operation) && in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
+                throw new RuntimeException('Finish or retry the in-progress Vibe operation before pushing other changes.');
+            }
             if (! $draft->pending) {
                 throw new RuntimeException('There are no pending changes to push.');
             }
-            $draft->update(['status' => 'pushing', 'last_error' => null, 'revision' => $revision + 1]);
+            $draft->update(['status' => 'pushing', 'last_error' => null, 'operation' => null, 'revision' => $draft->revision + 1]);
 
             return $draft;
         });
+    }
+
+    public function queueCreateVibe(int $id, int $revision, array $input): ShopYourVibeDraft
+    {
+        $draft = $this->editable($id, $revision);
+        $this->assertImmediateAllowed($draft);
+        if (! empty($draft->operation)) {
+            throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
+        }
+        $payload = $this->prepareCreatePayload($draft, $input);
+
+        return DB::transaction(function () use ($id, $revision, $payload) {
+            $draft = $this->editable($id, $revision, true);
+            $this->assertImmediateAllowed($draft);
+            if (! empty($draft->operation)) {
+                throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
+            }
+            if ($payload['mode'] === 'new' && ShopifyCollection::where('handle', $payload['handle'])->exists()) {
+                throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
+            }
+            $attempt = (string) Str::uuid();
+
+            $draft->update([
+                'status' => 'creating',
+                'pending' => false,
+                'last_error' => null,
+                'progress' => ['Creating Vibe in Shopify...'],
+                'operation' => [
+                    'id' => $attempt,
+                    'attempt' => $attempt,
+                    'type' => 'create_vibe',
+                    'payload' => $payload,
+                    'checkpoints' => [
+                        'image_gid' => $payload['image'] ?: null,
+                        'collection_gid' => $payload['mode'] === 'existing' ? $payload['collection_gid'] : null,
+                        'handle' => $payload['handle'],
+                        'card_id' => null,
+                        'card_handle' => $payload['card_handle'],
+                        'attached' => false,
+                        'published' => $payload['mode'] !== 'new',
+                    ],
+                ],
+                'revision' => $draft->revision + 1,
+            ]);
+
+            return $draft->refresh();
+        });
+    }
+
+    public function queueDeleteVibe(int $id, int $revision, array $input): ShopYourVibeDraft
+    {
+        $draft = $this->editable($id, $revision);
+        $this->assertImmediateAllowed($draft);
+        if (! empty($draft->operation)) {
+            throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
+        }
+        $payload = $this->prepareDeletePayload($draft, $input);
+        if ($payload['mode'] === 'collection') {
+            $this->shopify->collectionForDeletion($payload['collection']);
+        }
+        if (in_array($payload['mode'], ['permanent', 'collection'], true)) {
+            $this->shopify->assertCardDeletable($payload['card'], $draft->collection_gid);
+        }
+
+        return DB::transaction(function () use ($id, $revision, $payload) {
+            $draft = $this->editable($id, $revision, true);
+            $this->assertImmediateAllowed($draft);
+            if (! empty($draft->operation)) {
+                throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
+            }
+            $attempt = (string) Str::uuid();
+            $draft->update([
+                'status' => 'deleting',
+                'pending' => false,
+                'last_error' => null,
+                'progress' => ['Deleting Vibe in Shopify...'],
+                'operation' => [
+                    'id' => $attempt,
+                    'attempt' => $attempt,
+                    'type' => 'delete_vibe',
+                    'payload' => $payload,
+                    'checkpoints' => [
+                        'detached' => false,
+                        'card_deleted' => $payload['mode'] === 'layout',
+                        'collection_deleted' => $payload['mode'] !== 'collection',
+                    ],
+                ],
+                'revision' => $draft->revision + 1,
+            ]);
+
+            return $draft->refresh();
+        });
+    }
+
+    public function resumeOperation(int $id): ShopYourVibeDraft
+    {
+        return DB::transaction(function () use ($id) {
+            $draft = ShopYourVibeDraft::query()->lockForUpdate()->findOrFail($id);
+            if ($draft->status !== 'failed' || ! in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
+                throw new RuntimeException('There is no failed Shopify operation to retry.');
+            }
+            if ($draft->pending && $this->different($draft->snapshot, $draft->desired)) {
+                throw new RuntimeException('This collection has pending changes. Push or discard them before retrying.');
+            }
+            $operation = $draft->operation;
+            $operation['attempt'] = (string) Str::uuid();
+            $draft->update([
+                'status' => $operation['type'] === 'create_vibe' ? 'creating' : 'deleting',
+                'pending' => false,
+                'last_error' => null,
+                'operation' => $operation,
+                'revision' => $draft->revision + 1,
+            ]);
+
+            return $draft->refresh();
+        });
+    }
+
+    public function runImmediate(int $id, string $attempt): void
+    {
+        $draft = ShopYourVibeDraft::findOrFail($id);
+        if (! in_array($draft->status, ['creating', 'deleting'], true) || ($draft->operation['attempt'] ?? null) !== $attempt) {
+            return;
+        }
+        $this->holdOperationLock($draft);
+        try {
+            $draft->refresh();
+            if (! in_array($draft->status, ['creating', 'deleting'], true) || ($draft->operation['attempt'] ?? null) !== $attempt) {
+                return;
+            }
+            if ($draft->operation['type'] === 'create_vibe') {
+                $this->runCreate($draft);
+            } elseif ($draft->operation['type'] === 'delete_vibe') {
+                $this->runDelete($draft);
+            }
+        } catch (ShopYourVibeBusyException $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            report($e);
+            $fresh = $draft->fresh() ?? $draft;
+            if (($fresh->operation['attempt'] ?? null) === $attempt && in_array($fresh->status, ['creating', 'deleting', 'failed'], true)) {
+                $fresh->update([
+                    'status' => 'failed',
+                    'pending' => false,
+                    'last_error' => $e->getMessage(),
+                    'revision' => $fresh->revision + 1,
+                ]);
+            }
+        } finally {
+            $this->releaseOperationLock($draft);
+        }
     }
 
     public function confirmCompletedPush(int $id): ShopYourVibeDraft
@@ -410,15 +570,12 @@ class ShopYourVibeWorkflow
     /** Called by the queue worker only after the explicit push action. */
     public function push(int $id): void
     {
-        $lock = Cache::lock('shop-your-vibe-push', 900);
         $draft = ShopYourVibeDraft::findOrFail($id);
-        if ($draft->status !== 'pushing') {
+        if ($draft->status !== 'pushing' || in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
             return;
         }
+        $this->holdOperationLock($draft);
         try {
-            if (! $lock->get()) {
-                throw new RuntimeException('Another Shop Your Vibe push is running. Please retry shortly.');
-            }
             $this->shopify->definition();
             $state = $draft->desired;
             $baseline = $draft->snapshot;
@@ -437,20 +594,7 @@ class ShopYourVibeWorkflow
                 throw new RuntimeException('The preview layout changed in Shopify. Refresh and review before pushing.');
             }
             // Check every existing card before issuing any new mutations.
-            foreach ($state['cards'] as $card) {
-                if (! $card['id']) {
-                    continue;
-                }
-                $before = collect($baseline['cards'])->firstWhere('id', $card['id']);
-                $current = collect($remote['cards'])->firstWhere('id', $card['id']);
-                // Successfully created, not-yet-attached objects are checkpointed in the baseline.
-                if (! $current && ! in_array($card['id'], $baseline['reference_ids'], true)) {
-                    $current = $before;
-                }
-                if (! $current || ($this->fields($current) !== $this->fields($before) && $this->fields($current) !== $this->fields($card))) {
-                    throw new RuntimeException('A preview card changed in Shopify. Refresh and review before pushing.');
-                }
-            }
+            $this->assertCardsUnchanged($baseline, $remote, $state['cards']);
             $currentCollections = [];
             foreach ($state['delete_collections'] ?? [] as $deletion) {
                 if (! $deletion['deleted']) {
@@ -556,6 +700,7 @@ class ShopYourVibeWorkflow
             $baseline['cards'] = $state['cards'];
             $draft->update(['snapshot' => $baseline, 'progress' => $progress]);
 
+            $this->holdOperationLock($draft);
             foreach ($currentCollections as $gid => $current) {
                 $desired = $state['collections'][$gid];
                 if ($desired['enable_manual'] && $current['sort'] !== 'MANUAL') {
@@ -624,6 +769,7 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
             }
             // A final read confirms the complete layout, including exact reference order and fields.
+            $this->holdOperationLock($draft);
             foreach ($state['delete_cards'] ?? [] as $key => $deletion) {
                 if ($deletion['deleted']) {
                     continue;
@@ -650,18 +796,20 @@ class ShopYourVibeWorkflow
             $confirmed = $this->confirmedState($draft, $state, $ids);
             $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'remote_jobs' => [], 'progress' => $progress, 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
+        } catch (ShopYourVibeBusyException $e) {
+            throw $e;
         } catch (Throwable $e) {
             report($e);
             $draft->update(['pending' => true, 'status' => 'failed', 'last_error' => $e->getMessage(), 'revision' => $draft->revision + 1]);
         } finally {
-            $lock->release();
+            $this->releaseOperationLock($draft);
         }
     }
 
     private function confirmedState(ShopYourVibeDraft $draft, array $state, array $ids): array
     {
         $confirmed = $this->shopify->parent($draft->collection_gid);
-        if ($confirmed['reference_ids'] !== $ids || array_map($this->fields(...), $confirmed['cards']) !== array_map($this->fields(...), $state['cards'])) {
+        if ($confirmed['reference_ids'] !== $ids || array_map($this->shopifyComparable(...), $confirmed['cards']) !== array_map($this->shopifyComparable(...), $state['cards'])) {
             throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
         }
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
@@ -947,14 +1095,434 @@ class ShopYourVibeWorkflow
     private function editable(int $id, int $revision, bool $lock = false): ShopYourVibeDraft
     {
         $draft = ShopYourVibeDraft::query()->when($lock, fn ($query) => $query->lockForUpdate())->findOrFail($id);
-        if ($draft->status === 'pushing') {
-            throw new RuntimeException('Changes are being pushed to Shopify. Wait for completion before editing.');
+        if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true)) {
+            throw new RuntimeException($this->activeOperationMessage($draft));
         }
-        if ($draft->revision !== $revision) {
+        if ($draft->revision !== $revision && ! $this->staleRevisionIsHarmless($draft)) {
             throw new RuntimeException('This draft changed in another tab or session. Reopen it before editing.');
         }
 
         return $draft;
+    }
+
+    private function activeOperationMessage(ShopYourVibeDraft $draft): string
+    {
+        return match ($draft->status) {
+            'creating' => 'A Vibe is being created in Shopify. Wait for it to finish before editing.',
+            'deleting' => 'A Vibe is being deleted in Shopify. Wait for it to finish before editing.',
+            default => 'Changes are being pushed to Shopify. Wait for completion before editing.',
+        };
+    }
+
+    /**
+     * A synced draft has no unsaved edit to protect. An old Livewire revision is
+     * not a concurrent edit, so the next action may apply to the current database state.
+     */
+    private function staleRevisionIsHarmless(ShopYourVibeDraft $draft): bool
+    {
+        return $draft->status === 'synced'
+            && ! $draft->pending
+            && empty($draft->remote_jobs)
+            && empty($draft->operation)
+            && ! $this->different($draft->snapshot ?? [], $draft->desired ?? []);
+    }
+
+    private function assertImmediateAllowed(ShopYourVibeDraft $draft): void
+    {
+        if ($draft->pending || $this->different($draft->snapshot ?? [], $draft->desired ?? [])) {
+            throw new RuntimeException('This collection has pending changes. Push or discard them before adding or removing a vibe.');
+        }
+    }
+
+    private function prepareCreatePayload(ShopYourVibeDraft $draft, array $input): array
+    {
+        $mode = ($input['mode'] ?? 'new') === 'existing' ? 'existing' : 'new';
+        $token = (string) Str::uuid();
+        if ($mode === 'existing') {
+            $collection = $this->localCollection((string) ($input['collection_gid'] ?? ''));
+            if ($collection->shopify_id === $draft->collection_gid) {
+                throw new RuntimeException('Choose a collection other than the parent collection being edited.');
+            }
+
+            return [
+                'mode' => 'existing',
+                'token' => $token,
+                'collection_gid' => $collection->shopify_id,
+                'title' => $collection->title,
+                'handle' => $collection->handle,
+                'name' => $collection->title,
+                'image' => (string) ($input['image'] ?? ''),
+                'image_path' => $input['image_path'] ?? null,
+                'image_url' => $input['image_url'] ?? null,
+                'card_handle' => 'cms-vibe-'.$token,
+                'import_id' => null,
+            ];
+        }
+
+        $importId = ShopifyCollection::where('shopify_id', $draft->collection_gid)->latest('id')->value('import_id')
+            ?? Import::orderByDesc('is_current')->latest('id')->value('id');
+        if (! $importId) {
+            throw new RuntimeException('Synchronize the collection catalogue before creating a collection.');
+        }
+        $prepared = $this->preparedCollectionInput($draft, $input);
+        if (($prepared['image'] ?? '') === '') {
+            $prepared['image'] = null;
+        }
+        $fields = Validator::make($prepared, [
+            'title' => 'required|string|max:255',
+            'handle' => ['required', 'string', 'max:255', 'regex:/^[a-z0-9]+(?:-[a-z0-9]+)*$/'],
+            'vibe_name' => 'required|string|max:255',
+            'image' => ['nullable', 'regex:~^gid://shopify/MediaImage/\d+$~'],
+            'image_path' => ['nullable', 'regex:~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~'],
+            'image_url' => 'nullable|url|max:4096',
+        ])->validate();
+        if (ShopifyCollection::where('handle', $fields['handle'])->exists()) {
+            throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
+        }
+        if ($this->shopify->findCollectionByHandle($fields['handle'])) {
+            throw new RuntimeException('The handle "'.$fields['handle'].'" is already used in Shopify. Choose the existing collection or a different vibe name.');
+        }
+
+        return [
+            'mode' => 'new',
+            'token' => $token,
+            'collection_gid' => null,
+            'title' => $fields['title'],
+            'handle' => $fields['handle'],
+            'name' => $fields['vibe_name'],
+            'image' => (string) ($fields['image'] ?? ''),
+            'image_path' => $fields['image_path'] ?? null,
+            'image_url' => $fields['image_url'] ?? null,
+            'card_handle' => 'cms-vibe-'.$token,
+            'import_id' => (int) $importId,
+        ];
+    }
+
+    private function prepareDeletePayload(ShopYourVibeDraft $draft, array $input): array
+    {
+        $mode = (string) ($input['mode'] ?? 'layout');
+        if (! in_array($mode, ['layout', 'permanent', 'collection'], true)) {
+            throw new RuntimeException('Choose a removal option.');
+        }
+        $card = collect($draft->snapshot['cards'] ?? [])->firstWhere('key', $input['key'] ?? null)
+            ?? collect($draft->desired['cards'] ?? [])->firstWhere('key', $input['key'] ?? null);
+        if (! is_array($card)) {
+            throw new RuntimeException('This vibe is no longer in the draft.');
+        }
+        $collection = $mode === 'collection' ? $this->assertCollectionDeletable($draft, $card) : null;
+
+        return ['mode' => $mode, 'key' => $card['key'], 'card' => $card, 'collection' => $collection];
+    }
+
+    private function assertCollectionDeletable(ShopYourVibeDraft $draft, array $card): array
+    {
+        $gid = (string) ($card['collection_gid'] ?? '');
+        if ($gid === '' || $gid === $draft->collection_gid || str_starts_with($gid, 'new:')) {
+            throw new RuntimeException('Choose a vibe linked to a collection other than the parent collection being edited.');
+        }
+        $sharedHere = collect($draft->snapshot['cards'] ?? [])
+            ->contains(fn ($item) => ($item['collection_gid'] ?? null) === $gid && ($item['key'] ?? null) !== ($card['key'] ?? null));
+        if ($sharedHere) {
+            throw new RuntimeException('Another vibe in this layout uses the collection selected for deletion. Remove that vibe first.');
+        }
+        if (ShopYourVibeDraft::query()->where('collection_gid', $gid)->where('id', '!=', $draft->id)->exists()) {
+            throw new RuntimeException('This collection is a Shop Your Vibe parent in another workflow and cannot be deleted.');
+        }
+        ShopYourVibeDraft::query()->where('id', '!=', $draft->id)->get(['snapshot', 'desired'])->each(function (ShopYourVibeDraft $other) use ($gid): void {
+            foreach ([$other->snapshot['cards'] ?? [], $other->desired['cards'] ?? []] as $cards) {
+                if (collect($cards)->contains(fn ($item) => ($item['collection_gid'] ?? null) === $gid)) {
+                    throw new RuntimeException('Another Shop Your Vibe uses this collection. Remove that vibe first.');
+                }
+            }
+        });
+        $linked = $this->localCollection($gid);
+
+        return ['gid' => $gid, 'handle' => $linked->handle, 'title' => $linked->title, 'token' => null, 'deleted' => false];
+    }
+
+    private function runCreate(ShopYourVibeDraft $draft): void
+    {
+        $this->shopify->definition();
+        $payload = $draft->operation['payload'];
+        $checkpoints = $draft->operation['checkpoints'];
+        if (empty($checkpoints['attached'])) {
+            $remote = $this->shopify->parent($draft->collection_gid);
+            $this->assertCreateLayout($draft->snapshot, $remote);
+        }
+        if ($payload['mode'] === 'new' && empty($checkpoints['collection_gid'])) {
+            if (! empty($payload['image_path']) && empty($checkpoints['image_gid'])) {
+                $checkpoints['image_gid'] = $this->shopify->uploadImage($payload['image_path'], $payload['token'], $payload['title']);
+                $this->saveOperation($draft, $checkpoints, 'Image uploaded.');
+            }
+            $imageUrl = $payload['image_url'] ?? null;
+            if (! empty($checkpoints['image_gid'])) {
+                $image = $this->shopify->image($checkpoints['image_gid'], true);
+                $imageUrl = $image['image']['url'] ?? $imageUrl;
+            }
+            $created = $this->shopify->createCollection([
+                'title' => $payload['title'],
+                'handle' => $payload['handle'],
+                'token' => $payload['token'],
+                'membership_tag' => $payload['handle'],
+            ], $imageUrl);
+            $checkpoints['collection_gid'] = $created['id'];
+            $checkpoints['handle'] = $created['handle'];
+            $this->rememberCollectionRecord($payload['import_id'], $created['id'], $created['handle'], $payload['title']);
+            $this->saveOperation($draft, $checkpoints, 'Collection created: '.$created['title']);
+        }
+        if (empty($checkpoints['card_id'])) {
+            $handle = $checkpoints['handle'] ?? $payload['handle'];
+            $checkpoints['card_id'] = $this->shopify->saveCard([
+                'id' => null,
+                'handle' => $checkpoints['card_handle'],
+                'name' => $payload['name'],
+                'image' => (string) ($checkpoints['image_gid'] ?? $payload['image'] ?? ''),
+                'link' => rtrim((string) config('services.shopify.storefront_url'), '/').'/collections/'.$handle,
+            ]);
+            $this->saveOperation($draft, $checkpoints, 'Card created: '.$payload['name']);
+        }
+        if (empty($checkpoints['attached'])) {
+            $remote = $this->shopify->parent($draft->collection_gid);
+            $this->assertCreateLayout($draft->snapshot, $remote);
+            // Append to the live Shopify list. The saved snapshot can be older than another user's vibe.
+            $ids = $remote['reference_ids'];
+            if (! in_array($checkpoints['card_id'], $ids, true)) {
+                $ids[] = $checkpoints['card_id'];
+                $this->shopify->setReferences($draft->collection_gid, $ids, $remote['digest']);
+            }
+            $checkpoints['attached'] = true;
+            $this->saveOperation($draft, $checkpoints, 'Preview card added to the collection.');
+        }
+        if ($payload['mode'] === 'new' && empty($checkpoints['published'])) {
+            $publication = $this->shopify->onlineStorePublication();
+            $this->shopify->publishCollection($checkpoints['collection_gid'], $publication);
+            $checkpoints['published'] = true;
+            $this->saveOperation($draft, $checkpoints, 'Collection published to Online Store: '.$payload['title']);
+        }
+        $this->finishImmediate($draft);
+    }
+
+    private function runDelete(ShopYourVibeDraft $draft): void
+    {
+        $this->shopify->definition();
+        $payload = $draft->operation['payload'];
+        $checkpoints = $draft->operation['checkpoints'];
+        $card = $payload['card'];
+        if (empty($checkpoints['detached'])) {
+            $remote = $this->shopify->parent($draft->collection_gid);
+            $removedId = $card['id'] ?? null;
+            $alreadyGone = $removedId && ! in_array($removedId, $remote['reference_ids'], true);
+            $this->assertLayoutCompatible($draft->snapshot, $remote, $alreadyGone ? $removedId : null);
+            if (in_array($payload['mode'], ['permanent', 'collection'], true)) {
+                $this->shopify->assertCardDeletable($card, $draft->collection_gid);
+            }
+            if ($payload['mode'] === 'collection') {
+                $this->assertCollectionDeletable($draft, $card);
+                $this->shopify->collectionForDeletion($payload['collection']);
+            }
+            // Remove only the selected card from the live list, leaving vibes added since this snapshot.
+            $ids = array_values(array_filter($remote['reference_ids'], fn ($id) => $id !== $removedId));
+            if ($ids !== $remote['reference_ids']) {
+                $this->shopify->setReferences($draft->collection_gid, $ids, $remote['digest']);
+            }
+            $checkpoints['detached'] = true;
+            $this->saveOperation($draft, $checkpoints, 'Removed from the Shop Your Vibe preview.');
+        }
+        if (in_array($payload['mode'], ['permanent', 'collection'], true) && empty($checkpoints['card_deleted'])) {
+            $this->shopify->deleteCard($card);
+            $checkpoints['card_deleted'] = true;
+            $this->saveOperation($draft, $checkpoints, 'Vibe card deleted from Shopify: '.($card['name'] ?? 'Vibe'));
+        }
+        if ($payload['mode'] === 'collection' && empty($checkpoints['collection_deleted'])) {
+            $deletedGid = $this->shopify->deleteCollectionOnly($payload['collection']);
+            $gid = $deletedGid ?? $payload['collection']['gid'];
+            ShopifyCollection::where('shopify_id', $gid)->delete();
+            ShopYourVibeDraft::where('collection_gid', $gid)->where('id', '!=', $draft->id)->delete();
+            $checkpoints['collection_deleted'] = true;
+            $this->saveOperation($draft, $checkpoints, 'Collection deleted from Shopify; all products kept: '.$payload['collection']['title']);
+        }
+        $this->finishImmediate($draft);
+    }
+
+    private function finishImmediate(ShopYourVibeDraft $draft): void
+    {
+        $operationId = $draft->operation['id'] ?? null;
+        $state = $this->pullState($draft);
+        DB::transaction(function () use ($draft, $state, $operationId): void {
+            $locked = ShopYourVibeDraft::query()->lockForUpdate()->findOrFail($draft->id);
+            if (($locked->operation['id'] ?? null) !== $operationId) {
+                return;
+            }
+            if ($locked->pending && $this->different($locked->snapshot, $locked->desired)) {
+                $locked->update([
+                    'status' => 'failed',
+                    'last_error' => 'Pending draft changes appeared during the Shopify operation. Refresh and review before continuing.',
+                    'revision' => $locked->revision + 1,
+                ]);
+
+                return;
+            }
+            $locked->update([
+                'snapshot' => $state,
+                'desired' => $state,
+                'pending' => false,
+                'status' => 'synced',
+                'last_error' => null,
+                'remote_jobs' => [],
+                'operation' => null,
+                'progress' => array_values(array_merge($locked->progress ?? [], ['Shopify confirmed the Vibe operation.'])),
+                'refreshed_at' => now(),
+                'revision' => $locked->revision + 1,
+            ]);
+        });
+        Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
+    }
+
+    private function saveOperation(ShopYourVibeDraft $draft, array $checkpoints, ?string $progress = null): void
+    {
+        $operation = $draft->operation ?? [];
+        $operation['checkpoints'] = $checkpoints;
+        $attributes = ['operation' => $operation];
+        if ($progress) {
+            $attributes['progress'] = array_values(array_merge($draft->progress ?? [], [$progress]));
+        }
+        $draft->update($attributes);
+        $this->holdOperationLock($draft);
+    }
+
+    private function pullState(ShopYourVibeDraft $draft): array
+    {
+        $this->shopify->definition();
+        $state = $this->shopify->parent($draft->collection_gid);
+        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
+        foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
+            $state['collections'][$gid] = $this->shopify->collection($gid);
+        }
+        $state = $this->hydrateDraftPlacements($draft->collection_gid, $state, $draft->desired ?? []);
+
+        return $state;
+    }
+
+    private function rememberCollectionRecord(?int $importId, string $gid, string $handle, string $title): void
+    {
+        if (! $importId) {
+            return;
+        }
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::firstOrCreate(['shopify_id' => $gid], [
+            'import_id' => $importId,
+            'handle' => $handle,
+            'title' => $title,
+            'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED,
+            'last_synced_at' => now(),
+        ]));
+    }
+
+    private function holdOperationLock(ShopYourVibeDraft $draft): void
+    {
+        $key = 'shop-your-vibe-op:'.$draft->collection_gid;
+        $this->lockToken ??= (string) Str::uuid();
+        if (Cache::add($key, $this->lockToken, 180)) {
+            return;
+        }
+        if (Cache::get($key) === $this->lockToken) {
+            Cache::put($key, $this->lockToken, 180);
+
+            return;
+        }
+
+        throw new ShopYourVibeBusyException('Another Shop Your Vibe operation is running for this collection. It will retry automatically.');
+    }
+
+    private function releaseOperationLock(ShopYourVibeDraft $draft): void
+    {
+        if (! $this->lockToken) {
+            return;
+        }
+        $key = 'shop-your-vibe-op:'.$draft->collection_gid;
+        if (Cache::get($key) === $this->lockToken) {
+            Cache::forget($key);
+        }
+        $this->lockToken = null;
+    }
+
+    /**
+     * A synchronized draft can be edited with an old Livewire revision, so its snapshot
+     * may not contain vibes added in Shopify afterwards. Those ids stay on the live list.
+     * Cards this snapshot already knows about must still be unchanged.
+     */
+    private function assertCreateLayout(array $snapshot, array $remote): void
+    {
+        $this->assertCardsUnchanged($snapshot, $remote, $snapshot['cards'] ?? []);
+    }
+
+    private function assertLayoutCompatible(array $snapshot, array $remote, ?string $allowMissingId = null): void
+    {
+        $this->assertCardsUnchanged($snapshot, $remote, $snapshot['cards'] ?? [], $allowMissingId ? [$allowMissingId] : []);
+    }
+
+    private function assertCardsUnchanged(array $baseline, array $remote, array $cards, array $ignoreMissingIds = []): void
+    {
+        $conflicts = [];
+        foreach ($cards as $card) {
+            if (empty($card['id'])) {
+                continue;
+            }
+            if (in_array($card['id'], $ignoreMissingIds, true) && ! collect($remote['cards'] ?? [])->firstWhere('id', $card['id'])) {
+                continue;
+            }
+            $before = collect($baseline['cards'] ?? [])->firstWhere('id', $card['id']);
+            $current = collect($remote['cards'] ?? [])->firstWhere('id', $card['id']);
+            $referenced = in_array($card['id'], $baseline['reference_ids'] ?? [], true)
+                || in_array($card['id'], $remote['reference_ids'] ?? [], true);
+            if (! $current && ! $referenced) {
+                $current = $before;
+            }
+            $difference = $this->cardFieldDifference($before, $current, $card);
+            if ($difference !== []) {
+                $conflicts[] = $this->describeCardConflict($card, $difference);
+            }
+        }
+        if ($conflicts !== []) {
+            throw new RuntimeException('A preview card changed in Shopify. Refresh and review before pushing. '.implode(' ', $conflicts));
+        }
+    }
+
+    private function cardFieldDifference(?array $before, ?array $current, array $desired): array
+    {
+        if (! $current) {
+            return ['presence' => 'missing from Shopify'];
+        }
+        $remoteFields = $this->shopifyComparable($current);
+        $baseFields = $this->shopifyComparable($before);
+        $wantFields = $this->shopifyComparable($desired);
+        if ($remoteFields === $baseFields || $remoteFields === $wantFields) {
+            return [];
+        }
+        $difference = [];
+        foreach ($remoteFields as $key => $value) {
+            if ($value !== ($baseFields[$key] ?? '') && $value !== ($wantFields[$key] ?? '')) {
+                $difference[$key] = $value;
+            }
+        }
+
+        return $difference;
+    }
+
+    private function describeCardConflict(array $card, array $difference): string
+    {
+        $name = trim((string) ($card['name'] ?? 'Untitled'));
+        $id = (string) ($card['id'] ?? 'unsaved');
+
+        return 'Card "'.$name.'" ('.$id.') differs in: '.implode(', ', array_keys($difference)).'.';
+    }
+
+    private function shopifyComparable(?array $card): array
+    {
+        return [
+            'name' => trim((string) ($card['name'] ?? '')),
+            'image' => trim((string) ($card['image'] ?? '')),
+            'link' => ShopYourVibeShopify::canonicalLink((string) ($card['link'] ?? '')),
+        ];
     }
 
     private function card(array $state, string $key): array

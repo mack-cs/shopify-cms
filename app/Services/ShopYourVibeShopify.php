@@ -418,8 +418,11 @@ GQL, ['id' => $gid]);
             }
             $fields = array_column($object['fields'], 'value', 'key');
             foreach (['name', 'image', 'link'] as $field) {
-                if ((string) ($fields[$field] ?? '') !== (string) ($card[$field] ?? '')) {
-                    throw new RuntimeException('The vibe card changed in Shopify after removal was requested. Refresh and review it before deleting.');
+                $remote = self::canonicalCardField($field, (string) ($fields[$field] ?? ''));
+                $expected = self::canonicalCardField($field, (string) ($card[$field] ?? ''));
+                if ($remote !== $expected) {
+                    $name = trim((string) ($card['name'] ?? 'Untitled'));
+                    throw new RuntimeException('The vibe card changed in Shopify after removal was requested ('.$name.', field: '.$field.'). Refresh and review it before deleting.');
                 }
             }
             foreach ($object['referencedBy']['nodes'] as $reference) {
@@ -531,6 +534,47 @@ GQL, ['files' => [['originalSource' => $target['resourceUrl'], 'filename' => $fi
             'contentType' => 'IMAGE', 'alt' => $title, 'duplicateResolutionMode' => 'RAISE_ERROR']]], 'fileCreate');
 
         return $result['files'][0]['id'] ?? throw new RuntimeException('Shopify did not confirm the uploaded image.');
+    }
+
+    public static function canonicalCardField(string $field, string $value): string
+    {
+        $value = trim($value);
+        if ($field === 'link') {
+            return self::canonicalLink($value);
+        }
+
+        return $value;
+    }
+
+    public static function canonicalLink(string $link): string
+    {
+        $link = trim($link);
+        if ($link === '') {
+            return '';
+        }
+        $parts = parse_url($link);
+        if (! is_array($parts) || empty($parts['host'])) {
+            $path = (string) (parse_url($link, PHP_URL_PATH) ?? $link);
+
+            return rtrim($path, '/');
+        }
+        $scheme = strtolower((string) ($parts['scheme'] ?? 'https'));
+        $host = strtolower((string) $parts['host']);
+        $path = rtrim((string) ($parts['path'] ?? ''), '/');
+        $query = isset($parts['query']) && $parts['query'] !== '' ? '?'.$parts['query'] : '';
+
+        return $scheme.'://'.$host.$path.$query;
+    }
+
+    public function findCollectionByHandle(string $handle): ?array
+    {
+        $data = $this->client->graphql(<<<'GQL'
+query VibeCollectionByHandle($handle: String!) { collectionByIdentifier(identifier: {handle: $handle}) {
+  id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
+} }
+GQL, ['handle' => $handle]);
+
+        return $data['collectionByIdentifier'] ?? null;
     }
 
     public function createCollection(array $creation, ?string $imageUrl): array

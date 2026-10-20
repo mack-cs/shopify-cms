@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
+use App\Jobs\ApplyShopYourVibeOperation;
 use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibe;
 use App\Jobs\PushShopYourVibeProductSiblings;
@@ -108,6 +109,14 @@ class ShopYourVibe extends Page
     public bool $choosingImage = false;
 
     public bool $confirmingPush = false;
+
+    public bool $confirmingAdd = false;
+
+    #[Locked]
+    public array $pendingVibe = [];
+
+    #[Locked]
+    public ?string $observedStatus = null;
 
     public array $selectedProducts = [];
 
@@ -265,6 +274,9 @@ class ShopYourVibe extends Page
             $this->cardForm = [];
             $this->confirmingPush = false;
             if ($discard && ($draft = $this->draft()) && empty($draft->remote_jobs)) {
+                if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true)) {
+                    throw new \RuntimeException('Wait for the Shopify operation to finish before refreshing.');
+                }
                 $snapshot = $draft->snapshot;
                 $draft->update([
                     'desired' => $snapshot,
@@ -273,12 +285,16 @@ class ShopYourVibe extends Page
                     'last_error' => null,
                     'progress' => [],
                     'remote_jobs' => [],
+                    'operation' => null,
                     'revision' => $draft->revision + 1,
                 ]);
                 $this->accept($draft->refresh());
                 $this->dispatch('vibe-form-saved');
             }
             RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
+            if ($fresh = $this->draft()) {
+                $this->accept($fresh);
+            }
             Notification::make()
                 ->title('Shopify refresh queued')
                 ->body('This Shop Your Vibe draft will reload from Shopify in the background.')
@@ -307,6 +323,8 @@ class ShopYourVibe extends Page
         }
         $this->addingParent = ! $forCard;
         $this->addingCard = $forCard;
+        $this->confirmingAdd = false;
+        $this->pendingVibe = [];
         $this->selectedCollectionGid = '';
         $this->collectionMode = 'existing';
         $this->vibeNameWarning = null;
@@ -495,23 +513,92 @@ class ShopYourVibe extends Page
         }
         $this->vibeNameBlocked = false;
         $this->vibeNameWarning = null;
-        $this->attempt(function () use ($data): void {
-            $input = ['vibe_name' => (string) ($data['vibe_name'] ?? '')];
+        $this->attempt(function () use ($data, $normalized): void {
+            $pending = [
+                'mode' => 'new',
+                'vibe_name' => $normalized['name'],
+                'preview_name' => $normalized['name'],
+                'preview_title' => (string) ($data['generated_title'] ?? $this->newCollection['generated_title'] ?? ''),
+                'preview_handle' => (string) ($data['handle'] ?? $this->newCollection['handle'] ?? ''),
+            ];
             if ($data['image_mode'] === 'upload') {
-                $input['image_path'] = $data['upload']->store('shop-your-vibe', 'public');
-                if (! $input['image_path']) {
+                $pending['image_path'] = $data['upload']->store('shop-your-vibe', 'public');
+                if (! $pending['image_path']) {
                     throw new \RuntimeException('The image could not be saved. Please upload it again.');
                 }
-                $input['image_url'] = url(Storage::disk('public')->url($input['image_path']));
+                $pending['image_url'] = url(Storage::disk('public')->url($pending['image_path']));
             } elseif ($data['image_mode'] === 'existing') {
                 $image = app(ShopYourVibeShopify::class)->image($data['image_gid']);
-                $input['image'] = $image['id'];
-                $input['image_url'] = $image['image']['url'];
+                $pending['image'] = $image['id'];
+                $pending['image_url'] = $image['image']['url'];
             }
-            $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'create_collection', $input));
-            $this->confirmingPush = false;
+            $this->pendingVibe = $pending;
+            $this->confirmingAdd = true;
+            $this->dispatch('open-modal', id: 'confirm-add-vibe');
+        });
+    }
+
+    public function confirmAddVibe(): void
+    {
+        $this->guard();
+        abort_unless($this->confirmingAdd && $this->pendingVibe !== [] && $this->draftId, 422);
+        $this->attempt(function (): void {
+            $draft = app(ShopYourVibeWorkflow::class)->queueCreateVibe($this->draftId, $this->revision, $this->pendingVibe);
+            $this->accept($draft);
+            $this->dispatchImmediate($draft);
+            $draft = $draft->fresh();
+            $this->accept($draft);
+            if ($draft->status === 'failed') {
+                throw new \RuntimeException($draft->last_error ?: 'Shopify could not create this Vibe.');
+            }
+            $this->confirmingAdd = false;
+            $this->pendingVibe = [];
             $this->closeCollectionPicker();
+            $this->dispatch('close-modal', id: 'confirm-add-vibe');
             $this->dispatch('close-modal', id: 'shop-your-vibe-collections');
+            $this->activeTab = 'vibes';
+            $this->loadAssignmentOverview();
+            Cache::forget($this->parentCacheKey());
+            $completed = $draft->status === 'synced';
+            Notification::make()
+                ->title($completed ? 'Vibe added to Shopify' : 'Vibe queued for Shopify')
+                ->body($completed
+                    ? 'Shopify confirmed the new Vibe.'
+                    : 'Shopify is creating the collection, image, and preview card. This page will update when it finishes.')
+                ->success()
+                ->send();
+        });
+    }
+
+    public function cancelAddVibe(): void
+    {
+        $this->guard();
+        $this->confirmingAdd = false;
+        $this->dispatch('close-modal', id: 'confirm-add-vibe');
+    }
+
+    public function retryImmediateOperation(): void
+    {
+        $this->guard();
+        $this->attempt(function (): void {
+            $draft = app(ShopYourVibeWorkflow::class)->resumeOperation($this->draftId);
+            $this->accept($draft);
+            $this->dispatchImmediate($draft);
+            $draft = $draft->fresh();
+            $this->accept($draft);
+            if ($draft->status === 'failed') {
+                throw new \RuntimeException($draft->last_error ?: 'The Shopify operation failed.');
+            }
+            $this->loadAssignmentOverview();
+            Cache::forget($this->parentCacheKey());
+            $completed = $draft->status === 'synced';
+            Notification::make()
+                ->title($completed ? 'Shopify operation finished' : 'Shopify operation queued')
+                ->body($completed
+                    ? 'Shopify confirmed the operation.'
+                    : 'The operation is running again from the last completed step.')
+                ->success()
+                ->send();
         });
     }
 
@@ -663,10 +750,27 @@ class ShopYourVibe extends Page
             return;
         }
         if ($this->addingCard) {
-            $this->addCard($this->selectedCollectionGid);
+            $this->stageExistingVibe($this->selectedCollectionGid);
         } else {
             $this->manage($this->selectedCollectionGid);
         }
+    }
+
+    public function stageExistingVibe(string $gid): void
+    {
+        $this->guard();
+        $this->attempt(function () use ($gid): void {
+            $collection = ShopifyCollection::where('shopify_id', $gid)->firstOrFail();
+            $this->pendingVibe = [
+                'mode' => 'existing',
+                'collection_gid' => $collection->shopify_id,
+                'preview_name' => $collection->title,
+                'preview_title' => $collection->title,
+                'preview_handle' => $collection->handle,
+            ];
+            $this->confirmingAdd = true;
+            $this->dispatch('open-modal', id: 'confirm-add-vibe');
+        });
     }
 
     public function editCard(string $key): void
@@ -732,7 +836,7 @@ class ShopYourVibe extends Page
     {
         return Action::make('removeVibe')->color('danger')->requiresConfirmation()
             ->modalHeading('Remove vibe')->modalSubmitActionLabel('Confirm removal')
-            ->modalDescription('Choose what should happen when you push changes.')
+            ->modalDescription('Choose what should happen in Shopify. This runs after you confirm and does not use Push Changes.')
             ->form([
                 Radio::make('mode')->label('Removal option')->options([
                     'layout' => 'Remove locally from this preview',
@@ -749,17 +853,34 @@ class ShopYourVibe extends Page
                 $this->attempt(function () use ($arguments, $data): void {
                     $key = $arguments['key'] ?? '';
                     $collectionGid = collect($this->draft()->desired['cards'])->firstWhere('key', $key)['collection_gid'] ?? null;
-                    $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'remove_card', [
-                        'key' => $key, 'delete_from_shopify' => in_array($data['mode'] ?? '', ['permanent', 'collection'], true),
-                        'delete_collection' => ($data['mode'] ?? '') === 'collection',
-                    ]));
+                    $mode = (string) ($data['mode'] ?? 'layout');
+                    $draft = app(ShopYourVibeWorkflow::class)->queueDeleteVibe($this->draftId, $this->revision, [
+                        'key' => $key,
+                        'mode' => $mode,
+                    ]);
+                    $this->accept($draft);
+                    $this->dispatchImmediate($draft);
+                    $draft = $draft->fresh();
+                    $this->accept($draft);
+                    if ($draft->status === 'failed') {
+                        throw new \RuntimeException($draft->last_error ?: 'Shopify could not remove this Vibe.');
+                    }
                     $this->deactivateCardMapping($collectionGid);
                     if ($this->activeCard === $key) {
                         $this->activeCard = null;
                         $this->cardForm = [];
                     }
                     $this->confirmingPush = false;
-                    $this->dispatch('vibe-draft-saved');
+                    $this->loadAssignmentOverview();
+                    Cache::forget($this->parentCacheKey());
+                    $completed = $draft->status === 'synced';
+                    Notification::make()
+                        ->title($completed ? 'Vibe removal finished' : 'Vibe removal queued')
+                        ->body($completed
+                            ? 'Shopify confirmed the removal. Products were kept.'
+                            : 'Shopify is removing this Vibe. This page will update when it finishes.')
+                        ->success()
+                        ->send();
                 });
                 if ($this->loadError) {
                     $action->halt();
@@ -1206,6 +1327,7 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         if ($draft = $this->draft()) {
+            $previous = $this->observedStatus;
             if ($draft->pending && $draft->status === 'pending') {
                 try {
                     $draft = app(ShopYourVibeWorkflow::class)->confirmCompletedPush($draft->id);
@@ -1221,6 +1343,24 @@ class ShopYourVibe extends Page
                 }
             }
             $this->accept($draft);
+            if ($previous && $previous !== $draft->status && $draft->status === 'synced' && in_array($previous, ['creating', 'deleting', 'pushing'], true)) {
+                $this->loadAssignmentOverview();
+                Notification::make()
+                    ->id('syv-operation-finished')
+                    ->title('Shopify operation finished')
+                    ->body('The Shop Your Vibe page is up to date.')
+                    ->success()
+                    ->send();
+            }
+            if ($previous && $previous !== 'failed' && $draft->status === 'failed' && filled($draft->last_error)) {
+                $this->loadError = $draft->last_error;
+                Notification::make()
+                    ->id('syv-'.md5($draft->last_error))
+                    ->title('Shop Your Vibe operation failed')
+                    ->body($draft->last_error)
+                    ->danger()
+                    ->send();
+            }
         }
     }
 
@@ -1238,6 +1378,41 @@ class ShopYourVibe extends Page
     {
         $this->draftId = $draft->id;
         $this->revision = $draft->revision;
+        $this->observedStatus = $draft->status;
+    }
+
+    private function reconcileRevision(): void
+    {
+        if (! $this->draftId) {
+            return;
+        }
+        $draft = ShopYourVibeDraft::find($this->draftId);
+        if (! $draft || $draft->revision === $this->revision) {
+            return;
+        }
+        if ($draft->status === 'synced' && ! $draft->pending && empty($draft->remote_jobs) && empty($draft->operation)) {
+            $this->revision = $draft->revision;
+            $this->observedStatus = $draft->status;
+        }
+    }
+
+    private function dispatchImmediate(ShopYourVibeDraft $draft): void
+    {
+        $attempt = (string) ($draft->operation['attempt'] ?? '');
+        if ($attempt === '') {
+            throw new \RuntimeException('The Shopify operation could not be queued.');
+        }
+        try {
+            ApplyShopYourVibeOperation::dispatch($draft->id, $attempt);
+        } catch (Throwable $e) {
+            $draft->update([
+                'status' => 'failed',
+                'pending' => false,
+                'last_error' => 'The operation could not be queued. Please retry.',
+                'revision' => $draft->revision + 1,
+            ]);
+            throw $e;
+        }
     }
 
     private function draft(): ?ShopYourVibeDraft
@@ -1253,12 +1428,23 @@ class ShopYourVibe extends Page
     private function attempt(callable $callback): void
     {
         try {
+            $this->reconcileRevision();
             $callback();
             $this->loadError = null;
+        } catch (ValidationException $e) {
+            throw $e;
         } catch (Throwable $e) {
             report($e);
-            $this->loadError = $e->getMessage();
-            Notification::make()->title('Shop Your Vibe could not complete this action')->body($e->getMessage())->danger()->send();
+            $message = $e->getMessage();
+            if ($this->loadError !== $message) {
+                $this->loadError = $message;
+                Notification::make()
+                    ->id('syv-'.md5($message))
+                    ->title('Shop Your Vibe could not complete this action')
+                    ->body($message)
+                    ->danger()
+                    ->send();
+            }
         }
     }
 
@@ -1674,6 +1860,10 @@ class ShopYourVibe extends Page
         $this->guard();
         $draft = $this->draft();
         $pendingDrafts = ShopYourVibeDraft::where('pending', true)->get()->keyBy('collection_gid');
+        $operationDrafts = ShopYourVibeDraft::query()
+            ->whereIn('status', ['creating', 'deleting', 'pushing', 'failed'])
+            ->get()
+            ->keyBy('collection_gid');
         $parents = collect($this->parents)->keyBy('gid');
         foreach ($pendingDrafts as $gid => $pending) {
             if (! $parents->has($gid)) {
@@ -1753,7 +1943,7 @@ class ShopYourVibe extends Page
             ? collect($this->parentProducts)->firstWhere('id', $this->managingComplementaryProductGid)
             : null;
 
-        return compact('draft', 'parents', 'pendingDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct') + [
+        return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }

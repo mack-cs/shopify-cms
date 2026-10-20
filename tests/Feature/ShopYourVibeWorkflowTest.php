@@ -557,10 +557,18 @@ it('uses a Filament confirmation before removing a vibe and allows cancellation'
     $page->call('unmountAction');
     expect($this->draft->fresh()->pending)->toBeFalse();
     $page->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
-        ->setActionData(['mode' => 'layout'])->callMountedAction()->assertHasNoErrors();
+        ->setActionData(['mode' => 'layout'])->callMountedAction()->assertHasNoErrors()
+        ->assertSee('Deleting Vibe');
+    expect($this->draft->fresh()->status)->toBe('deleting')
+        ->and($this->draft->fresh()->desired['cards'])->toHaveCount(2);
+    $queued = $this->draft->fresh();
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
     expect($this->draft->fresh()->desired['cards'])->toHaveCount(1)
-        ->and($this->draft->fresh()->desired['delete_cards'] ?? [])->toBe([])
-        ->and($this->fake->mutations())->toBe([]);
+        ->and($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->draft->fresh()->status)->toBe('synced')
+        ->and($this->fake->cards)->toHaveCount(2)
+        ->and(collect($this->fake->mutations())->pluck(0)->join("\n"))->toContain('VibeReferences')
+        ->not->toContain('VibeDeleteCard');
 });
 
 it('stages permanent card deletion through the Filament modal and deletes only on push', function () {
@@ -570,10 +578,12 @@ it('stages permanent card deletion through the Filament modal and deletes only o
     Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
         ->setActionData(['mode' => 'permanent'])->callMountedAction()->assertHasNoErrors()
-        ->call('reviewPush')->assertSee('Permanent Shopify deletions');
+        ->assertSee('Deleting Vibe');
+    $queued = $this->draft->fresh();
+    expect($queued->status)->toBe('deleting');
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
     $this->draft->refresh();
-    expect($this->draft->desired['delete_cards'])->toHaveCount(1)->and($this->fake->mutations())->toBe([]);
-    vibePush($this);
+    expect($this->draft->pending)->toBeFalse()->and($this->draft->operation)->toBeNull();
     expect($this->draft->status)->toBe('synced')
         ->and($this->fake->cards)->not->toHaveKey('gid://shopify/Metaobject/11')
         ->and($this->fake->collections)->toHaveCount(4);
@@ -604,10 +614,10 @@ it('lets users delete the linked Shopify collection while keeping every product'
     Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->mountAction('removeVibe', ['key' => 'gid://shopify/Metaobject/11'])
         ->setActionData(['mode' => 'collection'])->callMountedAction()->assertHasNoErrors()
-        ->call('reviewPush')->assertSee('Collections to delete from Shopify')->assertSee('/collections/pearl');
+        ->assertSee('Deleting Vibe');
+    $queued = $this->draft->fresh();
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
     $this->draft->refresh();
-    expect($this->fake->mutations())->toBe([])->and($this->fake->collections)->toHaveCount(4);
-    vibePush($this);
     expect($this->draft->status)->toBe('synced')->and($this->draft->last_error)->toBeNull()
         ->and($this->fake->collections)->toBe($otherCollections)
         ->and($this->fake->products)->toBe($productsBefore)
@@ -1466,9 +1476,17 @@ it('uses the modal for adding a vibe and retains it on a failed selection', func
         ->assertDispatched('open-modal', id: 'shop-your-vibe-collections');
     $this->fake->calls = [];
     $page->call('addCard', 'invalid')->assertSet('addingCard', true)->assertNotDispatched('close-modal');
-    $page->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')->assertSet('addingCard', false)
-        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Pending changes');
-    expect($this->fake->calls)->toBe([])->and($this->draft->fresh()->desired['cards'])->toHaveCount(3);
+    $page->set('selectedCollectionGid', 'gid://shopify/Collection/4')->call('confirmCollectionSelection')
+        ->assertSet('addingCard', true)->assertSet('confirmingAdd', true)
+        ->assertDispatched('open-modal', id: 'confirm-add-vibe');
+    expect($this->draft->fresh()->desired['cards'])->toHaveCount(2);
+    $page->call('confirmAddVibe')->assertSet('addingCard', false)
+        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Creating Vibe');
+    $queued = $this->draft->fresh();
+    expect($queued->status)->toBe('creating')->and($queued->pending)->toBeFalse();
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
+    $page->call('pollPush')->assertSee('Up to date with Shopify');
+    expect($this->draft->fresh()->pending)->toBeFalse()->and($this->draft->fresh()->desired['cards'])->toHaveCount(3);
     $page->call('openCollectionPicker', true)->set('selectedCollectionGid', 'gid://shopify/Collection/2')->call('closeCollectionPicker')
         ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('selectedCollectionGid', '');
 });
@@ -1547,17 +1565,26 @@ it('creates a new collection draft from the normalized vibe name', function () {
         ->and($fields['newCollection.generated_title']->isReadOnly())->toBeTrue()
         ->and($fields['newCollection.handle']->isReadOnly())->toBeTrue();
     $this->fake->calls = [];
-    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false)
-        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('GOLD & WHITE');
-    $card = $this->draft->fresh()->desired['cards'][2];
-    $creation = array_values($this->draft->fresh()->desired['new_collections'])[0];
-    $page->call('editCard', $card['key'])->assertSee('New collection');
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('confirmingAdd', true)
+        ->assertDispatched('open-modal', id: 'confirm-add-vibe')->assertSee('Add Vibe to Shopify?');
+    expect($this->fake->calls)->toBe([])
+        ->and($this->draft->fresh()->desired['cards'])->toHaveCount(2);
+    $this->fake->calls = [];
+    $page->call('confirmAddVibe')->assertHasNoErrors()->assertSet('addingCard', false)
+        ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')->assertSee('Creating Vibe');
+    $queued = $this->draft->fresh();
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
+    $page->call('pollPush')->assertSee('GOLD & WHITE');
+    $card = collect($this->draft->fresh()->desired['cards'])->firstWhere('name', 'GOLD & WHITE');
+    $created = collect($this->fake->collections)->firstWhere('handle', 'elevated-basics-necklaces-gold-and-white');
+    $page->call('editCard', $card['key'])->assertSee('GOLD & WHITE');
     expect($card['name'])->toBe('GOLD & WHITE')
         ->and($card['link'])->toBe('https://leighavenue.co.za/collections/elevated-basics-necklaces-gold-and-white')
-        ->and($creation['title'])->toBe('ELEVATED BASICS NECKLACES GOLD & WHITE')
-        ->and($creation['handle'])->toBe('elevated-basics-necklaces-gold-and-white')
-        ->and($creation['membership_tag'])->toBe('elevated-basics-necklaces-gold-and-white')
-        ->and($this->fake->calls)->toBe([]);
+        ->and($created['title'])->toBe('ELEVATED BASICS NECKLACES GOLD & WHITE')
+        ->and($created['handle'])->toBe('elevated-basics-necklaces-gold-and-white')
+        ->and($created['ruleSet']['rules'][0]['condition'])->toBe('elevated-basics-necklaces-gold-and-white')
+        ->and($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->fake->mutations())->not->toBe([]);
 });
 
 it('falls back to the parent title when generating a new collection handle without a parent handle', function () {
@@ -1762,10 +1789,9 @@ it('accepts an uploaded image in the new collection modal without publishing it'
         ->fillForm(['vibe_name' => 'Summer Gold', 'image_mode' => 'upload',
             'upload' => UploadedFile::fake()->image('summer.jpg')], 'newCollectionForm');
     $this->fake->calls = [];
-    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('loadError', null)->assertSet('addingCard', false);
-    $creation = array_values($this->draft->fresh()->desired['new_collections'])[0];
-    Storage::disk('public')->assertExists($creation['image_path']);
-    expect($this->fake->calls)->toBe([]);
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('loadError', null)->assertSet('confirmingAdd', true);
+    Storage::disk('public')->assertExists($page->get('pendingVibe')['image_path']);
+    expect($this->fake->calls)->toBe([])->and($this->draft->fresh()->pending)->toBeFalse();
 });
 
 it('allows choosing an existing Shopify image for a new collection', function () {
@@ -1776,9 +1802,10 @@ it('allows choosing an existing Shopify image for a new collection', function ()
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
         ->fillForm(['vibe_name' => 'Summer Gold', 'image_mode' => 'existing',
             'image_gid' => 'gid://shopify/MediaImage/1'], 'newCollectionForm');
-    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('addingCard', false);
-    expect($this->draft->fresh()->desired['cards'][2]['image'])->toBe('gid://shopify/MediaImage/1')
-        ->and($this->fake->mutations())->toBe([]);
+    $page->call('createCollectionVibe')->assertHasNoErrors()->assertSet('confirmingAdd', true);
+    expect($page->get('pendingVibe')['image'])->toBe('gid://shopify/MediaImage/1')
+        ->and($this->fake->mutations())->toBe([])
+        ->and($this->draft->fresh()->desired['cards'])->toHaveCount(2);
 });
 
 it('keeps an incomplete publication pending after further draft edits', function () {
@@ -1863,16 +1890,20 @@ it('normalizes a vibe name on save before the field is blurred', function () {
     $state['parent']['handle'] = 'elevated-basics-bracelets';
     $this->draft->update(['desired' => $state, 'snapshot' => $state]);
 
-    Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')
         ->call('openCollectionPicker', true)->set('collectionMode', 'new')
         ->set('newCollection.vibe_name', 'gold and white')
         ->assertSet('newCollection.vibe_name', 'GOLD AND WHITE')
         ->call('createCollectionVibe')
-        ->assertHasNoErrors();
-
+        ->assertHasNoErrors()
+        ->assertSet('confirmingAdd', true);
+    expect($page->get('pendingVibe')['vibe_name'])->toBe('GOLD & WHITE');
+    $page->call('confirmAddVibe')->assertHasNoErrors();
+    $queued = $this->draft->fresh();
+    app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
     $draft = $this->draft->fresh();
-    $card = $draft->desired['cards'][2];
-    $creation = array_values($draft->desired['new_collections'])[0];
+    $card = collect($draft->desired['cards'])->firstWhere('name', 'GOLD & WHITE');
+    $creation = collect($this->fake->collections)->firstWhere('handle', 'elevated-basics-bracelets-gold-and-white');
     expect($card['name'])->toBe('GOLD & WHITE')
         ->and($creation['title'])->toBe('ELEVATED BASICS BRACELETS GOLD & WHITE')
         ->and($creation['handle'])->toBe('elevated-basics-bracelets-gold-and-white');

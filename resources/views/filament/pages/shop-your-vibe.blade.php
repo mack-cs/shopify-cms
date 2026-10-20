@@ -42,7 +42,7 @@
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
         class="syv-workflow space-y-6"
         x-on:vibe-editor-opened.window="formDirty = false; $nextTick(() => $el.scrollIntoView({ behavior: 'smooth', block: 'start' }))">
-        @if ($loadError)
+        @if ($loadError && ! ($addingCard || $addingParent || $uploadingMappings || $confirmingAdd))
             <div role="alert" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">{{ $loadError }}</div>
         @endif
 
@@ -61,7 +61,16 @@
                         <p class="text-sm text-gray-500">{{ $parent['handle'] }}</p>
                         <p class="mt-3 font-medium">{{ $parent['product_count'] ?? 0 }} Products</p>
                         <p class="mb-3">{{ $parent['count'] }} Shop Your Vibes</p>
-                        @if ($pendingDrafts->has($parent['gid']))
+                        @php($operation = $operationDrafts->get($parent['gid']))
+                        @if ($operation && $operation->status === 'creating')
+                            <x-filament::badge color="info">Creating Vibe</x-filament::badge>
+                        @elseif ($operation && $operation->status === 'deleting')
+                            <x-filament::badge color="info">Deleting Vibe</x-filament::badge>
+                        @elseif ($operation && $operation->status === 'pushing')
+                            <x-filament::badge color="info">Pushing Changes</x-filament::badge>
+                        @elseif ($operation && $operation->status === 'failed' && ! $operation->pending)
+                            <x-filament::badge color="danger">Operation Failed</x-filament::badge>
+                        @elseif ($pendingDrafts->has($parent['gid']))
                             <x-filament::badge color="warning">Pending Changes</x-filament::badge>
                         @else
                             <x-filament::badge color="success">Up to date at last refresh</x-filament::badge>
@@ -76,9 +85,15 @@
                 @endforelse
             </div>
         @else
-            @if ($draft->status === 'pushing')
+            @if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
                 <div wire:poll.3s="pollPush" role="status" class="rounded-xl border border-primary-300 p-4">
-                    Pushing to Shopify... You can return later; your draft is saved. Editing is paused until this push finishes.
+                    @if ($draft->status === 'creating')
+                        Creating Vibe... Shopify is creating the collection, image, and preview card. Editing is paused until this finishes.
+                    @elseif ($draft->status === 'deleting')
+                        Deleting Vibe... Shopify is applying the removal. Editing is paused until this finishes.
+                    @else
+                        Pushing to Shopify... You can return later; your draft is saved. Editing is paused until this push finishes.
+                    @endif
                 </div>
             @endif
             <div class="flex flex-wrap items-center justify-between gap-3">
@@ -105,7 +120,19 @@
                 <strong>Pending changes - not pushed to Shopify</strong>
                 <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
             </div>
-            @if ($draft->pending)
+            @if ($draft->status === 'failed' && ! $draft->pending && ! empty($draft->operation))
+                <div role="status" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">
+                    <strong>Operation Failed</strong>
+                    <p class="mt-2">{{ $draft->last_error ?: 'Shopify did not confirm this Vibe operation.' }}</p>
+                    @if ($draft->progress)
+                        <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
+                    @endif
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <x-filament::button size="sm" wire:click="retryImmediateOperation" wire:loading.attr="disabled">Retry operation</x-filament::button>
+                        <x-filament::button size="sm" color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify and clear this failed operation? Changes already saved in Shopify will stay there.">Refresh and review</x-filament::button>
+                    </div>
+                </div>
+            @elseif ($draft->pending)
                 <div @if ($draft->status === 'pending') wire:poll.5s="pollPush" @endif role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                     <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
                     <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
@@ -114,7 +141,7 @@
                         <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
                     @endif
                 </div>
-            @else
+            @elseif (! in_array($draft->status, ['creating', 'deleting', 'pushing'], true))
                 <x-filament::badge color="success">Up to date with Shopify</x-filament::badge>
             @endif
             <div class="space-y-6">
@@ -284,8 +311,8 @@
                     </div>
                 </div>
                 <div data-order-grid class="syv-card-grid"
-                    wire:key="vibe-grid-{{ $draft->id }}-{{ $draft->status === 'pushing' ? 'locked' : 'editable' }}"
-                    @if ($draft->status !== 'pushing')
+                    wire:key="vibe-grid-{{ $draft->id }}-{{ in_array($draft->status, ['pushing', 'creating', 'deleting'], true) ? 'locked' : 'editable' }}"
+                    @if (! in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
                         x-sortable data-sortable-animation-duration="200"
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'cards')"
                     @endif>
@@ -508,7 +535,7 @@
                     </div>
                 @endif
                 @if ($addingCard && $collectionMode === 'new')
-                    <p class="my-3 text-sm text-gray-500">Save a new collection to this draft. Pushing changes creates it in Shopify, applies its image and publishes it to the Online Store.</p>
+                    <p class="my-3 text-sm text-gray-500">Confirming creates the collection in Shopify, applies its image, creates the preview card, and adds it to this collection.</p>
                     <div data-new-collection-form>
                         {{ $this->newCollectionForm }}
                     </div>
@@ -519,11 +546,29 @@
             @endif
             <x-slot name="footer">
                 @if ($addingCard && $collectionMode === 'new')
-                    <x-filament::button wire:click="createCollectionVibe" wire:loading.attr="disabled" :disabled="$vibeNameBlocked">Add new collection to draft</x-filament::button>
+                    <x-filament::button wire:click="createCollectionVibe" wire:loading.attr="disabled" wire:target="createCollectionVibe" :disabled="$vibeNameBlocked">Add Vibe</x-filament::button>
                 @else
                     <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
                 @endif
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'shop-your-vibe-collections' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="confirm-add-vibe" width="lg" heading="Add Vibe to Shopify?">
+            @if ($confirmingAdd)
+                @if ($loadError)<p role="alert" class="mb-3 rounded-lg border border-danger-300 bg-danger-50 p-3 text-danger-800">{{ $loadError }}</p>@endif
+                @if (($pendingVibe['mode'] ?? '') === 'existing')
+                    <p>Are you sure you want to create this Vibe in Shopify? This will create the Shop Your Vibe card for <strong>{{ $pendingVibe['preview_title'] ?? 'the selected collection' }}</strong> and add it to the parent collection. The existing collection and its products will not be changed.</p>
+                @else
+                    <p>Are you sure you want to create this Vibe in Shopify? This will create the required Shopify collection, upload or assign its image, create the Shop Your Vibe card, and add it to the parent collection.</p>
+                @endif
+                @if (! empty($pendingVibe['preview_name']))
+                    <p class="mt-3 text-sm text-gray-600 dark:text-gray-300"><strong>{{ $pendingVibe['preview_name'] }}</strong>@if (! empty($pendingVibe['preview_handle'])) — /collections/{{ $pendingVibe['preview_handle'] }}@endif</p>
+                @endif
+            @endif
+            <x-slot name="footer">
+                <x-filament::button color="gray" wire:click="cancelAddVibe">Cancel</x-filament::button>
+                <x-filament::button wire:click="confirmAddVibe" wire:loading.attr="disabled" wire:target="confirmAddVibe">Yes, Add to Shopify</x-filament::button>
             </x-slot>
         </x-filament::modal>
 
