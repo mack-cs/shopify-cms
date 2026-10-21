@@ -75,7 +75,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
                     'variables' => $variablesPayload,
                 ]);
 
-            $payload = $response->json() ?? [];
+            $payload = $this->discardFalseThrottleErrors($response->json() ?? []);
             if ($this->isThrottledResponse($response->status(), $payload) && $attempt < 4) {
                 $delay = $this->throttleDelayMilliseconds($payload, $attempt);
                 $retryAfter = $response->header('Retry-After');
@@ -118,16 +118,61 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
         throw new \RuntimeException('Shopify GraphQL request remained throttled after four attempts.');
     }
 
+    /**
+     * Shopify can attach a THROTTLED error to a query that already ran while the
+     * bucket is still full. Retrying that response returns the same body.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function discardFalseThrottleErrors(array $payload): array
+    {
+        $errors = $payload['errors'] ?? null;
+        if (! is_array($errors) || $errors === [] || ! array_key_exists('data', $payload)) {
+            return $payload;
+        }
+
+        $requested = (float) data_get($payload, 'extensions.cost.requestedQueryCost', 0);
+        $available = (float) data_get($payload, 'extensions.cost.throttleStatus.currentlyAvailable', 0);
+        $actual = data_get($payload, 'extensions.cost.actualQueryCost');
+        $ran = $actual !== null && $actual !== '';
+        if (! $ran || $available < max($requested, 1)) {
+            return $payload;
+        }
+
+        $remaining = array_values(array_filter(
+            $errors,
+            fn (mixed $error): bool => ! $this->errorIsThrottle($error),
+        ));
+        if (count($remaining) === count($errors)) {
+            return $payload;
+        }
+
+        logger()->warning('Shopify returned a throttle flag after the query ran with capacity remaining. The result was kept.', [
+            'cost' => data_get($payload, 'extensions.cost'),
+        ]);
+        if ($remaining === []) {
+            unset($payload['errors']);
+        } else {
+            $payload['errors'] = $remaining;
+        }
+
+        return $payload;
+    }
+
     private function isThrottledResponse(int $status, array $payload): bool
     {
         if ($status === 429) {
             return true;
         }
 
-        return collect($payload['errors'] ?? [])->contains(function ($error): bool {
-            return strtoupper((string) data_get($error, 'extensions.code')) === 'THROTTLED'
-                || str_contains(strtolower((string) data_get($error, 'message')), 'throttl');
-        });
+        return collect($payload['errors'] ?? [])->contains(fn (mixed $error): bool => $this->errorIsThrottle($error));
+    }
+
+    private function errorIsThrottle(mixed $error): bool
+    {
+        return strtoupper((string) data_get($error, 'extensions.code')) === 'THROTTLED'
+            || str_contains(strtolower((string) data_get($error, 'message')), 'throttl');
     }
 
     private function throttleDelayMilliseconds(array $payload, int $attempt): int

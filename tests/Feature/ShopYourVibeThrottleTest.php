@@ -18,6 +18,23 @@ it('retries a Shopify HTTP throttle and respects Retry-After', function () {
     Http::assertSentCount(2);
 });
 
+it('keeps a Shopify result when a throttle flag arrives after the query ran with capacity left', function () {
+    Http::fake(['*' => Http::response([
+        'data' => ['shopifyqlQuery' => ['tableData' => ['rows' => [['inventory_adjustment_id' => '81']]]]],
+        'errors' => [['message' => 'Throttled', 'extensions' => ['code' => 'THROTTLED']]],
+        'extensions' => ['cost' => [
+            'requestedQueryCost' => 3,
+            'actualQueryCost' => 1,
+            'throttleStatus' => ['maximumAvailable' => 2000, 'currentlyAvailable' => 1999, 'restoreRate' => 100],
+        ]],
+    ])]);
+
+    $result = app(ShopifyApiClient::class)->graphql('query InventoryAdjustmentHistory { shopifyqlQuery { tableData { rows } } }');
+
+    expect($result['shopifyqlQuery']['tableData']['rows'][0]['inventory_adjustment_id'])->toBe('81');
+    Http::assertSentCount(1);
+});
+
 it('retries GraphQL cost throttling and reports exhausted throttles as failures', function () {
     Log::spy();
     $throttle = ['errors' => [['message' => 'Throttled', 'extensions' => ['code' => 'THROTTLED']]],
