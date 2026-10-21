@@ -3,27 +3,34 @@
 namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
-use App\Models\InventoryAuditReview;
 use App\Jobs\ReportDirectShopifyInventoryCorrectionsJob;
+use App\Models\InventoryAuditEntry;
+use App\Models\InventoryAuditReview;
+use App\Models\InventoryOperationAudit;
 use App\Services\Inventory\DirectShopifyInventoryCorrectionReport;
 use App\Services\Inventory\InventoryAuditHistoryService;
-use App\Services\Inventory\ShopifyInventoryHistoryQuery;
-use Filament\Forms\Components\Actions;
-use Filament\Forms\Components\Actions\Action;
-use Filament\Forms\Components\Grid;
-use Filament\Forms\Components\Section;
+use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
-use Filament\Forms\Concerns\InteractsWithForms;
-use Filament\Forms\Contracts\HasForms;
-use Filament\Forms\Form;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
+use Filament\Tables\Actions\Action;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Concerns\InteractsWithTable;
+use Filament\Tables\Contracts\HasTable;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
-class InventoryAuditHistory extends Page implements HasForms
+class InventoryAuditHistory extends Page implements HasTable
 {
-    use InteractsWithForms;
+    use InteractsWithTable;
 
     protected static ?string $navigationGroup = 'Inventory';
 
@@ -37,23 +44,10 @@ class InventoryAuditHistory extends Page implements HasForms
 
     protected static string $view = 'filament.pages.inventory-audit-history';
 
-    public ?array $data = [];
-
-    public array $applied = [];
-
-    public bool $searched = false;
-
-    public int $pageNumber = 1;
-
-    public ?string $selectedKey = null;
-
-    public string $reviewStatus = 'needs_investigation';
-
-    public string $reviewNote = '';
-
     public bool $directCorrectionOpen = false;
 
-    public array $tableFilters = [];
+    /** @var array<string, mixed>|null */
+    protected ?array $loadedReport = null;
 
     public static function canAccess(): bool
     {
@@ -66,105 +60,195 @@ class InventoryAuditHistory extends Page implements HasForms
     public function mount(): void
     {
         abort_unless(static::canAccess(), 403);
-        $this->tableFilters = $this->emptyTableFilters();
-        $this->form->fill([
-            'query' => '',
-            'investigation' => 'all',
-        ]);
-        $this->applied = array_merge($this->tableFilters, [
-            'query' => '',
-            'preset' => '7',
-            'investigation' => 'all',
-            'storewide' => true,
-            'live_shopify' => false,
-        ]);
-        $this->searched = true;
+    }
+
+    public function table(Table $table): Table
+    {
+        return $table
+            ->query(fn (): Builder => InventoryOperationAudit::query()->whereRaw('1 = 0'))
+            ->searchPlaceholder('Product name or SKU')
+            ->columns([
+                TextColumn::make('occurred_at')->label('Date')->searchable(false),
+                TextColumn::make('product')->label('Product')->searchable()->wrap(),
+                TextColumn::make('sku')->label('SKU')->searchable(),
+                TextColumn::make('activity')->label('Activity')->wrap(),
+                TextColumn::make('change')->label('Change'),
+                TextColumn::make('source_label')->label('Source'),
+                TextColumn::make('app')->label('App')->toggleable(),
+                TextColumn::make('triggered_by')->label('Triggered by')->wrap(),
+                TextColumn::make('confidence_label')->label('Match')->wrap(),
+            ])
+            ->filters([
+                Filter::make('dates')
+                    ->label('Dates')
+                    ->form([
+                        DatePicker::make('from')->label('From')->default(now()->subDays(6)->toDateString()),
+                        DatePicker::make('until')->label('Until')->default(now()->toDateString()),
+                    ]),
+                SelectFilter::make('activity')->label('Activity')->options([
+                    'received' => 'Inventory received',
+                    'reserved' => 'Inventory reserved',
+                    'reservation_deleted' => 'Reservation released',
+                    'consumed' => 'Reserved inventory consumed',
+                    'correction' => 'Inventory correction',
+                    'manual_deduction' => 'Manual stock deduction',
+                    'initialized' => 'New product initialization',
+                    'order_created' => 'Order created',
+                    'shopify_other' => 'Other Shopify adjustment',
+                ]),
+                SelectFilter::make('source')->label('Source')->options([
+                    'cms' => 'CMS',
+                    'shopify' => 'Shopify',
+                    'online_store' => 'Online Store',
+                    'automation' => 'Automation',
+                ]),
+                Filter::make('app')->label('Shopify app')->form([
+                    TextInput::make('value')->label('Shopify app'),
+                ]),
+                Filter::make('triggered_by')->label('CMS user or job')->form([
+                    TextInput::make('value')->label('CMS user or job'),
+                ]),
+                Filter::make('reason')->label('Reason')->form([
+                    TextInput::make('value')->label('Reason'),
+                ]),
+                SelectFilter::make('state')->label('Inventory state')->options([
+                    'available' => 'Available',
+                    'reserved' => 'Reserved',
+                    'committed' => 'Committed',
+                    'on_hand' => 'On hand',
+                ]),
+                SelectFilter::make('direction')->label('Direction')->options([
+                    'positive' => 'Positive change',
+                    'negative' => 'Negative change',
+                ]),
+                SelectFilter::make('match')->label('Match')->options([
+                    'confirmed' => 'Confirmed',
+                    'probable' => 'Probable',
+                    'unmatched' => 'Unmatched',
+                    'local' => 'Local record',
+                ]),
+                Filter::make('location')->label('Location')->form([
+                    TextInput::make('value')->label('Location'),
+                ]),
+                Filter::make('reference')->label('Purchase order, receipt, or stack')->form([
+                    TextInput::make('value')->label('Purchase order, receipt, or stack'),
+                ]),
+                SelectFilter::make('investigation')->label('Scope')->options([
+                    'all' => 'All adjustments',
+                    'cms' => 'CMS changes',
+                    'unexplained' => 'Unexplained',
+                ]),
+            ])
+            ->filtersFormColumns(2)
+            ->actions([
+                Action::make('details')
+                    ->label('Details')
+                    ->modalHeading(fn (InventoryAuditEntry $record): string => trim($record->activity.' '.$record->sku))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close')
+                    ->modalContent(fn (InventoryAuditEntry $record) => view('filament.pages.inventory-audit-detail', [
+                        'row' => $record->getAttributes(),
+                    ])),
+                Action::make('review')
+                    ->label('Review')
+                    ->fillForm(fn (InventoryAuditEntry $record): array => [
+                        'status' => $record->review_status ?: 'needs_investigation',
+                        'note' => (string) ($record->review_note ?? ''),
+                    ])
+                    ->form([
+                        Select::make('status')->label('Investigation status')->required()->options([
+                            'needs_investigation' => 'Needs investigation',
+                            'reviewed' => 'Reviewed',
+                            'resolved' => 'Resolved',
+                        ]),
+                        Textarea::make('note')->label('Note')->rows(3),
+                    ])
+                    ->action(function (array $data, InventoryAuditEntry $record): void {
+                        InventoryAuditReview::query()->updateOrCreate(
+                            ['operation_key' => $record->getKey()],
+                            [
+                                'status' => $data['status'],
+                                'note' => trim((string) ($data['note'] ?? '')) !== '' ? trim((string) $data['note']) : null,
+                                'reviewed_by' => Auth::id(),
+                                'reviewed_at' => now(),
+                            ],
+                        );
+                        $this->loadedReport = null;
+                        Notification::make()->title('Investigation status saved. This does not change stock.')->success()->send();
+                    }),
+            ])
+            ->headerActions([
+                Action::make('export')
+                    ->label('Export CSV')
+                    ->action(fn (): StreamedResponse => $this->export()),
+                Action::make('emailDirectCorrections')
+                    ->label('Email 7-day direct corrections')
+                    ->action(fn () => $this->emailDirectCorrectionReport()),
+            ])
+            ->defaultPaginationPageOption(25)
+            ->emptyStateHeading('No inventory adjustments matched')
+            ->emptyStateDescription('CMS records and stored Shopify adjustments are both included. Change the date filter or the product search.');
+    }
+
+    public function getFilteredTableQuery(): Builder
+    {
+        return InventoryOperationAudit::query()->whereRaw('1 = 0');
+    }
+
+    public function getFilteredSortedTableQuery(): Builder
+    {
+        return $this->getFilteredTableQuery();
+    }
+
+    public function getTableRecords(): LengthAwarePaginator
+    {
+        $rows = $this->auditReport()['rows'];
+        $perPage = $this->getTableRecordsPerPage();
+        $perPage = is_numeric($perPage) ? (int) $perPage : 25;
+        $page = max(1, $this->getTablePage());
+        $slice = array_slice($rows, ($page - 1) * $perPage, $perPage);
+
+        return (new LengthAwarePaginator(
+            array_map(fn (array $row): InventoryAuditEntry => $this->entry($row), $slice),
+            count($rows),
+            $perPage,
+            $page,
+            ['pageName' => $this->getTablePaginationPageName()],
+        ))->onEachSide(0);
+    }
+
+    public function getAllTableRecordsCount(): int
+    {
+        return count($this->auditReport()['rows']);
+    }
+
+    protected function resolveTableRecord(?string $key): ?InventoryAuditEntry
+    {
+        if ($key === null || $key === '') {
+            return null;
+        }
+        foreach ($this->auditReport()['rows'] as $row) {
+            if (($row['key'] ?? '') === $key) {
+                return $this->entry($row);
+            }
+        }
+
+        return null;
     }
 
     /**
-     * @return array<string, string>
+     * @return array{operations:int,cms_operations:int,shopify_operations:int,unexplained:int,products:int,positive_lines:int,negative_lines:int}
      */
-    private function emptyTableFilters(): array
+    public function auditSummary(): array
     {
-        return [
-            'from' => now()->subDays(6)->toDateString(),
-            'until' => now()->toDateString(),
-            'activity' => '',
-            'source' => '',
-            'app' => '',
-            'triggered_by' => '',
-            'reason' => '',
-            'state' => '',
-            'direction' => '',
-            'match' => '',
-            'location' => '',
-            'reference' => '',
-        ];
+        return $this->auditReport()['summary'];
     }
 
-    public function form(Form $form): Form
+    public function shopifyNotice(): ?string
     {
-        return $form
-            ->statePath('data')
-            ->schema([
-                Section::make('Search inventory history')
-                    ->description('Search stored records by product name or SKU. Leave it blank to include every product in the selected dates. Table filters narrow the rows already loaded.')
-                    ->schema([
-                        Grid::make(2)->schema([
-                            TextInput::make('query')->label('Product name or SKU'),
-                            Actions::make([
-                                Action::make('search')->label('Search')->submit('search'),
-                            ]),
-                        ]),
-                    ]),
-            ]);
-    }
+        $message = trim((string) ($this->auditReport()['shopify_message'] ?? ''));
 
-    public function search(): void
-    {
-        $state = $this->form->getState();
-        $this->applied['query'] = trim((string) ($state['query'] ?? ''));
-        $this->applied['storewide'] = true;
-        $this->applied['live_shopify'] = false;
-        $this->data['query'] = $this->applied['query'];
-        $this->searched = true;
-        $this->pageNumber = 1;
-        $this->selectedKey = null;
-    }
-
-    public function updatedTableFilters(): void
-    {
-        $fromText = trim((string) ($this->tableFilters['from'] ?? ''));
-        $untilText = trim((string) ($this->tableFilters['until'] ?? ''));
-        if ($fromText === '' || $untilText === '') {
-            return;
-        }
-        $from = Carbon::parse($fromText)->startOfDay();
-        $until = Carbon::parse($untilText)->endOfDay();
-        if ($until->lt($from)) {
-            Notification::make()->title('The end date is before the start date.')->danger()->send();
-
-            return;
-        }
-        if ($from->diffInDays($until) > 1095) {
-            Notification::make()->title('Keep a date range to three years or less.')->danger()->send();
-
-            return;
-        }
-
-        $filters = $this->tableFilters;
-        if (($filters['source'] ?? '') === 'cms' && trim((string) ($filters['app'] ?? '')) === '') {
-            $filters['app'] = 'la-cms-access';
-        }
-        if (in_array($this->applied['investigation'] ?? 'all', ['cms', 'unexplained'], true) && trim((string) ($filters['app'] ?? '')) === '') {
-            $filters['app'] = 'la-cms-access';
-        }
-        $this->applied = array_merge($this->applied, $filters, [
-            'storewide' => true,
-            'live_shopify' => false,
-        ]);
-        $this->pageNumber = 1;
-        $this->selectedKey = null;
+        return $message !== '' ? $message : null;
     }
 
     public function emailDirectCorrectionReport(): void
@@ -174,7 +258,7 @@ class InventoryAuditHistory extends Page implements HasForms
         $recipient = (string) config('services.shopify.direct_inventory_correction_email', 'shonayimack@gmail.com');
         Notification::make()
             ->title('7-day direct correction report queued')
-            ->body('It will be emailed to '.$recipient.' and every active user. The list below is what is already stored. This page does not call Shopify.')
+            ->body('It will be emailed to '.$recipient.' and every active user. This page does not call Shopify.')
             ->success()
             ->send();
     }
@@ -187,117 +271,15 @@ class InventoryAuditHistory extends Page implements HasForms
         return app(DirectShopifyInventoryCorrectionReport::class)->preview();
     }
 
-    public function recheckShopify(): void
-    {
-        app(ShopifyInventoryHistoryQuery::class)->forgetAccessDenial();
-        $this->selectedKey = null;
-    }
-
-    public function applyPreset(string $preset): void
-    {
-        $until = now();
-        $from = match ($preset) {
-            'today' => now(),
-            'yesterday' => now()->subDay(),
-            '30' => now()->subDays(29),
-            '90' => now()->subDays(89),
-            '180' => now()->subDays(179),
-            default => now()->subDays(6),
-        };
-        if ($preset === 'yesterday') {
-            $until = now()->subDay();
-        }
-        $this->data['preset'] = $preset;
-        $this->tableFilters['from'] = $from->toDateString();
-        $this->tableFilters['until'] = $until->toDateString();
-        if ($this->searched) {
-            $this->applied['from'] = $this->tableFilters['from'];
-            $this->applied['until'] = $this->tableFilters['until'];
-            $this->applied['preset'] = $preset;
-            $this->applied['live_shopify'] = false;
-            $this->pageNumber = 1;
-            $this->selectedKey = null;
-        }
-    }
-
-    public function setInvestigation(string $investigation): void
-    {
-        if (! in_array($investigation, ['all', 'cms', 'unexplained'], true)) {
-            return;
-        }
-        $this->data['investigation'] = $investigation;
-        if ($this->searched) {
-            $this->applied['investigation'] = $investigation;
-            $typedApp = trim((string) ($this->tableFilters['app'] ?? ''));
-            if (in_array($investigation, ['cms', 'unexplained'], true) && $typedApp === '') {
-                $this->tableFilters['app'] = 'la-cms-access';
-                $this->applied['app'] = 'la-cms-access';
-            }
-            if ($investigation === 'all') {
-                $this->applied['app'] = $typedApp;
-                if (($this->tableFilters['source'] ?? '') === 'cms' && $this->applied['app'] === '') {
-                    $this->applied['app'] = 'la-cms-access';
-                }
-            }
-            $this->pageNumber = 1;
-            $this->selectedKey = null;
-        }
-    }
-
-    public function openSku(string $sku): void
-    {
-        $sku = trim($sku);
-        if ($sku === '') {
-            return;
-        }
-        $this->data['query'] = $sku;
-        $this->applied['query'] = $sku;
-        $this->applied['storewide'] = true;
-        $this->applied['live_shopify'] = false;
-        $this->searched = true;
-        $this->pageNumber = 1;
-        $this->selectedKey = null;
-    }
-
-    public function show(string $key): void
-    {
-        $this->selectedKey = $key;
-        $review = InventoryAuditReview::query()->where('operation_key', $key)->first();
-        $this->reviewStatus = (string) ($review->status ?? 'needs_investigation');
-        $this->reviewNote = (string) ($review->note ?? '');
-    }
-
-    public function saveReview(): void
+    public function export(): StreamedResponse
     {
         abort_unless(static::canAccess(), 403);
-        if ($this->selectedKey === null || ! in_array($this->reviewStatus, ['reviewed', 'needs_investigation', 'resolved'], true)) {
-            return;
-        }
+        $rows = $this->auditReport()['rows'];
 
-        InventoryAuditReview::query()->updateOrCreate(
-            ['operation_key' => $this->selectedKey],
-            [
-                'status' => $this->reviewStatus,
-                'note' => trim($this->reviewNote) !== '' ? trim($this->reviewNote) : null,
-                'reviewed_by' => Auth::id(),
-                'reviewed_at' => now(),
-            ],
-        );
-        Notification::make()->title('Investigation status saved.')->success()->send();
-    }
-
-    public function export()
-    {
-        abort_unless(static::canAccess(), 403);
-        if (! $this->searched) {
-            return null;
-        }
-        $report = app(InventoryAuditHistoryService::class)->search($this->applied);
-
-        return response()->streamDownload(function () use ($report): void {
+        return response()->streamDownload(function () use ($rows): void {
             $out = fopen('php://output', 'w');
             fputcsv($out, ['Date', 'SKU', 'Product', 'Activity', 'Change', 'States', 'Source', 'App', 'Triggered by', 'Process', 'Reason', 'Reference', 'Match', 'Flags', 'Review']);
-            foreach ($report['rows'] as $row) {
+            foreach ($rows as $row) {
                 $states = [];
                 foreach ((array) ($row['states'] ?? []) as $state) {
                     if (is_array($state)) {
@@ -326,55 +308,103 @@ class InventoryAuditHistory extends Page implements HasForms
         }, 'inventory-audit.csv');
     }
 
-    public function previousPage(): void
+    /**
+     * @return array{rows:array<int, array<string, mixed>>,shopify_status:string,shopify_message:?string,truncated:bool,incomplete:bool,retrieved_at:?string,summary:array<string, int>}
+     */
+    protected function auditReport(): array
     {
-        $this->pageNumber = max(1, $this->pageNumber - 1);
-        $this->selectedKey = null;
+        if ($this->loadedReport !== null) {
+            return $this->loadedReport;
+        }
+
+        $dates = (array) data_get($this->tableFilters, 'dates', []);
+        $from = Carbon::parse((string) ($dates['from'] ?: now()->subDays(6)->toDateString()))->startOfDay();
+        $until = Carbon::parse((string) ($dates['until'] ?: now()->toDateString()))->endOfDay();
+        if ($until->lt($from) || $from->diffInDays($until) > 1095) {
+            $from = now()->subDays(6)->startOfDay();
+            $until = now()->endOfDay();
+        }
+
+        $investigation = $this->selectFilter('investigation');
+        if ($investigation === 'all') {
+            $investigation = '';
+        }
+
+        $report = app(InventoryAuditHistoryService::class)->search([
+            'from' => $from->toDateString(),
+            'until' => $until->toDateString(),
+            'query' => trim((string) $this->tableSearch),
+            'activity' => $this->selectFilter('activity'),
+            'source' => $this->selectFilter('source'),
+            'app' => $this->textFilter('app'),
+            'triggered_by' => $this->textFilter('triggered_by'),
+            'reason' => $this->textFilter('reason'),
+            'state' => $this->selectFilter('state'),
+            'direction' => $this->selectFilter('direction'),
+            'match' => $this->selectFilter('match'),
+            'location' => $this->textFilter('location'),
+            'reference' => $this->textFilter('reference'),
+            'investigation' => $investigation,
+            'storewide' => true,
+            'live_shopify' => false,
+        ]);
+
+        $needle = strtolower(trim((string) $this->tableSearch));
+        if ($needle !== '') {
+            $report['rows'] = array_values(array_filter(
+                $report['rows'],
+                fn (array $row): bool => str_contains(strtolower(implode(' ', [
+                    (string) ($row['sku'] ?? ''),
+                    (string) ($row['product'] ?? ''),
+                ])), $needle),
+            ));
+            $report['summary'] = app(InventoryAuditHistoryService::class)->summary($report['rows']);
+        }
+
+        return $this->loadedReport = $report;
     }
 
-    public function nextPage(): void
+    private function selectFilter(string $name): string
     {
-        $this->pageNumber++;
-        $this->selectedKey = null;
+        return trim((string) data_get($this->tableFilters, $name.'.value', ''));
+    }
+
+    private function textFilter(string $name): string
+    {
+        return trim((string) data_get($this->tableFilters, $name.'.value', ''));
     }
 
     /**
-     * @return array{rows:array<int, array<string, mixed>>,shopify_status:string,shopify_message:?string,truncated:bool,page_rows:array<int, array<string, mixed>>,selected:?array<string, mixed>,page_count:int}
+     * @param  array<string, mixed>  $row
      */
-    public function report(): array
+    private function entry(array $row): InventoryAuditEntry
     {
-        if (! $this->searched) {
-            return [
-                'rows' => [],
-                'page_rows' => [],
-                'selected' => null,
-                'shopify_status' => 'skipped',
-                'shopify_message' => null,
-                'truncated' => false,
-                'incomplete' => false,
-                'retrieved_at' => null,
-                'summary' => ['operations' => 0, 'cms_operations' => 0, 'shopify_operations' => 0, 'unexplained' => 0, 'products' => 0, 'positive_lines' => 0, 'negative_lines' => 0],
-                'page_count' => 1,
-            ];
-        }
+        $record = new InventoryAuditEntry;
+        $record->forceFill([
+            'key' => (string) ($row['key'] ?? ''),
+            'occurred_at' => (string) ($row['occurred_at'] ?? ''),
+            'product' => (string) ($row['product'] ?? ''),
+            'sku' => (string) ($row['sku'] ?? ''),
+            'activity' => (string) ($row['activity'] ?? ''),
+            'change' => (string) ($row['change'] ?? ''),
+            'source_label' => (string) ($row['source_label'] ?? ''),
+            'app' => (string) ($row['app'] ?? ''),
+            'triggered_by' => (string) ($row['triggered_by'] ?? ''),
+            'confidence_label' => (string) ($row['confidence_label'] ?? ''),
+            'review_status' => (string) ($row['review_status'] ?? ''),
+            'review_note' => (string) ($row['review_note'] ?? ''),
+            'detail_text' => collect($row['detail'] ?? [])->map(fn ($line): string => is_array($line) ? ($line[0].': '.$line[1]) : '')->implode("\n"),
+            'states_text' => collect($row['states'] ?? [])->map(function ($state): string {
+                if (! is_array($state)) {
+                    return '';
+                }
 
-        $report = app(InventoryAuditHistoryService::class)->search($this->applied);
-        $perPage = 25;
-        $pageCount = max(1, (int) ceil(count($report['rows']) / $perPage));
-        $this->pageNumber = min($this->pageNumber, $pageCount);
-        $pageRows = array_slice($report['rows'], ($this->pageNumber - 1) * $perPage, $perPage);
-        $selected = null;
-        foreach ($report['rows'] as $row) {
-            if (($row['key'] ?? '') === $this->selectedKey) {
-                $selected = $row;
-                break;
-            }
-        }
+                return (($state['delta'] ?? 0) > 0 ? '+' : '').($state['delta'] ?? 0).' '.($state['state'] ?? '').' ('.(($state['origin'] ?? '') === 'shopify' ? 'Shopify' : 'CMS').')';
+            })->filter()->implode("\n"),
+            'flag_text' => implode("\n", (array) ($row['flag_labels'] ?? [])),
+        ]);
+        $record->exists = true;
 
-        return $report + [
-            'page_rows' => $pageRows,
-            'selected' => $selected,
-            'page_count' => $pageCount,
-        ];
+        return $record;
     }
 }

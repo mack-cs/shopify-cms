@@ -250,12 +250,30 @@ it('shows the audit page to inventory managers and keeps shopify denial visible'
     app()->instance(ShopifyGraphqlGateway::class, $gateway);
     $this->actingAs($user);
 
+    ShopifyInventoryAdjustment::query()->create([
+        'adjustment_id' => 'direct-page',
+        'occurred_at' => now(),
+        'sku' => 'LRB0030',
+        'product_title' => 'Evening Protea Bracelet',
+        'inventory_state' => 'available',
+        'delta' => -2,
+        'reason' => 'correction',
+        'app_name' => 'Shopify',
+        'staff_name' => 'Riley Buyer',
+        'synced_at' => now(),
+    ]);
+
     Livewire::test(InventoryAuditHistory::class)
-        ->set('data.query', 'LA0544')
-        ->call('search')
         ->assertSee('Supplier inventory received')
+        ->assertSee('LRB0030')
+        ->assertSee('Riley Buyer')
         ->assertSee('has not been stored yet')
-        ->assertSee('Avery Clerk');
+        ->set('tableSearch', 'LA0544')
+        ->assertSee('Supplier inventory received')
+        ->assertDontSee('LRB0030')
+        ->set('tableSearch', 'LRB0030')
+        ->assertSee('LRB0030')
+        ->assertDontSee('Supplier inventory received');
 
     expect(InventoryAuditHistory::canAccess())->toBeTrue();
     $this->actingAs(User::factory()->create(['email' => 'viewer@leighavenue.co.za']));

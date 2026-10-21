@@ -1294,7 +1294,7 @@ final class InventoryAuditHistoryService
      * @param array<int, array<string, mixed>> $rows
      * @return array<string, int>
      */
-    private function summary(array $rows): array
+    public function summary(array $rows): array
     {
         $positive = 0;
         $negative = 0;
