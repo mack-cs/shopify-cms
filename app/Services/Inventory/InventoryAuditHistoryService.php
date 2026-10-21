@@ -1433,6 +1433,357 @@ final class InventoryAuditHistoryService
     }
 
     /**
+     * Logical quantity adjustments for managers. Receipts, reservations, and sales stay out.
+     * Several CMS fields saved together, and a matching CMS Shopify echo, become one adjustment.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    public function adjustments(array $rows): array
+    {
+        $operations = [];
+        $shopify = [];
+        $edits = [];
+        foreach ($rows as $row) {
+            if (! $this->isQuantityAdjustment($row)) {
+                continue;
+            }
+            if (($row['activity_key'] ?? '') === 'cms_edit') {
+                $edits[] = $row;
+            } elseif (($row['source'] ?? '') === 'shopify') {
+                $shopify[] = $this->presentAdjustment($row);
+            } else {
+                $operations[] = $this->presentAdjustment($row);
+            }
+        }
+
+        $edits = $this->collapsePersonEdits($edits);
+        $keptEdits = [];
+        foreach ($edits as $edit) {
+            $index = $this->matchingAdjustmentIndex($operations, $edit);
+            if ($index === null) {
+                $keptEdits[] = $edit;
+
+                continue;
+            }
+            $operation = $operations[$index];
+            if (($operation['reported_by'] ?? '') === 'shopify') {
+                $merged = $this->mergeAdjustmentDetail($edit, $operation);
+                $merged['source'] = 'cms';
+                $merged['source_label'] = 'CMS';
+                $operations[$index] = $merged;
+
+                continue;
+            }
+            $operations[$index] = $this->mergeAdjustmentDetail($operation, $edit);
+        }
+
+        $direct = [];
+        foreach ($shopify as $remote) {
+            $cms = $this->matchingAdjustmentIndex($operations, $remote) ?? $this->matchingAdjustmentIndex($keptEdits, $remote);
+            $sameCmsApp = strtolower((string) ($remote['app'] ?? '')) === 'la-cms-access';
+            if ($cms !== null && $sameCmsApp) {
+                $target = $this->matchingAdjustmentIndex($operations, $remote);
+                if ($target !== null) {
+                    $operations[$target] = $this->mergeAdjustmentDetail($operations[$target], $remote);
+                } else {
+                    $target = $this->matchingAdjustmentIndex($keptEdits, $remote);
+                    $keptEdits[$target] = $this->mergeAdjustmentDetail($keptEdits[$target], $remote);
+                }
+
+                continue;
+            }
+            $direct[] = $remote;
+        }
+
+        $adjustments = array_merge($operations, $keptEdits, $direct);
+        usort($adjustments, fn (array $left, array $right): int => strcmp((string) ($right['occurred_at_iso'] ?? ''), (string) ($left['occurred_at_iso'] ?? '')));
+
+        return array_values($adjustments);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     * @return array{adjustments:int,increases:int,decreases:int,cms_originated:int,shopify_originated:int,unexplained:int}
+     */
+    public function adjustmentSummary(array $rows): array
+    {
+        $increases = 0;
+        $decreases = 0;
+        $cms = 0;
+        $shopify = 0;
+        $unexplained = 0;
+        foreach ($rows as $row) {
+            $difference = $row['quantity_difference'] ?? null;
+            if (is_int($difference) && $difference > 0) {
+                $increases++;
+            } elseif (is_int($difference) && $difference < 0) {
+                $decreases++;
+            }
+            if (($row['source'] ?? '') === 'shopify') {
+                $shopify++;
+            } else {
+                $cms++;
+            }
+            if (($row['flags'] ?? []) !== []) {
+                $unexplained++;
+            }
+        }
+
+        return [
+            'adjustments' => count($rows),
+            'increases' => $increases,
+            'decreases' => $decreases,
+            'cms_originated' => $cms,
+            'shopify_originated' => $shopify,
+            'unexplained' => $unexplained,
+        ];
+    }
+
+    private function isGenericActor(string $name): bool
+    {
+        $name = strtolower(trim($name));
+
+        return $name === ''
+            || $name === 'la-cms-access'
+            || $name === 'cms user'
+            || $name === 'inventory sync job'
+            || str_contains($name, 'did not name')
+            || str_contains($name, 'not recorded');
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function isQuantityAdjustment(array $row): bool
+    {
+        $activityKey = (string) ($row['activity_key'] ?? '');
+        $activity = strtolower((string) ($row['activity'] ?? ''));
+        $process = strtolower((string) ($row['process'] ?? ''));
+        if (in_array($activityKey, ['received', 'reserved', 'reservation_deleted', 'consumed', 'order_created', 'initialized'], true)) {
+            return false;
+        }
+        foreach (['stack', 'reservation', 'order processing', 'supplier receipt', 'receipt'] as $marker) {
+            if (str_contains($activity, $marker) || str_contains($process, $marker)) {
+                return false;
+            }
+        }
+
+        return in_array($activityKey, ['correction', 'cms_edit', 'manual_deduction'], true);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $edits
+     * @return array<int, array<string, mixed>>
+     */
+    private function collapsePersonEdits(array $edits): array
+    {
+        usort($edits, fn (array $left, array $right): int => strcmp((string) ($left['occurred_at_iso'] ?? ''), (string) ($right['occurred_at_iso'] ?? '')));
+        $clusters = [];
+        foreach ($edits as $edit) {
+            $placed = false;
+            foreach ($clusters as &$cluster) {
+                $first = $cluster[0];
+                $sameSku = strcasecmp((string) ($first['sku'] ?? ''), (string) ($edit['sku'] ?? '')) === 0;
+                $samePerson = strcasecmp((string) ($first['triggered_by'] ?? ''), (string) ($edit['triggered_by'] ?? '')) === 0;
+                $sameDifference = (int) ($first['delta'] ?? 0) === (int) ($edit['delta'] ?? 0);
+                $start = $this->rowTime($first);
+                $time = $this->rowTime($edit);
+                $close = $start instanceof Carbon && $time instanceof Carbon && abs($start->diffInSeconds($time)) <= 5;
+                if ($sameSku && $samePerson && $sameDifference && $close) {
+                    $cluster[] = $edit;
+                    $placed = true;
+                    break;
+                }
+            }
+            unset($cluster);
+            if (! $placed) {
+                $clusters[] = [$edit];
+            }
+        }
+
+        return array_map(function (array $cluster): array {
+            $chosen = $cluster[0];
+            foreach ($cluster as $member) {
+                if (($member['expected_state'] ?? $member['state'] ?? '') === 'on_hand' || $this->detailValue((array) ($member['detail'] ?? []), 'Field') === 'current_on_hand_quantity') {
+                    $chosen = $member;
+                    break;
+                }
+            }
+            $row = $this->presentAdjustment($chosen);
+            if (count($cluster) === 1) {
+                return $row;
+            }
+            $keys = array_map(fn (array $member): string => (string) ($member['key'] ?? ''), $cluster);
+            sort($keys);
+            $row['key'] = 'cms-edit-group-'.substr(hash('sha256', implode('|', $keys)), 0, 24);
+            $detail = (array) ($row['detail'] ?? []);
+            $detail[] = ['Underlying records', count($cluster).' CMS quantity fields were saved together and are shown as one adjustment.'];
+            foreach ($cluster as $member) {
+                $field = $this->detailValue((array) ($member['detail'] ?? []), 'Field');
+                $old = $this->detailValue((array) ($member['detail'] ?? []), 'Old value');
+                $new = $this->detailValue((array) ($member['detail'] ?? []), 'New value');
+                if ($field !== null) {
+                    $detail[] = ['Change log '.$field, trim((string) $old).' → '.trim((string) $new)];
+                }
+            }
+            $row['detail'] = $detail;
+            $row['states'] = [[
+                'state' => (string) ($row['quantity_state'] ?? 'on_hand'),
+                'delta' => (int) ($row['quantity_difference'] ?? 0),
+                'origin' => 'local',
+            ]];
+
+            return $row;
+        }, $clusters);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function presentAdjustment(array $row): array
+    {
+        $detail = (array) ($row['detail'] ?? []);
+        $before = $this->numericQuantity($this->firstDetail($detail, [
+            'Old value',
+            'On hand before, as recorded in the CMS',
+            'On hand before',
+        ]));
+        $after = $this->numericQuantity($this->firstDetail($detail, [
+            'New value',
+            'On hand sent to Shopify',
+            'On hand after',
+        ]));
+        $difference = $before !== null && $after !== null ? $after - $before : $this->primaryDelta($row);
+        $state = $this->detailValue($detail, 'Field') === 'current_on_hand_quantity'
+            ? 'on_hand'
+            : (string) ($row['expected_state'] ?? ($row['state'] ?? ''));
+        $row['quantity_before'] = $before;
+        $row['quantity_after'] = $after;
+        $row['quantity_difference'] = $difference;
+        $row['quantity_state'] = $state !== '' ? $state : null;
+        $row['change'] = $difference === null ? (string) ($row['change'] ?? '') : (($difference > 0 ? '+' : '').$difference);
+
+        return $row;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     * @param array<string, mixed> $candidate
+     */
+    private function matchingAdjustmentIndex(array $rows, array $candidate): ?int
+    {
+        $sku = strtolower(trim((string) ($candidate['sku'] ?? '')));
+        $difference = $candidate['quantity_difference'] ?? $candidate['delta'] ?? null;
+        $time = $this->rowTime($candidate);
+        if ($sku === '' || $difference === null || ! $time instanceof Carbon) {
+            return null;
+        }
+        foreach ($rows as $index => $row) {
+            $rowDifference = $row['quantity_difference'] ?? $row['delta'] ?? null;
+            $rowTime = $this->rowTime($row);
+            if (strtolower(trim((string) ($row['sku'] ?? ''))) !== $sku || (int) $rowDifference !== (int) $difference) {
+                continue;
+            }
+            if ($rowTime instanceof Carbon && abs($rowTime->diffInSeconds($time)) <= 120) {
+                return $index;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @param array<string, mixed> $extra
+     * @return array<string, mixed>
+     */
+    private function mergeAdjustmentDetail(array $operation, array $extra): array
+    {
+        if ($operation['quantity_before'] === null && $extra['quantity_before'] !== null) {
+            $operation['quantity_before'] = $extra['quantity_before'];
+            $operation['quantity_after'] = $extra['quantity_after'];
+            $operation['quantity_difference'] = $extra['quantity_difference'];
+            $operation['change'] = $extra['change'];
+        }
+        if ($this->isGenericActor((string) ($operation['triggered_by'] ?? '')) && ! $this->isGenericActor((string) ($extra['triggered_by'] ?? ''))) {
+            $operation['triggered_by'] = $extra['triggered_by'];
+            $operation['actor_user_id'] = $extra['actor_user_id'] ?? $operation['actor_user_id'] ?? null;
+        }
+        $known = [];
+        foreach ((array) ($operation['detail'] ?? []) as $line) {
+            if (is_array($line)) {
+                $known[$line[0].'|'.$line[1]] = true;
+            }
+        }
+        foreach ((array) ($extra['detail'] ?? []) as $line) {
+            if (! is_array($line) || isset($known[$line[0].'|'.$line[1]])) {
+                continue;
+            }
+            $operation['detail'][] = $line;
+        }
+        $operation['detail'][] = ['Grouped adjustment', 'The CMS quantity edit and its matching audit record are one adjustment.'];
+
+        return $operation;
+    }
+
+    /**
+     * @param array<int, array{0:string,1:string}> $detail
+     * @param array<int, string> $labels
+     */
+    private function firstDetail(array $detail, array $labels): ?string
+    {
+        foreach ($labels as $label) {
+            $value = $this->detailValue($detail, $label);
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function primaryDelta(array $row): ?int
+    {
+        $states = array_values(array_filter((array) ($row['states'] ?? []), 'is_array'));
+        foreach (['on_hand', 'available'] as $preferred) {
+            foreach ($states as $state) {
+                if (strtolower((string) ($state['state'] ?? '')) === $preferred) {
+                    return (int) ($state['delta'] ?? 0);
+                }
+            }
+        }
+        if (array_key_exists('expected_delta', $row) && $row['expected_delta'] !== null && $states !== []) {
+            return (int) $row['expected_delta'];
+        }
+        if ($states === []) {
+            return null;
+        }
+
+        return (int) ($states[0]['delta'] ?? 0);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function rowTime(array $row): ?Carbon
+    {
+        $value = trim((string) ($row['occurred_at_iso'] ?? ''));
+        if ($value === '') {
+            return null;
+        }
+        try {
+            return Carbon::parse($value);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * @param array<int, array<string, mixed>> $rows
      * @return array<string, int>
      */

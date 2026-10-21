@@ -46,6 +46,8 @@ class InventoryAuditHistory extends Page implements HasTable
 
     public bool $directCorrectionOpen = false;
 
+    public string $auditTab = 'adjustments';
+
     public string $appliedFromLabel = '';
 
     public string $appliedUntilLabel = '';
@@ -66,12 +68,29 @@ class InventoryAuditHistory extends Page implements HasTable
         abort_unless(static::canAccess(), 403);
     }
 
+    public function setAuditTab(string $tab): void
+    {
+        $this->auditTab = $tab === 'operations' ? 'operations' : 'adjustments';
+        $this->bootedInteractsWithTable();
+        $this->resetPage();
+    }
+
     public function table(Table $table): Table
     {
         return $table
             ->query(fn (): Builder => InventoryOperationAudit::query()->whereRaw('1 = 0'))
             ->searchPlaceholder('Product name or SKU')
-            ->columns([
+            ->columns($this->auditTab === 'adjustments' ? [
+                TextColumn::make('occurred_at')->label('Date')->searchable(false),
+                TextColumn::make('product')->label('Product')->searchable()->wrap(),
+                TextColumn::make('sku')->label('SKU')->searchable(),
+                TextColumn::make('quantity_before')->label('Before'),
+                TextColumn::make('quantity_after')->label('After'),
+                TextColumn::make('quantity_difference')->label('Difference'),
+                TextColumn::make('source_label')->label('Source'),
+                TextColumn::make('triggered_by')->label('Person')->wrap(),
+                TextColumn::make('confidence_label')->label('Match')->wrap(),
+            ] : [
                 TextColumn::make('occurred_at')->label('Date')->searchable(false),
                 TextColumn::make('product')->label('Product')->searchable()->wrap(),
                 TextColumn::make('sku')->label('SKU')->searchable(),
@@ -191,8 +210,10 @@ class InventoryAuditHistory extends Page implements HasTable
                     ->action(fn () => $this->emailDirectCorrectionReport()),
             ])
             ->defaultPaginationPageOption(25)
-            ->emptyStateHeading('No inventory adjustments matched')
-            ->emptyStateDescription('CMS records and stored Shopify adjustments are both included. Change the date filter or the product search.');
+            ->emptyStateHeading($this->auditTab === 'adjustments' ? 'No inventory adjustments matched' : 'No inventory operations matched')
+            ->emptyStateDescription($this->auditTab === 'adjustments'
+                ? 'This tab lists quantity adjustments from Shopify and the CMS. Receipts, reservations, and sales are on Inventory operations.'
+                : 'This tab lists stack movements, supplier receipts, and other inventory workflows.');
     }
 
     public function getFilteredTableQuery(): Builder
@@ -207,7 +228,7 @@ class InventoryAuditHistory extends Page implements HasTable
 
     public function getTableRecords(): LengthAwarePaginator
     {
-        $rows = $this->auditReport()['rows'];
+        $rows = $this->visibleRows();
         $perPage = $this->getTableRecordsPerPage();
         $perPage = is_numeric($perPage) ? (int) $perPage : 25;
         $page = max(1, $this->getTablePage());
@@ -224,7 +245,7 @@ class InventoryAuditHistory extends Page implements HasTable
 
     public function getAllTableRecordsCount(): int
     {
-        return count($this->auditReport()['rows']);
+        return count($this->visibleRows());
     }
 
     protected function resolveTableRecord(?string $key): ?InventoryAuditEntry
@@ -232,7 +253,7 @@ class InventoryAuditHistory extends Page implements HasTable
         if ($key === null || $key === '') {
             return null;
         }
-        foreach ($this->auditReport()['rows'] as $row) {
+        foreach ($this->visibleRows() as $row) {
             if (($row['key'] ?? '') === $key) {
                 return $this->entry($row);
             }
@@ -242,11 +263,29 @@ class InventoryAuditHistory extends Page implements HasTable
     }
 
     /**
-     * @return array{operations:int,cms_operations:int,shopify_operations:int,unexplained:int,products:int,positive_lines:int,negative_lines:int}
+     * @return array<string, int>
      */
     public function auditSummary(): array
     {
-        return $this->auditReport()['summary'];
+        $rows = $this->visibleRows();
+        if ($this->auditTab === 'adjustments') {
+            return app(InventoryAuditHistoryService::class)->adjustmentSummary($rows);
+        }
+
+        return app(InventoryAuditHistoryService::class)->summary($rows);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function visibleRows(): array
+    {
+        $rows = $this->auditReport()['rows'];
+        if ($this->auditTab === 'operations') {
+            return $rows;
+        }
+
+        return app(InventoryAuditHistoryService::class)->adjustments($rows);
     }
 
     public function appliedDateRange(): string
@@ -286,11 +325,14 @@ class InventoryAuditHistory extends Page implements HasTable
     public function export(): StreamedResponse
     {
         abort_unless(static::canAccess(), 403);
-        $rows = $this->auditReport()['rows'];
+        $rows = $this->visibleRows();
+        $adjustments = $this->auditTab === 'adjustments';
 
-        return response()->streamDownload(function () use ($rows): void {
+        return response()->streamDownload(function () use ($rows, $adjustments): void {
             $out = fopen('php://output', 'w');
-            fputcsv($out, ['Date', 'SKU', 'Product', 'Activity', 'Change', 'States', 'Source', 'App', 'Triggered by', 'Process', 'Reason', 'Reference', 'Match', 'Flags', 'Review']);
+            fputcsv($out, $adjustments
+                ? ['Date', 'SKU', 'Product', 'Before', 'After', 'Difference', 'Source', 'Person', 'Match', 'Activity', 'Detail', 'Review']
+                : ['Date', 'SKU', 'Product', 'Activity', 'Change', 'States', 'Source', 'App', 'Triggered by', 'Process', 'Reason', 'Reference', 'Match', 'Flags', 'Review']);
             foreach ($rows as $row) {
                 $states = [];
                 foreach ((array) ($row['states'] ?? []) as $state) {
@@ -298,7 +340,21 @@ class InventoryAuditHistory extends Page implements HasTable
                         $states[] = ((int) ($state['delta'] ?? 0)).' '.($state['state'] ?? '').' ('.($state['origin'] ?? '').')';
                     }
                 }
-                fputcsv($out, [
+                $detail = collect($row['detail'] ?? [])->map(fn ($line): string => is_array($line) ? ($line[0].': '.$line[1]) : '')->implode(' | ');
+                fputcsv($out, $adjustments ? [
+                    $row['occurred_at'] ?? '',
+                    $row['sku'] ?? '',
+                    $row['product'] ?? '',
+                    $row['quantity_before'] ?? '',
+                    $row['quantity_after'] ?? '',
+                    $row['quantity_difference'] ?? '',
+                    $row['source_label'] ?? '',
+                    $row['triggered_by'] ?? '',
+                    $row['confidence_label'] ?? '',
+                    $row['activity'] ?? '',
+                    $detail,
+                    $row['review_status'] ?? '',
+                ] : [
                     $row['occurred_at'] ?? '',
                     $row['sku'] ?? '',
                     $row['product'] ?? '',
@@ -401,6 +457,11 @@ class InventoryAuditHistory extends Page implements HasTable
             'sku' => (string) ($row['sku'] ?? ''),
             'activity' => (string) ($row['activity'] ?? ''),
             'change' => (string) ($row['change'] ?? ''),
+            'quantity_before' => $row['quantity_before'] ?? null,
+            'quantity_after' => $row['quantity_after'] ?? null,
+            'quantity_difference' => isset($row['quantity_difference']) && $row['quantity_difference'] !== null
+                ? (($row['quantity_difference'] > 0 ? '+' : '').$row['quantity_difference'])
+                : '',
             'source_label' => (string) ($row['source_label'] ?? ''),
             'app' => (string) ($row['app'] ?? ''),
             'triggered_by' => (string) ($row['triggered_by'] ?? ''),

@@ -275,6 +275,56 @@ it('shows a cms user quantity edit and a direct shopify adjustment without a sal
         ->and(collect($report['rows'])->where('activity_key', 'cms_edit'))->toHaveCount(1);
 });
 
+it('shows one adjustment when one save changes available and on hand', function (): void {
+    $user = User::factory()->create(['name' => 'Caitlin']);
+    [$variant, $product] = inventoryAuditCatalog($user, 'LRB0030', 'Thunderous Echoes White and Gold Bracelet');
+    foreach (['inventory_qty', 'current_inventory_quantity', 'current_available_quantity', 'current_on_hand_quantity'] as $field) {
+        $log = new ChangeLog;
+        $log->forceFill([
+            'import_id' => $product->import_id,
+            'product_id' => $product->id,
+            'changed_by' => $user->id,
+            'model_type' => Variant::class,
+            'model_id' => $variant->id,
+            'field' => $field,
+            'old_value' => '30',
+            'new_value' => '60',
+        ]);
+        $log->created_at = Carbon::parse('2026-09-04 11:20:00');
+        $log->updated_at = Carbon::parse('2026-09-04 11:20:00');
+        $log->save();
+    }
+    inventoryAuditReceipt($user, $variant, 'LA2609', 10);
+    ShopifyInventoryAdjustment::query()->create([
+        'adjustment_id' => 'cms-echo-30',
+        'occurred_at' => Carbon::parse('2026-09-04 11:20:02'),
+        'sku' => 'LRB0030',
+        'product_title' => 'Thunderous Echoes White and Gold Bracelet',
+        'inventory_state' => 'available',
+        'delta' => 30,
+        'reason' => 'correction',
+        'app_name' => 'la-cms-access',
+        'synced_at' => now(),
+    ]);
+
+    $report = app(InventoryAuditHistoryService::class)->search([
+        'query' => 'LRB0030',
+        'from' => '2026-09-01',
+        'until' => now()->toDateString(),
+        'live_shopify' => false,
+    ]);
+    $adjustments = app(InventoryAuditHistoryService::class)->adjustments($report['rows']);
+
+    expect($adjustments)->toHaveCount(1)
+        ->and($adjustments[0]['triggered_by'])->toBe('Caitlin')
+        ->and($adjustments[0]['quantity_before'])->toBe(30)
+        ->and($adjustments[0]['quantity_after'])->toBe(60)
+        ->and($adjustments[0]['quantity_difference'])->toBe(30)
+        ->and($adjustments[0]['source'])->toBe('cms')
+        ->and(json_encode($adjustments[0]['detail']))->toContain('current_on_hand_quantity')
+        ->and(collect($report['rows'])->contains(fn (array $row): bool => ($row['activity_key'] ?? '') === 'received'))->toBeTrue();
+});
+
 it('keeps a cms user edit from outside the selected week when the product is searched', function (): void {
     $user = User::factory()->create(['name' => 'Caitlin']);
     [$variant, $product] = inventoryAuditCatalog($user, 'LRB0030', 'Thunderous Echoes White and Gold Bracelet');
@@ -357,15 +407,18 @@ it('shows the audit page to inventory managers and keeps shopify denial visible'
     ]);
 
     Livewire::test(InventoryAuditHistory::class)
-        ->assertSee('Supplier inventory received')
-        ->assertSee('LRB0030')
+        ->assertSet('auditTab', 'adjustments')
         ->assertSee('Riley Buyer')
+        ->assertDontSee('Supplier inventory received')
         ->assertSee('has not been stored yet')
+        ->call('setAuditTab', 'operations')
+        ->assertSee('Supplier inventory received')
         ->set('tableSearch', 'LA0544')
         ->assertSee('Supplier inventory received')
         ->assertDontSee('LRB0030')
+        ->call('setAuditTab', 'adjustments')
         ->set('tableSearch', 'LRB0030')
-        ->assertSee('LRB0030')
+        ->assertSee('Riley Buyer')
         ->assertDontSee('Supplier inventory received');
 
     expect(InventoryAuditHistory::canAccess())->toBeTrue();

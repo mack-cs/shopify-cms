@@ -1,25 +1,45 @@
 <x-filament-panels::page>
     <div class="space-y-4">
+        <div style="display:flex;gap:0.5rem;">
+            <button type="button" wire:click="setAuditTab('adjustments')" style="border-radius:0.5rem;padding:0.4rem 0.8rem;font-size:0.875rem;{{ $this->auditTab === 'adjustments' ? 'background:#111827;color:#fff;' : 'background:#fff;color:#111827;border:1px solid #d1d5db;' }}">
+                Inventory adjustments
+            </button>
+            <button type="button" wire:click="setAuditTab('operations')" style="border-radius:0.5rem;padding:0.4rem 0.8rem;font-size:0.875rem;{{ $this->auditTab === 'operations' ? 'background:#111827;color:#fff;' : 'background:#fff;color:#111827;border:1px solid #d1d5db;' }}">
+                Inventory operations
+            </button>
+        </div>
+
         <p class="text-sm text-gray-600 dark:text-gray-300">
-            This list includes inventory quantity edits saved by a CMS user, the CMS inventory workflows, and manual adjustments people make directly in Shopify. Sales and other Online Store movements are left out. The date filter starts at the last 120 days. Searching a product also includes quantity edits a CMS user saved for that product over the last three years, so an older edit such as 10 August is not dropped by the shorter date filter. Use the table search for a product name or SKU. Other filters are in the filter menu. This page does not call Shopify.
+            @if ($this->auditTab === 'adjustments')
+                Inventory adjustments are quantity corrections and manual edits from Shopify or the CMS. One save that changes available and on hand is one adjustment. Supplier receipts, stack reservations, and sales are on Inventory operations. Searching a product includes CMS quantity edits from the last three years.
+            @else
+                Inventory operations are stack reservations, reserved stock consumption, supplier receipts, and other automated workflows, with the existing match and review detail.
+            @endif
+            The date filter starts at the last 120 days. This page does not call Shopify or change stock.
         </p>
 
-        <p class="text-sm text-gray-600 dark:text-gray-300">Workflows and stored Shopify rows use {{ $this->appliedDateRange() }}.</p>
+        <p class="text-sm text-gray-600 dark:text-gray-300">Showing {{ $this->appliedDateRange() }}.</p>
 
         @if ($notice = $this->shopifyNotice())
             <p class="text-sm text-gray-600 dark:text-gray-300">{{ $notice }}</p>
         @endif
 
         @php($summary = $this->auditSummary())
-        <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:0.75rem;">
-            @foreach ([
+        <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:0.75rem;">
+            @foreach ($this->auditTab === 'adjustments' ? [
+                'Adjustments' => $summary['adjustments'],
+                'Increases' => $summary['increases'],
+                'Decreases' => $summary['decreases'],
+                'CMS-originated' => $summary['cms_originated'],
+                'Shopify-originated' => $summary['shopify_originated'],
+                'Unexplained' => $summary['unexplained'],
+            ] : [
                 'Operations' => $summary['operations'],
                 'CMS-originated' => $summary['cms_operations'],
                 'Shopify-originated' => $summary['shopify_operations'],
                 'Unexplained' => $summary['unexplained'],
-                'Products' => $summary['products'],
-                'State lines increased' => $summary['positive_lines'],
-                'State lines decreased' => $summary['negative_lines'],
+                'Increased lines' => $summary['positive_lines'],
+                'Decreased lines' => $summary['negative_lines'],
             ] as $label => $value)
                 <div class="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-900">
                     <div class="text-xs uppercase tracking-wide text-gray-500">{{ $label }}</div>
@@ -27,7 +47,13 @@
                 </div>
             @endforeach
         </div>
-        <p class="text-xs text-gray-500">Increased and decreased counts are separate state lines. They are not added together into a stock total.</p>
+        <p class="text-xs text-gray-500">
+            @if ($this->auditTab === 'adjustments')
+                Each count is one logical adjustment. Increases and decreases are not added together into a stock total.
+            @else
+                Increased and decreased counts are separate state lines. They are not added together into a stock total.
+            @endif
+        </p>
 
         {{ $this->table }}
 
