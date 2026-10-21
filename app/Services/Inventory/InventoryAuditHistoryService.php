@@ -1024,15 +1024,22 @@ final class InventoryAuditHistoryService
             return [];
         }
 
+        $logFrom = $query !== '' ? $until->copy()->subDays(1095)->startOfDay() : $from;
+        $variantIds = $query === ''
+            ? []
+            : Variant::query()->where('sku', 'like', '%'.$query.'%')->pluck('id')->all();
         $records = ChangeLog::query()
             ->with(['changedBy', 'product'])
             ->whereNotNull('changed_by')
             ->whereIn('field', array_keys(self::PERSON_INVENTORY_FIELDS))
-            ->whereBetween('created_at', [$from, $until])
-            ->when($query !== '', function (Builder $builder) use ($query): void {
-                $builder->where(function (Builder $inner) use ($query): void {
+            ->whereBetween('created_at', [$logFrom, $until])
+            ->when($query !== '', function (Builder $builder) use ($query, $variantIds): void {
+                $builder->where(function (Builder $inner) use ($query, $variantIds): void {
                     $inner->whereHas('product', fn (Builder $product): Builder => $product->where('title', 'like', '%'.$query.'%'))
-                        ->orWhereHas('product.variants', fn (Builder $variant): Builder => $variant->where('sku', 'like', '%'.$query.'%'));
+                        ->orWhereHas('product.variants', fn (Builder $variant): Builder => $variant->where('sku', 'like', '%'.$query.'%'))
+                        ->orWhere(function (Builder $variantLog) use ($variantIds): void {
+                            $variantLog->where('model_type', Variant::class)->whereIn('model_id', $variantIds !== [] ? $variantIds : [0]);
+                        });
                 });
             })
             ->orderByDesc('id')

@@ -275,6 +275,35 @@ it('shows a cms user quantity edit and a direct shopify adjustment without a sal
         ->and(collect($report['rows'])->where('activity_key', 'cms_edit'))->toHaveCount(1);
 });
 
+it('keeps a cms user edit from outside the selected week when the product is searched', function (): void {
+    $user = User::factory()->create(['name' => 'Caitlin']);
+    [$variant, $product] = inventoryAuditCatalog($user, 'LRB0030', 'Thunderous Echoes White and Gold Bracelet');
+    $log = new ChangeLog;
+    $log->forceFill([
+        'import_id' => $product->import_id,
+        'product_id' => $product->id,
+        'changed_by' => $user->id,
+        'model_type' => Variant::class,
+        'model_id' => $variant->id,
+        'field' => 'current_on_hand_quantity',
+        'old_value' => '30',
+        'new_value' => '60',
+    ]);
+    $log->created_at = now()->subDays(70);
+    $log->updated_at = now()->subDays(70);
+    $log->save();
+
+    $report = app(InventoryAuditHistoryService::class)->search([
+        'query' => 'LRB0030',
+        'from' => now()->subDays(6)->toDateString(),
+        'until' => now()->toDateString(),
+        'live_shopify' => false,
+    ]);
+
+    expect(collect($report['rows'])->firstWhere('activity_key', 'cms_edit')['triggered_by'])->toBe('Caitlin')
+        ->and(collect($report['rows'])->firstWhere('activity_key', 'cms_edit')['change'])->toContain('30 → 60');
+});
+
 it('parses a shopifyql history row and leaves the resulting balance empty', function (): void {
     Cache::flush();
     $gateway = Mockery::mock(ShopifyGraphqlGateway::class);

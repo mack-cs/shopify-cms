@@ -1,8 +1,10 @@
 <x-filament-panels::page>
     <div class="space-y-4">
         <p class="text-sm text-gray-600 dark:text-gray-300">
-            This list includes inventory quantity edits saved by a CMS user, the CMS inventory workflows, and manual adjustments people make directly in Shopify. Sales and other Online Store movements are left out. Use the table search for a product name or SKU. Other filters are in the filter menu. This page does not call Shopify.
+            This list includes inventory quantity edits saved by a CMS user, the CMS inventory workflows, and manual adjustments people make directly in Shopify. Sales and other Online Store movements are left out. The date filter starts at the last 120 days. Searching a product also includes quantity edits a CMS user saved for that product over the last three years, so an older edit such as 10 August is not dropped by the shorter date filter. Use the table search for a product name or SKU. Other filters are in the filter menu. This page does not call Shopify.
         </p>
+
+        <p class="text-sm text-gray-600 dark:text-gray-300">Workflows and stored Shopify rows use {{ $this->appliedDateRange() }}.</p>
 
         @if ($notice = $this->shopifyNotice())
             <p class="text-sm text-gray-600 dark:text-gray-300">{{ $notice }}</p>

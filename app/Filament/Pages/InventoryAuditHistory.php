@@ -46,6 +46,10 @@ class InventoryAuditHistory extends Page implements HasTable
 
     public bool $directCorrectionOpen = false;
 
+    public string $appliedFromLabel = '';
+
+    public string $appliedUntilLabel = '';
+
     /** @var array<string, mixed>|null */
     protected ?array $loadedReport = null;
 
@@ -82,7 +86,7 @@ class InventoryAuditHistory extends Page implements HasTable
                 Filter::make('dates')
                     ->label('Dates')
                     ->form([
-                        DatePicker::make('from')->label('From')->default(now()->subDays(6)->toDateString()),
+                        DatePicker::make('from')->label('From')->default(now()->subDays(119)->toDateString()),
                         DatePicker::make('until')->label('Until')->default(now()->toDateString()),
                     ]),
                 SelectFilter::make('activity')->label('Activity')->options([
@@ -245,6 +249,13 @@ class InventoryAuditHistory extends Page implements HasTable
         return $this->auditReport()['summary'];
     }
 
+    public function appliedDateRange(): string
+    {
+        $this->auditReport();
+
+        return trim($this->appliedFromLabel.' through '.$this->appliedUntilLabel);
+    }
+
     public function shopifyNotice(): ?string
     {
         $message = trim((string) ($this->auditReport()['shopify_message'] ?? ''));
@@ -319,12 +330,14 @@ class InventoryAuditHistory extends Page implements HasTable
         }
 
         $dates = (array) data_get($this->tableFilters, 'dates', []);
-        $from = Carbon::parse((string) ($dates['from'] ?: now()->subDays(6)->toDateString()))->startOfDay();
+        $from = Carbon::parse((string) ($dates['from'] ?: now()->subDays(119)->toDateString()))->startOfDay();
         $until = Carbon::parse((string) ($dates['until'] ?: now()->toDateString()))->endOfDay();
         if ($until->lt($from) || $from->diffInDays($until) > 1095) {
-            $from = now()->subDays(6)->startOfDay();
+            $from = now()->subDays(119)->startOfDay();
             $until = now()->endOfDay();
         }
+        $this->appliedFromLabel = $from->format('M j, Y');
+        $this->appliedUntilLabel = $until->format('M j, Y');
 
         $investigation = $this->selectFilter('investigation');
         if ($investigation === 'all') {
