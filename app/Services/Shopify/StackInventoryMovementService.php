@@ -5,6 +5,7 @@ namespace App\Services\Shopify;
 use App\Models\ShopifyStackInventoryMovement;
 use App\Models\ShopifyStackInventoryReservation;
 use App\Models\Variant;
+use App\Services\Inventory\InventoryAuditContext;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -52,19 +53,46 @@ final class StackInventoryMovementService
         ])->save();
 
         $reference = 'gid://leigh-avenue-cms/StackInventoryMovement/'.$movement->id;
+        $context = new InventoryAuditContext(
+            correlationKey: (string) $movement->idempotency_key,
+            workflow: match ($action) {
+                ShopifyStackInventoryMovement::ACTION_RELEASE => 'stack_release',
+                ShopifyStackInventoryMovement::ACTION_CONSUME => 'stack_consume',
+                default => 'stack_reserve',
+            },
+            action: $action,
+            actorType: 'system',
+            execution: 'queue',
+            processName: 'Order processing',
+            explanation: match ($action) {
+                ShopifyStackInventoryMovement::ACTION_RELEASE => 'The stack reservation was released.',
+                ShopifyStackInventoryMovement::ACTION_CONSUME => 'Reserved component inventory was consumed when the stack was fulfilled.',
+                default => 'Component inventory was reserved because an order included this stack.',
+            },
+            variantId: $variant->id ? (int) $variant->id : null,
+            productId: $variant->product_id ? (int) $variant->product_id : null,
+            sku: $reservation->component_sku,
+            inventoryItemId: $reservation->shopify_inventory_item_id,
+            locationId: $reservation->shopify_location_id,
+            referenceDocumentUri: $reference,
+            relatedType: ShopifyStackInventoryMovement::class,
+            relatedId: (int) $movement->id,
+        );
         try {
             $response = match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RESERVE => $this->inventory->moveQuantity(
                     $variant, $quantity, 'available', 'reserved', 'reservation_created', $reference,
                     $reservation->ledger_document_uri, $movement->idempotency_key, $reservation->shopify_location_id,
+                    $context,
                 ),
                 ShopifyStackInventoryMovement::ACTION_RELEASE => $this->inventory->moveQuantity(
                     $variant, $quantity, 'reserved', 'available', 'reservation_deleted', $reference,
                     $reservation->ledger_document_uri, $movement->idempotency_key, $reservation->shopify_location_id,
+                    $context,
                 ),
                 ShopifyStackInventoryMovement::ACTION_CONSUME => $this->inventory->consumeReserved(
                     $variant, $quantity, $reference, $reservation->ledger_document_uri,
-                    $movement->idempotency_key, $reservation->shopify_location_id,
+                    $movement->idempotency_key, $reservation->shopify_location_id, $context,
                 ),
                 default => throw new \InvalidArgumentException("Unsupported stack inventory action [{$action}]."),
             };

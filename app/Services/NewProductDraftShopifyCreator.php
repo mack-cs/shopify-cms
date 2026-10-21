@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\NewProductDraft;
+use App\Services\Inventory\InventoryAuditContext;
+use App\Services\Inventory\InventoryAuditRecorder;
 use Illuminate\Support\Collection;
 
 final class NewProductDraftShopifyCreator
@@ -220,8 +222,33 @@ final class NewProductDraftShopifyCreator
         }
 
         $this->clearManualReview($draft);
+        $this->recordInitialInventory($draft);
 
         return $this->success($product);
+    }
+
+    private function recordInitialInventory(NewProductDraft $draft): void
+    {
+        if (! $this->sendsInventory($draft)) {
+            return;
+        }
+
+        app(InventoryAuditRecorder::class)->succeeded(new InventoryAuditContext(
+            correlationKey: 'product-initialization:'.$draft->id,
+            workflow: 'product_initialization',
+            action: 'inventory_initialized',
+            actorType: $draft->created_by ? 'user' : 'system',
+            execution: app()->runningInConsole() ? 'queue' : 'web',
+            userId: $draft->created_by ? (int) $draft->created_by : null,
+            processName: 'Product creation',
+            explanation: 'New product inventory was initialized while the Shopify product was created. The on-hand quantity sent with creation is zero. Shopify does not return an adjustment id for this call.',
+            inventoryState: 'on_hand',
+            quantityAfter: 0,
+            sku: trim((string) ($draft->sku ?? '')) ?: null,
+            locationId: $this->inventoryLocationId(),
+            relatedType: NewProductDraft::class,
+            relatedId: (int) $draft->id,
+        ));
     }
 
     private function availablePrice(NewProductDraft $draft): ?string

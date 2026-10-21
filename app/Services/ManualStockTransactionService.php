@@ -4,9 +4,11 @@ namespace App\Services;
 
 use App\Models\ChangeLog;
 use App\Models\ManualStockTransaction;
+use App\Models\ManualStockTransactionImpact;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\Variant;
+use App\Services\Inventory\InventoryAuditContext;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -125,7 +127,27 @@ class ManualStockTransactionService
                 $impact->update(['status' => 'processing', 'error_message' => null]);
                 $response = $this->inventory->decreaseOnHand($impact->variant, $impact->quantity_required,
                     "gid://la-cms/ManualStockTransaction/{$transaction->id}/Impact/{$impact->id}", $impact->idempotency_key,
-                    $impact->shopify_location_id, (int) $impact->on_hand_before);
+                    $impact->shopify_location_id, (int) $impact->on_hand_before, new InventoryAuditContext(
+                        correlationKey: (string) $impact->idempotency_key,
+                        workflow: 'manual_stock',
+                        action: 'manual_deduction',
+                        actorType: $userId ? 'user' : 'system',
+                        execution: 'queue',
+                        userId: $userId,
+                        processName: 'Manual stock job',
+                        explanation: $transaction->notes ?: ($transaction->transaction_type ?: 'Manual stock deduction'),
+                        variantId: (int) $impact->variant_id,
+                        productId: $impact->variant?->product_id ? (int) $impact->variant->product_id : null,
+                        sku: $impact->sku,
+                        inventoryItemId: $impact->variant?->shopify_inventory_item_id,
+                        locationId: $impact->shopify_location_id,
+                        referenceDocumentUri: "gid://la-cms/ManualStockTransaction/{$transaction->id}/Impact/{$impact->id}",
+                        relatedType: ManualStockTransactionImpact::class,
+                        relatedId: (int) $impact->id,
+                        delta: -1 * (int) $impact->quantity_required,
+                        inventoryState: 'on_hand',
+                        quantityBefore: $impact->on_hand_before !== null ? (int) $impact->on_hand_before : null,
+                    ));
                 $after = $this->inventory->currentQuantities($impact->variant, $impact->shopify_location_id);
                 $impact->variant->update(['current_available_quantity' => $after['available'], 'current_on_hand_quantity' => $after['on_hand'],
                     'current_committed_quantity' => $after['committed'], 'inventory_last_synced_at' => now(), 'inventory_sync_error' => null]);

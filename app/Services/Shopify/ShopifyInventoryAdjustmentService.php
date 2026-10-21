@@ -5,10 +5,15 @@ namespace App\Services\Shopify;
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\Variant;
+use App\Services\Inventory\InventoryAuditContext;
+use App\Services\Inventory\InventoryAuditRecorder;
 
 class ShopifyInventoryAdjustmentService
 {
-    public function __construct(private readonly ShopifyGraphqlGateway $client) {}
+    public function __construct(
+        private readonly ShopifyGraphqlGateway $client,
+        private readonly ?InventoryAuditRecorder $audits = null,
+    ) {}
 
     public function resolveLocationId(Variant $variant): string
     {
@@ -102,7 +107,7 @@ GRAPHQL, ['id' => $inventoryItemId]);
     }
 
     /** @return array<string, mixed> */
-    public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null): array
+    public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null, ?InventoryAuditContext $audit = null): array
     {
         if ($quantity <= 0) throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
@@ -111,7 +116,23 @@ GRAPHQL, ['id' => $inventoryItemId]);
         $expectedOnHand ??= $this->currentQuantities($variant, $locationId)['on_hand'];
         $targetOnHand = $expectedOnHand - $quantity;
         if ($targetOnHand < 0) throw new \RuntimeException("Cannot deduct {$quantity}; Shopify On Hand is {$expectedOnHand}.");
-        $data = $this->client->graphql(<<<'GRAPHQL'
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $idempotencyKey,
+            'workflow' => 'manual_stock',
+            'action' => 'manual_deduction',
+            'processName' => 'Manual stock job',
+            'shopifyReason' => 'correction',
+            'inventoryState' => 'on_hand',
+            'delta' => -$quantity,
+            'quantityBefore' => $expectedOnHand,
+            'quantityAfter' => $targetOnHand,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
+
+        return $this->audited($context, function () use ($inventoryItemId, $locationId, $targetOnHand, $expectedOnHand, $referenceUri, $idempotencyKey): array {
+            $data = $this->client->graphql(<<<'GRAPHQL'
 mutation DeductManualStock($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
   inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup { createdAt reason referenceDocumentUri changes { name delta quantityAfterChange } }
@@ -119,22 +140,37 @@ mutation DeductManualStock($input: InventorySetQuantitiesInput!, $idempotencyKey
   }
 }
 GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceDocumentUri' => $referenceUri,
-            'quantities' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId,
-                'quantity' => $targetOnHand, 'changeFromQuantity' => $expectedOnHand]]],
-        'idempotencyKey' => $idempotencyKey]);
+                'quantities' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId,
+                    'quantity' => $targetOnHand, 'changeFromQuantity' => $expectedOnHand]]],
+            'idempotencyKey' => $idempotencyKey]);
 
-        return $this->confirmedGroup($data, 'inventorySetQuantities');
+            return $this->confirmedGroup($data, 'inventorySetQuantities');
+        });
     }
 
-    public function increaseAvailable(Variant $variant, int $quantity, string $referenceUri, ?string $locationId = null): void
+    public function increaseAvailable(Variant $variant, int $quantity, string $referenceUri, ?string $locationId = null, ?InventoryAuditContext $audit = null): void
     {
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
         if ($inventoryItemId === '') {
             throw new \RuntimeException("Variant {$variant->id} has no Shopify inventory item ID.");
         }
         $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $referenceUri,
+            'workflow' => 'supplier_receipt',
+            'action' => 'inventory_received',
+            'processName' => 'Supplier receipt job',
+            'explanation' => 'Supplier stock received',
+            'shopifyReason' => 'received',
+            'inventoryState' => 'available',
+            'delta' => $quantity,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
 
-        $data = $this->client->graphql(<<<'GRAPHQL'
+        $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri): array {
+            $data = $this->client->graphql(<<<'GRAPHQL'
 mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!) {
   inventoryAdjustQuantities(input: $input) {
     inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
@@ -142,16 +178,20 @@ mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!) {
   }
 }
 GRAPHQL, ['input' => [
-            'name' => 'available', 'reason' => 'received', 'referenceDocumentUri' => $referenceUri,
-            'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => $quantity]],
-        ]]);
-        $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
-        if ($errors !== []) {
-            throw new \RuntimeException('Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; '));
-        }
-        if (! data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup')) {
-            throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
-        }
+                'name' => 'available', 'reason' => 'received', 'referenceDocumentUri' => $referenceUri,
+                'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => $quantity]],
+            ]]);
+            $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
+            if ($errors !== []) {
+                throw new \RuntimeException('Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; '));
+            }
+            $group = data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup');
+            if (! is_array($group)) {
+                throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
+            }
+
+            return $group;
+        });
     }
 
     /**
@@ -163,6 +203,7 @@ GRAPHQL, ['input' => [
         string $referenceUri,
         string $idempotencyKey,
         ?string $locationId = null,
+        ?InventoryAuditContext $audit = null,
     ): array {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
@@ -177,8 +218,20 @@ GRAPHQL, ['input' => [
         if ($locationId === '') {
             throw new \RuntimeException('No Shopify inventory location could be resolved.');
         }
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $idempotencyKey,
+            'workflow' => 'unspecified',
+            'action' => 'available_decreased',
+            'shopifyReason' => 'correction',
+            'inventoryState' => 'available',
+            'delta' => -$quantity,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
 
-        $data = $this->client->graphql(<<<'GRAPHQL'
+        return $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri, $idempotencyKey): array {
+            $data = $this->client->graphql(<<<'GRAPHQL'
 mutation DeductStackComponentInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
   inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup {
@@ -191,32 +244,33 @@ mutation DeductStackComponentInventory($input: InventoryAdjustQuantitiesInput!, 
   }
 }
 GRAPHQL, [
-            'input' => [
-                'name' => 'available',
-                'reason' => 'correction',
-                'referenceDocumentUri' => $referenceUri,
-                'changes' => [[
-                    'inventoryItemId' => $inventoryItemId,
-                    'locationId' => $locationId,
-                    'delta' => -$quantity,
-                ]],
-            ],
-            'idempotencyKey' => $idempotencyKey,
-        ]);
+                'input' => [
+                    'name' => 'available',
+                    'reason' => 'correction',
+                    'referenceDocumentUri' => $referenceUri,
+                    'changes' => [[
+                        'inventoryItemId' => $inventoryItemId,
+                        'locationId' => $locationId,
+                        'delta' => -$quantity,
+                    ]],
+                ],
+                'idempotencyKey' => $idempotencyKey,
+            ]);
 
-        $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
-        if ($errors !== []) {
-            throw new \RuntimeException(
-                'Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; ')
-            );
-        }
+            $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
+            if ($errors !== []) {
+                throw new \RuntimeException(
+                    'Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; ')
+                );
+            }
 
-        $group = data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup');
-        if (! is_array($group)) {
-            throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
-        }
+            $group = data_get($data, 'inventoryAdjustQuantities.inventoryAdjustmentGroup');
+            if (! is_array($group)) {
+                throw new \RuntimeException('Shopify did not return an inventory adjustment confirmation.');
+            }
 
-        return $group;
+            return $group;
+        });
     }
 
     /** @return array<string, mixed> */
@@ -230,6 +284,7 @@ GRAPHQL, [
         string $ledgerDocumentUri,
         string $idempotencyKey,
         ?string $locationId = null,
+        ?InventoryAuditContext $audit = null,
     ): array {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Inventory movement quantity must be greater than zero.');
@@ -240,6 +295,18 @@ GRAPHQL, [
         if ($inventoryItemId === '' || $locationId === '') {
             throw new \RuntimeException('The component inventory item and location are required.');
         }
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $idempotencyKey,
+            'workflow' => $to === 'reserved' ? 'stack_reserve' : 'stack_release',
+            'action' => $to === 'reserved' ? 'reserve' : 'release',
+            'processName' => 'Order processing',
+            'shopifyReason' => $reason,
+            'inventoryState' => $to,
+            'delta' => $to === 'reserved' ? $quantity : -$quantity,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
 
         $terminal = fn (string $name): array => array_filter([
             'locationId' => $locationId,
@@ -247,7 +314,7 @@ GRAPHQL, [
             'ledgerDocumentUri' => $name === 'available' ? null : $ledgerDocumentUri,
         ], fn (mixed $value): bool => $value !== null);
 
-        $data = $this->client->graphql(<<<'GRAPHQL'
+        $data = $this->graphqlAudited($context, <<<'GRAPHQL'
 mutation MoveStackComponentInventory($input: InventoryMoveQuantitiesInput!, $idempotencyKey: String!) {
   inventoryMoveQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup {
@@ -271,7 +338,7 @@ GRAPHQL, [
             'idempotencyKey' => $idempotencyKey,
         ]);
 
-        return $this->confirmedGroup($data, 'inventoryMoveQuantities');
+        return $this->audited($context, fn (): array => $this->confirmedGroup($data, 'inventoryMoveQuantities'));
     }
 
     /** Remove physically consumed stock from reserved; available remains unchanged. @return array<string, mixed> */
@@ -282,6 +349,7 @@ GRAPHQL, [
         string $ledgerDocumentUri,
         string $idempotencyKey,
         ?string $locationId = null,
+        ?InventoryAuditContext $audit = null,
     ): array {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Consumed inventory quantity must be greater than zero.');
@@ -292,8 +360,21 @@ GRAPHQL, [
         if ($inventoryItemId === '' || $locationId === '') {
             throw new \RuntimeException('The component inventory item and location are required.');
         }
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $idempotencyKey,
+            'workflow' => 'stack_consume',
+            'action' => 'consume',
+            'processName' => 'Order processing',
+            'explanation' => 'Reserved component inventory was consumed when the stack was fulfilled.',
+            'shopifyReason' => 'correction',
+            'inventoryState' => 'reserved',
+            'delta' => -$quantity,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
 
-        $data = $this->client->graphql(<<<'GRAPHQL'
+        $data = $this->graphqlAudited($context, <<<'GRAPHQL'
 mutation ConsumeReservedStackInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
   inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup {
@@ -318,7 +399,7 @@ GRAPHQL, [
             'idempotencyKey' => $idempotencyKey,
         ]);
 
-        return $this->confirmedGroup($data, 'inventoryAdjustQuantities');
+        return $this->audited($context, fn (): array => $this->confirmedGroup($data, 'inventoryAdjustQuantities'));
     }
 
     /** @return array<string, mixed> */
@@ -337,5 +418,64 @@ GRAPHQL, [
         }
 
         return $group;
+    }
+
+    /**
+     * @param array<string, mixed> $defaults
+     */
+    private function auditContext(?InventoryAuditContext $audit, Variant $variant, array $defaults): InventoryAuditContext
+    {
+        $defaults += [
+            'variantId' => $variant->id ? (int) $variant->id : null,
+            'productId' => $variant->product_id ? (int) $variant->product_id : null,
+            'sku' => trim((string) $variant->sku) ?: null,
+            'actorType' => 'system',
+            'execution' => 'queue',
+        ];
+        $base = $audit ?? new InventoryAuditContext(
+            correlationKey: (string) $defaults['correlationKey'],
+            workflow: (string) $defaults['workflow'],
+            action: (string) $defaults['action'],
+        );
+
+        return $base->withDefaults($defaults);
+    }
+
+    /**
+     * @param callable():array<string, mixed> $callback
+     * @return array<string, mixed>
+     */
+    private function audited(InventoryAuditContext $context, callable $callback): array
+    {
+        try {
+            $group = $callback();
+            $this->auditRecorder()->succeeded($context, $group);
+
+            return $group;
+        } catch (\Throwable $exception) {
+            $this->auditRecorder()->failed($context, $exception->getMessage());
+
+            throw $exception;
+        }
+    }
+
+    private function auditRecorder(): InventoryAuditRecorder
+    {
+        return $this->audits ?? app(InventoryAuditRecorder::class);
+    }
+
+    /**
+     * @param array<string, mixed> $variables
+     * @return array<string, mixed>
+     */
+    private function graphqlAudited(InventoryAuditContext $context, string $query, array $variables): array
+    {
+        try {
+            return $this->client->graphql($query, $variables);
+        } catch (\Throwable $exception) {
+            $this->auditRecorder()->failed($context, $exception->getMessage());
+
+            throw $exception;
+        }
     }
 }

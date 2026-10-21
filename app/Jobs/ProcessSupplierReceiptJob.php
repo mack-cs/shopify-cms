@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\ProcurementSupplierReceipt;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
+use App\Services\Inventory\InventoryAuditContext;
 use App\Services\Procurement\SupplierOrderSummaryService;
 use App\Services\ProductInventorySyncService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
@@ -57,6 +58,25 @@ class ProcessSupplierReceiptJob implements ShouldQueue
                     $receipt->quantity_received,
                     $receipt->shopify_reference_uri,
                     $locationId,
+                    new InventoryAuditContext(
+                        correlationKey: $receipt->shopify_reference_uri,
+                        workflow: 'supplier_receipt',
+                        action: 'inventory_received',
+                        actorType: $receipt->created_by ? 'user' : 'system',
+                        execution: 'queue',
+                        userId: $receipt->created_by ? (int) $receipt->created_by : null,
+                        processName: 'Supplier receipt job',
+                        explanation: 'Supplier stock received',
+                        shopifyReason: 'received',
+                        inventoryState: 'available',
+                        delta: (int) $receipt->quantity_received,
+                        productId: $receipt->line->variant?->product_id ? (int) $receipt->line->variant->product_id : null,
+                        variantId: $receipt->line->variant_id ? (int) $receipt->line->variant_id : null,
+                        sku: $receipt->line->sku,
+                        referenceDocumentUri: $receipt->shopify_reference_uri,
+                        relatedType: ProcurementSupplierReceipt::class,
+                        relatedId: (int) $receipt->id,
+                    ),
                 );
                 $receipt->update(['status' => 'succeeded', 'shopify_adjusted_at' => now()]);
             } catch (\Throwable $e) {

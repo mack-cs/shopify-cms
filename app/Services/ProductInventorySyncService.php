@@ -2,11 +2,15 @@
 
 namespace App\Services;
 
+use App\Models\ChangeLog;
+use App\Models\InventoryAdjustmentRequestItem;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
-use App\Models\ChangeLog;
+use App\Services\Inventory\InventoryAuditContext;
+use App\Services\Inventory\InventoryAuditRecorder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 final class ProductInventorySyncService
 {
@@ -198,7 +202,10 @@ final class ProductInventorySyncService
                 $this->updateShopifyOnHandQuantity(
                     $inventoryItemId,
                     (int) ($variant->current_on_hand_quantity ?? $variant->inventory_qty ?? 0),
-                    (string) ($remoteVariant['id'] ?? '')
+                    (string) ($remoteVariant['id'] ?? ''),
+                    $variant,
+                    $userId,
+                    $syncBatchId,
                 );
             }
 
@@ -413,7 +420,7 @@ final class ProductInventorySyncService
         }
     }
 
-    private function updateShopifyOnHandQuantity(string $inventoryItemId, int $quantity, string $variantId): void
+    private function updateShopifyOnHandQuantity(string $inventoryItemId, int $quantity, string $variantId, ?Variant $variant = null, ?int $userId = null, ?string $syncBatchId = null): void
     {
         $locationId = $this->firstLocationId();
         if ($locationId === null) {
@@ -428,24 +435,64 @@ final class ProductInventorySyncService
             'fields' => ['on_hand'],
         ]);
 
-        $data = $this->client->graphql($this->inventorySetMutation(), [
-            'input' => [
-                'name' => 'on_hand',
-                'reason' => 'correction',
-                'ignoreCompareQuantity' => true,
-                'referenceDocumentUri' => 'logistics://shopify-editor/inventory/' . rawurlencode($variantId),
-                'quantities' => [[
-                    'inventoryItemId' => $inventoryItemId,
-                    'locationId' => $locationId,
-                    'quantity' => $quantity,
-                ]],
-            ],
-        ]);
+        $reason = null;
+        if ($syncBatchId !== null && $variant instanceof Variant) {
+            $reason = InventoryAdjustmentRequestItem::query()
+                ->where('variant_id', $variant->id)
+                ->whereHas('request', fn ($query) => $query->where('sync_batch_id', $syncBatchId))
+                ->value('reason');
+        }
+        $context = new InventoryAuditContext(
+            correlationKey: $syncBatchId !== null && $variant instanceof Variant
+                ? 'inventory-set:'.$syncBatchId.':'.$variant->id
+                : 'inventory-set:'.($variant?->id ?? $variantId).':'.Str::uuid(),
+            workflow: 'inventory_correction',
+            action: 'inventory_correction',
+            actorType: $userId ? 'user' : 'system',
+            execution: 'queue',
+            userId: $userId,
+            processName: 'Inventory sync job',
+            explanation: is_string($reason) && $reason !== '' ? $reason : 'Absolute on-hand quantity sent to Shopify.',
+            shopifyReason: 'correction',
+            inventoryState: 'on_hand',
+            quantityAfter: $quantity,
+            productId: $variant?->product_id ? (int) $variant->product_id : null,
+            variantId: $variant?->id ? (int) $variant->id : null,
+            sku: $variant?->sku,
+            inventoryItemId: $inventoryItemId,
+            locationId: $locationId,
+            referenceDocumentUri: 'logistics://shopify-editor/inventory/'.rawurlencode($variantId),
+        );
+
+        try {
+            $data = $this->client->graphql($this->inventorySetMutation(), [
+                'input' => [
+                    'name' => 'on_hand',
+                    'reason' => 'correction',
+                    'ignoreCompareQuantity' => true,
+                    'referenceDocumentUri' => 'logistics://shopify-editor/inventory/' . rawurlencode($variantId),
+                    'quantities' => [[
+                        'inventoryItemId' => $inventoryItemId,
+                        'locationId' => $locationId,
+                        'quantity' => $quantity,
+                    ]],
+                ],
+            ]);
+        } catch (\Throwable $exception) {
+            app(InventoryAuditRecorder::class)->failed($context, $exception->getMessage());
+
+            throw $exception;
+        }
 
         $errors = data_get($data, 'inventorySetQuantities.userErrors', []);
         if (is_array($errors) && !empty($errors)) {
-            throw new \RuntimeException($this->formatUserErrors($errors, 'inventorySetQuantities'));
+            $message = $this->formatUserErrors($errors, 'inventorySetQuantities');
+            app(InventoryAuditRecorder::class)->failed($context, $message);
+
+            throw new \RuntimeException($message);
         }
+
+        app(InventoryAuditRecorder::class)->succeeded($context, null);
     }
 
     /**
