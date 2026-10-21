@@ -1,7 +1,7 @@
 <x-filament-panels::page>
     <div class="space-y-4">
         <p class="text-sm text-gray-600 dark:text-gray-300">
-            This list includes CMS inventory records and Shopify adjustments stored in this CMS, including corrections made directly in Shopify. Use the table search for a product name or SKU. Other filters are in the filter menu. This page does not call Shopify.
+            This list includes inventory quantity edits saved by a CMS user, the CMS inventory workflows, and manual adjustments people make directly in Shopify. Sales and other Online Store movements are left out. Use the table search for a product name or SKU. Other filters are in the filter menu. This page does not call Shopify.
         </p>
 
         @if ($notice = $this->shopifyNotice())

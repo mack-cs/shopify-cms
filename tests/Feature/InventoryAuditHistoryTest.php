@@ -3,6 +3,7 @@
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\PermissionEnum;
 use App\Filament\Pages\InventoryAuditHistory;
+use App\Models\ChangeLog;
 use App\Models\Import;
 use App\Models\InventoryOperationAudit;
 use App\Models\ProcurementSupplierOrder;
@@ -150,7 +151,7 @@ it('filters inventory history by activity and reference', function (): void {
         ->and(json_encode($report['rows'][0]['detail']))->toContain('LA2609');
 });
 
-it('labels a verified online-store purchase as an order and confirms a stack reference', function (): void {
+it('omits an online-store purchase and still confirms a stack reference', function (): void {
     Cache::flush();
     config(['services.shopify.shop' => 'example.myshopify.com']);
     $user = User::factory()->create(['name' => 'Avery Clerk']);
@@ -200,15 +201,78 @@ it('labels a verified online-store purchase as an order and confirms a stack ref
     $stack = collect($report['rows'])->firstWhere('activity', 'Stack inventory reserved');
 
     expect($report['shopify_status'])->toBe('ok')
-        ->and($order['source'])->toBe('online_store')
-        ->and($order['change'])->toBe('-1 available')
-        ->and($order['available'])->toBeNull()
-        ->and($order['triggered_by'])->toBe('Online Store')
-        ->and($order['confidence'])->toBe('unmatched')
-        ->and($order['links'][0][1])->toBe('https://example.myshopify.com/admin/orders/18961870291080')
+        ->and($order)->toBeNull()
         ->and($stack['confidence'])->toBe('confirmed')
         ->and($stack['triggered_by'])->toBe('Order processing')
         ->and(json_encode($stack['detail']))->toContain('Confirmed from the same reference');
+});
+
+it('shows a cms user quantity edit and a direct shopify adjustment without a sale', function (): void {
+    $user = User::factory()->create(['name' => 'Caitlin']);
+    [$variant, $product] = inventoryAuditCatalog($user, 'LRB0132', 'Karoo Stone Silver Bracelet');
+    ChangeLog::query()->create([
+        'import_id' => $product->import_id,
+        'product_id' => $product->id,
+        'changed_by' => $user->id,
+        'model_type' => Variant::class,
+        'model_id' => $variant->id,
+        'field' => 'current_on_hand_quantity',
+        'old_value' => '30',
+        'new_value' => '60',
+    ]);
+    ChangeLog::query()->create([
+        'import_id' => $product->import_id,
+        'product_id' => $product->id,
+        'changed_by' => null,
+        'model_type' => Variant::class,
+        'model_id' => $variant->id,
+        'field' => 'current_on_hand_quantity',
+        'old_value' => '0',
+        'new_value' => '12',
+    ]);
+    ShopifyInventoryAdjustment::query()->create([
+        'adjustment_id' => 'sale-1',
+        'occurred_at' => now(),
+        'sku' => 'LRB0132',
+        'product_title' => 'Karoo Stone Silver Bracelet',
+        'inventory_state' => 'available',
+        'delta' => -1,
+        'reason' => 'purchase',
+        'app_name' => 'Online Store',
+        'reference_document_type' => 'Order',
+        'synced_at' => now(),
+    ]);
+    ShopifyInventoryAdjustment::query()->create([
+        'adjustment_id' => 'direct-1',
+        'occurred_at' => now(),
+        'sku' => 'LRB0132',
+        'product_title' => 'Karoo Stone Silver Bracelet',
+        'inventory_state' => 'available',
+        'delta' => 4,
+        'reason' => 'correction',
+        'app_name' => 'Shopify',
+        'staff_name' => 'Sam Admin',
+        'synced_at' => now(),
+    ]);
+
+    $report = app(InventoryAuditHistoryService::class)->search([
+        'query' => 'LRB0132',
+        'from' => now()->subDay()->toDateString(),
+        'until' => now()->toDateString(),
+        'live_shopify' => false,
+    ]);
+    $edit = collect($report['rows'])->firstWhere('activity_key', 'cms_edit');
+    $direct = collect($report['rows'])->firstWhere('triggered_by', 'Sam Admin');
+
+    expect($edit['triggered_by'])->toBe('Caitlin')
+        ->and($edit['change'])->toContain('30 → 60')
+        ->and($edit['source'])->toBe('cms')
+        ->and($edit['confidence'])->toBe('local')
+        ->and(json_encode($edit['detail']))->toContain('CMS change log')
+        ->and($direct['activity'])->toContain('correction')
+        ->and($direct['change'])->toBe('+4 available')
+        ->and(collect($report['rows'])->where('activity_key', 'order_created'))->toHaveCount(0)
+        ->and(collect($report['rows'])->where('activity_key', 'cms_edit'))->toHaveCount(1);
 });
 
 it('parses a shopifyql history row and leaves the resulting balance empty', function (): void {

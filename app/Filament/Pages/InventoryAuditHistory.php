@@ -91,6 +91,7 @@ class InventoryAuditHistory extends Page implements HasTable
                     'reservation_deleted' => 'Reservation released',
                     'consumed' => 'Reserved inventory consumed',
                     'correction' => 'Inventory correction',
+                    'cms_edit' => 'Quantity edited in the CMS',
                     'manual_deduction' => 'Manual stock deduction',
                     'initialized' => 'New product initialization',
                     'order_created' => 'Order created',

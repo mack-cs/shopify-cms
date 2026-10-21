@@ -6,6 +6,7 @@ use App\Filament\Resources\ManualStockTransactionResource;
 use App\Filament\Resources\ProcurementSupplierOrderResource;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\UserResource;
+use App\Models\ChangeLog;
 use App\Models\InventoryAdjustmentRequest;
 use App\Models\InventoryAdjustmentRequestItem;
 use App\Models\InventoryAuditReview;
@@ -24,6 +25,24 @@ use Illuminate\Support\Carbon;
 final class InventoryAuditHistoryService
 {
     private const SOURCE_CAP = 2000;
+
+    /**
+     * Inventory quantities a person can change on a variant. Product content edits stay on the product change log.
+     *
+     * @var array<string, array{0:string,1:string,2:string}>
+     */
+    private const PERSON_INVENTORY_FIELDS = [
+        'current_on_hand_quantity' => ['on_hand', 'On hand edited', 'on hand'],
+        'current_available_quantity' => ['available', 'Available quantity edited', 'available'],
+        'current_inventory_quantity' => ['available', 'Available quantity edited', 'available'],
+        'inventory_qty' => ['available', 'Available quantity edited', 'available'],
+        'current_committed_quantity' => ['committed', 'Committed quantity edited', 'committed'],
+        'current_reserved_quantity' => ['reserved', 'Reserved quantity edited', 'reserved'],
+        'current_incoming_quantity' => ['incoming', 'Incoming quantity edited', 'incoming'],
+        'current_damaged_quantity' => ['damaged', 'Damaged quantity edited', 'damaged'],
+        'current_quality_control_quantity' => ['quality_control', 'Quality control quantity edited', 'quality control'],
+        'current_safety_stock_quantity' => ['safety_stock', 'Safety stock quantity edited', 'safety stock'],
+    ];
 
     private bool $hitCap = false;
 
@@ -76,6 +95,9 @@ final class InventoryAuditHistoryService
             : $this->matcher->merge($local, $shopify['rows']);
         $rows = $this->grouper->group($rows);
         $rows = array_map(fn (array $row): array => $this->explanation->apply($row), $rows);
+        foreach ($this->personChangeLogs($from, $until, $query, $reference) as $change) {
+            $rows[] = $this->explanation->apply($change['row']);
+        }
 
         $rows = array_values(array_filter($rows, function (array $row) use ($activity, $source, $actor, $location, $reason, $state, $direction, $match, $investigation, $app): bool {
             if ($activity !== '' && ($row['activity_key'] ?? '') !== $activity) {
@@ -164,6 +186,9 @@ final class InventoryAuditHistoryService
         $needle = strtolower($query);
         $rows = [];
         foreach ($result['rows'] as $remote) {
+            if ($this->isShopifySale($remote)) {
+                continue;
+            }
             if ($needle !== '' && $sku === '' && ! $this->remoteMatchesQuery($remote, $needle)) {
                 continue;
             }
@@ -211,7 +236,7 @@ final class InventoryAuditHistoryService
 
         $rows = [];
         foreach ($records as $record) {
-            $rows[] = $this->shopifyCandidate([
+            $remote = [
                 'second' => optional($record->occurred_at)->toIso8601String(),
                 'inventory_adjustment_id' => $record->adjustment_id,
                 'inventory_adjustment_group_id' => $record->adjustment_group_id,
@@ -229,7 +254,11 @@ final class InventoryAuditHistoryService
                 'reference_document_uri' => $record->reference_document_uri,
                 'reference_document_type' => $record->reference_document_type,
                 'reference_document_id' => $record->reference_document_id,
-            ]);
+            ];
+            if ($this->isShopifySale($remote)) {
+                continue;
+            }
+            $rows[] = $this->shopifyCandidate($remote);
         }
 
         $incomplete = $records->count() >= 5000;
@@ -965,6 +994,112 @@ final class InventoryAuditHistoryService
             ->get();
 
         return $byTitle->count() === 1 ? $byTitle->first() : null;
+    }
+
+    /**
+     * A sale, return, or Online Store movement is Shopify's own order activity.
+     * A correction made by a person in Shopify admin stays in the report.
+     *
+     * @param array<string, mixed> $remote
+     */
+    private function isShopifySale(array $remote): bool
+    {
+        $reason = strtolower(trim((string) ($remote['inventory_change_reason'] ?? '')));
+        $app = strtolower(trim((string) ($remote['inventory_app_name'] ?? '')));
+        $documentType = strtolower(trim((string) ($remote['reference_document_type'] ?? '')));
+
+        return in_array($reason, ['purchase', 'restock'], true)
+            || $documentType === 'order'
+            || str_contains($app, 'online store');
+    }
+
+    /**
+     * Quantity edits a CMS user saved. These are read from the change log and are not matched to Shopify.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function personChangeLogs(Carbon $from, Carbon $until, string $query, string $reference): array
+    {
+        if ($reference !== '') {
+            return [];
+        }
+
+        $records = ChangeLog::query()
+            ->with(['changedBy', 'product'])
+            ->whereNotNull('changed_by')
+            ->whereIn('field', array_keys(self::PERSON_INVENTORY_FIELDS))
+            ->whereBetween('created_at', [$from, $until])
+            ->when($query !== '', function (Builder $builder) use ($query): void {
+                $builder->where(function (Builder $inner) use ($query): void {
+                    $inner->whereHas('product', fn (Builder $product): Builder => $product->where('title', 'like', '%'.$query.'%'))
+                        ->orWhereHas('product.variants', fn (Builder $variant): Builder => $variant->where('sku', 'like', '%'.$query.'%'));
+                });
+            })
+            ->orderByDesc('id')
+            ->limit(self::SOURCE_CAP + 1)
+            ->get();
+        $records = $this->cap($records);
+        $variants = Variant::query()
+            ->whereIn('id', $records->where('model_type', Variant::class)->pluck('model_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+
+        return $records->map(function (ChangeLog $log) use ($variants): array {
+            [$state, $activity, $stateLabel] = self::PERSON_INVENTORY_FIELDS[$log->field];
+            $variant = $log->model_type === Variant::class ? $variants->get($log->model_id) : null;
+            $old = $this->numericQuantity($log->old_value);
+            $new = $this->numericQuantity($log->new_value);
+            $delta = $old !== null && $new !== null ? $new - $old : 0;
+            $change = trim((string) $log->old_value).' → '.trim((string) $log->new_value).' '.$stateLabel;
+            if ($old !== null && $new !== null) {
+                $change .= ' ('.($delta > 0 ? '+' : '').$delta.')';
+            }
+
+            return $this->candidate(
+                key: 'change-log:'.$log->id,
+                occurredAt: Carbon::parse($log->created_at ?? now()),
+                activityKey: 'cms_edit',
+                activity: $activity,
+                change: $change,
+                available: null,
+                onHand: $state === 'on_hand' && $new !== null ? (string) $new : null,
+                source: 'cms',
+                triggeredBy: $this->actor($log->changedBy, 'CMS user', false),
+                status: 'recorded',
+                location: null,
+                references: [],
+                inventoryItemId: $variant?->shopify_inventory_item_id,
+                locationId: null,
+                delta: $delta,
+                state: $state,
+                detail: [
+                    ['SKU', $variant?->sku],
+                    ['Product', $log->product?->title ?? $variant?->product?->title],
+                    ['Field', $log->field],
+                    ['Old value', $log->old_value],
+                    ['New value', $log->new_value],
+                    ['Changed by', $log->changedBy?->name],
+                    ['Reason', 'Edited in the CMS by this user'],
+                    ['Record origin', 'CMS change log'],
+                ],
+                links: array_filter([
+                    $this->productLink($log->product_id ?? $variant?->product_id),
+                ]),
+                represented: [],
+                actorUserId: $log->changed_by ? (int) $log->changed_by : null,
+                process: 'CMS change log',
+            );
+        })->all();
+    }
+
+    private function numericQuantity(mixed $value): ?int
+    {
+        $value = trim((string) $value);
+        if ($value === '' || ! is_numeric($value)) {
+            return null;
+        }
+
+        return (int) $value;
     }
 
     /**
