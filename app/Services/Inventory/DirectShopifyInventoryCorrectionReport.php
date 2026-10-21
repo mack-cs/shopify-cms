@@ -42,7 +42,7 @@ final class DirectShopifyInventoryCorrectionReport
             return $result;
         }
 
-        $email = trim((string) config('services.shopify.direct_inventory_correction_email', 'shonaymack@gmail.com'));
+        $email = trim((string) config('services.shopify.direct_inventory_correction_email', 'shonayimack@gmail.com'));
         if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $result['errors'][] = 'DIRECT_INVENTORY_CORRECTION_EMAIL is not a valid address.';
 

@@ -66,7 +66,7 @@ it('emails direct shopify corrections and copies every active user', function ()
     Mail::assertSent(DirectShopifyInventoryCorrectionMail::class, function (DirectShopifyInventoryCorrectionMail $mail): bool {
         $html = $mail->render();
 
-        return $mail->hasTo('shonaymack@gmail.com')
+        return $mail->hasTo('shonayimack@gmail.com')
             && $mail->hasCc('copied.clerk@leighavenue.co.za')
             && ! $mail->hasCc('former.clerk@leighavenue.co.za')
             && str_contains($html, 'Avery Clerk')
@@ -151,7 +151,7 @@ it('shows the stored 7-day report from the audit page without calling shopify', 
         ->assertSee('Riley Buyer')
         ->assertSee('LA0544')
         ->assertSee('Pearls by the Baltic Necklace')
-        ->assertSee('shonaymack@gmail.com');
+        ->assertSee('shonayimack@gmail.com');
 
     Queue::assertPushed(ReportDirectShopifyInventoryCorrectionsJob::class);
 });

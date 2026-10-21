@@ -10,10 +10,8 @@ use App\Services\Inventory\InventoryAuditHistoryService;
 use App\Services\Inventory\ShopifyInventoryHistoryQuery;
 use Filament\Forms\Components\Actions;
 use Filament\Forms\Components\Actions\Action;
-use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Grid;
 use Filament\Forms\Components\Section;
-use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
@@ -55,6 +53,8 @@ class InventoryAuditHistory extends Page implements HasForms
 
     public bool $directCorrectionOpen = false;
 
+    public array $tableFilters = [];
+
     public static function canAccess(): bool
     {
         $user = Auth::user();
@@ -66,9 +66,27 @@ class InventoryAuditHistory extends Page implements HasForms
     public function mount(): void
     {
         abort_unless(static::canAccess(), 403);
+        $this->tableFilters = $this->emptyTableFilters();
         $this->form->fill([
             'query' => '',
+            'investigation' => 'all',
+        ]);
+        $this->applied = array_merge($this->tableFilters, [
+            'query' => '',
             'preset' => '7',
+            'investigation' => 'all',
+            'storewide' => true,
+            'live_shopify' => false,
+        ]);
+        $this->searched = true;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function emptyTableFilters(): array
+    {
+        return [
             'from' => now()->subDays(6)->toDateString(),
             'until' => now()->toDateString(),
             'activity' => '',
@@ -81,14 +99,7 @@ class InventoryAuditHistory extends Page implements HasForms
             'match' => '',
             'location' => '',
             'reference' => '',
-            'investigation' => 'all',
-        ]);
-        $this->applied = array_merge($this->data ?? [], [
-            'storewide' => true,
-            'live_shopify' => false,
-            'investigation' => 'all',
-        ]);
-        $this->searched = true;
+        ];
     }
 
     public function form(Form $form): Form
@@ -97,53 +108,13 @@ class InventoryAuditHistory extends Page implements HasForms
             ->statePath('data')
             ->schema([
                 Section::make('Search inventory history')
-                    ->description('Filters apply to inventory records already stored in this CMS. Leave the product blank to include every SKU. Shopify adjustments appear after they have been synced.')
+                    ->description('Search stored records by product name or SKU. Leave it blank to include every product in the selected dates. Table filters narrow the rows already loaded.')
                     ->schema([
-                        Grid::make(4)->schema([
+                        Grid::make(2)->schema([
                             TextInput::make('query')->label('Product name or SKU'),
-                            DatePicker::make('from')->label('From')->required()->native(false),
-                            DatePicker::make('until')->label('Until')->required()->native(false),
-                            Select::make('activity')->label('Activity')->placeholder('Any activity')->options([
-                                'received' => 'Inventory received',
-                                'reserved' => 'Inventory reserved',
-                                'reservation_deleted' => 'Reservation released',
-                                'consumed' => 'Reserved inventory consumed',
-                                'correction' => 'Inventory correction',
-                                'manual_deduction' => 'Manual stock deduction',
-                                'initialized' => 'New product initialization',
-                                'order_created' => 'Order created',
-                                'shopify_other' => 'Other Shopify adjustment',
+                            Actions::make([
+                                Action::make('search')->label('Search')->submit('search'),
                             ]),
-                            Select::make('source')->label('Source')->placeholder('Any source')->options([
-                                'cms' => 'CMS',
-                                'shopify' => 'Shopify',
-                                'online_store' => 'Online Store',
-                                'automation' => 'Automation',
-                            ]),
-                            TextInput::make('app')->label('Shopify app')->placeholder('la-cms-access'),
-                            TextInput::make('triggered_by')->label('CMS user or job'),
-                            TextInput::make('reason')->label('Reason'),
-                            Select::make('state')->label('Inventory state')->placeholder('Any state')->options([
-                                'available' => 'Available',
-                                'reserved' => 'Reserved',
-                                'committed' => 'Committed',
-                                'on_hand' => 'On hand',
-                            ]),
-                            Select::make('direction')->label('Direction')->placeholder('Any direction')->options([
-                                'positive' => 'Positive change',
-                                'negative' => 'Negative change',
-                            ]),
-                            Select::make('match')->label('Match')->placeholder('Any match')->options([
-                                'confirmed' => 'Confirmed',
-                                'probable' => 'Probable',
-                                'unmatched' => 'Unmatched',
-                                'local' => 'Local record',
-                            ]),
-                            TextInput::make('location')->label('Location'),
-                            TextInput::make('reference')->label('Purchase order, receipt, or stack'),
-                        ]),
-                        Actions::make([
-                            Action::make('search')->label('Search')->submit('search'),
                         ]),
                     ]),
             ]);
@@ -152,30 +123,46 @@ class InventoryAuditHistory extends Page implements HasForms
     public function search(): void
     {
         $state = $this->form->getState();
-        $from = Carbon::parse((string) $state['from'])->startOfDay();
-        $until = Carbon::parse((string) $state['until'])->endOfDay();
+        $this->applied['query'] = trim((string) ($state['query'] ?? ''));
+        $this->applied['storewide'] = true;
+        $this->applied['live_shopify'] = false;
+        $this->data['query'] = $this->applied['query'];
+        $this->searched = true;
+        $this->pageNumber = 1;
+        $this->selectedKey = null;
+    }
+
+    public function updatedTableFilters(): void
+    {
+        $fromText = trim((string) ($this->tableFilters['from'] ?? ''));
+        $untilText = trim((string) ($this->tableFilters['until'] ?? ''));
+        if ($fromText === '' || $untilText === '') {
+            return;
+        }
+        $from = Carbon::parse($fromText)->startOfDay();
+        $until = Carbon::parse($untilText)->endOfDay();
         if ($until->lt($from)) {
             Notification::make()->title('The end date is before the start date.')->danger()->send();
 
             return;
         }
         if ($from->diffInDays($until) > 1095) {
-            Notification::make()->title('Keep a date range to three years or less so the result can name anything Shopify does not return.')->danger()->send();
+            Notification::make()->title('Keep a date range to three years or less.')->danger()->send();
 
             return;
         }
-        $state['investigation'] = (string) ($this->data['investigation'] ?? 'all');
-        if (($state['source'] ?? '') === 'cms' && trim((string) ($state['app'] ?? '')) === '') {
-            $state['app'] = 'la-cms-access';
-        }
-        if (in_array($state['investigation'] ?? '', ['cms', 'unexplained'], true) && trim((string) ($state['app'] ?? '')) === '') {
-            $state['app'] = 'la-cms-access';
-        }
-        $state['storewide'] = true;
-        $state['live_shopify'] = false;
 
-        $this->applied = $state;
-        $this->searched = true;
+        $filters = $this->tableFilters;
+        if (($filters['source'] ?? '') === 'cms' && trim((string) ($filters['app'] ?? '')) === '') {
+            $filters['app'] = 'la-cms-access';
+        }
+        if (in_array($this->applied['investigation'] ?? 'all', ['cms', 'unexplained'], true) && trim((string) ($filters['app'] ?? '')) === '') {
+            $filters['app'] = 'la-cms-access';
+        }
+        $this->applied = array_merge($this->applied, $filters, [
+            'storewide' => true,
+            'live_shopify' => false,
+        ]);
         $this->pageNumber = 1;
         $this->selectedKey = null;
     }
@@ -184,7 +171,7 @@ class InventoryAuditHistory extends Page implements HasForms
     {
         ReportDirectShopifyInventoryCorrectionsJob::dispatch();
         $this->directCorrectionOpen = true;
-        $recipient = (string) config('services.shopify.direct_inventory_correction_email', 'shonaymack@gmail.com');
+        $recipient = (string) config('services.shopify.direct_inventory_correction_email', 'shonayimack@gmail.com');
         Notification::make()
             ->title('7-day direct correction report queued')
             ->body('It will be emailed to '.$recipient.' and every active user. The list below is what is already stored. This page does not call Shopify.')
@@ -221,11 +208,11 @@ class InventoryAuditHistory extends Page implements HasForms
             $until = now()->subDay();
         }
         $this->data['preset'] = $preset;
-        $this->data['from'] = $from->toDateString();
-        $this->data['until'] = $until->toDateString();
+        $this->tableFilters['from'] = $from->toDateString();
+        $this->tableFilters['until'] = $until->toDateString();
         if ($this->searched) {
-            $this->applied['from'] = $this->data['from'];
-            $this->applied['until'] = $this->data['until'];
+            $this->applied['from'] = $this->tableFilters['from'];
+            $this->applied['until'] = $this->tableFilters['until'];
             $this->applied['preset'] = $preset;
             $this->applied['live_shopify'] = false;
             $this->pageNumber = 1;
@@ -241,13 +228,14 @@ class InventoryAuditHistory extends Page implements HasForms
         $this->data['investigation'] = $investigation;
         if ($this->searched) {
             $this->applied['investigation'] = $investigation;
-            $typedApp = trim((string) ($this->data['app'] ?? ''));
+            $typedApp = trim((string) ($this->tableFilters['app'] ?? ''));
             if (in_array($investigation, ['cms', 'unexplained'], true) && $typedApp === '') {
+                $this->tableFilters['app'] = 'la-cms-access';
                 $this->applied['app'] = 'la-cms-access';
             }
             if ($investigation === 'all') {
                 $this->applied['app'] = $typedApp;
-                if (($this->applied['source'] ?? '') === 'cms' && $this->applied['app'] === '') {
+                if (($this->tableFilters['source'] ?? '') === 'cms' && $this->applied['app'] === '') {
                     $this->applied['app'] = 'la-cms-access';
                 }
             }

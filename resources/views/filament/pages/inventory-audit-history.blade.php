@@ -4,14 +4,13 @@
             Shopify adjustment history is the record of what changed in Shopify. CMS records explain who or what started the change and why. Confirmed links use the same reference this CMS sent to Shopify, such as a stack movement id. A probable link is one close record and is not treated as confirmed. An unmatched Shopify row stays visible. Available and on-hand balances appear only when this CMS read them back from Shopify.
         </p>
         <p class="text-sm text-gray-600 dark:text-gray-300">
-            Filters read records stored in this CMS, including the backfilled audit log. Searching does not call Shopify. Shopify adjustment rows appear here after inventory:sync-shopify-history has stored them.
+            Search reads records already stored in this CMS. Table filters narrow those rows. Searching does not call Shopify.
         </p>
 
         <div class="flex flex-wrap gap-2 text-sm">
             @foreach (['today' => 'Today', 'yesterday' => 'Yesterday', '7' => 'Last 7 days', '30' => 'Last 30 days', '90' => 'Last 90 days', '180' => 'Last 180 days'] as $preset => $label)
                 <button type="button" wire:click="applyPreset('{{ $preset }}')" class="rounded-lg border border-gray-300 px-3 py-1 dark:border-gray-600">{{ $label }}</button>
             @endforeach
-            <span class="px-2 py-1 text-gray-500">Custom range uses the date fields.</span>
             <button type="button" wire:click="emailDirectCorrectionReport" wire:loading.attr="disabled" wire:target="emailDirectCorrectionReport" class="rounded-lg bg-primary-600 px-3 py-1 font-medium text-white">
                 <span wire:loading.remove wire:target="emailDirectCorrectionReport">Email 7-day direct corrections</span>
                 <span wire:loading wire:target="emailDirectCorrectionReport">Queuing report…</span>
@@ -75,7 +74,7 @@
                     <button type="button" wire:click="export" class="rounded-lg border border-gray-300 px-3 py-1 dark:border-gray-600">Export CSV</button>
                 </div>
 
-                <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:0.75rem;">
                     @foreach ([
                         'Operations' => $summary['operations'],
                         'CMS-originated' => $summary['cms_operations'],
@@ -92,6 +91,90 @@
                     @endforeach
                 </div>
                 <p class="text-xs text-gray-500">Increased and decreased counts are separate state lines. They are not added together into a stock total.</p>
+
+                <div class="flex flex-wrap items-end gap-3 text-sm">
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">From</span>
+                        <input type="date" wire:model.live="tableFilters.from" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Until</span>
+                        <input type="date" wire:model.live="tableFilters.until" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Activity</span>
+                        <select wire:model.live="tableFilters.activity" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                            <option value="">Any activity</option>
+                            <option value="received">Inventory received</option>
+                            <option value="reserved">Inventory reserved</option>
+                            <option value="reservation_deleted">Reservation released</option>
+                            <option value="consumed">Reserved inventory consumed</option>
+                            <option value="correction">Inventory correction</option>
+                            <option value="manual_deduction">Manual stock deduction</option>
+                            <option value="initialized">New product initialization</option>
+                            <option value="order_created">Order created</option>
+                            <option value="shopify_other">Other Shopify adjustment</option>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Source</span>
+                        <select wire:model.live="tableFilters.source" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                            <option value="">Any source</option>
+                            <option value="cms">CMS</option>
+                            <option value="shopify">Shopify</option>
+                            <option value="online_store">Online Store</option>
+                            <option value="automation">Automation</option>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Shopify app</span>
+                        <input type="text" wire:model.live.debounce.400ms="tableFilters.app" placeholder="la-cms-access" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">CMS user or job</span>
+                        <input type="text" wire:model.live.debounce.400ms="tableFilters.triggered_by" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Reason</span>
+                        <input type="text" wire:model.live.debounce.400ms="tableFilters.reason" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">State</span>
+                        <select wire:model.live="tableFilters.state" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                            <option value="">Any state</option>
+                            <option value="available">Available</option>
+                            <option value="reserved">Reserved</option>
+                            <option value="committed">Committed</option>
+                            <option value="on_hand">On hand</option>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Direction</span>
+                        <select wire:model.live="tableFilters.direction" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                            <option value="">Any direction</option>
+                            <option value="positive">Positive change</option>
+                            <option value="negative">Negative change</option>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Match</span>
+                        <select wire:model.live="tableFilters.match" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                            <option value="">Any match</option>
+                            <option value="confirmed">Confirmed</option>
+                            <option value="probable">Probable</option>
+                            <option value="unmatched">Unmatched</option>
+                            <option value="local">Local record</option>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Location</span>
+                        <input type="text" wire:model.live.debounce.400ms="tableFilters.location" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                    <label class="flex flex-col gap-1">
+                        <span class="text-xs text-gray-500">Purchase order, receipt, or stack</span>
+                        <input type="text" wire:model.live.debounce.400ms="tableFilters.reference" class="rounded-lg border border-gray-300 bg-white px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                    </label>
+                </div>
 
                 @if ($report['shopify_message'])
                     <div class="rounded-lg border border-gray-200 bg-white p-4 text-sm dark:border-gray-700 dark:bg-gray-900">
