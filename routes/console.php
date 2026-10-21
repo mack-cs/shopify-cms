@@ -656,6 +656,13 @@ Artisan::command('shopify:alert-stale-stack-reservations', function (StackReserv
     return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
 })->purpose('Email stale stack reservations for a manual fix. Does not change Shopify inventory or reservation rows.');
 
+Schedule::job(new \App\Jobs\ReportDirectShopifyInventoryCorrectionsJob)
+    ->dailyAt('07:30')
+    ->timezone('Africa/Johannesburg')
+    ->withoutOverlapping()
+    ->onOneServer()
+    ->name('daily-direct-shopify-inventory-correction-report');
+
 Schedule::command('shopify:alert-stale-stack-reservations')
     ->dailyAt('08:00')
     ->timezone('Africa/Johannesburg')

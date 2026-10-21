@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\HandleShopifyInventoryLevelUpdatedJob;
+use App\Services\Inventory\ShopifyInventoryLevelEventRecorder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -67,6 +68,11 @@ class ShopifyInventoryLevelWebhookController extends Controller
 
             return response()->json(['message' => 'Missing inventory_item_id.'], 422);
         }
+
+        app(ShopifyInventoryLevelEventRecorder::class)->store(
+            $payload,
+            trim((string) $request->header('X-Shopify-Webhook-Id')) ?: null,
+        );
 
         HandleShopifyInventoryLevelUpdatedJob::dispatch(
             $inventoryItemId,

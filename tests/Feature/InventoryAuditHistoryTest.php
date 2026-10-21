@@ -18,7 +18,11 @@ use App\Services\Inventory\InventoryAuditExplanation;
 use App\Services\Inventory\InventoryAuditHistoryService;
 use App\Services\Inventory\InventoryAuditMatcher;
 use App\Services\Inventory\InventoryAuditOperationGrouper;
+use App\Jobs\SyncShopifyInventoryHistoryJob;
+use App\Models\ShopifyInventoryAdjustment;
+use Illuminate\Support\Facades\Queue;
 use App\Services\Inventory\ShopifyInventoryHistoryQuery;
+use App\Services\Inventory\ShopifyInventoryHistorySync;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -250,7 +254,7 @@ it('shows the audit page to inventory managers and keeps shopify denial visible'
         ->set('data.query', 'LA0544')
         ->call('search')
         ->assertSee('Supplier inventory received')
-        ->assertSee('read_reports')
+        ->assertSee('has not been stored yet')
         ->assertSee('Avery Clerk');
 
     expect(InventoryAuditHistory::canAccess())->toBeTrue();
@@ -283,6 +287,51 @@ it('attributes a correction to the requesting user and the sync job', function (
     expect(InventoryOperationAudit::query()->count())->toBe(1)
         ->and($report['rows'][0]['triggered_by'])->toBe('Avery Clerk (requested; Inventory sync job applied it)')
         ->and(json_encode($report['rows'][0]['detail']))->toContain('Count correction');
+});
+
+it('stores one day of shopify history and does not duplicate the adjustment', function (): void {
+    Cache::flush();
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->andReturn([
+        'shopifyqlQuery' => [
+            'parseErrors' => [],
+            'tableData' => ['rows' => [
+                shopifyHistoryLine('81', now()->toIso8601String(), 'gid://leigh-avenue-cms/StackInventoryMovement/79', 'available', '-1', 'reservation_created'),
+            ]],
+        ],
+    ]);
+    app()->instance(ShopifyGraphqlGateway::class, $gateway);
+
+    $sync = app(ShopifyInventoryHistorySync::class);
+    $sync->syncDay(now());
+    $sync->syncDay(now());
+
+    expect(ShopifyInventoryAdjustment::query()->count())->toBe(1)
+        ->and(ShopifyInventoryAdjustment::query()->first()->sku)->toBe('LA0544')
+        ->and(ShopifyInventoryAdjustment::query()->first()->app_name)->toBe('la-cms-access');
+});
+
+it('queues the following day only after the current day is stored', function (): void {
+    Cache::flush();
+    Queue::fake();
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->once()->andReturn([
+        'shopifyqlQuery' => [
+            'parseErrors' => [],
+            'tableData' => ['rows' => [
+                shopifyHistoryLine('82', now()->toIso8601String(), 'gid://leigh-avenue-cms/StackInventoryMovement/80', 'available', '-1', 'reservation_created'),
+            ]],
+        ],
+    ]);
+    app()->instance(ShopifyGraphqlGateway::class, $gateway);
+
+    $job = new SyncShopifyInventoryHistoryJob(now()->toDateString(), now()->addDay()->toDateString());
+    $job->handle(app(ShopifyInventoryHistorySync::class));
+
+    expect(ShopifyInventoryAdjustment::query()->where('adjustment_id', '82')->exists())->toBeTrue();
+    Queue::assertPushed(SyncShopifyInventoryHistoryJob::class, function (SyncShopifyInventoryHistoryJob $queued): bool {
+        return $queued->day === now()->addDay()->toDateString();
+    });
 });
 
 it('groups state lines that share a reference and keeps an unmatched cms adjustment unexplained', function (): void {

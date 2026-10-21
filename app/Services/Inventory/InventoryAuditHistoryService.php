@@ -10,6 +10,9 @@ use App\Models\InventoryAdjustmentRequest;
 use App\Models\InventoryAdjustmentRequestItem;
 use App\Models\InventoryAuditReview;
 use App\Models\InventoryOperationAudit;
+use App\Models\ShopifyInventoryAdjustment;
+use App\Models\ShopifyInventoryHistorySync;
+use Illuminate\Database\QueryException;
 use App\Models\ManualStockTransactionImpact;
 use App\Models\ProcurementSupplierReceipt;
 use App\Models\ShopifyStackInventoryMovement;
@@ -53,11 +56,12 @@ final class InventoryAuditHistoryService
         $match = trim((string) ($filters['match'] ?? ''));
         $investigation = trim((string) ($filters['investigation'] ?? ''));
         $storewide = (bool) ($filters['storewide'] ?? false);
+        $liveShopify = (bool) ($filters['live_shopify'] ?? true);
         if (in_array($investigation, ['cms', 'unexplained'], true) && $app === '') {
             $app = 'la-cms-access';
         }
 
-        $shopify = $this->shopifyRows($query, $from, $until, $storewide, $app);
+        $shopify = $this->shopifyRows($query, $from, $until, $storewide, $app, $liveShopify);
         $cited = $this->citedReferences($shopify['rows']);
         $local = array_merge(
             $this->receipts($from, $until, $query, $reference, $cited['receipts']),
@@ -136,8 +140,12 @@ final class InventoryAuditHistoryService
     /**
      * @return array{status:string,message:?string,rows:array<int, array<string, mixed>>,incomplete:bool,retrieved_at:?string}
      */
-    private function shopifyRows(string $query, Carbon $from, Carbon $until, bool $storewide, string $app): array
+    private function shopifyRows(string $query, Carbon $from, Carbon $until, bool $storewide, string $app, bool $liveShopify = true): array
     {
+        if (! $liveShopify) {
+            return $this->storedShopifyRows($query, $from, $until, $app);
+        }
+
         $variant = $this->singleVariant($query);
         $sku = $variant instanceof Variant ? trim((string) $variant->sku) : '';
         if (! $storewide && $sku === '') {
@@ -173,8 +181,75 @@ final class InventoryAuditHistoryService
     }
 
     /**
-     * @return array<int, array<string, mixed>>
+     * @return array{status:string,message:?string,rows:array<int, array<string, mixed>>,incomplete:bool,retrieved_at:?string}
      */
+    private function storedShopifyRows(string $query, Carbon $from, Carbon $until, string $app): array
+    {
+        try {
+            $records = ShopifyInventoryAdjustment::query()
+                ->whereBetween('occurred_at', [$from, $until])
+                ->when($app !== '', fn ($builder) => $builder->where('app_name', $app))
+                ->when($query !== '', function ($builder) use ($query): void {
+                    $builder->where(function ($inner) use ($query): void {
+                        $inner->where('sku', 'like', '%'.$query.'%')
+                            ->orWhere('product_title', 'like', '%'.$query.'%');
+                    });
+                })
+                ->orderByDesc('occurred_at')
+                ->limit(5000)
+                ->get();
+            $latest = ShopifyInventoryHistorySync::query()->max('finished_at');
+        } catch (QueryException) {
+            return [
+                'status' => 'skipped',
+                'message' => 'Stored Shopify history is not available yet. CMS records are shown.',
+                'rows' => [],
+                'incomplete' => false,
+                'retrieved_at' => null,
+            ];
+        }
+
+        $rows = [];
+        foreach ($records as $record) {
+            $rows[] = $this->shopifyCandidate([
+                'second' => optional($record->occurred_at)->toIso8601String(),
+                'inventory_adjustment_id' => $record->adjustment_id,
+                'inventory_adjustment_group_id' => $record->adjustment_group_id,
+                'inventory_adjustment_change' => (string) $record->delta,
+                'inventory_item_id' => $record->inventory_item_id,
+                'product_variant_id' => $record->product_variant_id,
+                'product_variant_sku' => $record->sku,
+                'product_variant_title' => $record->product_title,
+                'inventory_location_id' => $record->location_id,
+                'inventory_location_name' => $record->location_name,
+                'inventory_state' => $record->inventory_state,
+                'inventory_change_reason' => $record->reason,
+                'inventory_app_name' => $record->app_name,
+                'staff_member_name' => $record->staff_name,
+                'reference_document_uri' => $record->reference_document_uri,
+                'reference_document_type' => $record->reference_document_type,
+                'reference_document_id' => $record->reference_document_id,
+            ]);
+        }
+
+        $incomplete = $records->count() >= 5000;
+        $when = $latest ? Carbon::parse($latest)->timezone(config('app.timezone'))->format('M j, Y H:i') : null;
+        $message = $when
+            ? 'Showing Shopify history stored in this CMS. Last sync finished '.$when.'.'
+            : 'Shopify history has not been stored yet. CMS records are shown. Load Shopify adjustments with inventory:sync-shopify-history.';
+        if ($incomplete) {
+            $message .= ' This date range has more stored Shopify rows than this page can list. Narrow the dates.';
+        }
+
+        return [
+            'status' => 'ok',
+            'message' => $message,
+            'rows' => $this->enrichProducts($rows),
+            'incomplete' => $incomplete,
+            'retrieved_at' => $latest ? Carbon::parse($latest)->toIso8601String() : null,
+        ];
+    }
+
     /**
      * @param array<int, string> $citedUris
      * @return array<int, array<string, mixed>>

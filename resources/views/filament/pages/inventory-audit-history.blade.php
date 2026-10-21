@@ -4,7 +4,7 @@
             Shopify adjustment history is the record of what changed in Shopify. CMS records explain who or what started the change and why. Confirmed links use the same reference this CMS sent to Shopify, such as a stack movement id. A probable link is one close record and is not treated as confirmed. An unmatched Shopify row stays visible. Available and on-hand balances appear only when this CMS read them back from Shopify.
         </p>
         <p class="text-sm text-gray-600 dark:text-gray-300">
-            Shopify's product page shows 180 days of history. This report uses the dates you choose. A checked ShopifyQL query returned store history from 11 August 2024, so older ranges can return rows. If Shopify omits a range or stops at a page limit, that is stated with the result.
+            Filters read records stored in this CMS, including the backfilled audit log. Searching does not call Shopify. Shopify adjustment rows appear here after inventory:sync-shopify-history has stored them.
         </p>
 
         <div class="flex flex-wrap gap-2 text-sm">
@@ -12,7 +12,55 @@
                 <button type="button" wire:click="applyPreset('{{ $preset }}')" class="rounded-lg border border-gray-300 px-3 py-1 dark:border-gray-600">{{ $label }}</button>
             @endforeach
             <span class="px-2 py-1 text-gray-500">Custom range uses the date fields.</span>
+            <button type="button" wire:click="emailDirectCorrectionReport" wire:loading.attr="disabled" wire:target="emailDirectCorrectionReport" class="rounded-lg bg-primary-600 px-3 py-1 font-medium text-white">
+                <span wire:loading.remove wire:target="emailDirectCorrectionReport">Email 7-day direct corrections</span>
+                <span wire:loading wire:target="emailDirectCorrectionReport">Queuing report…</span>
+            </button>
         </div>
+
+        @if ($this->directCorrectionOpen)
+            @php($directReport = $this->directCorrectionPreview())
+            <div class="space-y-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+                <h2 class="text-base font-semibold">Direct Shopify corrections, last 7 days</h2>
+                <p class="text-sm text-gray-600 dark:text-gray-300">
+                    {{ $directReport['from']->timezone(config('app.timezone'))->format('M j, Y') }}
+                    through
+                    {{ $directReport['until']->timezone(config('app.timezone'))->format('M j, Y') }}.
+                    These are quantity corrections made in Shopify itself. CMS changes are left out. The email is queued for {{ config('services.shopify.direct_inventory_correction_email') }} and every active user.
+                </p>
+                @if ($directReport['corrections'] === 0)
+                    <p class="text-sm">No direct corrections are stored for these dates yet. The queued report reads any missing days in the background and emails the result.</p>
+                @else
+                    @foreach ($directReport['groups'] as $group)
+                        <div>
+                            <h3 class="text-sm font-semibold">{{ $group['user'] }} ({{ count($group['rows']) }})</h3>
+                            <table class="mt-2 w-full text-left text-sm">
+                                <thead class="text-gray-500">
+                                    <tr>
+                                        <th class="py-1 pr-3">When</th>
+                                        <th class="py-1 pr-3">SKU</th>
+                                        <th class="py-1 pr-3">Product</th>
+                                        <th class="py-1 pr-3">Change</th>
+                                        <th class="py-1">App</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach ($group['rows'] as $row)
+                                        <tr class="border-t border-gray-200 dark:border-gray-700">
+                                            <td class="py-1 pr-3">{{ $row['occurred_at'] }}</td>
+                                            <td class="py-1 pr-3">{{ $row['sku'] }}</td>
+                                            <td class="py-1 pr-3">{{ $row['product'] }}</td>
+                                            <td class="py-1 pr-3">{{ $row['delta'] > 0 ? '+' : '' }}{{ $row['delta'] }} {{ $row['state'] }}</td>
+                                            <td class="py-1">{{ $row['app'] !== '' ? $row['app'] : 'Shopify' }}</td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
+                    @endforeach
+                @endif
+            </div>
+        @endif
 
         {{ $this->form }}
 

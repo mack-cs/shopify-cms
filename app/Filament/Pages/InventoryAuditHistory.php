@@ -4,6 +4,8 @@ namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
 use App\Models\InventoryAuditReview;
+use App\Jobs\ReportDirectShopifyInventoryCorrectionsJob;
+use App\Services\Inventory\DirectShopifyInventoryCorrectionReport;
 use App\Services\Inventory\InventoryAuditHistoryService;
 use App\Services\Inventory\ShopifyInventoryHistoryQuery;
 use Filament\Forms\Components\Actions;
@@ -51,6 +53,8 @@ class InventoryAuditHistory extends Page implements HasForms
 
     public string $reviewNote = '';
 
+    public bool $directCorrectionOpen = false;
+
     public static function canAccess(): bool
     {
         $user = Auth::user();
@@ -79,6 +83,12 @@ class InventoryAuditHistory extends Page implements HasForms
             'reference' => '',
             'investigation' => 'all',
         ]);
+        $this->applied = array_merge($this->data ?? [], [
+            'storewide' => true,
+            'live_shopify' => false,
+            'investigation' => 'all',
+        ]);
+        $this->searched = true;
     }
 
     public function form(Form $form): Form
@@ -87,7 +97,7 @@ class InventoryAuditHistory extends Page implements HasForms
             ->statePath('data')
             ->schema([
                 Section::make('Search inventory history')
-                    ->description('Show results reads Shopify adjustment history for the selected dates across the store. Leave the product blank to search every SKU. A product name or SKU narrows that result.')
+                    ->description('Filters apply to inventory records already stored in this CMS. Leave the product blank to include every SKU. Shopify adjustments appear after they have been synced.')
                     ->schema([
                         Grid::make(4)->schema([
                             TextInput::make('query')->label('Product name or SKU'),
@@ -162,11 +172,32 @@ class InventoryAuditHistory extends Page implements HasForms
             $state['app'] = 'la-cms-access';
         }
         $state['storewide'] = true;
+        $state['live_shopify'] = false;
 
         $this->applied = $state;
         $this->searched = true;
         $this->pageNumber = 1;
         $this->selectedKey = null;
+    }
+
+    public function emailDirectCorrectionReport(): void
+    {
+        ReportDirectShopifyInventoryCorrectionsJob::dispatch();
+        $this->directCorrectionOpen = true;
+        $recipient = (string) config('services.shopify.direct_inventory_correction_email', 'shonaymack@gmail.com');
+        Notification::make()
+            ->title('7-day direct correction report queued')
+            ->body('It will be emailed to '.$recipient.' and every active user. The list below is what is already stored. This page does not call Shopify.')
+            ->success()
+            ->send();
+    }
+
+    /**
+     * @return array{from:\Illuminate\Support\Carbon,until:\Illuminate\Support\Carbon,corrections:int,groups:array<int, array{user:string,rows:array<int, array<string, mixed>>}>}
+     */
+    public function directCorrectionPreview(): array
+    {
+        return app(DirectShopifyInventoryCorrectionReport::class)->preview();
     }
 
     public function recheckShopify(): void
@@ -192,6 +223,14 @@ class InventoryAuditHistory extends Page implements HasForms
         $this->data['preset'] = $preset;
         $this->data['from'] = $from->toDateString();
         $this->data['until'] = $until->toDateString();
+        if ($this->searched) {
+            $this->applied['from'] = $this->data['from'];
+            $this->applied['until'] = $this->data['until'];
+            $this->applied['preset'] = $preset;
+            $this->applied['live_shopify'] = false;
+            $this->pageNumber = 1;
+            $this->selectedKey = null;
+        }
     }
 
     public function setInvestigation(string $investigation): void
@@ -226,6 +265,7 @@ class InventoryAuditHistory extends Page implements HasForms
         $this->data['query'] = $sku;
         $this->applied['query'] = $sku;
         $this->applied['storewide'] = true;
+        $this->applied['live_shopify'] = false;
         $this->searched = true;
         $this->pageNumber = 1;
         $this->selectedKey = null;

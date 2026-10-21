@@ -90,6 +90,7 @@ return [
         'secret_version' => env('AWS_SHOPIFY_SECRET_VERSION', 'latest'),
         'secret_profile' => env('AWS_SHOPIFY_SECRET_PROFILE'),
         'stale_reservation_alert_email' => env('STACK_RESERVATION_ALERT_EMAIL', 'shonayimack@gmail.com'),
+        'direct_inventory_correction_email' => env('DIRECT_INVENTORY_CORRECTION_EMAIL', 'shonaymack@gmail.com'),
     ],
 
 ];

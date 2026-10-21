@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\HandleShopifyInventoryLevelUpdatedJob;
+use App\Models\ShopifyInventoryLevelEvent;
 use App\Jobs\HandleShopifyProductUpdatedJob;
 use App\Jobs\InventorySyncJob;
 use App\Models\Import;
@@ -37,6 +38,7 @@ it('accepts a verified Shopify inventory webhook and queues the handler', functi
     ], $payload);
 
     $response->assertStatus(202);
+    expect(ShopifyInventoryLevelEvent::query()->where('webhook_id', 'webhook-1')->value('inventory_item_id'))->toBe('123456789');
 
     Queue::assertPushed(
         HandleShopifyInventoryLevelUpdatedJob::class,
@@ -62,6 +64,7 @@ it('rejects a Shopify inventory webhook with an invalid signature', function ():
 
     $response->assertStatus(401);
     Queue::assertNothingPushed();
+    expect(ShopifyInventoryLevelEvent::query()->count())->toBe(0);
 });
 
 it('can skip Shopify webhook signature verification in local testing only', function (): void {

@@ -102,15 +102,19 @@ GRAPHQL, ['query' => $shopifyql]);
      *
      * @return array{status:string,message:?string,rows:array<int, array<string, mixed>>,incomplete:bool,retrieved_at:?string}
      */
-    public function collect(Carbon $from, Carbon $until, ?string $sku = null, ?string $app = null, int $pageSize = 250, int $maxPages = 20): array
+    public function collect(Carbon $from, Carbon $until, ?string $sku = null, ?string $app = null, int $pageSize = 250, int $maxPages = 20, ?string $reason = null): array
     {
         $sku = trim((string) $sku);
         $app = trim((string) $app);
+        $reason = trim((string) $reason);
         if ($sku !== '' && preg_match('/[^A-Za-z0-9._-]/', $sku) === 1) {
             return $this->emptyCollect('skipped', 'Shopify history was not requested because the SKU contains characters that cannot be safely placed in a ShopifyQL filter.');
         }
         if ($app !== '' && preg_match('/[^A-Za-z0-9 ._-]/', $app) === 1) {
             return $this->emptyCollect('skipped', 'Shopify history was not requested because the app name contains characters that cannot be safely placed in a ShopifyQL filter.');
+        }
+        if ($reason !== '' && preg_match('/[^A-Za-z0-9_-]/', $reason) === 1) {
+            return $this->emptyCollect('skipped', 'Shopify history was not requested because the reason contains characters that cannot be safely placed in a ShopifyQL filter.');
         }
         if (Cache::get(self::ACCESS_CACHE_KEY) === true) {
             return $this->emptyCollect('unavailable', 'Shopify inventory history is unavailable. shopifyqlQuery requires the read_reports access scope, and the last check showed this app does not have it.');
@@ -123,6 +127,7 @@ GRAPHQL, ['query' => $shopifyql]);
             $until->toDateString(),
             $sku,
             strtolower($app),
+            strtolower($reason),
             $pageSize,
             $maxPages,
         ]));
@@ -137,6 +142,9 @@ GRAPHQL, ['query' => $shopifyql]);
         }
         if ($app !== '') {
             $where[] = "inventory_app_name = '{$app}'";
+        }
+        if ($reason !== '') {
+            $where[] = "inventory_change_reason = '{$reason}'";
         }
         $whereSql = $where === [] ? '' : 'WHERE '.implode(' AND ', $where)."\n";
         $since = $from->toDateString();
