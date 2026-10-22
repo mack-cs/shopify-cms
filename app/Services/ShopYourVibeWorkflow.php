@@ -7,8 +7,8 @@ use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyCollection;
-use App\Models\ShopYourVibeDraft;
 use App\Models\ShopYourVibeCollectionMapping;
+use App\Models\ShopYourVibeDraft;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -21,11 +21,58 @@ class ShopYourVibeWorkflow
 {
     public const PARENT_PREFIX_WARNING = "The collection name is added automatically. We've removed it from your vibe name.";
 
+    public const LOADING_PRODUCTS_MESSAGE = "We're retrieving this collection's products from Shopify. You can continue using the CMS while this runs.";
+
+    public const HYDRATION_FAILED_MESSAGE = "Shopify did not return this collection's products. Retry to load them.";
+
+    public const HYDRATION_SUCCESS_MESSAGE = 'Collection loaded successfully.';
+
+    public static function productProgressMessage(string $parentGid, string $gid, int $done, int $total, string $title = ''): string
+    {
+        $label = trim($title);
+        if ($gid !== '' && $gid !== $parentGid) {
+            $stage = $label !== '' ? 'Loading linked collection '.$label : 'Loading a linked collection';
+        } else {
+            $stage = $label !== '' ? 'Loading '.$label : 'Loading this collection';
+        }
+        if ($total <= 0) {
+            return $stage;
+        }
+        $percent = (int) floor(($done / $total) * 100);
+
+        return "{$stage}: {$done} of {$total} products — {$percent}%";
+    }
+
     private const VIBE_SEPARATOR = '[\s\-–—:\/|]+';
 
     private ?string $lockToken = null;
 
     public function __construct(private readonly ShopYourVibeShopify $shopify) {}
+
+    public static function progressKey(string $gid): string
+    {
+        return 'syv-progress:'.$gid;
+    }
+
+    /**
+     * A loaded collection always stores products as an array, including a confirmed empty collection.
+     * A legacy shell has the parent title only, so this array is absent.
+     *
+     * @param  array<string, mixed>|null  $state
+     */
+    public static function productsAreLoaded(?array $state, ?string $gid): bool
+    {
+        if (! is_string($gid) || $gid === '' || ! is_array($state)) {
+            return false;
+        }
+
+        return is_array($state['collections'][$gid]['products'] ?? null);
+    }
+
+    public function trackProductProgress(?callable $progress): void
+    {
+        $this->shopify->productProgress = $progress;
+    }
 
     /** Uppercase only. Standalone AND stays so it can still be typed. */
     public static function typingVibeName(string $value): string
@@ -127,9 +174,9 @@ class ShopYourVibeWorkflow
         ]);
     }
 
-    public function refresh(int $id, int $revision, bool $discard = false): ShopYourVibeDraft
+    public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false): ShopYourVibeDraft
     {
-        $draft = $this->editable($id, $revision);
+        $draft = $this->editable($id, $revision, false, $strictRevision);
         if ($draft->pending && ! $discard) {
             throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
         }
@@ -142,8 +189,8 @@ class ShopYourVibeWorkflow
         $state = $this->pullState($draft);
         app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($state);
 
-        $refreshed = DB::transaction(function () use ($id, $revision, $state, $discard) {
-            $draft = $this->editable($id, $revision, true);
+        $refreshed = DB::transaction(function () use ($id, $revision, $state, $discard, $strictRevision) {
+            $draft = $this->editable($id, $revision, true, $strictRevision);
             if ($draft->pending && ! $discard) {
                 throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
             }
@@ -969,6 +1016,7 @@ class ShopYourVibeWorkflow
                 }
                 if (! $this->draftBelongsToCollection($draft, $collections[$gid])) {
                     unset($state['draft_placements'][$draftId][$gid], $state['draft_placements'][$id][$gid]);
+
                     continue;
                 }
                 $previousCard = $previousProducts->get($draftId) ?? $previousProducts->get($id);
@@ -1074,6 +1122,31 @@ class ShopYourVibeWorkflow
         return array_map(fn ($key) => (string) ($card[$key] ?? ''), ['name', 'image', 'image_path', 'link']);
     }
 
+    public function placeProduct(int $id, int $revision, string $gid, string $productGid, int $position): ShopYourVibeDraft
+    {
+        $draft = $this->editable($id, $revision);
+        $products = $draft->desired['collections'][$gid]['products'] ?? null;
+        if (! is_array($products)) {
+            throw new RuntimeException('Open this collection’s products before changing their order.');
+        }
+        $ids = array_column($products, 'id');
+        $count = count($ids);
+        if ($position < 1 || $position > $count) {
+            throw new RuntimeException('Enter a position from 1 to '.$count.'.');
+        }
+        $from = array_search($productGid, $ids, true);
+        if ($from === false) {
+            throw new RuntimeException('That product is not in this collection.');
+        }
+        array_splice($ids, $from, 1);
+        array_splice($ids, $position - 1, 0, [$productGid]);
+
+        return $this->edit($id, $revision, 'reorder_products', [
+            'collection_gid' => $gid,
+            'ids' => $ids,
+        ]);
+    }
+
     public function moves(array $current, array $desired): array
     {
         $moves = [];
@@ -1092,13 +1165,13 @@ class ShopYourVibeWorkflow
         return $moves;
     }
 
-    private function editable(int $id, int $revision, bool $lock = false): ShopYourVibeDraft
+    private function editable(int $id, int $revision, bool $lock = false, bool $strict = false): ShopYourVibeDraft
     {
         $draft = ShopYourVibeDraft::query()->when($lock, fn ($query) => $query->lockForUpdate())->findOrFail($id);
         if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true)) {
             throw new RuntimeException($this->activeOperationMessage($draft));
         }
-        if ($draft->revision !== $revision && ! $this->staleRevisionIsHarmless($draft)) {
+        if ($draft->revision !== $revision && ($strict || ! $this->staleRevisionIsHarmless($draft))) {
             throw new RuntimeException('This draft changed in another tab or session. Reopen it before editing.');
         }
 

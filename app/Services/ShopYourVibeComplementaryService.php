@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
 use Illuminate\Database\Eloquent\Builder;
@@ -93,8 +94,8 @@ class ShopYourVibeComplementaryService
             ->whereNotNull('shopify_id')
             ->when($excludeGid, fn (Builder $query): Builder => $query->where('shopify_id', '!=', $excludeGid))
             ->where(function (Builder $query) use ($needle): void {
-                $query->where('title', 'like', '%' . $needle . '%')
-                    ->orWhereHas('variants', fn (Builder $variants): Builder => $variants->where('sku', 'like', '%' . $needle . '%'));
+                $query->where('title', 'like', '%'.$needle.'%')
+                    ->orWhereHas('variants', fn (Builder $variants): Builder => $variants->where('sku', 'like', '%'.$needle.'%'));
             })
             ->with(['images' => fn ($query) => $query->orderBy('position')->orderBy('id'), 'variants' => fn ($query) => $query->orderBy('id')])
             ->orderBy('title')
@@ -108,7 +109,7 @@ class ShopYourVibeComplementaryService
     }
 
     /**
-     * @param array<int, string> $currentGids
+     * @param  array<int, string>  $currentGids
      * @return array{selected:array<int, array<string, mixed>>,errors:array<int, string>}
      */
     public function addTokens(string $ownerGid, array $currentGids, string $rawTokens): array
@@ -125,16 +126,19 @@ class ShopYourVibeComplementaryService
             $product = $this->resolveToken($token);
             if (! $product instanceof Product) {
                 $errors[] = "Could not find product for {$token}.";
+
                 continue;
             }
 
             if ((string) $product->shopify_id === $ownerGid) {
                 $errors[] = "Skipped {$token}: a product cannot complement itself.";
+
                 continue;
             }
 
             if (in_array((int) $product->id, $selectedIds, true)) {
                 $errors[] = "Skipped {$token}: already selected.";
+
                 continue;
             }
 
@@ -154,7 +158,7 @@ class ShopYourVibeComplementaryService
     }
 
     /**
-     * @param array<int, string> $orderedGids
+     * @param  array<int, string>  $orderedGids
      * @return array{product:Product,selected:array<int,array<string,mixed>>}
      */
     public function saveLocal(string $productGid, array $orderedGids, ?int $userId = null): array
@@ -223,7 +227,7 @@ class ShopYourVibeComplementaryService
     }
 
     /**
-     * @param array<int, array<string, mixed>> $products
+     * @param  array<int, array<string, mixed>>  $products
      * @return array<string, int>
      */
     public function countsByGid(array $products): array
@@ -233,21 +237,94 @@ class ShopYourVibeComplementaryService
             return [];
         }
 
-        return Product::query()
+        $models = Product::query()
             ->whereIn('shopify_id', $gids->all())
+            ->orderByDesc('id')
             ->get(['id', 'shopify_id', 'import_id', 'handle'])
-            ->mapWithKeys(function (Product $product): array {
-                $ids = $this->audit->resolveProductIdsFromTokens(
-                    $this->audit->parseReferenceTokens($this->audit->localComplementaryValueForProduct($product))
-                );
+            ->unique('shopify_id')
+            ->values();
+        if ($models->isEmpty()) {
+            return [];
+        }
 
-                return [(string) $product->shopify_id => count($ids)];
-            })
-            ->all();
+        $handles = $models->pluck('handle')->map(fn ($handle): string => trim((string) $handle))->filter()->unique()->values();
+        $draftsByGid = NewProductDraft::query()
+            ->whereIn('shopify_id', $models->pluck('shopify_id')->all())
+            ->orderBy('id')
+            ->get(['shopify_id', 'handle', 'complementary_products'])
+            ->unique('shopify_id')
+            ->keyBy('shopify_id');
+        $draftsByHandle = $handles->isEmpty()
+            ? collect()
+            : NewProductDraft::query()
+                ->whereIn('handle', $handles->all())
+                ->orderBy('id')
+                ->get(['shopify_id', 'handle', 'complementary_products'])
+                ->unique(fn (NewProductDraft $draft): string => mb_strtolower(trim((string) $draft->handle)))
+                ->keyBy(fn (NewProductDraft $draft): string => mb_strtolower(trim((string) $draft->handle)));
+        $importIds = $models->pluck('import_id')->filter()->unique()->values();
+        $rows = ($handles->isEmpty() || $importIds->isEmpty())
+            ? collect()
+            : ShopifyRow::query()
+                ->where('row_type', 'product_primary')
+                ->whereIn('import_id', $importIds->all())
+                ->whereIn('handle', $handles->all())
+                ->orderBy('id')
+                ->get()
+                ->groupBy(fn (ShopifyRow $row): string => $row->import_id.'|'.trim((string) $row->handle));
+        $metafields = ($handles->isEmpty() || $importIds->isEmpty())
+            ? collect()
+            : ShopifyMetafield::query()
+                ->whereIn('import_id', $importIds->all())
+                ->whereIn('handle', $handles->all())
+                ->where('namespace', ComplementaryProductAuditService::STANDARD_NAMESPACE)
+                ->where('key', ComplementaryProductAuditService::STANDARD_KEY)
+                ->orderBy('id')
+                ->get(['import_id', 'handle', 'value'])
+                ->unique(fn (ShopifyMetafield $field): string => $field->import_id.'|'.trim((string) $field->handle))
+                ->keyBy(fn (ShopifyMetafield $field): string => $field->import_id.'|'.trim((string) $field->handle));
+
+        $values = [];
+        $needsResolve = false;
+        foreach ($models as $product) {
+            $handle = trim((string) $product->handle);
+            $draft = $draftsByGid->get($product->shopify_id);
+            if (! $draft instanceof NewProductDraft && $handle !== '') {
+                $draft = $draftsByHandle->get(mb_strtolower($handle));
+            }
+            if ($draft instanceof NewProductDraft) {
+                $value = trim((string) $draft->complementary_products);
+            } else {
+                $value = '';
+                $sourceKey = $product->import_id.'|'.$handle;
+                $row = $rows->get($sourceKey)?->first();
+                if ($row instanceof ShopifyRow) {
+                    $value = trim((string) ($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS, '') ?? ''));
+                }
+                if ($value === '') {
+                    $field = $metafields->get($sourceKey);
+                    $value = $field instanceof ShopifyMetafield ? trim((string) $field->value) : '';
+                }
+            }
+            $values[(string) $product->shopify_id] = $value;
+            $needsResolve = $needsResolve || $value !== '';
+        }
+        if (! $needsResolve) {
+            return array_map(fn (): int => 0, $values);
+        }
+
+        $counts = [];
+        foreach ($values as $gid => $value) {
+            $counts[$gid] = $value === ''
+                ? 0
+                : count($this->audit->resolveProductIdsFromTokens($this->audit->parseReferenceTokens($value)));
+        }
+
+        return $counts;
     }
 
     /**
-     * @param array<int, string> $gids
+     * @param  array<int, string>  $gids
      * @return array<int, int>
      */
     private function idsForGids(array $gids): array
@@ -328,7 +405,7 @@ class ShopYourVibeComplementaryService
     }
 
     /**
-     * @param array<int, array<string, mixed>> $rows
+     * @param  array<int, array<string, mixed>>  $rows
      * @return array<int, array<string, mixed>>
      */
     private function withSyncStatuses(array $rows): array
@@ -341,6 +418,7 @@ class ShopYourVibeComplementaryService
                 $syncableSeen++;
                 $rows[$index]['will_sync'] = true;
                 $rows[$index]['availability_label'] = 'Will sync to Shopify';
+
                 continue;
             }
 

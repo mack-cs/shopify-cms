@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
 final class SiblingCollectionResolver
@@ -18,13 +18,26 @@ final class SiblingCollectionResolver
     /**
      * @return array<int, array{gid:string,title:string,handle:string,tag_rules:array<int,string>}>
      */
+    public static function cacheKey(): string
+    {
+        return 'syv-sibling-candidates:'.config('services.shopify.shop');
+    }
+
     public function getSiblingCollections(): array
     {
         if ($this->candidateCache !== null) {
             return $this->candidateCache;
         }
 
-        return $this->candidateCache = $this->shopify->siblingCollectionCandidates();
+        $cached = Cache::get(self::cacheKey());
+        if (is_array($cached)) {
+            return $this->candidateCache = $cached;
+        }
+
+        $this->candidateCache = $this->shopify->siblingCollectionCandidates();
+        Cache::put(self::cacheKey(), $this->candidateCache, 600);
+
+        return $this->candidateCache;
     }
 
     /**
@@ -47,8 +60,8 @@ final class SiblingCollectionResolver
     }
 
     /**
-     * @param array<int, string> $tags
-     * @param array<int, array{tag:string,label:string}> $options
+     * @param  array<int, string>  $tags
+     * @param  array<int, array{tag:string,label:string}>  $options
      * @return array<int, array{tag:string,label:string}>
      */
     public function selectedForTags(array $tags, array $options): array
@@ -144,7 +157,7 @@ final class SiblingCollectionResolver
             }
 
             foreach ($main['prefixes'] as $prefix) {
-                if ($prefix !== '' && str_starts_with($slug, $prefix . '-')) {
+                if ($prefix !== '' && str_starts_with($slug, $prefix.'-')) {
                     $matched = $source;
                     break 2;
                 }
@@ -159,7 +172,7 @@ final class SiblingCollectionResolver
             $slug = Str::slug($rule);
 
             return str_contains($slug, 'sibling')
-                && collect($main['prefixes'])->contains(fn (string $prefix): bool => $prefix !== '' && str_starts_with($slug, $prefix . '-'));
+                && collect($main['prefixes'])->contains(fn (string $prefix): bool => $prefix !== '' && str_starts_with($slug, $prefix.'-'));
         }) ?? (string) ($collection['handle'] ?? $matched);
 
         $label = $this->displayLabel($canonical, $main['prefixes']);
@@ -199,7 +212,7 @@ final class SiblingCollectionResolver
     {
         $slug = Str::slug($tag);
         foreach ($prefixes as $prefix) {
-            if ($prefix !== '' && str_starts_with($slug, $prefix . '-')) {
+            if ($prefix !== '' && str_starts_with($slug, $prefix.'-')) {
                 $slug = substr($slug, strlen($prefix) + 1);
                 break;
             }

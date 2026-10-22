@@ -7,24 +7,289 @@
 @endonce
 
 <x-filament-panels::page>
-    <div x-data="{
-        formDirty: false, savingOrder: false, localPending: false,
+    <script>
+        window.syvEditor = function () {
+            return {
+        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', loadNotice: false, loadNoticeTimer: null, statusProgress: '', statusDone: 0, statusTotal: 0, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
-        async saveOrder(grid, type, gid = null, ids = null) {
-            if (this.savingOrder || grid.closest('fieldset')?.disabled) return;
-            const order = ids ?? Array.from(grid.children).map(el => el.dataset.orderKey).filter(Boolean);
-            const grids = Array.from(grid.closest('.syv-workflow').querySelectorAll('[data-order-grid]'));
-            this.savingOrder = true;
-            grids.forEach(item => item.sortable?.option('disabled', true));
-            try {
-                if (type === 'cards') await this.$wire.reorderCards(order);
-                else await this.$wire.reorderProducts(gid, order);
-                this.localPending = true;
-                this.$el.dataset.pending = 'true';
-            } finally {
-                this.savingOrder = false;
-                grids.forEach(item => item.sortable?.option('disabled', !!item.closest('fieldset')?.disabled));
+        clearStatus() {
+            this.statusMode = 'idle';
+            this.statusDone = 0;
+            this.statusTotal = 0;
+            this.statusProgress = '';
+        },
+        initStatus() {
+            this.$watch('productQuery', () => {
+                this.$el.querySelectorAll('[data-order-type=products]').forEach((grid) => {
+                    grid.sortable?.option('disabled', true);
+                });
+            });
+            this.$nextTick(() => this.bindProductDrag());
+            const phase = this.$el.dataset.hydration || '';
+            const waitingForProducts = this.$el.dataset.productsLoaded !== '1' && phase !== 'failed' && phase !== 'success';
+            if (this.$el.dataset.poll === '1' && waitingForProducts) this.statusMode = 'loading';
+            if (this.$el.dataset.poll !== '1' || this.statusTimer) return;
+            this.pollStatus();
+            this.statusTimer = setInterval(() => this.pollStatus(), 2000);
+        },
+        async pollStatus() {
+            const status = await this.$wire.statusSnapshot();
+            if (!status) return;
+            const terminal = !status.polling || ['success', 'failed', 'skipped'].includes(status.state);
+            if (status.state === 'failed') {
+                this.statusMode = 'failed';
+                this.statusDone = 0;
+                this.statusTotal = 0;
+                this.statusProgress = '';
+            } else if (status.polling) {
+                this.statusMode = 'loading';
+                this.statusDone = status.done || 0;
+                this.statusTotal = status.total || 0;
+                this.statusProgress = status.message || '';
+                const message = this.$refs.statusBanner?.querySelector('[data-status-message]');
+                if (message && status.message) message.textContent = status.message;
+            } else if (terminal) {
+                const finished = status.state === 'success' && this.$el.dataset.productsLoaded !== '1';
+                this.clearStatus();
+                if (finished) {
+                    this.loadNotice = true;
+                    clearTimeout(this.loadNoticeTimer);
+                    this.loadNoticeTimer = setTimeout(() => { this.loadNotice = false; }, 4000);
+                }
             }
+            if (status.changed) await this.$wire.pollPush();
+            if (!status.polling && this.statusTimer) {
+                clearInterval(this.statusTimer);
+                this.statusTimer = null;
+            }
+        },
+        cardVisible(el) {
+            const query = this.productQuery.trim().toLowerCase();
+            if (query === '') return true;
+            return (el.dataset.search || '').includes(query);
+        },
+        bindProductDrag() {
+            this.$el.querySelectorAll('[data-order-type=products]').forEach((grid) => {
+                const sample = grid.querySelector(':scope > [data-order-key]');
+                const height = sample ? Math.ceil(sample.getBoundingClientRect().height) : 0;
+                if (height > 0) grid.style.setProperty('--syv-card-size', height + 'px');
+                grid.sortable?.option('disabled', true);
+                grid.__syvDragAbort?.abort();
+                const controller = new AbortController();
+                grid.__syvDragAbort = controller;
+                grid.addEventListener('dragstart', (event) => event.preventDefault(), { signal: controller.signal });
+                grid.addEventListener('pointerdown', (event) => this.startProductDrag(event, grid), { signal: controller.signal });
+            });
+        },
+        startProductDrag(event, grid) {
+            if (this.productDrag || (event.button !== undefined && event.button !== 0) || this.productQuery.trim() !== '') return;
+            const handle = event.target.closest('[x-sortable-handle]');
+            if (!handle || handle.disabled || !grid.contains(handle) || grid.closest('fieldset')?.disabled) return;
+            const card = handle.closest('[data-order-key]');
+            const cards = Array.from(grid.querySelectorAll(':scope > [data-order-key]'));
+            const from = cards.indexOf(card);
+            if (!card || from < 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const slots = cards.map((item) => {
+                const rect = item.getBoundingClientRect();
+                return { x: rect.left + window.scrollX, y: rect.top + window.scrollY, w: rect.width, h: rect.height };
+            });
+            const rect = card.getBoundingClientRect();
+            const spacer = document.createElement('div');
+            spacer.className = 'syv-drag-spacer';
+            spacer.style.height = rect.height + 'px';
+            card.before(spacer);
+            document.body.appendChild(card);
+            card.classList.add('syv-dragging');
+            card.style.position = 'fixed';
+            card.style.left = rect.left + 'px';
+            card.style.top = rect.top + 'px';
+            card.style.width = rect.width + 'px';
+            card.style.margin = '0';
+            card.style.zIndex = '70';
+            document.body.classList.add('syv-drag-lock');
+            const move = (pointer) => this.queueProductDragMove(pointer);
+            const up = (pointer) => this.finishProductDrag(pointer.pointerId, true);
+            const cancel = (pointer) => this.finishProductDrag(pointer.pointerId, false);
+            this.productDrag = { grid, card, cards, slots, from, index: from, spacer, pointerId: event.pointerId, originX: event.clientX, originY: event.clientY, frame: 0, lastScroll: 0, move, up, cancel };
+            document.addEventListener('pointermove', move);
+            document.addEventListener('pointerup', up);
+            document.addEventListener('pointercancel', cancel);
+        },
+        queueProductDragMove(event) {
+            const drag = this.productDrag;
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            drag.latest = { clientX: event.clientX, clientY: event.clientY };
+            if (drag.frame) return;
+            drag.frame = requestAnimationFrame(() => {
+                if (this.productDrag !== drag) return;
+                drag.frame = 0;
+                this.updateProductDrag(drag.latest);
+            });
+        },
+        updateProductDrag(event) {
+            const drag = this.productDrag;
+            if (!drag || !event) return;
+            drag.card.style.transform = 'translate(' + (event.clientX - drag.originX) + 'px,' + (event.clientY - drag.originY) + 'px)';
+            const now = performance.now();
+            const edge = 56;
+            if (now - drag.lastScroll > 90 && event.clientY >= 0 && event.clientY <= window.innerHeight) {
+                if (event.clientY < edge) {
+                    window.scrollBy(0, -48);
+                    drag.lastScroll = now;
+                } else if (event.clientY > window.innerHeight - edge) {
+                    window.scrollBy(0, 48);
+                    drag.lastScroll = now;
+                }
+            }
+            const x = event.clientX + window.scrollX;
+            const y = event.clientY + window.scrollY;
+            let index = drag.from;
+            let best = Infinity;
+            drag.slots.forEach((slot, slotIndex) => {
+                const dx = x - (slot.x + slot.w / 2);
+                const dy = y - (slot.y + slot.h / 2);
+                const distance = dx * dx + dy * dy;
+                if (distance < best) {
+                    best = distance;
+                    index = slotIndex;
+                }
+            });
+            if (index === drag.index) return;
+            drag.cards[drag.index]?.classList.remove('syv-drop-target');
+            drag.index = index;
+            if (index !== drag.from) drag.cards[index].classList.add('syv-drop-target');
+        },
+        finishProductDrag(pointerId, commit) {
+            const drag = this.productDrag;
+            if (!drag || pointerId !== drag.pointerId) return;
+            this.productDrag = null;
+            if (drag.frame) cancelAnimationFrame(drag.frame);
+            document.removeEventListener('pointermove', drag.move);
+            document.removeEventListener('pointerup', drag.up);
+            document.removeEventListener('pointercancel', drag.cancel);
+            document.body.classList.remove('syv-drag-lock');
+            drag.cards.forEach((card) => card.classList.remove('syv-drop-target'));
+            drag.card.classList.remove('syv-dragging');
+            drag.card.style.position = '';
+            drag.card.style.left = '';
+            drag.card.style.top = '';
+            drag.card.style.width = '';
+            drag.card.style.margin = '';
+            drag.card.style.zIndex = '';
+            drag.card.style.transform = '';
+            if (!commit || drag.index === drag.from) {
+                if (drag.spacer.isConnected) drag.spacer.replaceWith(drag.card);
+                else drag.grid.appendChild(drag.card);
+                drag.spacer.remove();
+                return;
+            }
+            const target = drag.cards[drag.index];
+            if (drag.index > drag.from) target.after(drag.card);
+            else target.before(drag.card);
+            drag.spacer.remove();
+            this.saveOrder(drag.grid, 'products', drag.grid.dataset.orderGid);
+        },
+        renumber(grid) {
+            grid.querySelectorAll(':scope > [data-order-key]').forEach((el, index) => {
+                const input = el.querySelector('[data-position-input]');
+                if (input) input.value = String(index + 1);
+            });
+        },
+        applySavedOrder(grid, gid, ids) {
+            const current = grid?.isConnected ? grid : this.$el.querySelector('[data-order-gid=\'' + CSS.escape(gid) + '\']');
+            if (!current || !Array.isArray(ids)) return;
+            const nodes = new Map(Array.from(current.querySelectorAll(':scope > [data-order-key]')).map((el) => [el.dataset.orderKey, el]));
+            const present = ids.filter((id) => nodes.has(id));
+            const existing = Array.from(nodes.keys());
+            if (existing.length === present.length && existing.every((id, index) => id === present[index])) {
+                this.renumber(current);
+                return;
+            }
+            const display = current.style.display;
+            current.style.display = 'none';
+            void current.offsetWidth;
+            const fragment = document.createDocumentFragment();
+            present.forEach((id) => fragment.appendChild(nodes.get(id)));
+            current.appendChild(fragment);
+            current.style.display = display;
+            this.renumber(current);
+        },
+        queueProductOrder(grid, gid) {
+            if (this.productQuery.trim() !== '') return;
+            const epoch = ++this.orderEpoch;
+            this.persistChain = this.persistChain.then(async () => {
+                if (epoch !== this.orderEpoch) return;
+                const order = Array.from(grid.querySelectorAll(':scope > [data-order-key]')).map((el) => el.dataset.orderKey).filter(Boolean);
+                this.savingOrder = true;
+                this.orderError = '';
+                try {
+                    const result = await this.$wire.reorderProducts(gid, order, epoch, this.orderSession);
+                    if (epoch !== this.orderEpoch) return;
+                    if (result?.ids) this.applySavedOrder(grid, gid, result.ids);
+                    if (result?.applied) {
+                        this.localPending = true;
+                        this.$el.dataset.pending = 'true';
+                    } else if ((result?.ids || []).join('|') !== order.join('|')) {
+                        this.orderError = 'The product order was not saved. The list matches the saved draft.';
+                    }
+                } catch (error) {
+                    if (epoch !== this.orderEpoch) return;
+                    const ids = await this.$wire.savedProductOrder(gid);
+                    if (epoch === this.orderEpoch) this.applySavedOrder(grid, gid, ids);
+                    this.orderError = 'The product order was not saved. The list matches the saved draft.';
+                } finally {
+                    if (epoch === this.orderEpoch) this.savingOrder = false;
+                }
+            });
+        },
+        commitPosition(input) {
+            const card = input.closest('[data-order-key]');
+            const grid = input.closest('[data-order-grid]');
+            if (!card || !grid || grid.closest('fieldset')?.disabled) return;
+            if (this.productQuery.trim() !== '') {
+                this.orderError = 'Clear the product search before changing positions.';
+                this.renumber(grid);
+                return;
+            }
+            const cards = Array.from(grid.querySelectorAll(':scope > [data-order-key]'));
+            const total = cards.length;
+            const position = Number.parseInt(input.value, 10);
+            if (!Number.isInteger(position) || position < 1 || position > total) {
+                this.orderError = 'Enter a position from 1 to ' + total + '.';
+                this.renumber(grid);
+                return;
+            }
+            this.orderError = '';
+            const from = cards.indexOf(card);
+            const to = position - 1;
+            if (from === to) return;
+            if (from < to) cards[to].after(card);
+            else cards[to].before(card);
+            this.renumber(grid);
+            this.queueProductOrder(grid, grid.dataset.orderGid);
+        },
+        saveOrder(grid, type, gid = null, ids = null) {
+            if (grid.closest('fieldset')?.disabled) return;
+            if (type === 'cards') {
+                if (this.savingOrder) return;
+                const order = ids ?? Array.from(grid.children).map(el => el.dataset.orderKey).filter(Boolean);
+                this.persistChain = this.persistChain.then(async () => {
+                    this.savingOrder = true;
+                    try {
+                        await this.$wire.reorderCards(order);
+                        this.localPending = true;
+                        this.$el.dataset.pending = 'true';
+                    } finally {
+                        this.savingOrder = false;
+                    }
+                });
+                return;
+            }
+            if (this.productQuery.trim() !== '') return;
+            this.renumber(grid);
+            this.queueProductOrder(grid, gid);
         },
         move(element, type, key, direction, gid = null) {
             const grid = element.closest('[data-order-grid]');
@@ -34,8 +299,16 @@
             [ids[index], ids[next]] = [ids[next], ids[index]];
             this.saveOrder(grid, type, gid, ids);
         }
-    }"
+            };
+        };
+    </script>
+    <div x-data="syvEditor()"
         data-pending="{{ $draft?->pending ? 'true' : 'false' }}"
+        data-saved-pending="{{ $draft?->pending ? '1' : '0' }}"
+        data-poll="{{ !empty($statusPoll) ? '1' : '0' }}"
+        data-products-loaded="{{ !empty($productsLoaded) ? '1' : '0' }}"
+        data-hydration="{{ $hydrationState ?? '' }}"
+        x-init="initStatus()"
         x-on:vibe-form-saved.window="formDirty = false; localPending = false"
         x-on:vibe-draft-saved.window="formDirty = false; localPending = true; $el.dataset.pending = 'true'"
         x-on:beforeunload.window="if (pending()) { $event.preventDefault(); $event.returnValue = ''; }"
@@ -46,7 +319,7 @@
             <div role="alert" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">{{ $loadError }}</div>
         @endif
 
-        @if (!$draft)
+        @if (!$draft && ! $hydratingCollection)
             <div class="flex flex-wrap items-center gap-3">
                 <x-filament::input.wrapper><x-filament::input wire:model.live.debounce.300ms="search" placeholder="Search configured collections" aria-label="Search configured collections" /></x-filament::input.wrapper>
                 <x-filament::button wire:click="openCollectionPicker" wire:loading.attr="disabled">Add Shop Your Vibe</x-filament::button>
@@ -84,68 +357,116 @@
                     <p class="text-gray-500">No configured collections found. Add Shop Your Vibe to start a preview layout.</p>
                 @endforelse
             </div>
-        @else
-            @if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
-                <div wire:poll.3s="pollPush" role="status" class="rounded-xl border border-primary-300 p-4">
-                    @if ($draft->status === 'creating')
-                        Creating Vibe... Shopify is creating the collection, image, and preview card. Editing is paused until this finishes.
-                    @elseif ($draft->status === 'deleting')
-                        Deleting Vibe... Shopify is applying the removal. Editing is paused until this finishes.
-                    @else
-                        Pushing to Shopify... You can return later; your draft is saved. Editing is paused until this push finishes.
-                    @endif
+        @elseif ($hydratingCollection && ! $draft)
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h2 class="text-2xl font-bold">{{ $hydratingParent['title'] ?? 'Collection' }} - Shop Your Vibe</h2>
+                    <p class="text-sm text-gray-500">Opening from the local catalogue.</p>
                 </div>
-            @endif
+                <x-filament::button color="gray" wire:click="back">Back to collections</x-filament::button>
+            </div>
+            <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-primary-300 p-4">
+                @if (($syvProgress['state'] ?? null) === 'failed')
+                    <strong>Could not load collection products</strong>
+                    <p data-status-message>{{ $syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE }}</p>
+                    <div class="mt-3"><x-filament::button size="sm" wire:click="retryHydration" wire:loading.attr="disabled">Retry</x-filament::button></div>
+                @else
+                    <strong>Loading collection products</strong>
+                    <p data-status-message>{{ ($syvProgress['state'] ?? null) === 'running' ? ($syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE) : \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE }}</p>
+                    <progress x-show="statusMode === 'loading' && statusTotal > 0" x-cloak class="syv-progress" :value="statusDone" :max="statusTotal"></progress>
+                    <div x-show="statusMode === 'loading' && statusTotal === 0" class="syv-indeterminate" aria-hidden="true"></div>
+                @endif
+            </div>
+            <div class="syv-card-grid syv-product-grid" aria-hidden="true">
+                @foreach (range(1, 8) as $skeleton)
+                    <div class="syv-product-card syv-product-skeleton rounded-lg border border-gray-200 p-3"></div>
+                @endforeach
+            </div>
+        @else
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h2 class="text-2xl font-bold">{{ $draft->desired['parent']['title'] }} - Shop Your Vibe</h2>
-                    <p class="text-sm text-gray-500">Last confirmed with Shopify: {{ $draft->refreshed_at?->format('d M Y H:i') ?? 'Not yet refreshed' }}</p>
+                    <p class="text-sm text-gray-500">
+                        @if ($productsLoaded)
+                            Last confirmed with Shopify: {{ $draft->refreshed_at?->format('d M Y H:i') ?? 'Not yet refreshed' }}
+                        @else
+                            Products have not been loaded from Shopify yet.
+                        @endif
+                    </p>
                 </div>
                 <x-filament::button color="gray" wire:click="back" wire:confirm="You may have changes that have not been pushed to Shopify. Leave this editor? Saved drafts will be kept.">Back to collections</x-filament::button>
             </div>
             <div class="syv-tabs flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
                 <button type="button" wire:key="syv-tab-products" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'products' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
-                    Products ({{ count($parentProducts) }})
+                    Products ({{ $productCountLabel }})
                 </button>
                 <button type="button" wire:key="syv-tab-vibes" wire:click="setActiveTab('vibes')" role="tab" aria-selected="{{ $activeTab === 'vibes' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'vibes' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
-                    Shop Your Vibes ({{ count($draft->desired['cards']) }})
+                    Shop Your Vibes ({{ $vibeCountLabel }})
                 </button>
             </div>
             <div x-show="formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                 Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
-            <div x-show="localPending && !formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
-                <strong>Pending changes - not pushed to Shopify</strong>
-                <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
-            </div>
-            @if ($draft->status === 'failed' && ! $draft->pending && ! empty($draft->operation))
-                <div role="status" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">
-                    <strong>Operation Failed</strong>
-                    <p class="mt-2">{{ $draft->last_error ?: 'Shopify did not confirm this Vibe operation.' }}</p>
-                    @if ($draft->progress)
-                        <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
-                    @endif
-                    <div class="mt-3 flex flex-wrap gap-2">
-                        <x-filament::button size="sm" wire:click="retryImmediateOperation" wire:loading.attr="disabled">Retry operation</x-filament::button>
-                        <x-filament::button size="sm" color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify and clear this failed operation? Changes already saved in Shopify will stay there.">Refresh and review</x-filament::button>
-                    </div>
+            @php($operationBusy = in_array($draft->status, ['creating', 'deleting', 'pushing'], true))
+            @php($operationFailed = $draft->status === 'failed' && ! $draft->pending && ! empty($draft->operation))
+            @php($hydrationFailed = ! $productsLoaded && ($syvProgress['state'] ?? null) === 'failed')
+            @php($hydrationLoading = ! $productsLoaded && ! $hydrationFailed && ! $draft->pending && ! $operationBusy)
+            @php($refreshLoading = $refreshingCollection && $productsLoaded && ! $draft->pending && ! $operationBusy && ! in_array($hydrationState, ['success', 'failed', 'skipped'], true))
+            @if ($hydrationFailed)
+                <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-danger-300 p-4">
+                    <strong>Could not load collection products</strong>
+                    <p>{{ $syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE }}</p>
+                    <div class="mt-3"><x-filament::button size="sm" wire:click="retryHydration" wire:loading.attr="disabled">Retry</x-filament::button></div>
                 </div>
-            @elseif ($draft->pending)
-                <div @if ($draft->status === 'pending') wire:poll.5s="pollPush" @endif role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
-                    <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
-                    <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
-                    @if ($draft->last_error)<p class="mt-2">{{ $draft->last_error }}</p>@endif
-                    @if ($draft->progress)
-                        <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
+            @elseif ($hydrationLoading || $refreshLoading)
+                <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-primary-300 p-4" x-bind:hidden="statusMode !== 'loading'">
+                    <strong>{{ $refreshLoading ? 'Refreshing collection products' : 'Loading collection products' }}</strong>
+                    @php($statusDetail = ($syvProgress['state'] ?? null) === 'running' ? (string) ($syvProgress['message'] ?? '') : \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE)
+                    @if ($statusDetail !== '' && $statusDetail !== ($refreshLoading ? 'Refreshing collection products' : 'Loading collection products'))
+                        <p data-status-message>{{ $statusDetail }}</p>
+                    @endif
+                    <progress x-show="statusTotal > 0" x-cloak class="syv-progress" :value="statusDone" :max="statusTotal"></progress>
+                    <div x-show="statusTotal === 0" x-bind:hidden="statusMode !== 'loading'" class="syv-indeterminate" aria-hidden="true"></div>
+                </div>
+            @elseif ($operationBusy || $operationFailed || $draft->pending)
+                <div id="syv-status-banner" role="status" class="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
+                    @if ($draft->status === 'creating')
+                        Creating Vibe... Shopify is creating the collection, image, and preview card. Editing is paused until this finishes.
+                    @elseif ($draft->status === 'deleting')
+                        Deleting Vibe... Shopify is applying the removal. Editing is paused until this finishes.
+                    @elseif ($draft->status === 'pushing')
+                        Pushing to Shopify... You can return later; your draft is saved. Editing is paused until this push finishes.
+                    @elseif ($operationFailed)
+                        <strong>Operation Failed</strong>
+                        <p class="mt-2">{{ $draft->last_error ?: 'Shopify did not confirm this Vibe operation.' }}</p>
+                        <p class="mt-2">Some changes could not be synchronized. Retry is available.</p>
+                        @if ($draft->progress)
+                            <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
+                        @endif
+                        <div class="mt-3 flex flex-wrap gap-2">
+                            <x-filament::button size="sm" wire:click="retryImmediateOperation" wire:loading.attr="disabled">Retry operation</x-filament::button>
+                            <x-filament::button size="sm" color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify and clear this failed operation? Changes already saved in Shopify will stay there.">Refresh and review</x-filament::button>
+                        </div>
+                    @else
+                        <strong>{{ $draft->status === 'failed' ? 'Push failed - some changes are still pending' : 'Pending changes - not pushed to Shopify' }}</strong>
+                        <p>Your saved draft contains changes that have not been confirmed by Shopify.</p>
+                        @if (! $productsLoaded)
+                            <p class="mt-2">This collection's products have not been loaded. Pending edits were kept, so Shopify was not asked to replace them.</p>
+                        @endif
+                        @if ($draft->last_error)<p class="mt-2">{{ $draft->last_error }}</p>@endif
+                        @if ($draft->progress)
+                            <ul class="mt-2 list-inside list-disc">@foreach ($draft->progress as $message)<li>{{ $message }}</li>@endforeach</ul>
+                        @endif
                     @endif
                 </div>
-            @elseif (! in_array($draft->status, ['creating', 'deleting', 'pushing'], true))
-                <x-filament::badge color="success">Up to date with Shopify</x-filament::badge>
             @endif
+            <div x-show="loadNotice" x-cloak role="status" class="rounded-xl border border-success-300 bg-success-50 p-4 text-success-800">Collection loaded successfully.</div>
+            <p x-show="savingOrder" x-cloak>Saving your product order...</p>
+            <p x-show="localPending && !formDirty && $root.dataset.savedPending !== '1'" x-cloak><strong>Pending changes - not pushed to Shopify</strong></p>
+            <p x-show="orderError" x-text="orderError" x-cloak class="text-danger-600"></p>
             <div class="space-y-6">
-                <p x-show="savingOrder" x-cloak role="status" class="syv-order-status">Saving order to draft - not pushed to Shopify...</p>
                 <div class="flex flex-wrap gap-3">
                     @if ($draft->status === 'pushing')
                         <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
@@ -180,61 +501,56 @@
                 <div class="space-y-6" wire:key="syv-products-panel">
                     <div class="flex items-center justify-between gap-3">
                         <div><h3 class="text-lg font-semibold">Products</h3><p class="text-sm text-gray-500">Manage one or several Shop Your Vibe assignments for each product.</p></div>
-                        <input type="search" wire:model.live.debounce.300ms="assignmentProductSearch"
+                        <input type="search" x-model.debounce.150ms="productQuery"
                             placeholder="Search product name or SKU" aria-label="Search products by name or SKU"
                             class="block w-full max-w-sm rounded-lg border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-900" />
                     </div>
                     @php($parentCollection = $draft->desired['collections'][$draft->collection_gid] ?? null)
                     @php($parentSort = $parentCollection['sort'] ?? null)
-                    @php($parentSortLabel = $parentSort ? str_replace('_', ' ', ucwords(strtolower($parentSort), '_')) : 'Unknown')
-                    @php($parentIsAutomated = $parentCollection && ! ($parentCollection['membership_supported'] ?? true))
                     @php($parentManualSupported = $parentCollection && (($parentCollection['manual_supported'] ?? true) !== false || $parentSort !== 'UNSUPPORTED'))
                     @php($parentCanSort = $draft->status !== 'pushing' && $parentManualSupported)
                     <div class="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-900">
-                        <div class="flex flex-wrap items-center gap-2">
-                            <span class="font-semibold text-gray-900 dark:text-white">Main collection sorting:</span>
-                            @if ($parentCollection)
-                                <span class="text-gray-600 dark:text-gray-300">Current Shopify sort: {{ $parentSortLabel }}</span>
-                                <x-filament::badge :color="$parentIsAutomated ? 'gray' : 'info'">{{ $parentIsAutomated ? 'Automated collection' : 'Manual membership collection' }}</x-filament::badge>
-                            @else
-                                <span class="text-gray-600 dark:text-gray-300">Sorting data is not loaded for this draft.</span>
-                            @endif
-                            @if ($parentCanSort)
-                                @if ($parentSort === 'MANUAL')
-                                    <x-filament::badge color="success">Sortable manually</x-filament::badge>
-                                @elseif ($parentCollection['enable_manual'] ?? false)
-                                    <x-filament::badge color="warning">Manual sorting requested</x-filament::badge>
-                                @else
-                                    <x-filament::badge color="warning">Dragging will request Manual sorting</x-filament::badge>
-                                @endif
-                            @elseif ($parentCollection)
-                                <x-filament::badge color="gray">Manual sorting not supported</x-filament::badge>
-                            @endif
-                        </div>
                         @if ($parentCanSort)
-                            <p class="mt-1 text-xs text-gray-500">Drag handles appear on product cards below. Pushing changes will send this order to Shopify.</p>
+                            <p class="font-semibold text-gray-900 dark:text-white">Product order — {{ $parentSort === 'MANUAL' ? 'Manual sorting enabled' : 'Manual sorting will be requested' }}</p>
+                            <p class="mt-1 text-xs text-gray-500">Drag products or enter a position number to reorder. Changes are saved to the draft.</p>
+                            @if ($parentSort !== 'MANUAL')
+                                <p class="mt-1 text-xs text-gray-500">Pushing changes will ask Shopify to use manual sorting for this collection.</p>
+                            @endif
+                        @elseif (! $parentCollection && $draft->pending)
+                            <p class="font-semibold text-gray-900 dark:text-white">Product order</p>
+                            <p class="mt-1 text-xs text-gray-500">Pending edits were kept, so this collection was not reloaded from Shopify.</p>
+                        @elseif (! $parentCollection && ($syvProgress['state'] ?? null) === 'failed')
+                            <p class="font-semibold text-gray-900 dark:text-white">Product order</p>
+                            <p class="mt-1 text-xs text-gray-500">Retry loading to get this collection's sort mode.</p>
                         @elseif (! $parentCollection)
-                            <p class="mt-1 text-xs text-gray-500">Refresh from Shopify to reload the main collection sort mode before sorting products.</p>
+                            <p class="font-semibold text-gray-900 dark:text-white">Product order</p>
+                            <p class="mt-1 text-xs text-gray-500">Sorting will be available when the products finish loading.</p>
                         @else
-                            <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so drag handles are hidden.</p>
+                            <p class="font-semibold text-gray-900 dark:text-white">Product order — manual sorting is not available</p>
+                            <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so products cannot be reordered here.</p>
                         @endif
                     </div>
-                    @if ($parentCanSort)
-                    <div data-order-grid class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-sortable-{{ md5($draft->collection_gid) }}"
-                        x-sortable data-sortable-animation-duration="200"
-                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
+                    @if ($productsLoaded && $parentCanSort)
+                    <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
+                        wire:key="parent-products-{{ $draft->id }}-{{ $productMembership }}"
+                        wire:ignore
+                        x-sortable data-sortable-animation-duration="0"
+                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
+                    @elseif ($productsLoaded)
+                    <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
+                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ $productMembership }}"
+                        wire:ignore>
                     @else
-                    <div data-order-grid class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ md5($draft->collection_gid) }}">
+                    <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
+                        wire:key="parent-products-{{ $draft->id }}-loading">
                     @endif
                         @if (count($filteredParentProducts) > 0)
                         @foreach ($filteredParentProducts as $product)
-                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                @if ($parentCanSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $product['title'] }}">Drag</button>@endif
-                                @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
+                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($product['title'].' '.($product['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $parentCanSort, 'title' => $product['title'], 'position' => $loop->iteration, 'max' => $loop->count])
                                 <div class="syv-product-image-wrap">
                                     @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                    @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                 </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
@@ -277,7 +593,11 @@
                                     @forelse (($product['siblings'] ?? []) as $sibling)
                                         <span class="syv-sibling-badge">{{ strtoupper($sibling['label']) }}</span>
                                     @empty
-                                        <span class="syv-empty-state">None</span>
+                                        @if ($siblingsResolved)
+                                            <span class="syv-empty-state" data-sibling-state="empty">None</span>
+                                        @else
+                                            <span class="syv-empty-state" data-sibling-state="unknown">Not loaded</span>
+                                        @endif
                                     @endforelse
                                     </div>
                                 </div>
@@ -288,15 +608,15 @@
                                     </span>
                                 </div>
                                 <div class="syv-vibe-actions">
-                                    <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
-                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
-                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
-                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</x-filament::button>
+                                    <button type="button" class="syv-card-action syv-vibe-button" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
+                                    <button type="button" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</button>
+                                    <button type="button" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</button>
+                                    <button type="button" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</button>
                                 </div>
                             </article>
                         @endforeach
-                        @else
-                            <p class="text-gray-500">{{ $assignmentProductSearch !== '' ? 'No products match your search.' : 'No products belong to this Shopify collection.' }}</p>
+                        @elseif ($productsLoaded)
+                            <p class="text-gray-500">No products belong to this Shopify collection.</p>
                         @endif
                     </div>
                 </div>
@@ -413,23 +733,26 @@
                                     <p class="syv-membership-note">Remove takes a product out of this linked Shopify collection when you push changes. It does not delete the product. This can also affect the live storefront.</p>
                                 @endif
                                 @php($canSort = $draft->status !== 'pushing' && $collectionManualSupported)
+                                @php($vibeProductMembership = md5(implode('|', array_column($collection['products'], 'id'))))
                                 @if ($canSort)
-                                <div data-order-grid class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable"
-                                        x-sortable data-sortable-animation-duration="200"
-                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
+                                <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable-{{ $vibeProductMembership }}"
+                                        wire:ignore
+                                        x-sortable data-sortable-animation-duration="0"
+                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
                                 @else
-                                <div data-order-grid class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed">
+                                <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed-{{ $vibeProductMembership }}"
+                                    wire:ignore>
                                 @endif
                                     @foreach ($collection['products'] as $product)
-                                        @php($parentProductCard = collect($parentProducts)->firstWhere('id', $product['id']))
-                                        @php($displayProduct = $parentProductCard ? array_replace($product, $parentProductCard) : $product)
-                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                            @if ($canSort)<button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $displayProduct['title'] }}">Drag</button>@endif
-                                            @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $displayProduct])
+                                        @php($displayProduct = $product)
+                                        @php($inParentCollection = isset($parentProductIds[$product['id']]))
+                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($displayProduct['title'].' '.($displayProduct['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+                                            @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $canSort, 'title' => $displayProduct['title'], 'position' => $loop->iteration, 'max' => $loop->count])
                                             <div class="syv-product-image-wrap">
                                                 @if ($displayProduct['image'])<img src="{{ $displayProduct['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
+                                                @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $displayProduct])
                                             </div>
                                             <h4 class="mt-2 font-medium">{{ $displayProduct['title'] }}</h4>
                                             <p class="text-xs text-gray-500">SKU: {{ $displayProduct['sku'] ?: 'No SKU' }}</p>
@@ -472,7 +795,11 @@
                                                 @forelse (($displayProduct['siblings'] ?? []) as $sibling)
                                                     <span class="syv-sibling-badge">{{ strtoupper($sibling['label']) }}</span>
                                                 @empty
-                                                    <span class="syv-empty-state">None</span>
+                                                    @if ($siblingsResolved)
+                                                        <span class="syv-empty-state" data-sibling-state="empty">None</span>
+                                                    @else
+                                                        <span class="syv-empty-state" data-sibling-state="unknown">Not loaded</span>
+                                                    @endif
                                                 @endforelse
                                                 </div>
                                             </div>
@@ -483,11 +810,11 @@
                                                 </span>
                                             </div>
                                             <div class="syv-vibe-actions">
-                                                @if ($parentProductCard)
-                                                    <button type="button" class="syv-card-action syv-vibe-button rounded-lg bg-warning-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-warning-600" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
-                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</x-filament::button>
-                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</x-filament::button>
-                                                    <x-filament::button size="xs" color="gray" icon="heroicon-m-pencil-square" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</x-filament::button>
+                                                @if ($inParentCollection)
+                                                    <button type="button" class="syv-card-action syv-vibe-button" wire:click.stop="openProductAssignments({{ \Illuminate\Support\Js::from($product['id']) }})">Vibes</button>
+                                                    <button type="button" class="syv-card-action syv-sibling-button" wire:click="openProductSiblings({{ \Illuminate\Support\Js::from($product['id']) }})">Siblings</button>
+                                                    <button type="button" class="syv-card-action syv-tag-button" wire:click="openProductTags({{ \Illuminate\Support\Js::from($product['id']) }})">Tags</button>
+                                                    <button type="button" class="syv-card-action syv-complementary-button" wire:click="openProductComplementary({{ \Illuminate\Support\Js::from($product['id']) }})">Complementary</button>
                                                 @endif
                                                 @if ($collection['membership_supported'])
                                                     <x-filament::button size="xs" color="danger" class="syv-card-action" wire:click="removeProduct({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Remove</x-filament::button>
@@ -629,7 +956,6 @@
         </x-filament::modal>
 
         <x-filament::modal id="manage-sibling-assignments" width="2xl" heading="Manage Siblings">
-            @php($siblingProduct = $managingSiblingProductGid ? collect($parentProducts)->firstWhere('id', $managingSiblingProductGid) : null)
             @if ($siblingProduct)
                 <p class="font-semibold">{{ $siblingProduct['title'] }}</p>
                 <p class="mb-4 text-sm text-gray-500">SKU: {{ $siblingProduct['sku'] ?: 'No SKU' }}</p>
@@ -652,7 +978,6 @@
         </x-filament::modal>
 
         <x-filament::modal id="manage-tag-assignments" width="2xl" heading="Manage Product Tags">
-            @php($tagProduct = $managingTagProductGid ? collect($parentProducts)->firstWhere('id', $managingTagProductGid) : null)
             @if ($tagProduct)
                 <p class="font-semibold">{{ $tagProduct['title'] }}</p>
                 <p class="mb-4 text-sm text-gray-500">SKU: {{ $tagProduct['sku'] ?: 'No SKU' }}</p>

@@ -4,8 +4,10 @@ namespace App\Jobs;
 
 use App\Services\AdminNotification;
 use App\Services\ShopYourVibeShopify;
+use App\Services\SiblingCollectionResolver;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -13,13 +15,15 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Throwable;
 
-class RefreshShopYourVibeParents implements ShouldQueue
+class RefreshShopYourVibeParents implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 1;
 
     public int $timeout = 840;
+
+    public int $uniqueFor = 960;
 
     public function __construct(
         private readonly string $cacheKey,
@@ -29,9 +33,15 @@ class RefreshShopYourVibeParents implements ShouldQueue
         $this->onQueue('shop-your-vibe');
     }
 
+    public function uniqueId(): string
+    {
+        return 'syv-parents:'.$this->cacheKey;
+    }
+
     public function handle(ShopYourVibeShopify $shopify): void
     {
         try {
+            Cache::forget(SiblingCollectionResolver::cacheKey());
             Cache::put($this->cacheKey, $shopify->parents(), 300);
         } catch (Throwable $exception) {
             $this->notify(
@@ -52,7 +62,7 @@ class RefreshShopYourVibeParents implements ShouldQueue
 
     private function notify(string $title, string $body, bool $success): void
     {
-        if (!$this->userId) {
+        if (! $this->userId) {
             return;
         }
 

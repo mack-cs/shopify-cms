@@ -17,6 +17,9 @@ class ShopYourVibeShopify
 
     private ?bool $publishable = null;
 
+    /** @var null|callable(int, int, string): void */
+    public $productProgress = null;
+
     public function __construct(private readonly ShopifyGraphqlGateway $client) {}
 
     public function definition(): array
@@ -151,6 +154,10 @@ GQL, ['id' => $gid, 'after' => $after]);
             $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
             foreach ($node['products']['nodes'] as $product) {
                 $products[] = $this->productCard($product);
+            }
+            $total = (int) data_get($node, 'productsCount.count', count($products));
+            if ($this->productProgress) {
+                ($this->productProgress)(count($products), max($total, count($products)), $gid, (string) ($node['title'] ?? ''));
             }
             $after = $this->cursor($node['products']);
         } while ($after !== null);
