@@ -79,20 +79,22 @@ class HydrateShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
 
         Cache::put(ShopYourVibeWorkflow::progressKey($this->collectionGid), [
             'state' => 'running',
+            'stage' => 'Loading this collection',
             'done' => null,
             'total' => null,
             'message' => ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE,
         ], 600);
 
         $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = ''): void {
-            $reportedTotal = $total > 0 ? $total : null;
+            $payload = ShopYourVibeWorkflow::productProgressPayload($this->collectionGid, $gid, $done, $total, $title);
             Cache::put(ShopYourVibeWorkflow::progressKey($this->collectionGid), [
                 'state' => 'running',
-                'done' => $done,
-                'total' => $reportedTotal,
-                'percent' => $reportedTotal ? (int) floor(($done / $reportedTotal) * 100) : null,
+                'stage' => $payload['stage'],
+                'done' => $payload['done'],
+                'total' => $payload['total'],
+                'percent' => $payload['percent'],
                 'stage_gid' => $gid,
-                'message' => ShopYourVibeWorkflow::productProgressMessage($this->collectionGid, $gid, $done, $total, $title),
+                'message' => $payload['message'],
             ], 600);
         });
 

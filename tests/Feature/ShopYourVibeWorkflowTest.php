@@ -1480,7 +1480,7 @@ it('opens a searchable collection modal and closes it after selecting a parent',
         ->assertSet('addingParent', false)->assertSet('hydratingCollection', true)
         ->assertDispatched('close-modal', id: 'shop-your-vibe-collections')
         ->assertSee('Loading collection products')
-        ->assertSee("We're retrieving this collection's products from Shopify. You can continue using the CMS while this runs.");
+        ->assertSee("Retrieving products from Shopify. You can continue using the CMS while this runs.");
     expect($this->fake->mutations())->toBe([]);
 });
 
@@ -2085,7 +2085,7 @@ it('shows the editor shell for a new collection and queues a single hydration jo
         ->assertSet('hydratingCollection', true)
         ->assertSet('draftId', null)
         ->assertSee('Loading collection products')
-        ->assertSee("We're retrieving this collection's products from Shopify. You can continue using the CMS while this runs.");
+        ->assertSee("Retrieving products from Shopify. You can continue using the CMS while this runs.");
 
     expect($this->fake->calls)->toBe([])
         ->and(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(1);
@@ -2211,7 +2211,7 @@ it('replaces the hydration shell with local products when the background load fi
         ->handle(app(ShopYourVibeWorkflow::class));
 
     $ready = $page->instance()->statusSnapshot();
-    expect($ready['changed'])->toBeTrue()->and($ready['polling'])->toBeFalse();
+    expect($ready['changed'])->toBeTrue()->and($ready['polling'])->toBeTrue()->and($ready['phase'])->toBe('ready_to_render');
     $page->call('pollPush')
         ->assertSet('hydratingCollection', false)
         ->assertSee('Product 101')

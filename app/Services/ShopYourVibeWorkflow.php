@@ -21,13 +21,20 @@ class ShopYourVibeWorkflow
 {
     public const PARENT_PREFIX_WARNING = "The collection name is added automatically. We've removed it from your vibe name.";
 
-    public const LOADING_PRODUCTS_MESSAGE = "We're retrieving this collection's products from Shopify. You can continue using the CMS while this runs.";
+    public const LOADING_PRODUCTS_MESSAGE = 'Retrieving products from Shopify. You can continue using the CMS while this runs.';
+
+    public const WAITING_PRODUCTS_MESSAGE = 'Waiting to load collection products…';
+
+    public const PREPARING_PRODUCTS_MESSAGE = 'Preparing product display…';
 
     public const HYDRATION_FAILED_MESSAGE = "Shopify did not return this collection's products. Retry to load them.";
 
     public const HYDRATION_SUCCESS_MESSAGE = 'Collection loaded successfully.';
 
-    public static function productProgressMessage(string $parentGid, string $gid, int $done, int $total, string $title = ''): string
+    /**
+     * @return array{stage: string, done: int, total: int|null, percent: int|null, message: string}
+     */
+    public static function productProgressPayload(string $parentGid, string $gid, int $done, int $total, string $title = ''): array
     {
         $label = trim($title);
         if ($gid !== '' && $gid !== $parentGid) {
@@ -35,12 +42,21 @@ class ShopYourVibeWorkflow
         } else {
             $stage = $label !== '' ? 'Loading '.$label : 'Loading this collection';
         }
-        if ($total <= 0) {
-            return $stage;
-        }
-        $percent = (int) floor(($done / $total) * 100);
+        $reportedTotal = $total > 0 ? $total : null;
+        $percent = $reportedTotal ? (int) floor(($done / $reportedTotal) * 100) : null;
 
-        return "{$stage}: {$done} of {$total} products — {$percent}%";
+        return [
+            'stage' => $stage,
+            'done' => $done,
+            'total' => $reportedTotal,
+            'percent' => $percent,
+            'message' => $reportedTotal ? "{$stage}: {$done} of {$reportedTotal} products — {$percent}%" : $stage,
+        ];
+    }
+
+    public static function productProgressMessage(string $parentGid, string $gid, int $done, int $total, string $title = ''): string
+    {
+        return self::productProgressPayload($parentGid, $gid, $done, $total, $title)['message'];
     }
 
     private const VIBE_SEPARATOR = '[\s\-–—:\/|]+';

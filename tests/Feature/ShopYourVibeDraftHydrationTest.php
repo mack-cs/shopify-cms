@@ -124,8 +124,10 @@ it('queues hydration for a legacy draft that never loaded its collection', funct
 
     expect($this->fake->calls)->toBe([])
         ->and(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(1)
-        ->and(substr_count($page->html(), '<p data-status-message'))->toBe(1)
+        ->and(substr_count($page->html(), ' data-status-stage>'))->toBe(1)
         ->and(substr_count($page->html(), 'You can continue using the CMS while this runs.'))->toBe(1)
+        ->and($page->html())->toContain('syv-spinner')
+        ->and($page->html())->not->toContain('x-bind:hidden="statusMode !== \'loading\'"')
         ->and(substr_count($page->html(), 'syv-indeterminate'))->toBe(1)
         ->and($page->html())->not->toContain('x-text="statusProgress"')
         ->and($page->html())->toContain('data-products-loaded="0"')
@@ -145,7 +147,9 @@ it('replaces the incomplete editor with products when hydration finishes', funct
         ->handle(app(ShopYourVibeWorkflow::class));
 
     $ready = $page->instance()->statusSnapshot();
-    expect($ready['changed'])->toBeTrue()->and($ready['polling'])->toBeFalse();
+    expect($ready['changed'])->toBeTrue()
+        ->and($ready['polling'])->toBeTrue()
+        ->and($ready['phase'])->toBe('ready_to_render');
     $page->call('pollPush')
         ->assertSet('hydratingCollection', false)
         ->assertSee('Products (3)')
@@ -156,9 +160,53 @@ it('replaces the incomplete editor with products when hydration finishes', funct
         ->assertDontSee('Collection synchronization completed successfully.');
 
     $draft = ShopYourVibeDraft::query()->where('collection_gid', 'gid://shopify/Collection/1')->first();
+    $settled = $page->instance()->statusSnapshot();
     expect(ShopYourVibeWorkflow::productsAreLoaded($draft->desired, $draft->collection_gid))->toBeTrue()
+        ->and($settled['phase'])->toBe('loaded')
+        ->and($settled['polling'])->toBeFalse()
         ->and($page->html())->toContain('data-products-loaded="1"')
         ->and($page->html())->toContain('data-poll="0"');
+});
+
+it('renders a completed draft even when the progress cache still says the job failed', function () {
+    hydrationShell();
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    Cache::put(ShopYourVibeWorkflow::progressKey('gid://shopify/Collection/1'), [
+        'state' => 'failed',
+        'message' => ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE,
+    ], 600);
+
+    $failed = $page->instance()->statusSnapshot();
+    expect($failed['phase'])->toBe('failed')
+        ->and($failed['polling'])->toBeTrue()
+        ->and($failed['changed'])->toBeFalse()
+        ->and($page->html())->toContain('data-poll="1"');
+
+    $draft = ShopYourVibeDraft::query()->where('collection_gid', 'gid://shopify/Collection/1')->first();
+    $desired = $draft->desired;
+    $desired['collections']['gid://shopify/Collection/1'] = [
+        'gid' => 'gid://shopify/Collection/1',
+        'title' => 'All Products Collections',
+        'products' => [[
+            'id' => 'gid://shopify/Product/101',
+            'title' => 'Product 101',
+            'sku' => 'SKU-101',
+            'tags' => [],
+            'image' => null,
+        ]],
+    ];
+    $draft->update(['desired' => $desired, 'snapshot' => $desired, 'revision' => $draft->revision + 1]);
+
+    $ready = $page->instance()->statusSnapshot();
+    expect($ready['phase'])->toBe('ready_to_render')
+        ->and($ready['polling'])->toBeTrue()
+        ->and($ready['changed'])->toBeTrue();
+
+    $page->call('pollPush')
+        ->assertSet('productsRendered', true)
+        ->assertSee('Products (1)')
+        ->assertSee('Product 101')
+        ->assertDontSee('Could not load collection products');
 });
 
 it('opens a confirmed empty collection without calling Shopify', function () {
@@ -223,7 +271,7 @@ it('does not dispatch a second hydration while one is already running', function
         ->assertSee('Loading collection products');
 
     expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(1)
-        ->and(Cache::get(ShopYourVibeWorkflow::progressKey('gid://shopify/Collection/1'))['state'])->toBe('running');
+        ->and(Cache::get(ShopYourVibeWorkflow::progressKey('gid://shopify/Collection/1'))['state'])->toBe('queued');
 });
 
 it('shows a failed hydration with a retry that can queue again after the uniqueness lock is released', function () {

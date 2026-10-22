@@ -38,6 +38,7 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Form;
 use Filament\Forms\Get;
 use Filament\Notifications\Notification;
+use Illuminate\Support\Facades\DB;
 use Filament\Pages\Page;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Builder;
@@ -133,6 +134,8 @@ class ShopYourVibe extends Page
     public array $productPatches = [];
 
     public bool $hydratingCollection = false;
+
+    public bool $productsRendered = false;
 
     public bool $refreshingCollection = false;
 
@@ -248,6 +251,7 @@ class ShopYourVibe extends Page
             if (! $existing) {
                 $this->draftId = null;
                 $this->revision = 0;
+                $this->productsRendered = false;
                 $this->vibeMappings = [];
                 $this->beginProductHydration($gid);
             } else {
@@ -269,7 +273,7 @@ class ShopYourVibe extends Page
     {
         $progress = Cache::get(ShopYourVibeWorkflow::progressKey($gid));
         $state = is_array($progress) ? ($progress['state'] ?? null) : null;
-        if (! $force && in_array($state, ['running', 'failed'], true)) {
+        if (! $force && in_array($state, ['queued', 'running', 'failed'], true)) {
             $this->hydratingCollection = true;
 
             return;
@@ -278,10 +282,11 @@ class ShopYourVibe extends Page
             HydrateShopYourVibeDraft::releaseUniqueLock($gid);
         }
         Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
-            'state' => 'running',
+            'state' => 'queued',
             'done' => null,
             'total' => null,
-            'message' => ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE,
+            'stage' => ShopYourVibeWorkflow::WAITING_PRODUCTS_MESSAGE,
+            'message' => ShopYourVibeWorkflow::WAITING_PRODUCTS_MESSAGE,
         ], 600);
         $this->hydratingCollection = true;
         HydrateShopYourVibeDraft::dispatch($gid, auth()->id());
@@ -296,6 +301,8 @@ class ShopYourVibe extends Page
         $this->cardForm = [];
         $this->productPatches = [];
         $this->hydratingCollection = false;
+        $this->productsRendered = false;
+        $this->refreshingCollection = false;
         $this->parentSiblingOptions = [];
         $this->siblingsResolved = false;
         $this->vibeMappings = [];
@@ -1435,17 +1442,20 @@ class ShopYourVibe extends Page
                 $this->refreshingCollection = false;
             }
         }
-        if ($this->hydratingCollection && is_string($this->selectedCollection)) {
-            $progress = Cache::get(ShopYourVibeWorkflow::progressKey($this->selectedCollection));
-            if (is_array($progress) && ($progress['state'] ?? null) === 'failed') {
-                return;
-            }
+        if (! $this->productsRendered && is_string($this->selectedCollection)) {
             $ready = ShopYourVibeDraft::query()->where('collection_gid', $this->selectedCollection)->first();
-            if ($ready && ShopYourVibeWorkflow::productsAreLoaded($ready->desired, $ready->collection_gid)) {
+            if ($ready && ! $ready->pending && ShopYourVibeWorkflow::productsAreLoaded($ready->desired, $ready->collection_gid)) {
                 $this->hydratingCollection = false;
                 $this->accept($ready);
                 $this->loadAssignmentOverview();
                 $this->loadError = null;
+                $this->dispatch('vibe-products-ready');
+
+                return;
+            }
+            $progress = Cache::get(ShopYourVibeWorkflow::progressKey($this->selectedCollection));
+            if (is_array($progress) && ($progress['state'] ?? null) === 'failed') {
+                $this->hydratingCollection = true;
 
                 return;
             }
@@ -1508,6 +1518,7 @@ class ShopYourVibe extends Page
         $this->draftId = $draft->id;
         $this->revision = $draft->revision;
         $this->observedStatus = $draft->status;
+        $this->productsRendered = ShopYourVibeWorkflow::productsAreLoaded($draft->desired, $draft->collection_gid);
     }
 
     private function reconcileRevision(): void
@@ -2034,7 +2045,7 @@ class ShopYourVibe extends Page
         $columns = ['id', 'collection_gid', 'revision', 'pending', 'status', 'progress', 'remote_jobs'];
         $draft = $this->draftId ? ShopYourVibeDraft::query()->select($columns)->find($this->draftId) : null;
         if (! $draft && $this->hydratingCollection && is_string($gid)) {
-            $draft = ShopYourVibeDraft::query()->where('collection_gid', $gid)->first();
+            $draft = ShopYourVibeDraft::query()->select($columns)->where('collection_gid', $gid)->first();
         }
         if ($draft && $draft->pending && $draft->status === 'pending' && empty($draft->remote_jobs) && filled($draft->progress)) {
             try {
@@ -2045,27 +2056,78 @@ class ShopYourVibe extends Page
         }
         $status = $draft->status ?? ($this->hydratingCollection ? 'hydrating' : null);
         $state = is_array($progress) ? ($progress['state'] ?? null) : null;
-        $terminal = in_array($state, ['success', 'failed', 'skipped'], true);
+        $probe = $draft && is_string($gid) ? $this->productLoadProbe($draft->id, $gid) : ['ready' => false, 'count' => null];
+        $productsReady = $probe['ready'] && ! ($draft && $draft->pending);
+        $done = is_array($progress) ? ($progress['done'] ?? null) : null;
+        $total = is_array($progress) ? ($progress['total'] ?? null) : null;
+        $done = is_int($done) ? $done : null;
+        $total = is_int($total) && $total > 0 ? $total : null;
+        $percent = is_array($progress) && is_int($progress['percent'] ?? null)
+            ? $progress['percent']
+            : ($total ? (int) floor((($done ?? 0) / $total) * 100) : null);
+        if ($this->productsRendered) {
+            $phase = 'loaded';
+        } elseif ($productsReady) {
+            $phase = 'ready_to_render';
+        } elseif ($state === 'failed') {
+            $phase = 'failed';
+        } elseif ($state === 'running') {
+            $phase = 'running';
+        } elseif ($this->hydratingCollection || $state === 'queued') {
+            $phase = 'queued';
+        } else {
+            $phase = 'not_loaded';
+        }
         $changed = $draft && (
             ($this->hydratingCollection && ! $this->draftId)
-            || ($this->hydratingCollection && $terminal)
-            || ($this->refreshingCollection && $terminal)
+            || (! $this->productsRendered && $productsReady)
+            || ($this->refreshingCollection && in_array($state, ['success', 'failed', 'skipped'], true))
             || $this->observedStatus !== $draft->status
             || ($this->draftId && $this->revision !== $draft->revision)
         );
-        $polling = ($this->hydratingCollection && ! $terminal)
-            || ($this->refreshingCollection && ! $terminal)
-            || in_array($status, ['pushing', 'creating', 'deleting'], true);
-        $done = is_array($progress) ? ($progress['done'] ?? null) : null;
-        $total = is_array($progress) ? ($progress['total'] ?? null) : null;
+        $operationPolling = in_array($status, ['pushing', 'creating', 'deleting'], true);
+        $hydrationPolling = ! $this->productsRendered
+            && ! ($draft && $draft->pending)
+            && ($this->hydratingCollection || $productsReady || in_array($state, ['queued', 'running', 'success'], true));
 
         return [
-            'polling' => $polling,
+            'polling' => $operationPolling || $hydrationPolling || ($this->refreshingCollection && ! in_array($state, ['success', 'failed', 'skipped'], true)),
             'changed' => (bool) $changed,
             'message' => is_array($progress) ? ($progress['message'] ?? null) : null,
-            'done' => is_int($done) ? $done : null,
-            'total' => is_int($total) && $total > 0 ? $total : null,
+            'stage' => is_array($progress) ? ($progress['stage'] ?? null) : null,
+            'done' => $done,
+            'total' => $total,
+            'percent' => $percent,
             'state' => $state,
+            'phase' => $phase,
+            'gid' => $gid,
+            'productCount' => $productsReady ? $probe['count'] : null,
+        ];
+    }
+
+    /**
+     * @return array{ready: bool, count: int|null}
+     */
+    private function productLoadProbe(int $id, string $gid): array
+    {
+        if (DB::connection()->getDriverName() === 'mysql') {
+            $path = '$.collections."'.str_replace(['\\', '"'], ['\\\\', '\\"'], $gid).'".products';
+            $row = DB::selectOne(
+                'select JSON_TYPE(JSON_EXTRACT(desired, ?)) as kind, JSON_LENGTH(JSON_EXTRACT(desired, ?)) as product_count from shop_your_vibe_drafts where id = ?',
+                [$path, $path, $id]
+            );
+            $ready = strtoupper((string) ($row->kind ?? '')) === 'ARRAY';
+
+            return ['ready' => $ready, 'count' => $ready ? (int) $row->product_count : null];
+        }
+
+        $raw = DB::table('shop_your_vibe_drafts')->where('id', $id)->value('desired');
+        $state = is_string($raw) ? json_decode($raw, true) : $raw;
+        $products = is_array($state) ? ($state['collections'][$gid]['products'] ?? null) : null;
+
+        return [
+            'ready' => is_array($products),
+            'count' => is_array($products) ? count($products) : null,
         ];
     }
 
@@ -2259,11 +2321,20 @@ class ShopYourVibe extends Page
         $productTotal = count($parentProductIds);
         $productsLoaded = $draft && ShopYourVibeWorkflow::productsAreLoaded($draft->desired, $draft->collection_gid);
         $hydrationState = is_array($syvProgress) ? ($syvProgress['state'] ?? null) : null;
-        $hydrationTerminal = in_array($hydrationState, ['success', 'failed', 'skipped'], true);
-        $statusPoll = (! $productsLoaded && $this->hydratingCollection && ! $hydrationTerminal)
-            || ($this->refreshingCollection && ! $hydrationTerminal)
+        $statusPoll = (! $productsLoaded && ! ($draft && $draft->pending) && ($this->hydratingCollection || in_array($hydrationState, ['queued', 'running', 'success'], true)))
+            || ($this->refreshingCollection && ! in_array($hydrationState, ['success', 'failed', 'skipped'], true))
             || ($draft && in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
             || ($draft && $draft->pending && $draft->status === 'pending' && filled($draft->progress) && empty($draft->remote_jobs));
+        $progressDone = is_array($syvProgress) && is_int($syvProgress['done'] ?? null) ? $syvProgress['done'] : 0;
+        $progressTotal = is_array($syvProgress) && is_int($syvProgress['total'] ?? null) ? $syvProgress['total'] : 0;
+        $progressPercent = $progressTotal > 0 ? (int) floor(($progressDone / $progressTotal) * 100) : null;
+        $progressStage = is_array($syvProgress) ? (string) ($syvProgress['stage'] ?? '') : '';
+        if ($hydrationState === 'success' && ! $productsLoaded) {
+            $progressStage = ShopYourVibeWorkflow::PREPARING_PRODUCTS_MESSAGE;
+        } elseif ($progressStage === '' || $hydrationState === 'queued' || ($this->hydratingCollection && $hydrationState === null)) {
+            $progressStage = ShopYourVibeWorkflow::WAITING_PRODUCTS_MESSAGE;
+        }
+        $progressCount = $progressTotal > 0 ? $progressDone.' of '.$progressTotal.' · '.$progressPercent.'%' : '';
         $productCountLabel = $productsLoaded
             ? (string) $productTotal
             : (($draft?->pending || $hydrationState === 'failed') ? 'Not loaded' : 'Loading…');
@@ -2271,7 +2342,7 @@ class ShopYourVibe extends Page
             ? (string) count($draft->desired['cards'] ?? [])
             : ($hydrationState === 'failed' ? 'Not loaded' : 'Loading…');
 
-        return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel') + [
+        return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel', 'progressStage', 'progressCount', 'progressDone', 'progressTotal') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }

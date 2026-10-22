@@ -10,13 +10,14 @@
     <script>
         window.syvEditor = function () {
             return {
-        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', loadNotice: false, loadNoticeTimer: null, statusProgress: '', statusDone: 0, statusTotal: 0, productDrag: null,
+        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
-        clearStatus() {
-            this.statusMode = 'idle';
-            this.statusDone = 0;
-            this.statusTotal = 0;
-            this.statusProgress = '';
+        destroy() { this.stopStatusTimer(); },
+        stopStatusTimer() {
+            if (this.statusTimer) {
+                clearInterval(this.statusTimer);
+                this.statusTimer = null;
+            }
         },
         initStatus() {
             this.$watch('productQuery', () => {
@@ -24,43 +25,110 @@
                     grid.sortable?.option('disabled', true);
                 });
             });
+            this.syncHydration();
+        },
+        syncHydration() {
             this.$nextTick(() => this.bindProductDrag());
-            const phase = this.$el.dataset.hydration || '';
-            const waitingForProducts = this.$el.dataset.productsLoaded !== '1' && phase !== 'failed' && phase !== 'success';
-            if (this.$el.dataset.poll === '1' && waitingForProducts) this.statusMode = 'loading';
-            if (this.$el.dataset.poll !== '1' || this.statusTimer) return;
+            if (this.$el.dataset.productsLoaded === '1') {
+                this.finishLoaded(false);
+                return;
+            }
+            if (this.$el.dataset.poll !== '1') {
+                this.stopStatusTimer();
+                return;
+            }
+            this.wasLoading = true;
+            this.statusMode = 'loading';
+            this.statusStartedAt = this.statusStartedAt || Date.now();
+            if (this.statusTimer) return;
             this.pollStatus();
             this.statusTimer = setInterval(() => this.pollStatus(), 2000);
         },
-        async pollStatus() {
-            const status = await this.$wire.statusSnapshot();
-            if (!status) return;
-            const terminal = !status.polling || ['success', 'failed', 'skipped'].includes(status.state);
-            if (status.state === 'failed') {
-                this.statusMode = 'failed';
-                this.statusDone = 0;
-                this.statusTotal = 0;
-                this.statusProgress = '';
-            } else if (status.polling) {
-                this.statusMode = 'loading';
-                this.statusDone = status.done || 0;
-                this.statusTotal = status.total || 0;
-                this.statusProgress = status.message || '';
-                const message = this.$refs.statusBanner?.querySelector('[data-status-message]');
-                if (message && status.message) message.textContent = status.message;
-            } else if (terminal) {
-                const finished = status.state === 'success' && this.$el.dataset.productsLoaded !== '1';
-                this.clearStatus();
-                if (finished) {
-                    this.loadNotice = true;
-                    clearTimeout(this.loadNoticeTimer);
-                    this.loadNoticeTimer = setTimeout(() => { this.loadNotice = false; }, 4000);
+        applyProgress(status) {
+            const banner = this.$refs.statusBanner;
+            if (!banner) return;
+            const stage = banner.querySelector('[data-status-stage]');
+            const count = banner.querySelector('[data-status-count]');
+            const bar = banner.querySelector('[data-status-progress]');
+            const indeterminate = banner.querySelector('[data-status-indeterminate]');
+            const preparing = status.phase === 'ready_to_render';
+            const waiting = status.phase === 'queued' || status.phase === 'not_loaded';
+            const total = status.total || 0;
+            if (stage) {
+                stage.textContent = preparing
+                    ? 'Preparing product display…'
+                    : (waiting ? 'Waiting to load collection products…' : (status.stage || 'Loading this collection'));
+            }
+            if (count) {
+                count.textContent = !preparing && total > 0
+                    ? ((status.done || 0) + ' of ' + total + ' · ' + (status.percent != null ? status.percent : Math.floor(((status.done || 0) / total) * 100)) + '%')
+                    : '';
+            }
+            if (bar) {
+                bar.hidden = preparing || total < 1;
+                if (!bar.hidden) {
+                    bar.max = total;
+                    bar.value = status.done || 0;
                 }
             }
-            if (status.changed) await this.$wire.pollPush();
-            if (!status.polling && this.statusTimer) {
-                clearInterval(this.statusTimer);
-                this.statusTimer = null;
+            if (indeterminate) indeterminate.hidden = !preparing && total > 0;
+        },
+        finishLoaded(announce) {
+            this.stopStatusTimer();
+            this.statusMode = 'idle';
+            if (announce && this.wasLoading) {
+                const count = this.$el.dataset.productCount || '';
+                this.loadNoticeText = count !== '' ? (count + ' products loaded successfully') : 'Collection loaded successfully.';
+                this.loadNotice = true;
+                clearTimeout(this.loadNoticeTimer);
+                this.loadNoticeTimer = setTimeout(() => { this.loadNotice = false; }, 6000);
+            }
+            this.wasLoading = false;
+        },
+        async pollStatus() {
+            if (this.$el.dataset.productsLoaded === '1') {
+                this.finishLoaded(true);
+                return;
+            }
+            if (this.statusStartedAt && Date.now() - this.statusStartedAt > 15 * 60 * 1000) {
+                this.statusMode = 'failed';
+                this.stopStatusTimer();
+                const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
+                if (stale) stale.hidden = false;
+                return;
+            }
+            const status = await this.$wire.statusSnapshot();
+            if (!status) return;
+            if (status.gid && this.$el.dataset.collection && status.gid !== this.$el.dataset.collection) return;
+            if ((status.phase === 'failed' || status.state === 'failed') && status.phase !== 'ready_to_render') {
+                if (this.statusMode !== 'failed' && !this.renderingProducts) {
+                    this.statusMode = 'failed';
+                    this.renderingProducts = true;
+                    try {
+                        await this.$wire.pollPush();
+                    } finally {
+                        this.renderingProducts = false;
+                    }
+                    this.$nextTick(() => this.bindProductDrag());
+                }
+                if (this.$el.dataset.productsLoaded === '1') {
+                    this.finishLoaded(true);
+                }
+                return;
+            }
+            this.statusMode = 'loading';
+            this.applyProgress(status);
+            if (status.changed && !this.renderingProducts) {
+                this.renderingProducts = true;
+                try {
+                    await this.$wire.pollPush();
+                } finally {
+                    this.renderingProducts = false;
+                }
+                this.$nextTick(() => this.bindProductDrag());
+            }
+            if (this.$el.dataset.productsLoaded === '1') {
+                this.finishLoaded(true);
             }
         },
         cardVisible(el) {
@@ -307,6 +375,8 @@
         data-saved-pending="{{ $draft?->pending ? '1' : '0' }}"
         data-poll="{{ !empty($statusPoll) ? '1' : '0' }}"
         data-products-loaded="{{ !empty($productsLoaded) ? '1' : '0' }}"
+        data-product-count="{{ $productsLoaded ? $productTotal : '' }}"
+        data-collection="{{ $draft?->collection_gid ?? ($selectedCollection ?? '') }}"
         data-hydration="{{ $hydrationState ?? '' }}"
         x-init="initStatus()"
         x-on:vibe-form-saved.window="formDirty = false; localPending = false"
@@ -314,7 +384,9 @@
         x-on:beforeunload.window="if (pending()) { $event.preventDefault(); $event.returnValue = ''; }"
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
         class="syv-workflow space-y-6"
-        x-on:vibe-editor-opened.window="formDirty = false; $nextTick(() => $el.scrollIntoView({ behavior: 'smooth', block: 'start' }))">
+        x-on:vibe-editor-opened.window="formDirty = false; statusStartedAt = Date.now(); $nextTick(() => { syncHydration(); $el.scrollIntoView({ behavior: 'smooth', block: 'start' }) })"
+        x-on:vibe-products-ready.window="$nextTick(() => { bindProductDrag(); if ($el.dataset.productsLoaded === '1') finishLoaded(true); })"
+        x-on:livewire:navigating.window="stopStatusTimer()">
         @if ($loadError && ! ($addingCard || $addingParent || $uploadingMappings || $confirmingAdd))
             <div role="alert" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">{{ $loadError }}</div>
         @endif
@@ -365,18 +437,22 @@
                 </div>
                 <x-filament::button color="gray" wire:click="back">Back to collections</x-filament::button>
             </div>
-            <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-primary-300 p-4">
-                @if (($syvProgress['state'] ?? null) === 'failed')
+            @if (($syvProgress['state'] ?? null) === 'failed')
+                <div id="syv-status-banner" role="status" class="syv-load syv-load-failed">
                     <strong>Could not load collection products</strong>
-                    <p data-status-message>{{ $syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE }}</p>
+                    <p>{{ $syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE }}</p>
                     <div class="mt-3"><x-filament::button size="sm" wire:click="retryHydration" wire:loading.attr="disabled">Retry</x-filament::button></div>
-                @else
-                    <strong>Loading collection products</strong>
-                    <p data-status-message>{{ ($syvProgress['state'] ?? null) === 'running' ? ($syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE) : \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE }}</p>
-                    <progress x-show="statusMode === 'loading' && statusTotal > 0" x-cloak class="syv-progress" :value="statusDone" :max="statusTotal"></progress>
-                    <div x-show="statusMode === 'loading' && statusTotal === 0" class="syv-indeterminate" aria-hidden="true"></div>
-                @endif
-            </div>
+                </div>
+            @else
+                @include('filament.pages.partials.shop-your-vibe-loading-banner', [
+                    'title' => 'Loading collection products',
+                    'detail' => \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE,
+                    'stage' => $progressStage,
+                    'count' => $progressCount,
+                    'done' => $progressDone,
+                    'total' => $progressTotal,
+                ])
+            @endif
             <div class="syv-card-grid syv-product-grid" aria-hidden="true">
                 @foreach (range(1, 8) as $skeleton)
                     <div class="syv-product-card syv-product-skeleton rounded-lg border border-gray-200 p-3"></div>
@@ -421,15 +497,14 @@
                     <div class="mt-3"><x-filament::button size="sm" wire:click="retryHydration" wire:loading.attr="disabled">Retry</x-filament::button></div>
                 </div>
             @elseif ($hydrationLoading || $refreshLoading)
-                <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-primary-300 p-4" x-bind:hidden="statusMode !== 'loading'">
-                    <strong>{{ $refreshLoading ? 'Refreshing collection products' : 'Loading collection products' }}</strong>
-                    @php($statusDetail = ($syvProgress['state'] ?? null) === 'running' ? (string) ($syvProgress['message'] ?? '') : \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE)
-                    @if ($statusDetail !== '' && $statusDetail !== ($refreshLoading ? 'Refreshing collection products' : 'Loading collection products'))
-                        <p data-status-message>{{ $statusDetail }}</p>
-                    @endif
-                    <progress x-show="statusTotal > 0" x-cloak class="syv-progress" :value="statusDone" :max="statusTotal"></progress>
-                    <div x-show="statusTotal === 0" x-bind:hidden="statusMode !== 'loading'" class="syv-indeterminate" aria-hidden="true"></div>
-                </div>
+                @include('filament.pages.partials.shop-your-vibe-loading-banner', [
+                    'title' => $refreshLoading ? 'Refreshing collection products' : 'Loading collection products',
+                    'detail' => \App\Services\ShopYourVibeWorkflow::LOADING_PRODUCTS_MESSAGE,
+                    'stage' => $progressStage,
+                    'count' => $progressCount,
+                    'done' => $progressDone,
+                    'total' => $progressTotal,
+                ])
             @elseif ($operationBusy || $operationFailed || $draft->pending)
                 <div id="syv-status-banner" role="status" class="rounded-xl border border-gray-200 p-4 dark:border-gray-700">
                     @if ($draft->status === 'creating')
@@ -462,7 +537,13 @@
                     @endif
                 </div>
             @endif
-            <div x-show="loadNotice" x-cloak role="status" class="rounded-xl border border-success-300 bg-success-50 p-4 text-success-800">Collection loaded successfully.</div>
+            <div x-show="loadNotice" x-cloak role="status" class="syv-load syv-load-success">
+                <div class="syv-load-heading">
+                    <span class="syv-load-check" aria-hidden="true">✓</span>
+                    <strong x-text="loadNoticeText">Collection loaded successfully.</strong>
+                </div>
+                <p class="syv-load-copy">The product grid appears automatically. No page refresh is required.</p>
+            </div>
             <p x-show="savingOrder" x-cloak>Saving your product order...</p>
             <p x-show="localPending && !formDirty && $root.dataset.savedPending !== '1'" x-cloak><strong>Pending changes - not pushed to Shopify</strong></p>
             <p x-show="orderError" x-text="orderError" x-cloak class="text-danger-600"></p>
