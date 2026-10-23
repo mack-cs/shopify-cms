@@ -640,6 +640,11 @@ class NewProductDraft extends Model
     /**
      * @return array<int, array{field:string,label:string,draft_value:string,shopify_value:string}>
      */
+    public function hasCsvPriceOverride(string $attribute): bool
+    {
+        return in_array($attribute, (array) ($this->payload['_csv_price_overrides'] ?? []), true);
+    }
+
     public function shopifySyncWarnings(): array
     {
         if (! static::supportsShopifySyncWarningsColumn()) {

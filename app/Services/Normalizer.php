@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Jobs\ProductImageBackupImagesJob;
 use App\Models\Import;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\Category;
 use App\Models\Color;
@@ -396,6 +397,28 @@ final class Normalizer
      */
     private function syncInboundVariant(Variant $variant, array $payload, $syncedAt): void
     {
+        $product = $variant->product;
+        $draft = $product ? NewProductDraft::query()->where(function ($query) use ($product, $variant): void {
+            $query->where('handle', $product->handle);
+            if (trim((string) $product->shopify_id) !== '') {
+                $query->orWhere('shopify_id', $product->shopify_id);
+            }
+            if (trim((string) $variant->sku) !== '') {
+                $query->orWhere('sku', $variant->sku);
+            }
+        })->first() : null;
+        $pricePending = false;
+        foreach (['price' => 'variant_price', 'compare_at_price' => 'variant_compare_at_price'] as $field => $attribute) {
+            if ($draft?->hasCsvPriceOverride($attribute)) {
+                $pricePending = $pricePending || $this->normalizeVariantComparableValue($field, $payload[$field] ?? null)
+                    !== $this->normalizeVariantComparableValue($field, $variant->getAttribute($field));
+                $payload[$field] = $variant->getAttribute($field);
+            }
+        }
+        if ($pricePending) {
+            $variant->local_dirty = true;
+        }
+
         Variant::withoutEvents(function () use ($variant, $payload, $syncedAt): void {
             if ($variant->local_dirty) {
                 $updates = [
