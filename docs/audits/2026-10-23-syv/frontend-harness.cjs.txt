@@ -1,0 +1,27 @@
+const fs = require('fs');
+const source = fs.readFileSync('resources/views/filament/pages/shop-your-vibe.blade.php', 'utf8');
+global.window = {};
+global.crypto = require('crypto').webcrypto;
+eval(source.match(/<script>([\s\S]*?)<\/script>/)[1]);
+(async () => {
+ const editor = window.syvEditor();
+ let polls = 0;
+ editor.$el = {dataset: {productsLoaded:'0', refresh:'0', collection:'test'}};
+ editor.$refs = {};
+ editor.$nextTick = () => {};
+ editor.$wire = { statusSnapshot: async () => ({phase:'failed',state:'failed',gid:'test'}), pollPush: async () => {polls++;} };
+ editor.statusTimer = setInterval(() => {}, 10000);
+ await editor.pollStatus();
+ console.log(JSON.stringify({case:'failed hydration polling',timerStillActive:editor.statusTimer !== null,statusMode:editor.statusMode,renderRequests:polls}));
+ editor.stopStatusTimer();
+ const order = window.syvEditor();
+ let saves=0;
+ order.$el = {dataset:{}};
+ order.$wire = {reorderProducts: async () => {saves++; throw new Error('request failed');}, savedProductOrder: async () => {throw new Error('reconcile failed');}};
+ const grid = {querySelectorAll: () => [{dataset:{orderKey:'a'}}]};
+ order.queueProductOrder(grid,'test');
+ await order.persistChain.catch(() => {});
+ order.queueProductOrder(grid,'test');
+ await order.persistChain.catch(() => {});
+ console.log(JSON.stringify({case:'save plus reconciliation outage',saveAttemptsAfterTwoEdits:saves,chainStillRejected:await order.persistChain.then(()=>false,()=>true)}));
+})();

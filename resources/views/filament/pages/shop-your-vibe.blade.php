@@ -12,6 +12,7 @@
             return {
         formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
+        canPush() { return this.localPending || this.$root.dataset.pending === 'true'; },
         destroy() { this.stopStatusTimer(); },
         stopStatusTimer() {
             if (this.statusTimer) {
@@ -26,15 +27,22 @@
                 });
             });
             this.syncHydration();
+            if (window.Livewire?.hook) {
+                Livewire.hook('commit', ({ succeed }) => {
+                    succeed(() => {
+                        if (!this.$el?.isConnected) return;
+                        this.syncHydration();
+                    });
+                });
+            }
         },
         syncHydration() {
             this.$nextTick(() => this.bindProductDrag());
-            if (this.$el.dataset.productsLoaded === '1') {
-                this.finishLoaded(false);
-                return;
-            }
-            if (this.$el.dataset.poll !== '1') {
-                this.stopStatusTimer();
+            const refreshing = this.$el.dataset.refresh === '1';
+            const needsPoll = refreshing || (this.$el.dataset.poll === '1' && this.$el.dataset.productsLoaded !== '1');
+            if (!needsPoll) {
+                if (this.$el.dataset.productsLoaded === '1') this.finishLoaded(false);
+                else this.stopStatusTimer();
                 return;
             }
             this.wasLoading = true;
@@ -52,12 +60,15 @@
             const bar = banner.querySelector('[data-status-progress]');
             const indeterminate = banner.querySelector('[data-status-indeterminate]');
             const preparing = status.phase === 'ready_to_render';
-            const waiting = status.phase === 'queued' || status.phase === 'not_loaded';
+            const refreshing = this.$el.dataset.refresh === '1' || status.phase === 'refreshing';
+            const waiting = !refreshing && (status.phase === 'queued' || status.phase === 'not_loaded');
             const total = status.total || 0;
             if (stage) {
                 stage.textContent = preparing
                     ? 'Preparing product display…'
-                    : (waiting ? 'Waiting to load collection products…' : (status.stage || 'Loading this collection'));
+                    : (refreshing
+                        ? (status.stage || 'Refreshing collection products')
+                        : (waiting ? 'Waiting to load collection products…' : (status.stage || 'Loading this collection')));
             }
             if (count) {
                 count.textContent = !preparing && total > 0
@@ -86,13 +97,18 @@
             this.wasLoading = false;
         },
         async pollStatus() {
-            if (this.$el.dataset.productsLoaded === '1') {
-                this.finishLoaded(true);
+            const refreshing = this.$el.dataset.refresh === '1';
+            if (this.$el.dataset.productsLoaded === '1' && !refreshing) {
+                this.finishLoaded(this.wasLoading);
                 return;
             }
             if (this.statusStartedAt && Date.now() - this.statusStartedAt > 15 * 60 * 1000) {
                 this.statusMode = 'failed';
                 this.stopStatusTimer();
+                if (refreshing) {
+                    await this.$wire.expireRefresh();
+                    return;
+                }
                 const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
                 if (stale) stale.hidden = false;
                 return;
@@ -100,6 +116,27 @@
             const status = await this.$wire.statusSnapshot();
             if (!status) return;
             if (status.gid && this.$el.dataset.collection && status.gid !== this.$el.dataset.collection) return;
+            if (status.phase === 'refresh_complete' || status.phase === 'refresh_failed' || status.phase === 'refresh_skipped') {
+                const announceRefresh = this.wasLoading || refreshing;
+                if (!this.renderingProducts) {
+                    this.renderingProducts = true;
+                    try {
+                        await this.$wire.pollPush();
+                    } finally {
+                        this.renderingProducts = false;
+                    }
+                    this.$nextTick(() => this.bindProductDrag());
+                }
+                if (status.phase === 'refresh_complete') {
+                    this.wasLoading = announceRefresh;
+                    this.finishLoaded(true);
+                } else {
+                    this.stopStatusTimer();
+                    this.statusMode = status.phase === 'refresh_failed' ? 'failed' : 'idle';
+                    this.wasLoading = false;
+                }
+                return;
+            }
             if ((status.phase === 'failed' || status.state === 'failed') && status.phase !== 'ready_to_render') {
                 if (this.statusMode !== 'failed' && !this.renderingProducts) {
                     this.statusMode = 'failed';
@@ -375,6 +412,7 @@
         data-saved-pending="{{ $draft?->pending ? '1' : '0' }}"
         data-poll="{{ !empty($statusPoll) ? '1' : '0' }}"
         data-products-loaded="{{ !empty($productsLoaded) ? '1' : '0' }}"
+        data-refresh="{{ !empty($refreshingCollection) ? '1' : '0' }}"
         data-product-count="{{ $productsLoaded ? $productTotal : '' }}"
         data-collection="{{ $draft?->collection_gid ?? ($selectedCollection ?? '') }}"
         data-hydration="{{ $hydrationState ?? '' }}"
@@ -385,6 +423,7 @@
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
         class="syv-workflow space-y-6"
         x-on:vibe-editor-opened.window="formDirty = false; statusStartedAt = Date.now(); $nextTick(() => { syncHydration(); $el.scrollIntoView({ behavior: 'smooth', block: 'start' }) })"
+        x-on:vibe-refresh-started.window="statusStartedAt = Date.now(); $nextTick(() => syncHydration())"
         x-on:vibe-products-ready.window="$nextTick(() => { bindProductDrag(); if ($el.dataset.productsLoaded === '1') finishLoaded(true); })"
         x-on:livewire:navigating.window="stopStatusTimer()">
         @if ($loadError && ! ($addingCard || $addingParent || $uploadingMappings || $confirmingAdd))
@@ -482,6 +521,18 @@
                     Shop Your Vibes ({{ $vibeCountLabel }})
                 </button>
             </div>
+            @if (filled($draft->desired['unavailable_collections'] ?? null))
+                <div role="status" class="syv-load syv-load-failed">
+                    <strong>A linked collection could not be loaded</strong>
+                    @foreach ($draft->desired['unavailable_collections'] as $missing)
+                        <p class="syv-load-copy">{{ $missing['message'] }}</p>
+                    @endforeach
+                    <p class="syv-load-copy">The other products are shown below.</p>
+                    <div class="mt-3">
+                        <x-filament::button size="sm" color="gray" wire:click="dismissUnavailableNotice" wire:target="dismissUnavailableNotice" wire:loading.attr="disabled">Dismiss</x-filament::button>
+                    </div>
+                </div>
+            @endif
             <div x-show="formDirty" x-cloak role="status" class="rounded-xl border border-warning-300 bg-warning-50 p-4 text-warning-900 dark:bg-warning-950 dark:text-warning-100">
                 Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
@@ -490,7 +541,18 @@
             @php($hydrationFailed = ! $productsLoaded && ($syvProgress['state'] ?? null) === 'failed')
             @php($hydrationLoading = ! $productsLoaded && ! $hydrationFailed && ! $draft->pending && ! $operationBusy)
             @php($refreshLoading = $refreshingCollection && $productsLoaded && ! $draft->pending && ! $operationBusy && ! in_array($hydrationState, ['success', 'failed', 'skipped'], true))
-            @if ($hydrationFailed)
+            @php($refreshFailed = filled($refreshError))
+            @if ($refreshFailed)
+                <div id="syv-status-banner" role="status" class="syv-load syv-load-failed">
+                    <strong>Could not refresh collection products</strong>
+                    <p class="syv-load-copy">{{ $refreshError }}</p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <x-filament::button size="sm" color="gray" wire:click="dismissRefreshNotice" wire:target="dismissRefreshNotice" wire:loading.attr="disabled">Dismiss</x-filament::button>
+                        <x-filament::button size="sm" wire:click="refreshDraft" wire:loading.attr="disabled">Retry</x-filament::button>
+                    </div>
+                </div>
+            @endif
+            @if (! $refreshFailed && $hydrationFailed)
                 <div id="syv-status-banner" x-ref="statusBanner" role="status" class="rounded-xl border border-danger-300 p-4">
                     <strong>Could not load collection products</strong>
                     <p>{{ $syvProgress['message'] ?? \App\Services\ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE }}</p>
@@ -552,7 +614,7 @@
                     @if ($draft->status === 'pushing')
                         <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
                     @else
-                        <x-filament::button wire:click="reviewPush" :disabled="! $draft->pending" wire:loading.attr="disabled">Push Changes to Shopify</x-filament::button>
+                        <button type="button" wire:click="reviewPush" x-bind:disabled="!canPush()" class="fi-btn relative inline-grid grid-flow-col items-center justify-center gap-1.5 rounded-lg bg-custom-600 px-3 py-2 text-sm font-semibold text-white shadow-sm outline-none transition duration-75 hover:bg-custom-500 focus-visible:ring-2 focus-visible:ring-custom-500/50 disabled:pointer-events-none disabled:opacity-70" style="--c-400:var(--primary-400);--c-500:var(--primary-500);--c-600:var(--primary-600);">Push Changes to Shopify</button>
                     @endif
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
                     <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>

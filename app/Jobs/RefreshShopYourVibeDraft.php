@@ -7,6 +7,8 @@ use App\Services\AdminNotification;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
+use Illuminate\Bus\UniqueLock;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -40,6 +42,11 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
         return 'syv-refresh:'.$this->draftId;
     }
 
+    public static function releaseUniqueLock(int $draftId): void
+    {
+        (new UniqueLock(app(CacheRepository::class)))->release(new self($draftId, 0, false));
+    }
+
     public function handle(ShopYourVibeWorkflow $workflow): void
     {
         $draft = ShopYourVibeDraft::find($this->draftId);
@@ -62,22 +69,24 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
             return;
         }
 
-        $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = '') use ($draft): void {
-            $reportedTotal = $total > 0 ? $total : null;
-            Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                'state' => 'running',
-                'done' => $done,
-                'total' => $reportedTotal,
-                'percent' => $reportedTotal ? (int) floor(($done / $reportedTotal) * 100) : null,
-                'stage_gid' => $gid,
-                'message' => ShopYourVibeWorkflow::productProgressMessage($draft->collection_gid, $gid, $done, $total, $title),
-            ], 600);
-        });
-
         try {
+            $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = '') use ($draft): void {
+                $payload = ShopYourVibeWorkflow::productProgressPayload($draft->collection_gid, $gid, $done, $total, $title);
+                Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
+                    'state' => 'running',
+                    'kind' => 'refresh',
+                    'stage' => $payload['stage'],
+                    'done' => $payload['done'],
+                    'total' => $payload['total'],
+                    'percent' => $payload['percent'],
+                    'stage_gid' => $gid,
+                    'message' => $payload['message'],
+                ], 600);
+            });
             $workflow->refresh($this->draftId, $this->revision, $this->discard);
             Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                 'state' => 'success',
+                'kind' => 'refresh',
                 'done' => null,
                 'total' => null,
                 'message' => ShopYourVibeWorkflow::HYDRATION_SUCCESS_MESSAGE,
@@ -87,6 +96,7 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
             if ($current && ($current->pending || (int) $current->revision !== $this->revision)) {
                 Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                     'state' => 'skipped',
+                    'kind' => 'refresh',
                     'done' => null,
                     'total' => null,
                     'message' => 'Refresh skipped. Newer local changes were kept.',
@@ -101,10 +111,11 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
             }
             Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                 'state' => 'failed',
+                'kind' => 'refresh',
                 'done' => null,
                 'total' => null,
-                'message' => 'Some changes could not be synchronized. Retry is available.',
-            ], 300);
+                'message' => $exception->getMessage(),
+            ], 3600);
             $this->notify(
                 'Shop Your Vibe refresh failed',
                 $exception->getMessage(),
@@ -121,6 +132,26 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
             'Latest Shopify state has been loaded.',
             true
         );
+    }
+
+    public function failed(Throwable $exception): void
+    {
+        $draft = ShopYourVibeDraft::find($this->draftId);
+        if (! $draft) {
+            return;
+        }
+        $key = ShopYourVibeWorkflow::progressKey($draft->collection_gid);
+        $current = Cache::get($key);
+        if (is_array($current) && in_array($current['state'] ?? null, ['success', 'failed', 'skipped'], true)) {
+            return;
+        }
+        Cache::put($key, [
+            'state' => 'failed',
+            'kind' => 'refresh',
+            'done' => null,
+            'total' => null,
+            'message' => $exception->getMessage(),
+        ], 3600);
     }
 
     private function notify(string $title, string $body, bool $success): void

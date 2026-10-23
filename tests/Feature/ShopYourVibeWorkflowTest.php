@@ -877,6 +877,49 @@ it('rejects stale revisions and duplicate or incomplete drag lists', function ()
     expect(fn () => vibeEdit($this, 'reorder_cards', ['keys' => ['gid://shopify/Metaobject/11', 'gid://shopify/Metaobject/11']]))->toThrow(RuntimeException::class, 'exactly once');
 });
 
+it('pushes a product reorder when the draft still lists products Shopify no longer has', function () {
+    $gid = 'gid://shopify/Collection/1';
+    $this->fake->collections[$gid]['products']['nodes'] = array_values(array_filter(
+        $this->fake->collections[$gid]['products']['nodes'],
+        fn ($product) => $product['id'] !== 'gid://shopify/Product/103'
+    ));
+    $this->fake->collections[$gid]['productsCount']['count'] = 2;
+    unset($this->fake->collections['gid://shopify/Collection/2']);
+    vibeEdit($this, 'reorder_products', [
+        'collection_gid' => $gid,
+        'ids' => ['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103'],
+    ]);
+    $this->fake->calls = [];
+    vibePush($this);
+
+    expect($this->draft->status)->toBe('synced')
+        ->and($this->draft->pending)->toBeFalse()
+        ->and(array_column($this->fake->collections[$gid]['products']['nodes'], 'id'))
+        ->toBe(['gid://shopify/Product/102', 'gid://shopify/Product/101'])
+        ->and(array_column($this->draft->desired['collections'][$gid]['products'], 'id'))
+        ->not->toContain('gid://shopify/Product/103');
+    expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeAddProducts')))->toHaveCount(0);
+});
+
+it('still stops when Shopify reordered the products that remain in the collection', function () {
+    $gid = 'gid://shopify/Collection/1';
+    $nodes = $this->fake->collections[$gid]['products']['nodes'];
+    $this->fake->collections[$gid]['products']['nodes'] = [$nodes[1], $nodes[0], $nodes[2]];
+    vibeEdit($this, 'reorder_products', [
+        'collection_gid' => $gid,
+        'ids' => ['gid://shopify/Product/103', 'gid://shopify/Product/101', 'gid://shopify/Product/102'],
+    ]);
+    $this->fake->calls = [];
+    vibePush($this);
+
+    expect($this->draft->status)->toBe('failed')
+        ->and($this->draft->pending)->toBeTrue()
+        ->and($this->draft->last_error)->toContain('changed in Shopify')
+        ->and(array_column($this->fake->collections[$gid]['products']['nodes'], 'id'))
+        ->toBe(['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103']);
+    expect($this->fake->mutations())->toBe([]);
+});
+
 it('stops when Shopify changed since the snapshot without overwriting remote edits', function () {
     vibeEdit($this, 'remove_card', ['key' => 'gid://shopify/Metaobject/11']);
     $this->fake->references = ['gid://shopify/Metaobject/11'];
@@ -937,7 +980,11 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
     expect($this->draft->pending)->toBeTrue();
     $this->fake->calls = [];
 
-    $page->call('refreshDraft', true)->assertHasNoErrors()->assertSee('Refreshing collection products')->assertDontSee('Up to date with Shopify');
+    $page->call('refreshDraft', true)
+        ->assertHasNoErrors()
+        ->assertSee('Refreshing collection products')
+        ->assertDontSee('Up to date with Shopify')
+        ->assertSee('data-refresh="1"', false);
 
     expect($this->fake->calls)->toBe([])
         ->and($this->draft->fresh()->pending)->toBeFalse()
@@ -956,6 +1003,246 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
             && $jobRevision->getValue($job) === $revision + 2
             && $discard->getValue($job) === true;
     });
+});
+
+it('clears the refresh banner after Refresh from Shopify fails', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([RefreshShopYourVibeDraft::class]);
+    $gid = $this->draft->collection_gid;
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page->call('refreshDraft', true)
+        ->assertSet('refreshingCollection', true)
+        ->assertSee('Refreshing collection products')
+        ->assertSee('data-refresh="1"', false)
+        ->assertDontSee('syv-load-failed');
+    expect(substr_count($page->html(), 'Waiting to load collection products'))->toBe(1);
+    Bus::assertDispatchedTimes(RefreshShopYourVibeDraft::class, 1);
+
+    Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
+        'state' => 'failed',
+        'kind' => 'refresh',
+        'message' => 'Could not refresh linked collection Pearl (gid://shopify/Collection/2). Existing products and Shop Your Vibe assignments were kept.',
+    ], 3600);
+
+    expect($page->instance()->statusSnapshot()['phase'])->toBe('refresh_failed');
+    $page->call('pollPush')
+        ->assertSet('refreshingCollection', false)
+        ->assertSee('Could not refresh collection products')
+        ->assertSee('linked collection Pearl')
+        ->assertSee('Product 101')
+        ->assertDontSee('syv-spinner');
+    expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
+        ->and($page->instance()->statusSnapshot()['phase'])->toBe('loaded')
+        ->and($page->instance()->statusSnapshot()['polling'])->toBeFalse();
+});
+
+it('shows the parent products when one linked collection is missing', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $before = $this->draft->fresh();
+    $gid = $before->collection_gid;
+    $cardNames = array_column($before->desired['cards'], 'name');
+    $desired = $before->desired;
+    unset($desired['collections'][$gid]['products']);
+    $before->update(['desired' => $desired, 'snapshot' => $desired, 'revision' => $before->revision]);
+    unset($this->fake->collections['gid://shopify/Collection/2']);
+
+    (new HydrateShopYourVibeDraft($gid, $this->user->id))
+        ->handle(app(ShopYourVibeWorkflow::class));
+
+    $after = $before->fresh();
+    $progress = Cache::get(ShopYourVibeWorkflow::progressKey($gid));
+    expect(ShopYourVibeWorkflow::productsAreLoaded($after->desired, $gid))->toBeTrue()
+        ->and(array_column($after->desired['cards'], 'name'))->toBe($cardNames)
+        ->and(array_column($after->desired['collections'][$gid]['products'], 'title'))->toContain('Product 101')
+        ->and($after->desired['unavailable_collections'][0]['gid'])->toBe('gid://shopify/Collection/2')
+        ->and($after->desired['unavailable_collections'][0]['message'])->toContain('Pearl')
+        ->and($progress['state'])->toBe('success')
+        ->and($this->fake->mutations())->toBe([]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->assertSee('Products (3)')
+        ->assertSee('Product 101')
+        ->assertSee('A linked collection could not be loaded')
+        ->assertSee('linked collection Pearl')
+        ->assertDontSee('Products (Not loaded)')
+        ->assertDontSee('Could not load collection products');
+});
+
+it('dismisses a missing linked collection notice and still opens the push review', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+    $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
+    $moved = $ids[count($ids) - 1];
+    $desired = $this->draft->desired;
+    $desired['unavailable_collections'] = [[
+        'gid' => 'gid://shopify/Collection/2',
+        'message' => 'Could not refresh linked collection Pearl (gid://shopify/Collection/2).',
+    ]];
+    $this->draft->update(['desired' => $desired]);
+
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->assertSee('A linked collection could not be loaded')
+        ->assertSee('Dismiss')
+        ->assertSeeHtml('x-bind:disabled="!canPush()"');
+
+    $page->call('moveProductToPosition', $gid, $moved, 1, 1)->assertHasNoErrors();
+    $page->call('dismissUnavailableNotice')
+        ->assertDontSee('A linked collection could not be loaded')
+        ->assertDontSee('linked collection Pearl')
+        ->assertSee('Product 101');
+
+    $after = $this->draft->fresh();
+    expect($after->pending)->toBeTrue()
+        ->and($after->desired['unavailable_collections'] ?? null)->toBeNull()
+        ->and($after->desired['collections'][$gid]['products'][0]['id'])->toBe($moved)
+        ->and($this->fake->mutations())->toBe([]);
+
+    $page->call('reviewPush')
+        ->assertSet('confirmingPush', true)
+        ->assertSee('Ready to push')
+        ->assertSee('Product sorting changed');
+});
+
+it('dismisses a failed refresh notice without changing the draft', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->set('refreshError', 'Could not refresh linked collection Pearl.')
+        ->assertSee('Could not refresh collection products')
+        ->call('dismissRefreshNotice')
+        ->assertSet('refreshError', null)
+        ->assertDontSee('Could not refresh collection products');
+
+    expect($this->draft->fresh()->pending)->toBeFalse()
+        ->and($this->fake->mutations())->toBe([]);
+});
+
+it('queues a push when the open page is behind a failed push revision', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibe::class]);
+    $gid = $this->draft->collection_gid;
+    $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page->call('moveProductToPosition', $gid, $ids[count($ids) - 1], 1, 1)->assertHasNoErrors();
+    $saved = $this->draft->fresh();
+    $saved->update([
+        'revision' => $saved->revision + 1,
+        'status' => 'failed',
+        'pending' => true,
+        'last_error' => 'Bracelets changed in Shopify. Refresh and review before pushing.',
+    ]);
+
+    $page->call('pushChanges')->assertSet('confirmingPush', false);
+    Bus::assertDispatched(PushShopYourVibe::class);
+    expect($this->draft->fresh()->status)->toBe('pushing')
+        ->and($this->draft->fresh()->last_error)->toBeNull();
+});
+
+it('stops a failed refresh and leaves the loaded products visible', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+    Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
+        'state' => 'failed',
+        'kind' => 'refresh',
+        'message' => 'Could not refresh linked collection Pearl (gid://shopify/Collection/2). Existing products and Shop Your Vibe assignments were kept.',
+    ], 3600);
+
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->set('refreshingCollection', true);
+    $status = $page->instance()->statusSnapshot();
+    expect($status['phase'])->toBe('refresh_failed')
+        ->and($status['polling'])->toBeFalse()
+        ->and($status['changed'])->toBeTrue();
+
+    $page->call('pollPush')
+        ->assertSet('refreshingCollection', false)
+        ->assertSee('Could not refresh collection products')
+        ->assertSee('linked collection Pearl')
+        ->assertSee('Product 101')
+        ->assertSee('Retry')
+        ->assertDontSee('syv-spinner');
+
+    expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
+        ->and($page->instance()->statusSnapshot()['polling'])->toBeFalse()
+        ->and($page->instance()->statusSnapshot()['phase'])->toBe('loaded');
+});
+
+it('ends a refresh when the progress cache has expired', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+    Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
+        'state' => 'running',
+        'kind' => 'refresh',
+        'message' => 'Refreshing collection products',
+    ], 600);
+
+    $opened = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    expect($opened->instance()->refreshingCollection)->toBeFalse();
+    $opened->assertSee('Product 101')->assertDontSee('syv-spinner');
+
+    Cache::forget(ShopYourVibeWorkflow::progressKey($gid));
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->set('refreshingCollection', true);
+    expect($page->instance()->statusSnapshot()['phase'])->toBe('refresh_failed');
+
+    $page->call('pollPush')
+        ->assertSet('refreshingCollection', false)
+        ->assertSee('Could not refresh collection products')
+        ->assertSee('The refresh did not finish. Existing products were kept.')
+        ->assertSee('Product 101')
+        ->assertDontSee('syv-spinner');
+
+    expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
+        ->and(Cache::get(ShopYourVibeWorkflow::progressKey($gid))['state'])->toBe('failed');
+});
+
+it('renders refreshed products when the refresh job completes', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+    $this->fake->collections[$gid]['products']['nodes'][0]['title'] = 'Refreshed Product 101';
+
+    (new RefreshShopYourVibeDraft($this->draft->id, $this->draft->revision, false, $this->user->id))
+        ->handle(app(ShopYourVibeWorkflow::class));
+
+    $page = Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->set('refreshingCollection', true);
+    $status = $page->instance()->statusSnapshot();
+    expect($status['phase'])->toBe('refresh_complete')
+        ->and($status['state'])->toBe('success');
+
+    $page->call('pollPush')
+        ->assertSet('refreshingCollection', false)
+        ->assertSet('refreshError', null)
+        ->assertSee('Refreshed Product 101')
+        ->assertDontSee('Could not refresh collection products')
+        ->assertDontSee('syv-spinner');
+
+    expect($page->instance()->statusSnapshot()['polling'])->toBeFalse()
+        ->and($page->instance()->statusSnapshot()['phase'])->toBe('loaded');
 });
 
 it('runs a queued Shop Your Vibe refresh against the latest draft revision', function () {

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Contracts\ShopifyGraphqlGateway;
+use App\Exceptions\ShopYourVibeCollectionUnavailableException;
 use App\Models\ShopifyCollection;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -76,7 +77,7 @@ query VibeParent($id: ID!) { collection(id: $id) { id title handle image { url }
   metafield(namespace: "custom", key: "shop_your_vibe_preview") { type value compareDigest }
 } }
 GQL, ['id' => $gid]);
-        $node = $data['collection'] ?? throw new RuntimeException('This Shopify collection is no longer available.');
+        $node = $this->collectionResponseNode($data, $gid);
         $ids = $this->references($node['metafield']);
         $cards = [];
         foreach (array_chunk($ids, 100) as $chunk) {
@@ -151,8 +152,25 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   }
 } }
 GQL, ['id' => $gid, 'after' => $after]);
-            $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
+            $node = $this->collectionResponseNode($data, $gid);
+            if (! is_string($node['title'] ?? null)
+                || ! is_string($node['handle'] ?? null)
+                || ! is_string($node['sortOrder'] ?? null)
+                || ! array_key_exists('ruleSet', $node)
+                || ($node['ruleSet'] !== null && ! is_array($node['ruleSet']))
+                || ! is_array(data_get($node, 'products.nodes'))
+                || ! array_is_list($node['products']['nodes'])
+                || ! is_bool(data_get($node, 'products.pageInfo.hasNextPage'))
+                || ! array_key_exists('endCursor', $node['products']['pageInfo'])
+                || ($node['products']['pageInfo']['endCursor'] !== null && ! is_string($node['products']['pageInfo']['endCursor']))) {
+                throw new RuntimeException('Shopify returned a malformed collection response for '.$gid.'. The collection could not be verified; changes remain pending.');
+            }
             foreach ($node['products']['nodes'] as $product) {
+                if (! is_array($product) || ! is_string($product['id'] ?? null)
+                    || ! preg_match('~^gid://shopify/Product/\d+$~', $product['id'])
+                    || ! is_string($product['title'] ?? null)) {
+                    throw new RuntimeException('Shopify returned malformed collection products for '.$gid.'. Changes remain pending.');
+                }
                 $products[] = $this->productCard($product);
             }
             $total = (int) data_get($node, 'productsCount.count', count($products));
@@ -174,6 +192,22 @@ GQL, ['id' => $gid, 'after' => $after]);
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
     }
 
+    /** Only an explicit null in a successful, parsed response establishes unavailability. */
+    private function collectionResponseNode(array $data, string $gid): array
+    {
+        if (! array_key_exists('collection', $data)) {
+            throw new RuntimeException('Shopify returned an incomplete collection response for '.$gid.'. The collection could not be verified; changes remain pending.');
+        }
+        if ($data['collection'] === null) {
+            throw new ShopYourVibeCollectionUnavailableException($gid);
+        }
+        if (! is_array($data['collection']) || ($data['collection']['id'] ?? null) !== $gid) {
+            throw new RuntimeException('Shopify returned a malformed collection response for '.$gid.'. The collection could not be verified; changes remain pending.');
+        }
+
+        return $data['collection'];
+    }
+
     /** Lightweight collection data used while globally configuring mappings. */
     public function collectionMapping(string $gid): array
     {
@@ -184,7 +218,7 @@ query VibeCollectionMapping($id: ID!) { collection(id: $id) {
   ruleSet { appliedDisjunctively rules { column relation condition } }
 } }
 GQL, ['id' => $gid]);
-        $node = $data['collection'] ?? throw new RuntimeException('The linked collection is no longer available in Shopify.');
+        $node = $data['collection'] ?? throw new ShopYourVibeCollectionUnavailableException($gid);
         $tagRules = collect(data_get($node, 'ruleSet.rules', []))
             ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG'
                 && strtoupper((string) ($rule['relation'] ?? '')) === 'EQUALS')

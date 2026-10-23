@@ -1,0 +1,177 @@
+<?php
+
+use App\Contracts\ShopifyGraphqlGateway;
+use App\Enums\RolesEnum;
+use App\Filament\Pages\ShopYourVibe;
+use App\Models\Import;
+use App\Models\Product;
+use App\Models\ShopYourVibeDraft;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Role;
+use Tests\Support\VibeShopifyFake;
+
+uses(RefreshDatabase::class);
+
+it('independently measures zero through one thousand products', function () {
+    $fake = new VibeShopifyFake;
+    app()->instance(ShopifyGraphqlGateway::class, $fake);
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'vibe-perf',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+        'is_valid' => true,
+    ]);
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($user);
+
+    $gid = 'gid://shopify/Collection/900';
+    $metrics = [];
+    $queries = 0;
+    $tracking = false;
+    DB::listen(function () use (&$queries, &$tracking): void {
+        if ($tracking) {
+            $queries++;
+        }
+    });
+
+    foreach ([0, 100, 250, 500, 1000] as $count) {
+        $products = [];
+        $rows = [];
+        $now = now();
+        for ($i = 1; $i <= $count; $i++) {
+            $id = 100000 + $i;
+            $productGid = 'gid://shopify/Product/'.$id;
+            $products[] = [
+                'id' => $productGid,
+                'title' => 'Performance Product '.$i,
+                'sku' => 'PERF-'.$i,
+                'tags' => ['perf-'.$i, 'shared-tag'],
+                'image' => 'https://cdn.shopify.com/perf-'.$i.'.jpg',
+                'inventory_quantity' => $i % 7,
+                'inventory_tracked' => true,
+                'shopify_metafields' => [
+                    'bead_colour_finish' => [
+                        'type' => 'single_line_text_field',
+                        'value' => 'Metallic '.$i,
+                        'reference' => ['displayName' => 'Metallic'],
+                        'references' => ['nodes' => [
+                            ['displayName' => 'Metallic', 'handle' => 'metallic'],
+                            ['displayName' => 'Gold', 'handle' => 'gold'],
+                        ]],
+                    ],
+                ],
+            ];
+            $rows[] = [
+                'import_id' => $import->id,
+                'shopify_id' => $productGid,
+                'handle' => 'perf-'.$i,
+                'title' => 'Performance Product '.$i,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+        Product::withoutEvents(fn () => Product::insert($rows));
+
+        ShopYourVibeDraft::updateOrCreate(['collection_gid' => $gid], [
+            'snapshot' => ['parent' => ['gid' => $gid, 'title' => 'Performance', 'handle' => 'performance'], 'cards' => [], 'collections' => []],
+            'desired' => [
+                'parent' => ['gid' => $gid, 'title' => 'Performance', 'handle' => 'performance', 'product_count' => $count],
+                'cards' => [],
+                'reference_ids' => [],
+                'collections' => [
+                    $gid => [
+                        'gid' => $gid,
+                        'title' => 'Performance',
+                        'handle' => 'performance',
+                        'sort' => 'MANUAL',
+                        'manual_supported' => true,
+                        'membership_supported' => true,
+                        'enable_manual' => false,
+                        'product_count' => $count,
+                        'products' => $products,
+                    ],
+                ],
+            ],
+            'revision' => 1,
+            'pending' => false,
+            'status' => 'synced',
+            'refreshed_at' => now(),
+        ]);
+
+        $page = Livewire::test(ShopYourVibe::class);
+        $fake->calls = [];
+        $queries = 0;
+        $tracking = true;
+        $started = microtime(true);
+        $page->call('manage', $gid)->assertSet('selectedCollection', $gid);
+        $elapsedMs = (int) round((microtime(true) - $started) * 1000);
+        $tracking = false;
+
+        $html = $page->html();
+        $openSnapshotBytes = strlen(json_encode($page->snapshot));
+        $state = [];
+        foreach ((new ReflectionClass(ShopYourVibe::class))->getProperties(ReflectionProperty::IS_PUBLIC) as $property) {
+            if ($property->isStatic()) {
+                continue;
+            }
+            $state[$property->getName()] = $property->getValue($page->instance());
+        }
+
+        if ($count === 0) {
+            $metrics[$count] = ['open_ms' => $elapsedMs, 'queries' => $queries, 'shopify_calls' => count($fake->calls), 'open_snapshot_bytes' => $openSnapshotBytes, 'public_state_bytes' => strlen(json_encode($state)), 'html_bytes' => strlen($html)];
+            $page->call('back');
+            continue;
+        }
+        $ids = array_column($products, 'id');
+        $rotated = $ids;
+        $movedId = array_shift($rotated);
+        $rotated[] = $movedId;
+        $reorderStarted = microtime(true);
+        $page->call('reorderProducts', $gid, $rotated, 1)->assertHasNoErrors();
+        $reorderMs = (int) round((microtime(true) - $reorderStarted) * 1000);
+        $reorderSnapshotBytes = strlen(json_encode($page->snapshot));
+        $positionStarted = microtime(true);
+        $page->call('moveProductToPosition', $gid, $movedId, 1, 2)->assertHasNoErrors();
+        $positionMs = (int) round((microtime(true) - $positionStarted) * 1000);
+        $stored = array_column(
+            ShopYourVibeDraft::query()->where('collection_gid', $gid)->first()->desired['collections'][$gid]['products'],
+            'id'
+        );
+
+        $metrics[$count] = [
+            'open_ms' => $elapsedMs,
+            'queries' => $queries,
+            'shopify_calls' => count($fake->calls),
+            'open_snapshot_bytes' => $openSnapshotBytes,
+            'public_state_bytes' => strlen(json_encode($state)),
+            'html_bytes' => strlen($html),
+            'reorder_ms' => $reorderMs,
+            'reorder_snapshot_bytes' => $reorderSnapshotBytes,
+            'position_ms' => $positionMs,
+            'stored_first' => $stored[0] ?? null,
+            'expected_first' => $movedId,
+        ];
+
+        $page->call('back');
+        Product::query()->where('handle', 'like', 'perf-%')->delete();
+    }
+
+    fwrite(STDERR, json_encode($metrics, JSON_PRETTY_PRINT).PHP_EOL);
+    expect($metrics[100]['shopify_calls'])->toBe(0)
+        ->and($metrics[250]['shopify_calls'])->toBe(0)
+        ->and($metrics[500]['shopify_calls'])->toBe(0)
+        ->and($metrics[100]['queries'])->toBeLessThan(80)
+        ->and($metrics[250]['queries'])->toBeLessThan(80)
+        ->and($metrics[500]['queries'])->toBeLessThan(80)
+        ->and($metrics[500]['public_state_bytes'])->toBeLessThan(50000)
+        ->and($metrics[500]['html_bytes'])->toBeLessThan(4000000)
+        ->and($metrics[500]['stored_first'])->toBe($metrics[500]['expected_first']);
+});
+

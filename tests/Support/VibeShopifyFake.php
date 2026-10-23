@@ -193,7 +193,7 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             return ['collection' => $this->collections[$variables['id']] ?? null];
         }
         if (str_contains($query, 'query VibeProducts')) {
-            return ['collection' => $this->collections[$variables['id']]];
+            return ['collection' => $this->collections[$variables['id']] ?? null];
         }
         if (str_contains($query, 'query VibeParentProducts')) {
             return ['collection' => ['products' => $this->collections[$variables['id']]['products']]];

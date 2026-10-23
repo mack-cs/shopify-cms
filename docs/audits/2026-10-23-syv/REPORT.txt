@@ -1,0 +1,261 @@
+﻿Independent technical audit: Shop Your Vibe
+23 October 2026 â€” local working tree at 6f59d03, including existing uncommitted changes
+
+OVERALL VERDICT: NOT PRODUCTION-READY against the requirements in the audit brief.
+
+The editor has useful performance and reliability improvements, but successful tests conceal important gaps. A deleted linked collection can have its requested order silently skipped while the whole draft becomes synced. Missing mappings remain active. Refresh can mirror historical unavailable data over newly retrieved product data. Local draft tags can place a real Shopify product into a supposedly verified membership snapshot without Shopify returning that membership. These are release blockers.
+
+Scope and safety
+---------------
+No Shopify mutation, deployment, production data update, real-record deactivation, Git commit, or Git push was performed. Application code and the user's pre-existing edits were left unchanged. Temporary independent test files were moved into this audit folder as inert .php.txt evidence after execution. Only audit artifacts were added.
+
+Production was not accessed. No production Supervisor configuration, deployed source hash, worker process, failed_jobs table, queue depth, shared-cache behavior, production database, or authenticated production browser session was verified. The claim that a new production worker is running remains unverified. This report is not a production acceptance certificate.
+
+Evidence labels:
+C = direct code inspection; T = executed isolated PHP/Livewire test; J = executed Node harness using the actual extracted editor JavaScript; D = official Shopify documentation. No findings are represented as live browser or production observations.
+
+Reviewed the working-tree diff and relevant recent loading/sorting commits, SYV page, view, CSS, workflow, jobs, mapping model/service, Shopify adapter and actual gateway binding, product mirror, complementary counts, sibling handling, shared product updater, queue/cache configuration, and tests. AppServiceProvider binds ShopifyGraphqlGateway to ShopifyApiClient, not the separate Shopify/ShopifyGraphqlClient class.
+
+1. Verified improvements
+------------------------
+* Cached complete collection opening and local drag/numeric workflow actions require no Shopify calls in the tested fixtures. Product arrays stay out of public Livewire state. [T,C]
+* Missing product arrays trigger background hydration. Duplicate ordinary Manage requests queue one hydration job in the existing tests. Confirmed empty product arrays render as loaded. [T,C]
+* Retrieval is accumulated in memory before a draft snapshot update. Exceptions during ordinary retrieval preserve the previous draft. Revision checks protect pending local draft edits in tested hydration races. [T,C]
+* Completed hydration can advance through ready_to_render into rendered products through the Livewire status path. Old progress does not override a complete loaded parent snapshot in those tests. [T,C]
+* Refresh now distinguishes terminal refresh states even when products are already displayed. Existing tests exercise failure banners, Retry, keeping products visible, missing progress, and stopping the rendered spinner. This addresses the prior Bracelets symptom at the server/Livewire level; real browser behavior and worker restarts remain unverified. [T,C]
+* Refresh can preserve historical data for a missing linked collection and continue retrieving valid collections. This is only partially correct: see F1, F2 and F7. [T,C]
+* Full-list local reorder validation rejects missing/duplicate members and out-of-range integer positions. Page-session epochs allow a reloaded editor to start again at epoch 1, and reject older requests within that session. Pending revision conflicts are checked in the workflow. [T,C]
+* Push preflights changed existing collections against current Shopify membership/order, validates GraphQL mutation userErrors, waits for asynchronous jobs, checkpoints work, and reads back results. Ordinary failures retain pending state. These safeguards do not close all failure paths below. [T,C]
+* Complementary count batching preserves linked NewProductDraft -> catalogue primary row -> metafield precedence. An existing empty linked draft intentionally wins with zero; it is not replaced with a lower-priority source. Missing sibling-cache data is explicitly presented as Not loaded. Movement classification uses the latest completed movement run by SKU. [C,T]
+
+2. Findings, ordered by severity
+-------------------------------
+
+F1 â€” HIGH: Skipped linked-collection push reported as fully synced. [C,T]
+Location: app/Services/ShopYourVibeWorkflow.php:635 push(), especially the missing-collection catch around line 683; :889 confirmedState().
+Root cause: both preflight and final collection confirmation swallow ShopYourVibeCollectionUnavailableException for linked collections. They neither retain a failed operation nor require a verified result for that requested change.
+Reproduce: load linked collection 2; save a reversed local order; make fake Shopify return null for that collection; queue and execute push.
+Expected: block that collection's operation; preserve its pending order and explicitly report incomplete/partial execution. Valid unrelated changes may finish only with accurately scoped status.
+Actual: status=synced, pending=false, unconfirmed requested order remains in local desired data, and no unavailable flag is added in this path. refreshed_at advances despite the unverified linked result.
+Correction: classify unavailable targets before writes; track results per target; never clear pending or advance global confirmation for skipped requested work. Preserve history separately from confirmed active state.
+Independent reproduction passed, proving the bad behavior. This is introduced by the current uncommitted exception-swallowing change.
+
+F2 â€” HIGH: Missing collections remain eligible for active assignments. [C,T]
+Location: ShopYourVibeWorkflow::pullState():1544 / keptUnavailableCollection():1571; app/Filament/Pages/ShopYourVibe.php:1698 loadAssignmentOverview(); app/Services/ShopYourVibeAssignmentService.php:139 syncMapping(), :306 deactivateMissing(), :315 assign().
+Root cause: refresh flags a historical collection unavailable, but mapping reconciliation counts every referenced card as represented. It does not consult unavailable. New mappings are created with is_active=true; existing active mappings remain active. assign() validates against active mapping rows, not fresh target existence.
+Reproduce: Manage to create mappings; remove linked collection 2 from fake Shopify; refresh; reopen Manage.
+Expected: preserve draft/history, mark the confirmed missing mapping inactive/unavailable, exclude it from assignments and all push paths. Temporary failures must leave activity unchanged.
+Actual: the draft reports unavailable=true while its mapping still has is_active=true. Assignment can still select its membership tag.
+Correction: use the existing is_active column; no migration is needed for mapping deactivation. Reconcile only authoritative, validated missing results and gate all operations on availability. Preserve a reason separately if useful.
+Also, a no-history unavailable placeholder contains products=[] and product_count=0; productsAreLoaded() treats this as a loaded empty collection. That conflates unavailable with confirmed empty.
+
+F3 â€” HIGH: Snapshot membership can be invented from local draft tags. [C,T]
+Location: ShopYourVibeWorkflow::open():178, refresh():194, hydrateDraftPlacements():1065, draftBelongsToCollection():1145, productIds():994, push():635.
+Root cause: hydration blends local NewProductDraft cards into the Shopify products array. A draft with a Shopify GID is treated as a real product member based on local tags/handle/title matching, and this blended array is also persisted as snapshot.
+Reproduce: Shopify collection 1 returns products 101â€“103. Create a local NewProductDraft with Shopify product 104 and tag necklaces. Refresh collection 1.
+Expected: verified Shopify membership remains 101â€“103. A local planned placement is separate and cannot assert real membership.
+Actual: both draft snapshot and desired include real product 104 although Shopify did not return it. Synthetic draft:<id> products are deliberately filtered out of push membership, but real GIDs added this way are not synthetic and therefore require different treatment.
+Correction: store planned placements separately from verified Shopify members. Use only remote retrieval for the authoritative baseline. Explicit additions must independently validate live product identity and permitted collection membership.
+Push currently filters baseline members missing remotely, so this reproduction does not by itself prove that 104 will be added on the next push. It does prove that the claimed verified local baseline is false.
+
+F4 â€” HIGH: Stale editor can queue another editor's unreviewed revision. [C,T]
+Location: app/Filament/Pages/ShopYourVibe.php:1423 queueDraftPush(), :1357 reviewPush(), :1387 pushChanges(); ShopYourVibeWorkflow::queue():438.
+Root cause: queueDraftPush() silently adopts the latest pending/failed revision before queueing. There is no persisted binding between a reviewed revision and the queued operation.
+Reproduce: open two Livewire editors on the same synced draft. Editor B reorders products. Editor A, still on the old revision, invokes pushChanges().
+Expected: stale A is rejected and must review B's actual saved revision before approving it.
+Actual: A's revision is silently advanced and B's order is queued. The independent test faked dispatch; nothing was pushed externally.
+Correction: capture and strictly compare the reviewed revision when queueing. A failed-attempt retry must verify that desired content still equals the content previously reviewed, rather than accepting arbitrary newer pending state.
+Approval limitation: this SYV path has an access guard and a review modal, not a persisted two-person approval gate. Do not claim New Products or Collection Approval is automatically enforced here. queueImagePush() also queues the entire pending draft when an image changes, so a prior local order can travel with an image save without the ordinary order review. Preserve intended approval requirements explicitly.
+
+F5 â€” HIGH: Refresh uniqueness is deliberately released before each dispatch. [C,T]
+Location: app/Filament/Pages/ShopYourVibe.php:333 refreshDraft(); app/Jobs/RefreshShopYourVibeDraft.php:45 releaseUniqueLock().
+Root cause: refreshDraft() unconditionally releases the unique-job lock before dispatch, even if another refresh is queued or running.
+Reproduce: with a real isolated database queue and after_commit disabled for the test transaction, call refreshDraft() twice on the same editor.
+Expected: one active refresh for that draft, with one attempt's progress.
+Actual: two queue rows. Both jobs also use the same collection progress key and can race to overwrite running/success/skipped/failure states.
+Correction: keep uniqueness for live jobs. Recover only a proven expired attempt; use an attempt identifier and heartbeat. Forced hydration retry similarly must not release the lock of a genuinely running job.
+This duplicate-refresh route is introduced by the uncommitted releaseUniqueLock call.
+
+F6 â€” HIGH: Long push concurrency is not protected for the full operation. [C; race not executed]
+Location: ShopYourVibeWorkflow::push():635, holdOperationLock():1633, releaseOperationLock():1649; app/Jobs/PushShopYourVibe.php.
+Root cause: operation exclusion uses Cache::add with a 180-second lease while the job timeout is 840 seconds. It is renewed only at a few phase boundaries. A slow preflight or collection/job loop can outlive the lease. Draft status is read before lock acquisition, not reread under the acquired lock. Locking is by parent even when different parents share a linked collection.
+Reproduce: delay Shopify pages beyond the lease; enqueue Retry / Check Push or operate on a second parent sharing the same linked collection. Allow another worker to acquire the expired lease.
+Expected: at most one current revision writes any target; stale jobs exit after acquiring the lock.
+Actual from control flow: a second operation may enter with a stale draft object, and a shared linked collection has no target-level exclusion. Exactly-once mutation delivery cannot be guaranteed, especially if a remote response is lost before checkpointing.
+Correction: use an owner-safe lock with a lease covering the bounded operation or reliable renewal, reread status/revision after acquisition, and serialize shared collection targets. Preserve readback/checkpoint-based retry rather than promising exactly-once network execution.
+
+F7 â€” HIGH: Preserved unavailable data overwrites fresh catalogue values during refresh. [C,T]
+Location: ShopYourVibeWorkflow::refresh():207, pullState():1544; app/Services/ShopYourVibeProductMirror.php:24 mirrorFromDraftState(), :73 mergeProductCards().
+Root cause: mirrorFromDraftState() iterates historical unavailable collections alongside freshly fetched collections. Later duplicate product cards overwrite earlier fresh cards. The unavailable flag and retrieval provenance are ignored.
+Reproduce: hydrate linked collection 2 with Product 101's old title. Change Product 101's title to Fresh Shopify title in all remaining fake remote collections. Delete collection 2, then refresh the parent.
+Expected: preserved history stays historical; the catalogue mirrors Fresh Shopify title from the valid remote retrieval.
+Actual: parent draft displays Fresh Shopify title, while Product.title is overwritten with old Product 101 from the unavailable linked snapshot.
+Correction: exclude unavailable/historical cards from mirroring, prefer explicitly fresh source records, and perform mirror writes only after final revision validation. Refresh currently mirrors before the draft's final transaction check, so even a subsequently rejected refresh can already have catalogue side effects.
+This stale-source path is a new side effect of keeping missing linked snapshots without changing the mirror.
+
+F8 â€” MEDIUM: Array presence is the only completeness proof. [C,T]
+Location: ShopYourVibeWorkflow::productsAreLoaded():80; ShopYourVibeShopify::collection():132, cursor():756; ShopYourVibe page::productLoadProbe():2200.
+Root cause: a products array is deemed complete with no persisted retrieval generation/completion marker, unique-ID check, expected-count check, or cursor-history check. The adapter trusts terminal hasNextPage=false even if returned membership count is inconsistent.
+Reproduce: return one node, productsCount.count=3, and hasNextPage=false. Call collection() and productsAreLoaded().
+Expected: inconsistent retrieval is rejected or retried; it is never published as a verified complete list.
+Actual: one node is returned with product_count=3 and classified loaded. Historical/malformed partial arrays are equally accepted.
+Correction: record successful completion only after structurally valid pages, cursor advancement, duplicate checks and an appropriate count/precision consistency policy. Genuine verified zero is complete; unavailable zero is not. Preserve the previous completed snapshot until a new generation passes validation.
+Ordinary GraphQL/HTTP errors do throw in the gateway. Missing hasNextPage keys generally become Laravel errors; this reproduction uses a structurally valid but inconsistent terminal response and does not rely on suppressing PHP warnings.
+
+F9 â€” MEDIUM: Failed hydration keeps the JavaScript polling timer alive. [C,J]
+Location: resources/views/filament/pages/shop-your-vibe.blade.php:99 pollStatus(), failed-state branch around :140; HydrateShopYourVibeDraft::handle().
+Root cause: the hydration-failed branch renders failure once but does not stopStatusTimer(). The refresh-failed branch does stop it, so the two paths differ. syncHydration() may restart polling while hydration remains true; no durable attempt state coordinates retries.
+Reproduce: invoke actual extracted pollStatus() with phase=failed/state=failed and productsLoaded=0.
+Expected: terminal failure stops automatic polling and displays Retry until explicitly retried.
+Actual: Node harness reports timerStillActive=true and statusMode=failed. It will continue status requests until the 15-minute client limit or another transition.
+Correction: stop terminal failure polling, honor the server's polling flag, and restart only for a new explicit attempt. Reset timing and attempt state on Retry.
+Hydration lacks a failed() hook analogous to RefreshShopYourVibeDraft; hard worker timeout/termination can leave progress dependent on TTL and the browser deadline. There are no durable explicit cancelled/timed_out states. Do not interpret worker restart or cache disappearance as successful retrieval.
+
+F10 â€” MEDIUM: Two failed reorder requests poison future local saves. [C,J]
+Location: same Blade view:324 queueProductOrder(), especially reconciliation request around :344.
+Root cause: if reorderProducts rejects and savedProductOrder also rejects, the recovery request escapes the catch. persistChain remains rejected, and subsequent .then callbacks never execute.
+Reproduce: fail both requests; make a second reorder while using the same editor instance.
+Expected: show an error, recover the saved order when possible, and allow the next retry/edit to attempt saving.
+Actual: extracted-code harness reports only one save attempt after two edits and chainStillRejected=true. Future queued edits are silently prevented until the component is recreated.
+Correction: catch reconciliation failures separately and recover the chain before accepting the next task. Keep an explicit unsaved/error state when saved order cannot be fetched.
+
+F11 â€” MEDIUM: Unavailable-notice dismissal bypasses draft concurrency protections. [C; race not executed]
+Location: app/Filament/Pages/ShopYourVibe.php:1363 dismissUnavailableNotice().
+Root cause: dismissal reads full desired/snapshot JSON and writes both back without lockForUpdate, expected revision, revision increment, or busy-status check.
+Reproduce: let dismissal read the draft, then allow a reorder/push checkpoint to save newer JSON before dismissal updates.
+Expected: dismissing a notice cannot rewrite draft content or invalidate a worker checkpoint.
+Actual from control flow: stale whole-document JSON can overwrite the concurrent state without a revision conflict being detected.
+Correction: keep notice dismissal as per-user UI state, or narrowly update it with strict locked revision handling. Do not rewrite authoritative snapshot JSON merely to hide a banner.
+This method is part of the uncommitted changes.
+
+F12 â€” MEDIUM: Product-level stock badges can describe only one variant. [C; multi-variant browser scenario not executed]
+Location: app/Services/ShopYourVibeShopify.php:287 productCard(); queries at :149 and :260; ShopYourVibe page::decorateProductCards():1761.
+Root cause: productCard selects the first variant with a SKU from only the first 20 variants. Sold Out/Low Stock uses that variant's tracked inventory quantity and ignores the saved available_for_sale field.
+Reproduce: first SKU variant tracked at zero, another sellable variant positive; or a zero-quantity variant permits continued selling. Include variants beyond page 1.
+Expected: product-level badges reflect the established product sellability rule, or clearly label a variant-specific quantity.
+Actual from calculation: the product is marked Sold Out based on that first variant alone. A hydrated cached card also remains a timestamped stock snapshot, not live inventory.
+Correction: decide and document whether SYV cards represent a product or one SKU; use aggregate/authoritative availability for product badges and retrieve required variant data. Keep the existing product sellability business policy consistent.
+
+F13 â€” LOW: Decimal numeric positions are silently truncated in the browser. [C]
+Location: Blade view:363 commitPosition().
+Root cause: Number.parseInt precedes Number.isInteger, so input 2.7 becomes integer 2.
+Reproduce: enter 2.7 in a position field and trigger change.
+Expected: reject a noninteger position and restore the saved field.
+Actual from JavaScript: product is moved to position 2.
+Correction: parse the complete value with Number and validate integer/range explicitly. Server integer bounds remain useful but do not fix the client conversion.
+
+3. Shopify source of truth and entity lifecycle
+----------------------------------------------
+Normal hydration reads Shopify collection/product IDs and ordering. The normal draft push uses the saved desired list, checks remote changes, computes sequential zero-based moves, batches at 250, and confirms jobs. Drag itself writes only locally.
+
+Source-of-truth failures are F1/F2/F3/F7/F8. Missing-product filtering in productsMissingFromShopify() avoids reintroducing baseline products that the current collection no longer returns, but it does not distinguish product deletion from removal/movement between collections and does not deactivate a local product/assignment record. It also removes those products from snapshot/desired during push, without a distinct historical tombstone model. Preserve history and make the event explicit.
+
+Missing metafield is interpreted as an empty reference list, which is reasonable only after a valid successful response. The gateway normally throws HTTP and GraphQL errors, including permission errors. However, ShopifyApiClient::graphql() returns [] when data is missing, and collection() uses null-coalescing for both a missing collection key and an explicit null. An invalid success body can therefore be classified like a missing collection. Require valid response shape before declaring authoritative absence. The unavailable error text currently asserts the request succeeded and was not access denied more confidently than the adapter proves.
+
+Pagination failures throwing an exception do not publish the in-memory partial list. Missing/repeated cursor safeguards and structural/count verification need improvement. A repeated nonempty cursor is not detected and can keep reading until timeout. A live collection changing during multi-page retrieval is also not an atomic Shopify snapshot; a consistency check or retry policy is needed before relying on it as a push baseline.
+
+An existing is_active mapping field already provides the smallest safe deactivation mechanism. Do not add a migration by default. Parent collection absence currently fails refresh rather than deactivating all associated active mappings. Linked card/metaobject absence generally fails parent parsing; no unified unavailable entity lifecycle covers all these entity types.
+
+4. Hydration, refresh, and loading architecture
+-----------------------------------------------
+Prefer Option A: complete background hydration, page-level progress, and atomic publication of a verified completed snapshot. It is already close to this architecture and has the smallest correction surface.
+
+Option A: approximately ceil(N/100) product-page queries per collection (at least one for zero products), plus definition/parent/card/link queries; cache progress writes per page; a final draft publication. Current refresh additionally mirrors catalogue rows per product, so its database work is substantially larger than just one snapshot write.
+
+Option B: similar minimum retrieval queries, but needs durable cursors, staging rows or generation buffers, idempotent page ingestion, duplicate checks, recovery state, partial-render rules, and more database/UI updates. It can show the first page earlier but must still disable global ordering and push until the entire list is verified. It does not inherently reduce Shopify cost. There is no measured evidence here that warrants that added complexity.
+
+Current state is a mixture of ephemeral queued/running/success/failed/skipped cache entries, ready_to_render/loaded presentation state, products-array presence, and client booleans. Progress is keyed by collection, not job attempt. The 600-second progress expiry is shorter than the 840-second job timeout and excludes a busy queue's wait time. Cache expiry can be shown as refresh failure while a valid job is still executing. Multiple attempts can overwrite each other's progress; F5 makes that reachable without a worker restart.
+
+Pending drafts are protected by ordinary edit revision checks and pending guards, but no separate pending-approval state is modeled in ShopYourVibeDraft. Refresh mirrors shared product/draft data outside the final draft transaction. It therefore cannot be described as protecting every related pending product approval record solely because the SYV JSON remains unchanged.
+
+5. Sorting, push, approvals, and retries
+----------------------------------------
+The current browser numeric control and pointer drag both submit a complete DOM order through queueProductOrder() -> page reorderProducts() -> workflow edit('reorder_products'). The older server moveProductToPosition() also delegates to that workflow operation. Search blocks both browser drag start and numeric commit while a query is active. Local stored order is validated as a permutation and normal responses reconcile IDs from the database. Epoch and revision safeguards are useful; F4/F6/F10/F11 are the important exceptions.
+
+Shopify API capability check: collectionReorderProducts requires sortOrder=MANUAL, returns an asynchronous job, accepts up to 250 sequential moves, and uses zero-based positions. The implementation's move format/batching agrees. Automated rule-based membership is a separate concern from manual sort order; do not ban sorting merely because ruleSet is non-null. The code correctly blocks direct membership edits for rule-based collections. manualSortingSupported() uses a permissive OR that can override an explicit manual_supported=false whenever sort is not UNSUPPORTED; make that capability check fail closed for unavailable/unsupported targets.
+
+Official source: https://shopify.dev/docs/api/admin-graphql/2026-01/mutations/collectionReorderProducts
+
+Ordinary userErrors/GraphQL errors are handled, and successful requested collections are read back. waitForJob() waits only about five seconds of sleeps plus request time, so genuinely long Shopify jobs become pending failures requiring retry; remote_jobs supports later confirmation. Push catches most exceptions and updates failed rather than rethrowing. Consequently the queue's job retry count does not automatically retry those failures; it is primarily a UI retry workflow. Retry / Check Push can dispatch duplicate jobs and relies on the operation lock, with the limitations in F6.
+
+No real Shopify mutation was executed to validate remote capability or idempotency. Exactly-once submission is not established. A lost mutation response before storing its remote job ID is an ambiguous result. Re-read remote state before repeating such work.
+
+6. Performance measurements
+----------------------------
+Executed with installed PHP 8.4, memory_limit=1G, mocked Shopify, in-memory SQLite, array cache, local Livewire test calls. These are one-run server-side fixture measurements, not browser latency, network payload transfer timings, or production MySQL benchmarks. Tests enforce sqlite::memory: before migrations; the local .env uses MySQL and was not used as the test database.
+
+Products | Cached open ms | Queries | Shopify calls | Snapshot bytes | HTML bytes | Reorder ms | Numeric server action ms
+0        | 39             | 3       | 0             | 2,953          | 138,899    | n/a        | n/a
+100      | 70             | 11      | 0             | 2,953          | 676,466    | 9          | 6
+250      | 133            | 11      | 0             | 2,953          | 1,484,141  | 9          | 11
+500      | 246            | 11      | 0             | 2,953          | 2,830,191  | 19         | 20
+1,000    | 594            | 11      | 0             | 2,953          | 5,523,301  | 30         | 34
+
+Public component state was 2,098 bytes. Reorder snapshots were approximately 2,953â€“2,988 bytes. The earlier 2.9 KB snapshot claim broadly holds; the exact 10-query claim did not reproduce (11 measured here). Snapshot bytes exclude rendered HTML effects and request envelopes. Small state is not equivalent to a small initial HTML response.
+
+The independent run and original performance run differed in elapsed time, illustrating environment variance; no percentile/SLA claim is justified. At 500 and 1,000 products the HTML volume deserves a real browser profile. The pointer implementation reads initial card bounds, caches slots, uses requestAnimationFrame, and mostly updates one dragged element and one target class. That is directionally useful, but the old approximately one-second browser blocking claim was not independently remeasured.
+
+Not measured: actual initial navigation, browser main-thread blocking, search or pointer latency, mobile rendering, real hydration duration/cost, production MySQL JSON probes/locking, real push preparation duration, and remote job latency. Recommendation: profile these on an isolated staging clone; first reduce repeated card markup/handlers and unnecessary DOM passes supported by that profile. Do not introduce virtualization without evidence.
+
+7. Product cards and presentation
+---------------------------------
+CSS places Sold Out top-right of the thumbnail, Low Stock bottom-left, Movement bottom-right, and Position to the right of card tools. Position is a normal number input and drag has an aria-label and a visible icon. Responsive CSS exists. Desktop/mobile visual layout and drag accessibility were inspected in source only, not certified in a rendered browser.
+
+Sibling absent cache is distinguished from a loaded empty cache. Complementary empty-draft precedence is retained. Movement labels are sourced from completed reports, not invented from cached inventory. Materials/colour/finish and tags have both Shopify snapshot and catalogue/mirror paths; F7 means the displayed and catalogue values can diverge. ProductMirror ignores null/empty metafield entries when normalizing/mirroring, so confirmed removal of a remote metafield can leave old catalogue/draft values rather than clear them. Treat explicit removal differently from unavailable retrieval, following the existing business policy on safe clears.
+
+8. Queues, configuration, and production evidence
+-------------------------------------------------
+Repository configuration:
+* Dedicated database connection and queue: shop-your-vibe; retry_after=960; after_commit=true.
+* Hydrate: timeout=840, tries=3, uniqueFor=960, backoff=[15,60].
+* Refresh: timeout=840, tries=1, uniqueFor=960, failed() progress hook present.
+* Push: timeout=840, tries=20; busy lock releases for 15 seconds; no ShouldBeUnique.
+* Documented worker: queue:work shop-your-vibe --queue=shop-your-vibe --timeout=840 --tries=1.
+* Default cache: environment driven; repository fallback database. Local .env says APP_ENV=local, DB_CONNECTION=mysql, QUEUE_CONNECTION=database, CACHE_STORE=database, SHOPIFY_API_VERSION=2026-01. These are local declarations, not verified production runtime configuration.
+
+retry_after exceeds job timeout, which is appropriate in the repository. Job-level tries take precedence over the worker default in Laravel, so --tries=1 does not make Hydrate tries=1 or Push tries=1. The worker command documentation should explain that rather than presenting one uniform retry policy. Hydration uniqueness can expire before its full three-attempt retry lifetime, and progress lasts only 600 seconds without a page heartbeat. F5/F6 compound that mismatch.
+
+No Supervisor config was found in the checked-in deployment paths/inventory. stopwaitsecs, actual cached configuration, process command, worker code version, effective cache/database connection, failed jobs, and recovery after hard kill remain unverified. A worker restart alone proves neither job success nor deployed-source correctness. Require a read-only production evidence check before approval to release: deployed commit/hash, Supervisor program/status, actual queue command, effective queue/cache configuration, and relevant queued/failed job metadata. No credential values are needed in that evidence.
+
+9. Test results and regression limits
+-------------------------------------
+Existing SYV-focused selection: 188 passed, 1,170 assertions, 78.24 seconds.
+Entire existing suite: 671 passed, 31 failed, 4,148 assertions, 155.51 seconds.
+Independent defect reproductions: 7 passed, 16 assertions. Passing here means the reported undesirable behavior was reproduced; these are not claims of correctness.
+Independent performance test: passed for 0/100/250/500/1,000 products.
+JavaScript harness: reproduced continuing failed-hydration polling and a rejected persistChain blocking subsequent saves. This was Node execution with small mocks, not a browser end-to-end test.
+
+PHP command used the installed php84 executable, -d memory_limit=1G and -d disable_functions=curl_exec,fsockopen,stream_socket_client, followed by vendor/bin/pest. PHPUnit/TestCase force APP_ENV=testing, DB_CONNECTION=sqlite, DB_DATABASE=:memory:, and a separate config cache path. SYV mutations went exclusively to VibeShopifyFake; queue dispatch was faked or used the isolated in-memory jobs table. No local operational or production database migrations were run.
+
+Full-suite failures:
+* DropdownCollectionCatalogTest: 3; DropdownOptionValueTest: 1.
+* Authentication: 2; EmailVerification: 3; Registration: 2; VerificationNotification: 2.
+* CollectionApprovalVisibility: 2.
+* ComplementaryProductAuditService: 5; ComplementaryProductMaintenanceService: 1.
+* ExampleTest: 1; NewProductDraftApprovalWithdrawal: 1; NewProductDraftEditing: 1.
+* PendingApprovalDeletion: 1; ProductPartialApprovalVisibility: 2; ProductWorkflowSync: 2; Settings/ProfileUpdate: 2.
+Examples include missing dashboard routes, missing collections.import_id in fixtures, unit-test container bootstrap lacking storagePath(), and complementary/normalization expectation mismatches. The full output is retained. These failures were not proven introduced by SYV: no clean historical baseline was executed, and network transports were intentionally disabled. Do not dismiss all 31 as pre-existing solely on earlier implementation notes.
+
+Passing relevant groups included procurement supplier orders/incoming stock/predictions, inventory adjustment approval and on-hand sync, inventory audit history, Shopify collection workflow, stack reservations and sellability webhook behavior, stack price comparison, and numerous new-draft/import tests. Collection approval request workflow passed, but visibility and partial approval visibility did not. New-draft editing/withdrawal and complementary/workflow tests also have failures. Therefore blanket regression clearance for every requested business area is not supported.
+
+Uncommitted application changes are confined to the SYV page, refresh job, Shopify adapter/workflow, Blade view and new exception. Recent sorting/loading commits additionally changed the complementary batching and sibling resolver paths. The fresh-data mirror defect F7 is an independently verified shared-catalogue side effect. No evidence was found in the current working-tree diff of direct inventory, supplier procurement, receiving, price/cost, or reservation mutation changes; passing tests are supporting evidence, not proof that production behavior is unaffected.
+
+10. Recommended approval sequence
+----------------------------------
+First approve targeted fixes for F1/F2/F3/F4/F7: preserve accurate pending/confirmation state, deactivate confirmed missing mappings, keep real Shopify membership separate from planned placements, bind reviewed revisions, and prevent stale-source mirroring. No production cleanup or migration is necessary merely to begin those corrections.
+
+Next fix F5/F6 plus attempt-scoped durable recovery: preserve uniqueness, serialize actual targets, bind attempts and revisions, and make timeout/restart status truthful. Correct F8 completeness checks before enabling ordering for any legacy/unverified snapshot. Preserve previous snapshots and historical unavailable records.
+
+Then fix F9/F10/F11 and numeric validation, settle stock badge semantics, and add automated tests asserting the desired safe outcomes rather than the currently reproduced defects. Cover null versus malformed response, second-page failure, repeated cursor, duplicate products, long jobs, hard worker termination, concurrent editors/parents, stale review, partial push and ambiguous mutation responses.
+
+Finally resolve or baseline the 31 suite failures, run isolated MySQL integration and browser tests at all five sizes on desktop/mobile, and obtain the read-only production worker/config evidence. Reprofile before considering virtualization. No fix, deployment, production deactivation or Shopify push is authorized by this report.
+
+Evidence files in this directory
+--------------------------------
+syv-tests.txt â€” existing SYV selection output.
+full-suite.txt â€” all existing-suite output and 31 failure details.
+independent-reproductions.txt â€” final seven independent reproductions.
+performance.txt â€” independent five-size benchmark (also includes an earlier five-reproduction run).
+reproduction-tests.php.txt and performance-test.php.txt â€” inert source for reproducing the isolated tests.
+frontend-harness.cjs.txt â€” inert extracted-code harness; results: timerStillActive=true; saveAttemptsAfterTwoEdits=1; chainStillRejected=true.
+

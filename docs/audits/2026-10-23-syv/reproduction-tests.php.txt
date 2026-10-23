@@ -1,0 +1,139 @@
+<?php
+
+use App\Contracts\ShopifyGraphqlGateway;
+use App\Enums\RolesEnum;
+use App\Filament\Pages\ShopYourVibe;
+use App\Jobs\HydrateShopYourVibeDraft;
+use App\Jobs\PushShopYourVibe;
+use App\Jobs\PushShopYourVibeComplementaryProducts;
+use App\Jobs\PushShopYourVibeProductSiblings;
+use App\Jobs\PushShopYourVibeProductTags;
+use App\Jobs\RefreshShopYourVibeDraft;
+use App\Jobs\RefreshShopYourVibeParents;
+use App\Models\ChangeLog;
+use App\Models\DropdownOption;
+use App\Models\Import;
+use App\Models\NewProductDraft;
+use App\Models\Product;
+use App\Models\ShopifyCollection;
+use App\Models\ShopifyRow;
+use App\Models\ShopYourVibeCollectionMapping;
+use App\Models\ShopYourVibeDraft;
+use App\Models\User;
+use App\Models\Variant;
+use App\Services\HeaderStore;
+use App\Services\ShopYourVibeAssignmentService;
+use App\Services\ShopYourVibeProductMirror;
+use App\Services\ShopYourVibeShopify;
+use App\Services\ShopYourVibeWorkflow;
+use App\Services\SiblingCollectionResolver;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Role;
+use Tests\Support\VibeShopifyFake;
+
+uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    config()->set('services.shopify.storefront_url', 'https://leighavenue.co.za');
+    $this->fake = new VibeShopifyFake;
+    app()->instance(ShopifyGraphqlGateway::class, $this->fake);
+    $this->workflow = app(ShopYourVibeWorkflow::class);
+    $this->user = User::factory()->create();
+    $this->import = Import::create(['filename' => 'vibe-test', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $this->user->id, 'is_current' => true, 'is_valid' => true]);
+    foreach ($this->fake->collections as $collection) {
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create(['import_id' => $this->import->id, 'shopify_id' => $collection['id'], 'title' => $collection['title'], 'handle' => $collection['handle']]));
+    }
+    foreach ([101, 102, 103, 104] as $id) {
+        Product::withoutEvents(fn () => Product::create(['import_id' => $this->import->id, 'shopify_id' => 'gid://shopify/Product/'.$id, 'handle' => 'product-'.$id, 'title' => 'Product '.$id]));
+    }
+    $this->draft = $this->workflow->open('gid://shopify/Collection/1');
+});
+
+it('audit reproduces incomplete count accepted as loaded', function () {
+    $gid = $this->draft->collection_gid;
+    $this->fake->collections[$gid]['products']['nodes'] = array_slice($this->fake->collections[$gid]['products']['nodes'], 0, 1);
+    $state = app(ShopYourVibeShopify::class)->collection($gid);
+    expect($state['product_count'])->toBe(3)->and($state['products'])->toHaveCount(1)
+        ->and(ShopYourVibeWorkflow::productsAreLoaded(['collections' => [$gid => $state]], $gid))->toBeTrue();
+});
+
+it('audit reproduces skipped linked reorder reported synced', function () {
+    $gid = 'gid://shopify/Collection/2';
+    $draft = $this->workflow->loadProducts($this->draft->id, $this->draft->revision, 'gid://shopify/Metaobject/11');
+    $wanted = array_reverse(array_column($draft->desired['collections'][$gid]['products'], 'id'));
+    $draft = $this->workflow->edit($draft->id, $draft->revision, 'reorder_products', ['collection_gid' => $gid, 'ids' => $wanted]);
+    unset($this->fake->collections[$gid]);
+    $draft = $this->workflow->queue($draft->id, $draft->revision);
+    $this->workflow->push($draft->id);
+    $draft->refresh();
+    expect($draft->status)->toBe('synced')->and($draft->pending)->toBeFalse()
+        ->and(array_column($draft->desired['collections'][$gid]['products'], 'id'))->toBe($wanted)
+        ->and($draft->desired['collections'][$gid]['unavailable'] ?? false)->toBeFalse();
+});
+
+it('audit reproduces missing mapping stays active after refresh', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = 'gid://shopify/Collection/2';
+    Livewire::test(ShopYourVibe::class)->call('manage', $this->draft->collection_gid);
+    $mapping = ShopYourVibeCollectionMapping::where('shopify_collection_id', $gid)->firstOrFail();
+    unset($this->fake->collections[$gid]);
+    $draft = $this->workflow->refresh($this->draft->id, $this->draft->fresh()->revision);
+    Livewire::test(ShopYourVibe::class)->call('manage', $draft->collection_gid);
+    expect($draft->desired['collections'][$gid]['unavailable'])->toBeTrue()->and($mapping->fresh()->is_active)->toBeTrue();
+});
+
+it('audit reproduces duplicate refresh jobs despite uniqueness', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    config()->set('queue.connections.shop-your-vibe.after_commit', false);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->draft->collection_gid);
+    $page->call('refreshDraft')->call('refreshDraft');
+    expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(2);
+});
+
+it('audit reproduces local tagged live draft invents Shopify membership', function () {
+    NewProductDraft::withoutEvents(fn () => NewProductDraft::create(['title' => 'Local only membership', 'handle' => 'audit-local', 'shopify_id' => 'gid://shopify/Product/104', 'tags' => 'necklaces']));
+    $draft = $this->workflow->refresh($this->draft->id, $this->draft->revision);
+    expect(array_column($draft->snapshot['collections'][$draft->collection_gid]['products'], 'id'))->toContain('gid://shopify/Product/104')
+        ->and(array_column($this->fake->collections[$draft->collection_gid]['products']['nodes'], 'id'))->not->toContain('gid://shopify/Product/104');
+});
+
+it('audit reproduces stale editor can queue another editors unseen changes', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    Bus::fake([PushShopYourVibe::class]);
+    $gid = $this->draft->collection_gid;
+    $oldPage = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $otherPage = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $ids = array_reverse(array_column($this->draft->desired['collections'][$gid]['products'], 'id'));
+    $otherPage->call('reorderProducts', $gid, $ids, 1, 'other-editor');
+    $oldPage->call('pushChanges');
+    expect($this->draft->fresh()->status)->toBe('pushing');
+    Bus::assertDispatched(PushShopYourVibe::class);
+});
+
+it('audit reproduces unavailable snapshot overwrites fresh catalogue product', function () {
+    $draft = $this->workflow->loadProducts($this->draft->id, $this->draft->revision, 'gid://shopify/Metaobject/11');
+    foreach ($this->fake->collections as &$collection) {
+        foreach ($collection['products']['nodes'] as &$product) {
+            if ($product['id'] === 'gid://shopify/Product/101') $product['title'] = 'Fresh Shopify title';
+        }
+        unset($product);
+    }
+    unset($collection);
+    unset($this->fake->collections['gid://shopify/Collection/2']);
+    $draft = $this->workflow->refresh($draft->id, $draft->revision);
+    expect($draft->desired['collections'][$draft->collection_gid]['products'][0]['title'])->toBe('Fresh Shopify title')
+        ->and(Product::where('shopify_id', 'gid://shopify/Product/101')->firstOrFail()->title)->toBe('Product 101');
+});

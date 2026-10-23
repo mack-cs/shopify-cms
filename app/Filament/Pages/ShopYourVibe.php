@@ -139,6 +139,8 @@ class ShopYourVibe extends Page
 
     public bool $refreshingCollection = false;
 
+    public ?string $refreshError = null;
+
     #[Locked]
     public array $vibeMappings = [];
 
@@ -239,6 +241,8 @@ class ShopYourVibe extends Page
                 ->select(['id', 'revision', 'status', 'collection_gid', 'pending', 'desired'])
                 ->where('collection_gid', $gid)
                 ->first();
+            $this->refreshingCollection = false;
+            $this->refreshError = null;
             $this->selectedCollection = $gid;
             $this->activeTab = 'products';
             $this->productPatches = [];
@@ -303,6 +307,7 @@ class ShopYourVibe extends Page
         $this->hydratingCollection = false;
         $this->productsRendered = false;
         $this->refreshingCollection = false;
+        $this->refreshError = null;
         $this->parentSiblingOptions = [];
         $this->siblingsResolved = false;
         $this->vibeMappings = [];
@@ -351,15 +356,20 @@ class ShopYourVibe extends Page
                 $this->dispatch('vibe-form-saved');
             }
             if ($gid = $this->draft()?->collection_gid) {
+                $this->refreshError = null;
                 $this->refreshingCollection = true;
                 Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
                     'state' => 'running',
+                    'kind' => 'refresh',
+                    'stage' => 'Refreshing collection products',
                     'done' => null,
                     'total' => null,
                     'message' => 'Refreshing collection products',
                 ], 600);
             }
+            RefreshShopYourVibeDraft::releaseUniqueLock($this->draftId);
             RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
+            $this->dispatch('vibe-refresh-started');
             if ($fresh = $this->draft()) {
                 $this->accept($fresh);
             }
@@ -1350,6 +1360,30 @@ class ShopYourVibe extends Page
         $this->confirmingPush = $this->draft()?->pending ?? false;
     }
 
+    public function dismissUnavailableNotice(): void
+    {
+        $this->guard();
+        $draft = $this->draft(true);
+        if (! $draft) {
+            return;
+        }
+        $desired = $draft->desired;
+        $snapshot = $draft->snapshot ?? [];
+        unset($desired['unavailable_collections'], $snapshot['unavailable_collections']);
+        $draft->update([
+            'desired' => $desired,
+            'snapshot' => $snapshot,
+        ]);
+        $this->accept($draft->fresh());
+    }
+
+    public function dismissRefreshNotice(): void
+    {
+        $this->guard();
+        $this->refreshError = null;
+        $this->refreshingCollection = false;
+    }
+
     public function pushChanges(): void
     {
         $this->guard();
@@ -1388,6 +1422,14 @@ class ShopYourVibe extends Page
 
     private function queueDraftPush(): void
     {
+        $saved = $this->draftId ? ShopYourVibeDraft::query()->find($this->draftId) : null;
+        if ($saved && $saved->revision !== $this->revision
+            && $saved->pending
+            && in_array($saved->status, ['pending', 'failed'], true)
+            && empty($saved->remote_jobs)
+            && empty($saved->operation)) {
+            $this->revision = $saved->revision;
+        }
         $draft = app(ShopYourVibeWorkflow::class)->queue($this->draftId, $this->revision);
         $this->accept($draft);
         try {
@@ -1432,14 +1474,51 @@ class ShopYourVibe extends Page
         });
     }
 
+    public function expireRefresh(): void
+    {
+        $this->guard();
+        if (! $this->refreshingCollection) {
+            $this->skipRender();
+
+            return;
+        }
+        $this->refreshingCollection = false;
+        $this->refreshError = 'The refresh did not finish. Existing products were kept.';
+        if (is_string($this->selectedCollection)) {
+            Cache::put(ShopYourVibeWorkflow::progressKey($this->selectedCollection), [
+                'state' => 'failed',
+                'kind' => 'refresh',
+                'done' => null,
+                'total' => null,
+                'message' => $this->refreshError,
+            ], 3600);
+        }
+    }
+
     public function pollPush(): void
     {
         $this->guard();
+        $refreshEnded = false;
         if ($this->refreshingCollection && is_string($this->selectedCollection)) {
             $refreshProgress = Cache::get(ShopYourVibeWorkflow::progressKey($this->selectedCollection));
             $refreshState = is_array($refreshProgress) ? ($refreshProgress['state'] ?? null) : null;
-            if (in_array($refreshState, ['success', 'failed', 'skipped'], true)) {
+            if (in_array($refreshState, ['success', 'failed', 'skipped'], true) || $refreshState === null) {
+                $refreshEnded = true;
                 $this->refreshingCollection = false;
+                $this->refreshError = match ($refreshState) {
+                    'failed' => (string) ($refreshProgress['message'] ?? 'Could not refresh collection products.'),
+                    null => 'The refresh did not finish. Existing products were kept.',
+                    default => null,
+                };
+                if ($refreshState === null) {
+                    Cache::put(ShopYourVibeWorkflow::progressKey($this->selectedCollection), [
+                        'state' => 'failed',
+                        'kind' => 'refresh',
+                        'done' => null,
+                        'total' => null,
+                        'message' => $this->refreshError,
+                    ], 3600);
+                }
             }
         }
         if (! $this->productsRendered && is_string($this->selectedCollection)) {
@@ -1461,6 +1540,9 @@ class ShopYourVibe extends Page
             }
             $this->skipRender();
 
+            return;
+        }
+        if ($refreshEnded && $this->refreshError) {
             return;
         }
         if ($draft = $this->draft()) {
@@ -2065,7 +2147,14 @@ class ShopYourVibe extends Page
         $percent = is_array($progress) && is_int($progress['percent'] ?? null)
             ? $progress['percent']
             : ($total ? (int) floor((($done ?? 0) / $total) * 100) : null);
-        if ($this->productsRendered) {
+        if ($this->refreshingCollection) {
+            $phase = match ($state) {
+                'success' => 'refresh_complete',
+                'skipped' => 'refresh_skipped',
+                'failed', null => 'refresh_failed',
+                default => 'refreshing',
+            };
+        } elseif ($this->productsRendered) {
             $phase = 'loaded';
         } elseif ($productsReady) {
             $phase = 'ready_to_render';
@@ -2081,7 +2170,7 @@ class ShopYourVibe extends Page
         $changed = $draft && (
             ($this->hydratingCollection && ! $this->draftId)
             || (! $this->productsRendered && $productsReady)
-            || ($this->refreshingCollection && in_array($state, ['success', 'failed', 'skipped'], true))
+            || in_array($phase, ['refresh_complete', 'refresh_failed', 'refresh_skipped'], true)
             || $this->observedStatus !== $draft->status
             || ($this->draftId && $this->revision !== $draft->revision)
         );
@@ -2091,7 +2180,7 @@ class ShopYourVibe extends Page
             && ($this->hydratingCollection || $productsReady || in_array($state, ['queued', 'running', 'success'], true));
 
         return [
-            'polling' => $operationPolling || $hydrationPolling || ($this->refreshingCollection && ! in_array($state, ['success', 'failed', 'skipped'], true)),
+            'polling' => $operationPolling || $hydrationPolling || $phase === 'refreshing',
             'changed' => (bool) $changed,
             'message' => is_array($progress) ? ($progress['message'] ?? null) : null,
             'stage' => is_array($progress) ? ($progress['stage'] ?? null) : null,
@@ -2331,7 +2420,9 @@ class ShopYourVibe extends Page
         $progressStage = is_array($syvProgress) ? (string) ($syvProgress['stage'] ?? '') : '';
         if ($hydrationState === 'success' && ! $productsLoaded) {
             $progressStage = ShopYourVibeWorkflow::PREPARING_PRODUCTS_MESSAGE;
-        } elseif ($progressStage === '' || $hydrationState === 'queued' || ($this->hydratingCollection && $hydrationState === null)) {
+        } elseif ($this->refreshingCollection && $progressStage === '') {
+            $progressStage = 'Refreshing collection products';
+        } elseif (! $this->refreshingCollection && ($progressStage === '' || $hydrationState === 'queued' || ($this->hydratingCollection && $hydrationState === null))) {
             $progressStage = ShopYourVibeWorkflow::WAITING_PRODUCTS_MESSAGE;
         }
         $progressCount = $progressTotal > 0 ? $progressDone.' of '.$progressTotal.' · '.$progressPercent.'%' : '';

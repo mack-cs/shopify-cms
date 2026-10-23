@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\ShopYourVibeBusyException;
+use App\Exceptions\ShopYourVibeCollectionUnavailableException;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -676,14 +677,25 @@ class ShopYourVibeWorkflow
                 if (! $this->collectionDifferent($baseline['collections'][$gid], $desiredCollection)) {
                     continue;
                 }
+                // All changed targets must pass preflight before any new writes.
+                // An unavailable target is unfinished work, never a successful no-op.
                 $current = $this->shopify->collection($gid);
                 foreach ($state['cards'] as $card) {
                     if ($card['collection_gid'] === $gid) {
                         $this->assertCollectionLink($card, $current);
                     }
                 }
-                if ($this->collectionDifferent($baseline['collections'][$gid], $current) && $this->collectionDifferent($current, $desiredCollection)) {
+                $missingFromShopify = $this->productsMissingFromShopify($baseline['collections'][$gid], $current, $desiredCollection);
+                $baselineForCheck = $this->withoutProductIds($baseline['collections'][$gid], $missingFromShopify);
+                $desiredForCheck = $this->withoutProductIds($desiredCollection, $missingFromShopify);
+                if ($this->collectionDifferent($baselineForCheck, $current) && $this->collectionDifferent($current, $desiredForCheck)) {
                     throw new RuntimeException($current['title'].' changed in Shopify. Refresh and review before pushing.');
+                }
+                if ($missingFromShopify !== []) {
+                    $baseline['collections'][$gid] = $baselineForCheck;
+                    $desiredCollection = $desiredForCheck;
+                    $state['collections'][$gid] = $desiredCollection;
+                    $draft->update(['desired' => $state, 'snapshot' => $baseline]);
                 }
                 if (! $current['membership_supported'] && $this->membership($current) !== $this->membership($desiredCollection)) {
                     throw new RuntimeException('Shopify rules control membership in '.$current['title'].'.');
@@ -861,6 +873,14 @@ class ShopYourVibeWorkflow
                 'last_error' => null, 'remote_jobs' => [], 'progress' => $progress, 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
         } catch (ShopYourVibeBusyException $e) {
             throw $e;
+        } catch (ShopYourVibeCollectionUnavailableException $e) {
+            report($e);
+            $draft->update([
+                'pending' => true,
+                'status' => 'failed',
+                'last_error' => 'Push incomplete. '.$e->getMessage().' Requested local changes and historical data were kept. Previously confirmed changes were retained; retry to finish unconfirmed work.',
+                'revision' => $draft->revision + 1,
+            ]);
         } catch (Throwable $e) {
             report($e);
             $draft->update(['pending' => true, 'status' => 'failed', 'last_error' => $e->getMessage(), 'revision' => $draft->revision + 1]);
@@ -875,9 +895,31 @@ class ShopYourVibeWorkflow
         if ($confirmed['reference_ids'] !== $ids || array_map($this->shopifyComparable(...), $confirmed['cards']) !== array_map($this->shopifyComparable(...), $state['cards'])) {
             throw new RuntimeException('Shopify has not confirmed the final preview layout. Some changes remain pending.');
         }
-        foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
-            if (preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
-                $state['collections'][$gid] = $this->shopify->collection($gid);
+        $collectionGids = array_unique(array_filter(array_merge(
+            array_keys($state['collections']),
+            array_column($state['cards'], 'collection_gid'),
+        )));
+        foreach ($collectionGids as $gid) {
+            if (! preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
+                continue;
+            }
+            try {
+                $current = $this->shopify->collection($gid);
+            } catch (ShopYourVibeCollectionUnavailableException $e) {
+                if (array_key_exists($gid, $state['collections'])) {
+                    throw $e;
+                }
+                // An unloaded link has no staged product operation or product
+                // snapshot to confirm. Do not invent a confirmed empty snapshot.
+                continue;
+            }
+            if (isset($state['collections'][$gid]) && $this->collectionDifferent($current, $state['collections'][$gid])) {
+                throw new RuntimeException('Shopify has not confirmed the requested products or sorting for '.$current['title'].'. Some changes remain pending.');
+            }
+            // Keep the parent's local prelaunch placements; only real Shopify IDs
+            // participate in collectionDifferent(), as in push preparation.
+            if ($gid !== $draft->collection_gid) {
+                $state['collections'][$gid] = $current;
             }
         }
         $confirmed['collections'] = $state['collections'];
@@ -964,6 +1006,46 @@ class ShopYourVibeWorkflow
         }
 
         return false;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function productIds(array $collection): array
+    {
+        return array_values(array_filter(
+            array_column($collection['products'] ?? [], 'id'),
+            fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/Product/\d+$~', $id)
+        ));
+    }
+
+    /**
+     * Real products the draft still lists, and did not add in this edit, that Shopify no longer returns.
+     *
+     * @return array<int, string>
+     */
+    private function productsMissingFromShopify(array $baseline, array $current, array $desired): array
+    {
+        return array_values(array_intersect(
+            array_diff($this->productIds($baseline), $this->productIds($current)),
+            $this->productIds($desired)
+        ));
+    }
+
+    /**
+     * @param  array<int, string>  $ids
+     */
+    private function withoutProductIds(array $collection, array $ids): array
+    {
+        if ($ids === []) {
+            return $collection;
+        }
+        $collection['products'] = array_values(array_filter(
+            $collection['products'] ?? [],
+            fn ($product): bool => ! in_array($product['id'] ?? null, $ids, true)
+        ));
+
+        return $collection;
     }
 
     private function collectionDifferent(array $before, array $after): bool
@@ -1483,13 +1565,75 @@ class ShopYourVibeWorkflow
     {
         $this->shopify->definition();
         $state = $this->shopify->parent($draft->collection_gid);
-        $state['collections'][$draft->collection_gid] = $this->shopify->collection($draft->collection_gid);
+        $state['collections'][$draft->collection_gid] = $this->pullCollection($draft, $draft->collection_gid, false);
+        $unavailable = [];
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
-            $state['collections'][$gid] = $this->shopify->collection($gid);
+            if ($gid === $draft->collection_gid) {
+                continue;
+            }
+            try {
+                $state['collections'][$gid] = $this->shopify->collection($gid);
+            } catch (ShopYourVibeCollectionUnavailableException) {
+                $message = $this->unavailableCollectionMessage($draft, $gid, true);
+                $unavailable[] = ['gid' => $gid, 'message' => $message];
+                $state['collections'][$gid] = $this->keptUnavailableCollection($draft, $gid);
+            }
         }
+        $state['unavailable_collections'] = $unavailable;
         $state = $this->hydrateDraftPlacements($draft->collection_gid, $state, $draft->desired ?? []);
 
         return $state;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function keptUnavailableCollection(ShopYourVibeDraft $draft, string $gid): array
+    {
+        $previous = $draft->desired['collections'][$gid] ?? null;
+        if (is_array($previous) && array_key_exists('products', $previous)) {
+            $previous['unavailable'] = true;
+
+            return $previous;
+        }
+        $title = $draft->desired['collections'][$gid]['title']
+            ?? collect($draft->desired['cards'] ?? [])->firstWhere('collection_gid', $gid)['name']
+            ?? ShopifyCollection::query()->where('shopify_id', $gid)->latest('id')->value('title')
+            ?? $gid;
+
+        return [
+            'gid' => $gid,
+            'title' => $title,
+            'handle' => '',
+            'sort' => 'MANUAL',
+            'manual_supported' => false,
+            'membership_supported' => false,
+            'enable_manual' => false,
+            'product_count' => 0,
+            'products' => [],
+            'unavailable' => true,
+        ];
+    }
+
+    private function pullCollection(ShopYourVibeDraft $draft, string $gid, bool $linked): array
+    {
+        try {
+            return $this->shopify->collection($gid);
+        } catch (ShopYourVibeCollectionUnavailableException) {
+            throw new RuntimeException($this->unavailableCollectionMessage($draft, $gid, $linked));
+        }
+    }
+
+    private function unavailableCollectionMessage(ShopYourVibeDraft $draft, string $gid, bool $linked): string
+    {
+        $title = $draft->desired['collections'][$gid]['title']
+            ?? collect($draft->desired['cards'] ?? [])->firstWhere('collection_gid', $gid)['name']
+            ?? ShopifyCollection::query()->where('shopify_id', $gid)->latest('id')->value('title');
+        $label = trim((string) $title);
+        $name = $label !== '' ? $label.' ('.$gid.')' : $gid;
+        $role = $linked ? 'linked collection' : 'collection';
+
+        return 'Could not refresh '.$role.' '.$name.'. Shopify returned no collection for this id. The request succeeded, so this was not a rate limit or an access-denied error. An empty collection result means this id is not a collection the store connection can read. Existing products and Shop Your Vibe assignments were kept.';
     }
 
     private function rememberCollectionRecord(?int $importId, string $gid, string $handle, string $title): void
