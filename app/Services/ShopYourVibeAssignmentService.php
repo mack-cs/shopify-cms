@@ -18,7 +18,8 @@ class ShopYourVibeAssignmentService
     /** Reuse configuration saved for the same Shopify collection under any parent. */
     public static function configuredMappings(array $parentGids): \Illuminate\Support\Collection
     {
-        $all = ShopYourVibeCollectionMapping::where('is_active', true)->latest('id')->get();
+        $all = ShopYourVibeCollectionMapping::where('is_active', true)
+            ->whereNotIn('shopify_collection_id', ShopYourVibeCollectionMapping::confirmedMissingIds())->latest('id')->get();
         return $all->whereIn('parent_collection_id', $parentGids)->map(function ($mapping) use ($all) {
             $resolved = clone $mapping;
             foreach (['membership_tag', 'design_value', 'colour_style_value'] as $field) {
@@ -42,6 +43,7 @@ class ShopYourVibeAssignmentService
     {
         $mappings = ShopYourVibeCollectionMapping::query()
             ->where('is_active', true)
+            ->whereNotIn('shopify_collection_id', ShopYourVibeCollectionMapping::confirmedMissingIds())
             ->where('parent_collection_id', '!=', self::GLOBAL_PARENT)
             ->whereNotNull('membership_tag')
             ->get();
@@ -138,10 +140,20 @@ class ShopYourVibeAssignmentService
 
     public function syncMapping(string $parentGid, array $card, array $collection): ShopYourVibeCollectionMapping
     {
-        $mapping = ShopYourVibeCollectionMapping::firstOrNew([
+        return DB::transaction(fn () => $this->saveMapping($parentGid, $card, $collection));
+    }
+
+    private function saveMapping(string $parentGid, array $card, array $collection): ShopYourVibeCollectionMapping
+    {
+        $mapping = ShopYourVibeCollectionMapping::query()->lockForUpdate()->firstOrNew([
             'parent_collection_id' => $parentGid,
             'shopify_collection_id' => $collection['gid'],
         ]);
+        if ($mapping->exists && ShopYourVibeCollectionMapping::isConfirmedMissing($collection['gid'])) {
+            $mapping->update(['is_active' => false]);
+
+            return $mapping;
+        }
         if (! $mapping->exists) {
             $seed = ShopYourVibeCollectionMapping::query()
                 ->where('shopify_collection_id', $collection['gid'])
@@ -158,7 +170,7 @@ class ShopYourVibeAssignmentService
         $mapping->fill([
             'collection_name' => $collection['title'] ?: $card['name'],
             'collection_handle' => $collection['handle'],
-            'is_active' => true,
+            'is_active' => empty($collection['unavailable']) && ! ShopYourVibeCollectionMapping::isConfirmedMissing($collection['gid']),
         ]);
 
         // A configured value wins. Detection only fills a missing membership tag.
@@ -173,6 +185,9 @@ class ShopYourVibeAssignmentService
     public function configure(int $id, array $values): ShopYourVibeCollectionMapping
     {
         $mapping = ShopYourVibeCollectionMapping::findOrFail($id);
+        if (! $mapping->is_active || ShopYourVibeCollectionMapping::isConfirmedMissing($mapping->shopify_collection_id)) {
+            throw new RuntimeException(ShopYourVibeCollectionMapping::MISSING_MESSAGE.'. Editing is disabled.');
+        }
         $mapping->update([
             'membership_tag' => $this->nullable($values['membership_tag'] ?? null),
             'design_value' => $this->nullable($values['design_value'] ?? null),
@@ -317,11 +332,12 @@ class ShopYourVibeAssignmentService
         $mappings = ShopYourVibeCollectionMapping::query()
             ->where('parent_collection_id', $parentGid)
             ->where('is_active', true)
+            ->whereNotIn('shopify_collection_id', ShopYourVibeCollectionMapping::confirmedMissingIds())
             ->get();
         $selected = array_fill_keys(array_unique($selectedCollectionGids), true);
 
         foreach (array_keys($selected) as $gid) {
-            if (! $mappings->contains('shopify_collection_id', $gid)) {
+            if (! $mappings->contains('shopify_collection_id', $gid) || ShopYourVibeCollectionMapping::isConfirmedMissing($gid)) {
                 throw new RuntimeException('One of the selected Shop Your Vibes is not configured for this collection.');
             }
         }
@@ -351,7 +367,8 @@ class ShopYourVibeAssignmentService
 
         $futureTagKeys = $currentByKey->keys()->reject(fn ($key) => collect($remove)->contains(fn ($tag) => mb_strtolower(trim($tag)) === $key));
         $futureTagKeys = $futureTagKeys->merge(collect($add)->map(fn ($tag) => mb_strtolower(trim($tag))))->unique();
-        $globalMappings = ShopYourVibeCollectionMapping::query()->where('is_active', true)->get();
+        $globalMappings = ShopYourVibeCollectionMapping::query()->where('is_active', true)
+            ->whereNotIn('shopify_collection_id', ShopYourVibeCollectionMapping::confirmedMissingIds())->get();
         $activeMappings = $globalMappings->filter(fn ($mapping) => filled($mapping->membership_tag)
             && $futureTagKeys->contains(mb_strtolower(trim($mapping->membership_tag))));
         $addedTagKeys = collect($add)->map(fn ($tag) => mb_strtolower(trim($tag)));

@@ -987,8 +987,8 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
         ->assertSee('data-refresh="1"', false);
 
     expect($this->fake->calls)->toBe([])
-        ->and($this->draft->fresh()->pending)->toBeFalse()
-        ->and($this->draft->fresh()->status)->toBe('synced')
+        ->and($this->draft->fresh()->pending)->toBeTrue()
+        ->and($this->draft->fresh()->status)->toBe('pending')
         ->and($this->draft->fresh()->last_error)->toBeNull();
     Bus::assertDispatched(RefreshShopYourVibeDraft::class, function (RefreshShopYourVibeDraft $job) use ($revision): bool {
         $reflection = new ReflectionClass($job);
@@ -1000,7 +1000,7 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
         $discard->setAccessible(true);
 
         return $draftId->getValue($job) === $this->draft->id
-            && $jobRevision->getValue($job) === $revision + 2
+            && $jobRevision->getValue($job) === $revision + 1
             && $discard->getValue($job) === true;
     });
 });
@@ -2461,6 +2461,37 @@ it('saves a reorder from a reloaded page and ignores an older reorder from that 
         ->and($stale['ids'])->toBe($newer)
         ->and(array_column($this->draft->fresh()->desired['collections'][$gid]['products'], 'id'))->toBe($newer);
 });
+
+it('replaces ignored product grids when Shopify confirms updated titles or order with unchanged membership', function (string $change) {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    vibeLoadProducts($this);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->draft->collection_gid);
+    $keys = function ($html) {
+        preg_match_all('/wire:key="((?:parent-products-|vibe-products-)[^"]+)"/', $html, $matches);
+
+        return $matches[1];
+    };
+    $before = $keys($page->html());
+    foreach ($this->fake->collections as &$collection) {
+        if ($change === 'title') {
+            $collection['products']['nodes'][0]['title'] = 'Fresh browser title';
+        } else {
+            $collection['products']['nodes'] = array_reverse($collection['products']['nodes']);
+        }
+    }
+    unset($collection);
+    $this->workflow->refresh($this->draft->id, $this->draft->revision);
+    $page->call('pollPush');
+    $after = $keys($page->html());
+    expect($after)->not->toBe($before);
+    if ($change === 'title') {
+        $page->assertSee('Fresh browser title');
+    }
+    $page->call('pollPush');
+    expect($keys($page->html()))->toBe($after);
+})->with(['title', 'order']);
 
 it('does not re-render the product grid while checking background status', function () {
     Role::findOrCreate(RolesEnum::Admin->value);

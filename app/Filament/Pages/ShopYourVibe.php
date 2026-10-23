@@ -341,19 +341,8 @@ class ShopYourVibe extends Page
                 if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true)) {
                     throw new \RuntimeException('Wait for the Shopify operation to finish before refreshing.');
                 }
-                $snapshot = $draft->snapshot;
-                $draft->update([
-                    'desired' => $snapshot,
-                    'pending' => false,
-                    'status' => 'synced',
-                    'last_error' => null,
-                    'progress' => [],
-                    'remote_jobs' => [],
-                    'operation' => null,
-                    'revision' => $draft->revision + 1,
-                ]);
-                $this->accept($draft->refresh());
-                $this->dispatch('vibe-form-saved');
+                // Discard only after verified retrieval. A missing target must
+                // retain its pending edits and historical snapshot for recovery.
             }
             if ($gid = $this->draft()?->collection_gid) {
                 $this->refreshError = null;
@@ -797,6 +786,7 @@ class ShopYourVibe extends Page
         $this->guard();
 
         return ShopifyCollection::query()->whereNotNull('shopify_id')
+            ->whereNotIn('shopify_id', ShopYourVibeCollectionMapping::confirmedMissingIds())
             ->whereIn('id', ShopifyCollection::query()->selectRaw('MAX(id)')->groupBy('shopify_id'))
             ->when($this->addingParent, fn ($query) => $query->whereNotIn('shopify_id', array_column($this->parents, 'gid')));
     }
@@ -859,6 +849,7 @@ class ShopYourVibe extends Page
             $draft = $this->draft();
             $card = collect($draft->desired['cards'])->firstWhere('key', $key);
             abort_unless($card, 404);
+            app(ShopYourVibeWorkflow::class)->assertCollectionAvailable($draft, $card['unavailable_collection_gid'] ?? $card['collection_gid'] ?? null);
             $this->activeCard = $key;
             $this->cardForm = array_intersect_key($card, array_flip(['name', 'image', 'image_path', 'image_url', 'link']));
             $mapping = collect($this->vibeMappings)->firstWhere('shopify_collection_id', $card['collection_gid']);
@@ -901,9 +892,7 @@ class ShopYourVibe extends Page
 
     public function removeCard(string $key): void
     {
-        $collectionGid = collect($this->draft()?->desired['cards'] ?? [])->firstWhere('key', $key)['collection_gid'] ?? null;
         $this->change('remove_card', ['key' => $key]);
-        $this->deactivateCardMapping($collectionGid);
         if ($this->activeCard === $key) {
             $this->activeCard = null;
             $this->cardForm = [];
@@ -943,7 +932,9 @@ class ShopYourVibe extends Page
                     if ($draft->status === 'failed') {
                         throw new \RuntimeException($draft->last_error ?: 'Shopify could not remove this Vibe.');
                     }
-                    $this->deactivateCardMapping($collectionGid);
+                    if ($draft->status === 'synced') {
+                        $this->deactivateCardMapping($collectionGid);
+                    }
                     if ($this->activeCard === $key) {
                         $this->activeCard = null;
                         $this->cardForm = [];
@@ -1562,6 +1553,9 @@ class ShopYourVibe extends Page
                 }
             }
             $this->accept($draft);
+            if ($refreshEnded) {
+                $this->loadAssignmentOverview();
+            }
             if ($previous && $previous !== $draft->status && $draft->status === 'synced' && in_array($previous, ['creating', 'deleting', 'pushing'], true)) {
                 $this->loadAssignmentOverview();
                 Notification::make()
@@ -1714,15 +1708,20 @@ class ShopYourVibe extends Page
                 continue;
             }
             $collection = $this->mappingCollectionSummary($draft, $gid, $card);
+            if (! empty($draft->desired['collections'][$gid]['unavailable']) || ShopYourVibeCollectionMapping::isConfirmedMissing($gid)) {
+                continue;
+            }
             $mapping = $existing->get($gid);
             if (! $mapping) {
                 $mapping = $service->syncMapping($draft->collection_gid, $card, $collection);
             }
-            $mappings[$gid] = $mapping->toArray() + ['product_count' => $collection['product_count']];
+            if ($mapping->is_active) {
+                $mappings[$gid] = $mapping->toArray() + ['product_count' => $collection['product_count']];
+            }
         }
         $represented = array_keys($mappings);
         $missing = $existing->where('is_active', true)->keys()->diff($represented);
-        if ($missing->isNotEmpty()) {
+        if ($missing->isNotEmpty() && ! $draft->pending) {
             $service->deactivateMissing($draft->collection_gid, $represented);
         }
         $this->vibeMappings = array_values($mappings);
@@ -2347,7 +2346,14 @@ class ShopYourVibe extends Page
             }
         }
         $parents = $parents->filter(fn ($parent) => $this->search === '' || str_contains(strtolower(($parent['title'] ?? '').' '.($parent['handle'] ?? '')), strtolower($this->search)));
+        $unavailableCollectionIds = array_values(array_unique(array_merge(
+            ShopYourVibeCollectionMapping::confirmedMissingIds(),
+            array_keys(array_filter($draft?->desired['collections'] ?? [], fn ($collection) => ! empty($collection['unavailable']))),
+        )));
         $card = $draft ? collect($draft->desired['cards'])->firstWhere('key', $this->activeCard) : null;
+        if ($card && in_array($card['unavailable_collection_gid'] ?? $card['collection_gid'] ?? null, $unavailableCollectionIds, true)) {
+            $card = null;
+        }
         $collection = $card ? ($draft->desired['collections'][$card['collection_gid']] ?? null) : null;
         if ($collection) {
             $collection['products'] = $this->presentProducts($draft, $collection['products'] ?? []);
@@ -2433,7 +2439,7 @@ class ShopYourVibe extends Page
             ? (string) count($draft->desired['cards'] ?? [])
             : ($hydrationState === 'failed' ? 'Not loaded' : 'Loading…');
 
-        return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel', 'progressStage', 'progressCount', 'progressDone', 'progressTotal') + [
+        return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel', 'progressStage', 'progressCount', 'progressDone', 'progressTotal', 'unavailableCollectionIds') + [
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }

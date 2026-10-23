@@ -673,15 +673,16 @@
                             <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so products cannot be reordered here.</p>
                         @endif
                     </div>
+                    @php($confirmedParentProductsVersion = md5((string) ($draft->desired['collections'][$draft->collection_gid]['retrieval_started_at'] ?? $draft->refreshed_at)))
                     @if ($productsLoaded && $parentCanSort)
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-{{ $productMembership }}"
+                        wire:key="parent-products-{{ $draft->id }}-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}"
                         wire:ignore
                         x-sortable data-sortable-animation-duration="0"
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
                     @elseif ($productsLoaded)
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ $productMembership }}"
+                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}"
                         wire:ignore>
                     @else
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
@@ -773,20 +774,27 @@
                         <button type="button" class="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-500 disabled:opacity-60" wire:click.stop="openCollectionPicker(true)" wire:loading.attr="disabled" wire:target="openCollectionPicker">Add Vibe</button>
                     </div>
                 </div>
+                @php($hasUnavailableVibes = collect($draft->desired['cards'])->contains(fn ($vibe) => in_array($vibe['unavailable_collection_gid'] ?? $vibe['collection_gid'] ?? null, $unavailableCollectionIds, true)))
                 <div data-order-grid class="syv-card-grid"
                     wire:key="vibe-grid-{{ $draft->id }}-{{ in_array($draft->status, ['pushing', 'creating', 'deleting'], true) ? 'locked' : 'editable' }}"
-                    @if (! in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
+                    @if (! $hasUnavailableVibes && ! in_array($draft->status, ['pushing', 'creating', 'deleting'], true))
                         x-sortable data-sortable-animation-duration="200"
                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex) saveOrder($el, 'cards')"
                     @endif>
                     @foreach ($draft->desired['cards'] as $vibe)
+                        @php($vibeUnavailable = in_array($vibe['unavailable_collection_gid'] ?? $vibe['collection_gid'] ?? null, $unavailableCollectionIds, true))
                         <article wire:key="vibe-{{ md5($vibe['key']) }}" data-order-key="{{ $vibe['key'] }}" x-sortable-item="{{ md5($vibe['key']) }}"
+                            data-collection-unavailable="{{ $vibeUnavailable ? 'true' : 'false' }}"
                             class="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-700 dark:bg-gray-900 {{ $activeCard === $vibe['key'] ? 'syv-vibe-card-active' : '' }}">
                             @if ($activeCard === $vibe['key'])
                                 <span class="syv-vibe-active-pill">Editing</span>
                             @endif
-                            <button type="button" x-sortable-handle x-bind:disabled="savingOrder" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">Drag</button>
-                            <button type="button" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
+                            @if ($vibeUnavailable)
+                                <p role="status" class="mb-3 text-sm font-semibold text-danger-600">Collection no longer exists in Shopify</p>
+                                <p class="mb-3 text-xs text-gray-500">Editing is disabled. Historical data and existing draft changes are preserved.</p>
+                            @endif
+                            <button type="button" x-sortable-handle x-bind:disabled="savingOrder || {{ $hasUnavailableVibes ? 'true' : 'false' }}" class="syv-drag-handle" aria-label="Drag {{ $vibe['name'] }}">Drag</button>
+                            <button type="button" @disabled($vibeUnavailable) wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty && !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false" class="block w-full text-left">
                                 @if ($vibe['image_url'])<img src="{{ $vibe['image_url'] }}" alt="" draggable="false" class="syv-vibe-image" loading="lazy">@else<div class="syv-vibe-image syv-image-placeholder">Choose an image</div>@endif
                                 <h4 class="my-3 font-semibold">{{ $vibe['name'] }}</h4>
                                 @php($vibeMapping = collect($vibeMappings)->firstWhere('shopify_collection_id', $vibe['collection_gid']))
@@ -805,10 +813,10 @@
                                 @endif
                             </button>
                             <div class="flex flex-wrap gap-2">
-                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">Up</x-filament::button>
-                                <x-filament::button size="xs" color="gray" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, 1)" aria-label="Move vibe later">Down</x-filament::button>
-                                <x-filament::button size="xs" color="gray" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty &amp;&amp; !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false">Edit</x-filament::button>
-                                <x-filament::button size="xs" color="danger" wire:click="mountAction('removeVibe', {{ \Illuminate\Support\Js::from(['key' => $vibe['key']]) }})">Remove</x-filament::button>
+                                <x-filament::button size="xs" color="gray" :disabled="$hasUnavailableVibes" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, -1)" aria-label="Move vibe earlier">Up</x-filament::button>
+                                <x-filament::button size="xs" color="gray" :disabled="$hasUnavailableVibes" x-on:click="move($el, 'cards', {{ \Illuminate\Support\Js::from($vibe['key']) }}, 1)" aria-label="Move vibe later">Down</x-filament::button>
+                                <x-filament::button size="xs" color="gray" :disabled="$vibeUnavailable" wire:click="editCard({{ \Illuminate\Support\Js::from($vibe['key']) }})" x-on:click="if (formDirty &amp;&amp; !confirm('Discard unsaved card fields and open this vibe?')) $event.stopImmediatePropagation(); else formDirty = false">Edit</x-filament::button>
+                                <x-filament::button size="xs" color="danger" :disabled="$vibeUnavailable" wire:click="mountAction('removeVibe', {{ \Illuminate\Support\Js::from(['key' => $vibe['key']]) }})">Remove</x-filament::button>
                             </div>
                         </article>
                     @endforeach
@@ -877,15 +885,16 @@
                                 @endif
                                 @php($canSort = $draft->status !== 'pushing' && $collectionManualSupported)
                                 @php($vibeProductMembership = md5(implode('|', array_column($collection['products'], 'id'))))
+                                @php($confirmedVibeProductsVersion = md5((string) ($collection['retrieval_started_at'] ?? $draft->refreshed_at)))
                                 @if ($canSort)
                                 <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable-{{ $vibeProductMembership }}"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}"
                                         wire:ignore
                                         x-sortable data-sortable-animation-duration="0"
                                         x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
                                 @else
                                 <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed-{{ $vibeProductMembership }}"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}"
                                     wire:ignore>
                                 @endif
                                     @foreach ($collection['products'] as $product)
@@ -1048,6 +1057,7 @@
                 <p class="mb-4 text-sm text-gray-500">SKU: {{ $managedProduct['sku'] ?: 'No SKU' }}</p>
                 <div class="space-y-3">
                     @foreach ($vibeMappings as $mapping)
+                        @continue(in_array($mapping['shopify_collection_id'], $unavailableCollectionIds, true))
                         <label class="flex items-start gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
                             <input type="checkbox" wire:model="selectedVibes" value="{{ $mapping['shopify_collection_id'] }}" @disabled(blank($mapping['membership_tag'] ?? null))>
                             <span><strong>{{ $mapping['collection_name'] }}</strong><small class="block text-gray-500">{{ ($mapping['membership_tag'] ?? null) ?: 'Membership tag requires configuration' }}</small></span>

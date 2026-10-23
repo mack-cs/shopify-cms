@@ -53,7 +53,7 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
         if (! $draft) {
             throw new \RuntimeException('This Shop Your Vibe draft no longer exists.');
         }
-        if ($draft->pending || (int) $draft->revision !== $this->revision) {
+        if (($draft->pending && ! $this->discard) || (int) $draft->revision !== $this->revision) {
             Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                 'state' => 'skipped',
                 'done' => null,
@@ -93,7 +93,7 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
             ], 120);
         } catch (Throwable $exception) {
             $current = ShopYourVibeDraft::find($this->draftId);
-            if ($current && ($current->pending || (int) $current->revision !== $this->revision)) {
+            if ($current && (($current->pending && ! $this->discard) || (int) $current->revision !== $this->revision)) {
                 Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                     'state' => 'skipped',
                     'kind' => 'refresh',

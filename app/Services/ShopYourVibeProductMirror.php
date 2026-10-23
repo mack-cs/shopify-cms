@@ -7,6 +7,7 @@ use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
+use App\Models\ShopYourVibeDraft;
 use Illuminate\Support\Facades\DB;
 
 class ShopYourVibeProductMirror
@@ -25,19 +26,46 @@ class ShopYourVibeProductMirror
     {
         $products = [];
         foreach (($state['collections'] ?? []) as $collection) {
+            if (! empty($collection['unavailable'])) {
+                continue;
+            }
             foreach (($collection['products'] ?? []) as $product) {
-                if (is_array($product) && filled($product['id'] ?? null)) {
+                if (is_array($product) && empty($product['is_prelaunch_draft'])
+                    && preg_match('~^gid://shopify/Product/\d+$~', (string) ($product['id'] ?? ''))) {
                     $gid = (string) $product['id'];
+                    $product['_syv_retrieval_started_at'] = $collection['retrieval_started_at'] ?? null;
                     $products[$gid] = isset($products[$gid])
-                        ? $this->mergeProductCards($products[$gid], $product)
+                        ? $this->mergeProductCards($product, $products[$gid])
                         : $product;
                 }
             }
         }
 
-        foreach ($products as $product) {
-            $this->mirrorProductCard($product);
-        }
+        // Lock shared product rows in a stable order across different parents.
+        DB::transaction(function () use ($products, $state): void {
+            Product::query()->whereIn('shopify_id', array_keys($products))->orderBy('id')->lockForUpdate()->get(['id']);
+            $newer = [];
+            foreach (ShopYourVibeDraft::query()->where('collection_gid', '!=', $state['parent']['gid'] ?? '')->get(['snapshot']) as $draft) {
+                foreach ($draft->snapshot['collections'] ?? [] as $collection) {
+                    if (! empty($collection['unavailable']) || empty($collection['retrieval_started_at'])) {
+                        continue;
+                    }
+                    foreach ($collection['products'] ?? [] as $card) {
+                        $gid = $card['id'] ?? '';
+                        if (isset($products[$gid])) {
+                            $newer[$gid] = max($newer[$gid] ?? '', $collection['retrieval_started_at']);
+                        }
+                    }
+                }
+            }
+            foreach ($products as $gid => $product) {
+                $observed = $product['_syv_retrieval_started_at'] ?? null;
+                if ($observed !== null && isset($newer[$gid]) && $newer[$gid] > $observed) {
+                    continue;
+                }
+                $this->mirrorProductCard($product);
+            }
+        });
     }
 
     /**
@@ -76,41 +104,11 @@ class ShopYourVibeProductMirror
 
         $existingMetafields = is_array($existing['shopify_metafields'] ?? null) ? $existing['shopify_metafields'] : [];
         $incomingMetafields = is_array($incoming['shopify_metafields'] ?? null) ? $incoming['shopify_metafields'] : [];
-        $existingHasMetafields = $this->hasMetafieldValue($existingMetafields);
-        $incomingHasMetafields = $this->hasMetafieldValue($incomingMetafields);
-
-        if ($existingHasMetafields && ! $incomingHasMetafields) {
-            foreach (['tags', 'title', 'vendor', 'type', 'status'] as $key) {
-                if (array_key_exists($key, $existing)) {
-                    $merged[$key] = $existing[$key];
-                }
-            }
-        }
-
-        foreach ($existingMetafields as $header => $entry) {
-            $incomingValue = data_get($incomingMetafields, $header.'.value');
-            if (blank($incomingValue) && filled(data_get($entry, 'value'))) {
-                $incomingMetafields[$header] = $entry;
-            }
-        }
-
-        $merged['shopify_metafields'] = $incomingMetafields ?: $existingMetafields;
+        // The parent/first fresh card has precedence over linked duplicates.
+        // Fill only omitted fields; a confirmed empty value stays empty.
+        $merged['shopify_metafields'] = array_replace($existingMetafields, $incomingMetafields);
 
         return $merged;
-    }
-
-    /**
-     * @param array<string, mixed> $metafields
-     */
-    private function hasMetafieldValue(array $metafields): bool
-    {
-        foreach ($metafields as $entry) {
-            if (filled(data_get($entry, 'value'))) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -121,6 +119,10 @@ class ShopYourVibeProductMirror
     {
         DB::transaction(function () use ($product, $card, $values): void {
             $row = $this->primaryRow($product);
+            $baseline = [];
+            foreach (self::FIELD_HEADERS as $attribute => $header) {
+                $baseline[$attribute] = $row ? $row->get($header) : $product->getAttribute($attribute);
+            }
 
             if ($row && $values !== []) {
                 foreach ($values as $header => $value) {
@@ -150,7 +152,7 @@ class ShopYourVibeProductMirror
             }
 
             $this->mirrorMetafieldRows($product, $card['shopify_metafields'] ?? []);
-            $this->mirrorDrafts($product, $values);
+            $this->mirrorDrafts($product, $values, $baseline);
             $this->upsertTrustedDropdownOptions($product->fresh(), $values);
 
             if ($row) {
@@ -181,6 +183,10 @@ class ShopYourVibeProductMirror
 
         $values = [];
         foreach (self::FIELD_HEADERS as $attribute => $header) {
+            if (array_key_exists($header, $metafields) && $metafields[$header] === null) {
+                $values[$header] = '';
+                continue;
+            }
             $entry = $metafields[$header] ?? null;
             if (! is_array($entry)) {
                 continue;
@@ -194,7 +200,7 @@ class ShopYourVibeProductMirror
             $values[$header] = $value;
         }
 
-        return array_filter($values, static fn (string $value): bool => $value !== '');
+        return $values;
     }
 
     /**
@@ -273,8 +279,11 @@ class ShopYourVibeProductMirror
         }
 
         foreach (self::FIELD_HEADERS as $header) {
+            if (! array_key_exists($header, $metafields)) {
+                continue;
+            }
             $entry = $metafields[$header] ?? null;
-            if (! is_array($entry)) {
+            if ($entry !== null && ! is_array($entry)) {
                 continue;
             }
 
@@ -297,29 +306,25 @@ class ShopYourVibeProductMirror
     /**
      * @param array<string, string> $values
      */
-    private function mirrorDrafts(Product $product, array $values): void
+    private function mirrorDrafts(Product $product, array $values, array $baseline): void
     {
         if ($values === []) {
             return;
         }
 
         NewProductDraft::query()
-            ->where(function ($query) use ($product): void {
-                $shopifyId = trim((string) ($product->shopify_id ?? ''));
-                $handle = trim((string) ($product->handle ?? ''));
-
-                if ($shopifyId !== '') {
-                    $query->where('shopify_id', $shopifyId);
-                }
-                if ($handle !== '') {
-                    $query->orWhere('handle', $handle);
-                }
-            })
+            // Handles can be reused or changed; only verified identity may join
+            // confirmed values to a local product draft.
+            ->where('shopify_id', $product->shopify_id)
+            ->orderBy('id')->lockForUpdate()
             ->get()
-            ->each(function (NewProductDraft $draft) use ($values): void {
+            ->each(function (NewProductDraft $draft) use ($values, $baseline): void {
                 $updates = [];
                 foreach (self::FIELD_HEADERS as $attribute => $header) {
-                    if (isset($values[$header])) {
+                    // A draft value differing from the previous confirmed value
+                    // is a local edit, including a deliberately cleared value.
+                    if (isset($values[$header])
+                        && trim((string) $draft->getAttribute($attribute)) === trim((string) ($baseline[$attribute] ?? ''))) {
                         $updates[$attribute] = $values[$header] !== '' ? $values[$header] : null;
                     }
                 }

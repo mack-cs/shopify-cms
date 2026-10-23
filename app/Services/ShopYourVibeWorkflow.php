@@ -194,6 +194,7 @@ class ShopYourVibeWorkflow
     public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false): ShopYourVibeDraft
     {
         $draft = $this->editable($id, $revision, false, $strictRevision);
+        $revision = $draft->revision;
         if ($draft->pending && ! $discard) {
             throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
         }
@@ -204,22 +205,100 @@ class ShopYourVibeWorkflow
             throw new RuntimeException('A Shopify operation is still awaiting confirmation. Retry it before refreshing.');
         }
         $state = $this->pullState($draft);
-        app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($state);
-
-        $refreshed = DB::transaction(function () use ($id, $revision, $state, $discard, $strictRevision) {
-            $draft = $this->editable($id, $revision, true, $strictRevision);
+        // Different parents share catalogue products. Serialize only publication,
+        // after network reads, so the mirror sees the latest committed provenance.
+        $refreshed = Cache::lock('syv-confirmed-state-publication', 960)->block(5, fn () => DB::transaction(function () use ($id, $revision, $state, $discard) {
+            // Never publish an older lookup over a newer deletion or local edit.
+            $draft = $this->editable($id, $revision, true, true);
             if ($draft->pending && ! $discard) {
                 throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
             }
             if (! empty($draft->operation) && ! $discard) {
                 throw new RuntimeException('A Shopify operation is still awaiting confirmation. Retry it before refreshing.');
             }
-            $draft->update(['snapshot' => $state, 'desired' => $state, 'pending' => false, 'status' => 'synced',
-                'last_error' => null, 'progress' => [], 'remote_jobs' => [], 'operation' => null,
-                'revision' => $draft->revision + 1, 'refreshed_at' => now()]);
+            // Another parent may have confirmed deletion while this lookup ran.
+            foreach (ShopYourVibeCollectionMapping::confirmedMissingIds() as $gid) {
+                if (isset($state['collections'][$gid])) {
+                    $state['collections'][$gid] = $this->keptUnavailableCollection($draft, $gid);
+                    $state['missing_collection_ids'][] = $gid;
+                }
+            }
+            $state['missing_collection_ids'] = array_values(array_unique($state['missing_collection_ids'] ?? []));
+            $snapshot = $state;
+            $desired = $state;
+            foreach ($state['missing_collection_ids'] ?? [] as $gid) {
+                $affectedKeys = array_column(array_filter(array_merge(
+                    $draft->snapshot['cards'] ?? [], $draft->desired['cards'] ?? [],
+                ), fn ($card) => ($card['collection_gid'] ?? null) === $gid), 'key');
+                $beforeCards = collect($draft->snapshot['cards'] ?? [])->keyBy('key');
+                $afterCards = collect($draft->desired['cards'] ?? [])->keyBy('key');
+                $changedKeys = array_values(array_filter($affectedKeys, fn ($key) =>
+                    $this->fields($beforeCards->get($key)) !== $this->fields($afterCards->get($key))
+                    || array_search($key, array_column($draft->snapshot['cards'] ?? [], 'key'), true) !== array_search($key, array_column($draft->desired['cards'] ?? [], 'key'), true)
+                ));
+                // Keep both sides of a missing target's pending edit, even when
+                // the user discards other edits to refresh valid collections.
+                if (isset($draft->snapshot['collections'][$gid])) {
+                    $snapshot['collections'][$gid] = $draft->snapshot['collections'][$gid];
+                    $snapshot['collections'][$gid]['unavailable'] = true;
+                }
+                foreach (['snapshot', 'desired'] as $side) {
+                    if ($side === 'snapshot') {
+                        $target = &$snapshot;
+                    } else {
+                        $target = &$desired;
+                    }
+                    $target['collections'][$gid] ??= $this->keptUnavailableCollection($draft, $gid);
+                    $target['collections'][$gid]['card_history'] ??= [
+                        'snapshot' => $beforeCards->only($affectedKeys)->values()->all(),
+                        'desired' => $afterCards->only($affectedKeys)->values()->all(),
+                    ];
+                    $oldKeys = array_column($draft->{$side}['cards'] ?? [], 'key');
+                    $target['cards'] = array_values(array_filter($target['cards'], fn ($card) => ! in_array($card['key'], $changedKeys, true) || in_array($card['key'], $oldKeys, true)));
+                    foreach ($draft->{$side}['cards'] ?? [] as $oldPosition => $oldCard) {
+                        if (in_array($oldCard['key'], $changedKeys, true)) {
+                            if (($oldCard['collection_gid'] ?? null) !== $gid) {
+                                $oldCard['unavailable_collection_gid'] = $gid;
+                            }
+                            $index = array_search($oldCard['key'], array_column($target['cards'], 'key'), true);
+                            if ($index !== false) {
+                                $target['cards'][$index] = $oldCard;
+                                if ($side === 'desired' && $index !== $oldPosition) {
+                                    array_splice($target['cards'], $index, 1);
+                                    array_splice($target['cards'], min($oldPosition, count($target['cards'])), 0, [$oldCard]);
+                                }
+                            } else {
+                                $target['cards'][] = $oldCard;
+                            }
+                        }
+                    }
+                    foreach (['delete_cards', 'delete_collections'] as $field) {
+                        foreach ($draft->{$side}[$field] ?? [] as $key => $deletion) {
+                            if (($deletion['gid'] ?? $deletion['card']['collection_gid'] ?? null) === $gid) {
+                                $target[$field][$key] = $deletion;
+                            }
+                        }
+                    }
+                    unset($target);
+                }
+            }
+            $missingPending = $this->different($snapshot, $desired);
+            $desired = $this->stagePublishedPlacements($desired, $draft->desired ?? []);
+            $pending = $this->different($snapshot, $desired);
+            $draft->update(['snapshot' => $snapshot, 'desired' => $desired, 'pending' => $pending, 'status' => $pending ? 'failed' : 'synced',
+                'last_error' => $pending ? ($missingPending
+                    ? ShopYourVibeCollectionMapping::MISSING_MESSAGE.'. Pending changes to this collection were kept and cannot be pushed.'
+                    : 'Prepared product positions are pending. Review them before pushing to Shopify.') : null,
+                'progress' => [], 'remote_jobs' => [], 'operation' => null,
+                'revision' => $draft->revision + 1, 'refreshed_at' => $pending ? $draft->refreshed_at : now()]);
+
+            $this->deactivateMissingMappings($draft, $desired);
+            $freshState = $state;
+            $freshState['collections'] = array_filter($state['collections'], fn ($collection) => empty($collection['unavailable']));
+            app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($freshState);
 
             return $draft;
-        });
+        }));
 
         return $refreshed;
     }
@@ -227,8 +306,10 @@ class ShopYourVibeWorkflow
     public function loadProducts(int $id, int $revision, string $key): ShopYourVibeDraft
     {
         $draft = $this->editable($id, $revision);
+        $revision = $draft->revision;
         $card = $this->card($draft->desired, $key);
         $gid = $card['collection_gid'] ?? throw new RuntimeException('Choose a synchronized collection link to manage this vibe’s products.');
+        $this->assertCollectionAvailable($draft, $card['unavailable_collection_gid'] ?? $gid);
         if (isset($draft->desired['collections'][$gid])) {
             return $draft;
         }
@@ -236,7 +317,7 @@ class ShopYourVibeWorkflow
         $this->assertCollectionLink($card, $collection);
 
         return DB::transaction(function () use ($id, $revision, $gid, $collection) {
-            $draft = $this->editable($id, $revision, true);
+            $draft = $this->editable($id, $revision, true, true);
             $desired = $draft->desired;
             $snapshot = $draft->snapshot;
             $desired['collections'][$gid] = $snapshot['collections'][$gid] = $collection;
@@ -257,6 +338,13 @@ class ShopYourVibeWorkflow
                 throw new RuntimeException('Shopify is still processing this draft. Retry the push to confirm completion before editing.');
             }
             $state = $draft->desired;
+            if (in_array($operation, ['edit_card', 'remove_card'], true)) {
+                $targetCard = $this->card($state, $input['key']);
+                $this->assertCollectionAvailable($draft, $targetCard['unavailable_collection_gid'] ?? $targetCard['collection_gid'] ?? null);
+            }
+            if ($operation === 'add_card') {
+                $this->assertCollectionAvailable($draft, $input['collection_gid'] ?? null);
+            }
             switch ($operation) {
                 case 'create_collection':
                     $importId = ShopifyCollection::where('shopify_id', $draft->collection_gid)->latest('id')->value('import_id')
@@ -315,6 +403,7 @@ class ShopYourVibeWorkflow
                     }
                     $fields['image'] = $fields['image'] ?? '';
                     $fields['collection_gid'] = $this->localLink($fields['link']);
+                    $this->assertCollectionAvailable($draft, $fields['collection_gid']);
                     if (str_starts_with($card['collection_gid'] ?? '', 'new:')) {
                         if ($fields['link'] !== $card['link']) {
                             throw new RuntimeException('Push the new collection before changing its link.');
@@ -357,9 +446,15 @@ class ShopYourVibeWorkflow
                     $state['cards'] = array_values(array_filter($state['cards'], fn ($card) => $card['key'] !== $input['key']));
                     // Do not push product edits for a collection no longer represented in this layout.
                     $gids = array_merge([$draft->collection_gid], array_column($state['cards'], 'collection_gid'));
-                    $state['collections'] = array_intersect_key($state['collections'], array_flip(array_filter($gids)));
+                    $state['collections'] = array_intersect_key($state['collections'], array_flip(array_filter(array_merge($gids, $state['missing_collection_ids'] ?? []))));
                     break;
                 case 'reorder_cards':
+                    foreach ($state['cards'] as $position => $card) {
+                        if ($this->collectionIsUnavailable($draft, $card['unavailable_collection_gid'] ?? $card['collection_gid'] ?? null)
+                            && ($input['keys'][$position] ?? null) !== $card['key']) {
+                            throw new RuntimeException(ShopYourVibeCollectionMapping::MISSING_MESSAGE.'. Sorting this card is disabled.');
+                        }
+                    }
                     $state['cards'] = $this->reorder($state['cards'], $input['keys'], 'key');
                     break;
                 case 'enable_manual':
@@ -367,6 +462,7 @@ class ShopYourVibeWorkflow
                 case 'remove_product':
                 case 'reorder_products':
                     $gid = $input['collection_gid'];
+                    $this->assertCollectionAvailable($draft, $gid);
                     if (($gid !== $draft->collection_gid && ! in_array($gid, array_column($state['cards'], 'collection_gid'), true)) || ! isset($state['collections'][$gid])) {
                         throw new RuntimeException('Open this vibe’s products first.');
                     }
@@ -417,6 +513,7 @@ class ShopYourVibeWorkflow
             $represented = array_values(array_unique(array_filter(array_merge(
                 [$draft->collection_gid],
                 array_column($state['cards'], 'collection_gid'),
+                $state['missing_collection_ids'] ?? [],
             ))));
             foreach ($state['delete_collections'] ?? [] as $gid => $deletion) {
                 if (in_array($gid, $represented, true)) {
@@ -445,6 +542,7 @@ class ShopYourVibeWorkflow
             if (! $draft->pending) {
                 throw new RuntimeException('There are no pending changes to push.');
             }
+            $this->assertMissingTargetsUnchanged($draft, $draft->desired, $draft->snapshot);
             $draft->update(['status' => 'pushing', 'last_error' => null, 'operation' => null, 'revision' => $draft->revision + 1]);
 
             return $draft;
@@ -624,7 +722,9 @@ class ShopYourVibeWorkflow
             return $draft;
         }
 
-        $confirmed = $this->confirmedState($draft, $state, array_column($state['cards'] ?? [], 'id'));
+        $this->assertMissingTargetsUnchanged($draft, $state, $draft->snapshot);
+        $allowedUnavailable = array_values(array_filter(array_keys($state['collections']), fn ($gid) => $this->collectionIsUnavailable($draft, $gid)));
+        $confirmed = $this->confirmedState($draft, $state, array_column($state['cards'] ?? [], 'id'), $allowedUnavailable);
         $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
             'last_error' => null, 'remote_jobs' => [], 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
 
@@ -643,6 +743,11 @@ class ShopYourVibeWorkflow
             $this->shopify->definition();
             $state = $draft->desired;
             $baseline = $draft->snapshot;
+            $this->assertMissingTargetsUnchanged($draft, $state, $baseline);
+            $allowedUnavailable = array_values(array_filter(
+                array_unique(array_merge(array_keys($state['collections']), array_column($state['cards'], 'collection_gid'))),
+                fn ($gid) => $this->collectionIsUnavailable($draft, $gid),
+            ));
             $progress = [];
             // Resume asynchronous work before calculating another mutation for that collection.
             foreach (($draft->remote_jobs ?? []) as $gid => $job) {
@@ -868,7 +973,7 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
                 Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
             }
-            $confirmed = $this->confirmedState($draft, $state, $ids);
+            $confirmed = $this->confirmedState($draft, $state, $ids, $allowedUnavailable);
             $draft->update(['snapshot' => $confirmed, 'desired' => $confirmed, 'pending' => false, 'status' => 'synced',
                 'last_error' => null, 'remote_jobs' => [], 'progress' => $progress, 'refreshed_at' => now(), 'revision' => $draft->revision + 1]);
         } catch (ShopYourVibeBusyException $e) {
@@ -889,7 +994,7 @@ class ShopYourVibeWorkflow
         }
     }
 
-    private function confirmedState(ShopYourVibeDraft $draft, array $state, array $ids): array
+    private function confirmedState(ShopYourVibeDraft $draft, array $state, array $ids, array $allowedUnavailable = []): array
     {
         $confirmed = $this->shopify->parent($draft->collection_gid);
         if ($confirmed['reference_ids'] !== $ids || array_map($this->shopifyComparable(...), $confirmed['cards']) !== array_map($this->shopifyComparable(...), $state['cards'])) {
@@ -901,6 +1006,11 @@ class ShopYourVibeWorkflow
         )));
         foreach ($collectionGids as $gid) {
             if (! preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
+                continue;
+            }
+            if (in_array($gid, $allowedUnavailable, true)) {
+                // Only unchanged, already-known unavailable targets may be kept
+                // as history. A new missing response still follows F1 failure.
                 continue;
             }
             try {
@@ -923,6 +1033,12 @@ class ShopYourVibeWorkflow
             }
         }
         $confirmed['collections'] = $state['collections'];
+        if (! empty($state['missing_collection_ids'])) {
+            $confirmed['missing_collection_ids'] = $state['missing_collection_ids'];
+        }
+        if (! empty($state['unavailable_collections'])) {
+            $confirmed['unavailable_collections'] = $state['unavailable_collections'];
+        }
 
         return $confirmed;
     }
@@ -1099,7 +1215,7 @@ class ShopYourVibeWorkflow
 
         $collections = $this->placementCollectionRules($parentGid, $state);
         foreach ($represented as $gid) {
-            if (! isset($state['collections'][$gid], $collections[$gid])) {
+            if (! isset($state['collections'][$gid], $collections[$gid]) || ! empty($state['collections'][$gid]['unavailable'])) {
                 continue;
             }
             $previousList = collect(data_get($previous, "collections.{$gid}.products", []))->values();
@@ -1110,7 +1226,9 @@ class ShopYourVibeWorkflow
                 $id = $draftId;
                 $liveGid = trim((string) ($draft->shopify_id ?? ''));
                 if ($liveGid !== '' && preg_match('~^gid://shopify/Product/\d+$~', $liveGid)) {
-                    $id = $liveGid;
+                    // A live product's identity, values, membership and relative
+                    // order come exclusively from this Shopify retrieval.
+                    continue;
                 }
                 if (! $this->draftBelongsToCollection($draft, $collections[$gid])) {
                     unset($state['draft_placements'][$draftId][$gid], $state['draft_placements'][$id][$gid]);
@@ -1136,6 +1254,35 @@ class ShopYourVibeWorkflow
                 }
             }
             $state['collections'][$gid]['products'] = $products->values()->all();
+        }
+
+        return $state;
+    }
+
+    /** Carry a prepared prelaunch position into desired only, using the fresh live card. */
+    private function stagePublishedPlacements(array $state, array $previous): array
+    {
+        foreach (NewProductDraft::query()->whereNotNull('shopify_id')->get() as $productDraft) {
+            $gid = trim((string) $productDraft->shopify_id);
+            if (! preg_match('~^gid://shopify/Product/\d+$~', $gid)) {
+                continue;
+            }
+            $draftId = $this->draftProductId($productDraft);
+            foreach ($state['collections'] as $collectionGid => &$collection) {
+                if (! empty($collection['unavailable'])) {
+                    continue;
+                }
+                $old = $previous['collections'][$collectionGid]['products'] ?? [];
+                $position = array_search($draftId, array_column($old, 'id'), true);
+                $livePosition = array_search($gid, array_column($collection['products'] ?? [], 'id'), true);
+                if ($position === false || $livePosition === false) {
+                    continue;
+                }
+                $card = $collection['products'][$livePosition];
+                array_splice($collection['products'], $livePosition, 1);
+                array_splice($collection['products'], min($position, count($collection['products'])), 0, [$card]);
+            }
+            unset($collection);
         }
 
         return $state;
@@ -1311,6 +1458,7 @@ class ShopYourVibeWorkflow
         $token = (string) Str::uuid();
         if ($mode === 'existing') {
             $collection = $this->localCollection((string) ($input['collection_gid'] ?? ''));
+            $this->assertCollectionAvailable($draft, $collection->shopify_id);
             if ($collection->shopify_id === $draft->collection_gid) {
                 throw new RuntimeException('Choose a collection other than the parent collection being edited.');
             }
@@ -1380,6 +1528,7 @@ class ShopYourVibeWorkflow
         if (! is_array($card)) {
             throw new RuntimeException('This vibe is no longer in the draft.');
         }
+        $this->assertCollectionAvailable($draft, $card['unavailable_collection_gid'] ?? $card['collection_gid'] ?? null);
         $collection = $mode === 'collection' ? $this->assertCollectionDeletable($draft, $card) : null;
 
         return ['mode' => $mode, 'key' => $card['key'], 'card' => $card, 'collection' => $collection];
@@ -1413,8 +1562,9 @@ class ShopYourVibeWorkflow
 
     private function runCreate(ShopYourVibeDraft $draft): void
     {
-        $this->shopify->definition();
         $payload = $draft->operation['payload'];
+        $this->assertCollectionAvailable($draft, $payload['collection_gid'] ?? null);
+        $this->shopify->definition();
         $checkpoints = $draft->operation['checkpoints'];
         if (empty($checkpoints['attached'])) {
             $remote = $this->shopify->parent($draft->collection_gid);
@@ -1475,8 +1625,9 @@ class ShopYourVibeWorkflow
 
     private function runDelete(ShopYourVibeDraft $draft): void
     {
-        $this->shopify->definition();
         $payload = $draft->operation['payload'];
+        $this->assertCollectionAvailable($draft, $payload['card']['unavailable_collection_gid'] ?? $payload['card']['collection_gid'] ?? null);
+        $this->shopify->definition();
         $checkpoints = $draft->operation['checkpoints'];
         $card = $payload['card'];
         if (empty($checkpoints['detached'])) {
@@ -1545,6 +1696,7 @@ class ShopYourVibeWorkflow
                 'refreshed_at' => now(),
                 'revision' => $locked->revision + 1,
             ]);
+            $this->deactivateMissingMappings($locked, $state);
         });
         Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
     }
@@ -1567,8 +1719,16 @@ class ShopYourVibeWorkflow
         $state = $this->shopify->parent($draft->collection_gid);
         $state['collections'][$draft->collection_gid] = $this->pullCollection($draft, $draft->collection_gid, false);
         $unavailable = [];
+        $knownMissing = ShopYourVibeCollectionMapping::confirmedMissingIds();
+        $missingIds = $draft->desired['missing_collection_ids'] ?? [];
         foreach (array_unique(array_filter(array_column($state['cards'], 'collection_gid'))) as $gid) {
             if ($gid === $draft->collection_gid) {
+                continue;
+            }
+            if (in_array($gid, $knownMissing, true)) {
+                $missingIds[] = $gid;
+                $unavailable[] = ['gid' => $gid, 'message' => $this->unavailableCollectionMessage($draft, $gid, true)];
+                $state['collections'][$gid] = $this->keptUnavailableCollection($draft, $gid);
                 continue;
             }
             try {
@@ -1576,10 +1736,15 @@ class ShopYourVibeWorkflow
             } catch (ShopYourVibeCollectionUnavailableException) {
                 $message = $this->unavailableCollectionMessage($draft, $gid, true);
                 $unavailable[] = ['gid' => $gid, 'message' => $message];
+                $missingIds[] = $gid;
                 $state['collections'][$gid] = $this->keptUnavailableCollection($draft, $gid);
             }
         }
         $state['unavailable_collections'] = $unavailable;
+        $state['missing_collection_ids'] = array_values(array_unique($missingIds));
+        foreach ($state['missing_collection_ids'] as $gid) {
+            $state['collections'][$gid] ??= $this->keptUnavailableCollection($draft, $gid);
+        }
         $state = $this->hydrateDraftPlacements($draft->collection_gid, $state, $draft->desired ?? []);
 
         return $state;
@@ -1590,7 +1755,7 @@ class ShopYourVibeWorkflow
      */
     private function keptUnavailableCollection(ShopYourVibeDraft $draft, string $gid): array
     {
-        $previous = $draft->desired['collections'][$gid] ?? null;
+        $previous = $draft->desired['collections'][$gid] ?? $draft->snapshot['collections'][$gid] ?? null;
         if (is_array($previous) && array_key_exists('products', $previous)) {
             $previous['unavailable'] = true;
 
@@ -1633,7 +1798,70 @@ class ShopYourVibeWorkflow
         $name = $label !== '' ? $label.' ('.$gid.')' : $gid;
         $role = $linked ? 'linked collection' : 'collection';
 
-        return 'Could not refresh '.$role.' '.$name.'. Shopify returned no collection for this id. The request succeeded, so this was not a rate limit or an access-denied error. An empty collection result means this id is not a collection the store connection can read. Existing products and Shop Your Vibe assignments were kept.';
+        return ShopYourVibeCollectionMapping::MISSING_MESSAGE.': '.$role.' '.$name.'. Existing products and draft history were kept. Editing and new assignments are disabled.';
+    }
+
+    public function assertCollectionAvailable(ShopYourVibeDraft $draft, ?string $gid): void
+    {
+        if ($this->collectionIsUnavailable($draft, $gid)) {
+            throw new RuntimeException(ShopYourVibeCollectionMapping::MISSING_MESSAGE.' ('.$gid.'). Editing and Shopify writes are disabled; existing draft changes were kept.');
+        }
+    }
+
+    private function deactivateMissingMappings(ShopYourVibeDraft $draft, array $state): void
+    {
+        foreach ($state['missing_collection_ids'] ?? [] as $gid) {
+            ShopYourVibeCollectionMapping::query()->where('shopify_collection_id', $gid)->update(['is_active' => false]);
+            $card = collect($state['cards'])->firstWhere('collection_gid', $gid);
+            if ($card && isset($state['collections'][$gid])) {
+                app(ShopYourVibeAssignmentService::class)->syncMapping($draft->collection_gid, $card, $state['collections'][$gid]);
+            }
+        }
+    }
+
+    private function collectionIsUnavailable(ShopYourVibeDraft $draft, ?string $gid): bool
+    {
+        if (! $gid || str_starts_with($gid, 'new:')) {
+            return false;
+        }
+
+        return ! empty($draft->desired['collections'][$gid]['unavailable'])
+            || in_array($gid, $draft->desired['missing_collection_ids'] ?? [], true)
+            || ShopYourVibeCollectionMapping::isConfirmedMissing($gid)
+            || ShopYourVibeCollectionMapping::query()->where('parent_collection_id', $draft->collection_gid)
+                ->where('shopify_collection_id', $gid)->where('is_active', false)->exists();
+    }
+
+    private function assertMissingTargetsUnchanged(ShopYourVibeDraft $draft, array $state, array $baseline): void
+    {
+        foreach (array_keys($draft->remote_jobs ?? []) as $gid) {
+            $this->assertCollectionAvailable($draft, $gid);
+        }
+        foreach ($state['collections'] as $gid => $collection) {
+            if ($this->collectionIsUnavailable($draft, $gid)
+                && (! isset($baseline['collections'][$gid]) || $this->collectionDifferent($baseline['collections'][$gid], $collection))) {
+                $this->assertCollectionAvailable($draft, $gid);
+            }
+        }
+        $beforeCards = collect($baseline['cards'])->keyBy('key');
+        $afterCards = collect($state['cards'])->keyBy('key');
+        foreach ($beforeCards->merge($afterCards) as $key => $card) {
+            $gids = array_unique([
+                $beforeCards->get($key)['collection_gid'] ?? null, $afterCards->get($key)['collection_gid'] ?? null,
+                $beforeCards->get($key)['unavailable_collection_gid'] ?? null, $afterCards->get($key)['unavailable_collection_gid'] ?? null,
+            ]);
+            foreach ($gids as $gid) {
+                if ($this->collectionIsUnavailable($draft, $gid)
+                    && ($this->fields($beforeCards->get($key)) !== $this->fields($afterCards->get($key))
+                        || array_search($key, array_column($baseline['cards'], 'key'), true) !== array_search($key, array_column($state['cards'], 'key'), true)
+                        || in_array($card['id'] ?? null, $baseline['reference_ids'], true) !== in_array($card['id'] ?? null, array_column($state['cards'], 'id'), true))) {
+                    $this->assertCollectionAvailable($draft, $gid);
+                }
+            }
+        }
+        foreach (array_merge(array_values($state['delete_cards'] ?? []), array_values($state['delete_collections'] ?? [])) as $deletion) {
+            $this->assertCollectionAvailable($draft, $deletion['gid'] ?? $deletion['card']['collection_gid'] ?? null);
+        }
     }
 
     private function rememberCollectionRecord(?int $importId, string $gid, string $handle, string $title): void

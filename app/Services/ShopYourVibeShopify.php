@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Exceptions\ShopYourVibeCollectionUnavailableException;
 use App\Models\ShopifyCollection;
+use App\Models\ShopYourVibeCollectionMapping;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use RuntimeException;
@@ -119,6 +120,7 @@ GQL, ['ids' => $chunk]);
         }
         $handle = rawurldecode($match[1]);
         $local = ShopifyCollection::query()->where('handle', $handle)->whereNotNull('shopify_id')->latest('id')->value('shopify_id');
+        $local ??= ShopYourVibeCollectionMapping::query()->where('collection_handle', $handle)->latest('id')->value('shopify_collection_id');
         if ($local && preg_match('~^gid://shopify/Collection/\d+$~', $local)) {
             return $local;
         }
@@ -132,8 +134,10 @@ GQL, ['query' => 'handle:'.json_encode($handle)]);
     public function collection(string $gid): array
     {
         $this->gid($gid, 'Collection');
+        $retrievalStartedAt = now()->format('Y-m-d\TH:i:s.uP');
         $after = null;
         $products = [];
+        $seenCursors = [];
         do {
             $data = $this->client->graphql(<<<'GQL'
 query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
@@ -152,6 +156,9 @@ query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   }
 } }
 GQL, ['id' => $gid, 'after' => $after]);
+            if ($after !== null && array_key_exists('collection', $data) && $data['collection'] === null) {
+                throw new RuntimeException('Shopify collection pagination was interrupted for '.$gid.'. Existence could not be verified.');
+            }
             $node = $this->collectionResponseNode($data, $gid);
             if (! is_string($node['title'] ?? null)
                 || ! is_string($node['handle'] ?? null)
@@ -168,8 +175,26 @@ GQL, ['id' => $gid, 'after' => $after]);
             foreach ($node['products']['nodes'] as $product) {
                 if (! is_array($product) || ! is_string($product['id'] ?? null)
                     || ! preg_match('~^gid://shopify/Product/\d+$~', $product['id'])
-                    || ! is_string($product['title'] ?? null)) {
+                    || ! is_string($product['title'] ?? null)
+                    || ! is_string($product['vendor'] ?? null)
+                    || ! is_string($product['productType'] ?? null)
+                    || ! is_string($product['status'] ?? null)
+                    || ! is_array($product['tags'] ?? null)
+                    || ! array_is_list($product['tags'])
+                    || count(array_filter($product['tags'], 'is_string')) !== count($product['tags'])) {
                     throw new RuntimeException('Shopify returned malformed collection products for '.$gid.'. Changes remain pending.');
+                }
+                foreach (['featuredImage', 'materialsAndDimensions', 'colorPattern', 'jewelryMaterial', 'beadColourFinish'] as $field) {
+                    if (! array_key_exists($field, $product) || ($product[$field] !== null && ! is_array($product[$field]))) {
+                        throw new RuntimeException('Shopify returned incomplete product fields for '.$gid.'. The last confirmed state was kept.');
+                    }
+                    if ($field !== 'featuredImage' && $product[$field] !== null
+                        && (! is_string($product[$field]['type'] ?? null) || ! is_string($product[$field]['value'] ?? null))) {
+                        throw new RuntimeException('Shopify returned incomplete product metafields for '.$gid.'. The last confirmed state was kept.');
+                    }
+                }
+                if (! is_array(data_get($product, 'variants.nodes')) || ! array_is_list($product['variants']['nodes'])) {
+                    throw new RuntimeException('Shopify returned incomplete product variants for '.$gid.'. The last confirmed state was kept.');
                 }
                 $products[] = $this->productCard($product);
             }
@@ -178,6 +203,12 @@ GQL, ['id' => $gid, 'after' => $after]);
                 ($this->productProgress)(count($products), max($total, count($products)), $gid, (string) ($node['title'] ?? ''));
             }
             $after = $this->cursor($node['products']);
+            if ($after !== null) {
+                if (isset($seenCursors[$after])) {
+                    throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Existence could not be verified.');
+                }
+                $seenCursors[$after] = true;
+            }
         } while ($after !== null);
 
         $tagRules = collect(data_get($node, 'ruleSet.rules', []))
@@ -186,6 +217,7 @@ GQL, ['id' => $gid, 'after' => $after]);
             ->pluck('condition')->filter(fn ($tag) => trim((string) $tag) !== '')->unique(fn ($tag) => mb_strtolower(trim($tag)))->values();
 
         return ['gid' => $gid, 'title' => $node['title'], 'handle' => $node['handle'], 'sort' => $node['sortOrder'],
+            'retrieval_started_at' => $retrievalStartedAt,
             'manual_supported' => $node['sortOrder'] !== 'UNSUPPORTED',
             'membership_supported' => $node['ruleSet'] === null, 'enable_manual' => false,
             'detected_membership_tag' => $tagRules->count() === 1 ? trim((string) $tagRules->first()) : null,
@@ -218,7 +250,7 @@ query VibeCollectionMapping($id: ID!) { collection(id: $id) {
   ruleSet { appliedDisjunctively rules { column relation condition } }
 } }
 GQL, ['id' => $gid]);
-        $node = $data['collection'] ?? throw new ShopYourVibeCollectionUnavailableException($gid);
+        $node = $this->collectionResponseNode($data, $gid);
         $tagRules = collect(data_get($node, 'ruleSet.rules', []))
             ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG'
                 && strtoupper((string) ($rule['relation'] ?? '')) === 'EQUALS')
