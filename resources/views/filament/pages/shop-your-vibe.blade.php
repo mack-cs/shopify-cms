@@ -13,7 +13,49 @@
         formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
         canPush() { return this.localPending || this.$root.dataset.pending === 'true'; },
-        destroy() { this.stopStatusTimer(); },
+        lastEditingSignal: 0,
+        editingState: {}, editingStatusTimer: null,
+        livewireOrderCleanup: null,
+        alignPropertyKeys(values, reference) {
+            // Livewire 3.8.1 treats object key order changes as a whole-object
+            // replacement, even at the component root (an invalid empty path).
+            // Align only root key order; preserve every value and signed snapshot.
+            return Object.fromEntries([...new Set([...Object.keys(reference), ...Object.keys(values)])]
+                .filter(key => Object.prototype.hasOwnProperty.call(values, key))
+                .map(key => [key, values[key]]));
+        },
+        protectLivewirePropertyOrder(component, livewire) {
+            const align = this.alignPropertyKeys.bind(this);
+            const merge = component.mergeNewSnapshot;
+            component.mergeNewSnapshot = function (snapshot, ...args) {
+                this.canonical = align(this.canonical, JSON.parse(snapshot).data);
+                return merge.call(this, snapshot, ...args);
+            };
+            const unhook = livewire.hook('commit.prepare', ({ component: target }) => {
+                if (target === component) target.canonical = align(target.canonical, target.ephemeral);
+            });
+            return () => { unhook(); component.mergeNewSnapshot = merge; };
+        },
+        scopeBlocked() {
+            const state = this.editingState;
+            return !!state.blocked || (!!state.owner && !state.active);
+        },
+        async pollEditingState() {
+            if (document.hidden || !this.$el.dataset.collection) return;
+            try { this.editingState = await this.$wire.editingStatus(); } catch (error) { /* Read failure never renews a lease. */ }
+        },
+        async editingActivity(event) {
+            if (!event.isTrusted || document.hidden || this.$el.dataset.editingMine !== '1' || Date.now() - this.lastEditingSignal < 30000) return;
+            this.lastEditingSignal = Date.now();
+            try {
+                const state = await this.$wire.editingHeartbeat();
+                if (state.expires_at) { this.editingState = state; this.$dispatch('syv-lock-renewed', state); }
+            } catch (error) {
+                this.$el.dataset.editingMine = '0';
+                this.orderError = 'Editing lock expired or changed. Reload and reacquire it before saving.';
+            }
+        },
+        destroy() { this.stopStatusTimer(); if (this.editingStatusTimer) clearInterval(this.editingStatusTimer); this.livewireOrderCleanup?.(); },
         stopStatusTimer() {
             if (this.statusTimer) {
                 clearInterval(this.statusTimer);
@@ -21,6 +63,8 @@
             }
         },
         initStatus() {
+            this.editingState = JSON.parse(this.$el.dataset.editingStatus || '{}');
+            if (this.$el.dataset.collection) this.editingStatusTimer = setInterval(() => this.pollEditingState(), 30000);
             this.$watch('productQuery', () => {
                 this.$el.querySelectorAll('[data-order-type=products]').forEach((grid) => {
                     grid.sortable?.option('disabled', true);
@@ -28,6 +72,7 @@
             });
             this.syncHydration();
             if (window.Livewire?.hook) {
+                this.livewireOrderCleanup = this.protectLivewirePropertyOrder(this.$wire.__instance, window.Livewire);
                 Livewire.hook('commit', ({ succeed }) => {
                     succeed(() => {
                         if (!this.$el?.isConnected) return;
@@ -336,8 +381,8 @@
                     if (result?.applied) {
                         this.localPending = true;
                         this.$el.dataset.pending = 'true';
-                    } else if ((result?.ids || []).join('|') !== order.join('|')) {
-                        this.orderError = 'The product order was not saved. The list matches the saved draft.';
+                    } else if (result?.message || (result?.ids || []).join('|') !== order.join('|')) {
+                        this.orderError = result?.message || 'The product order was not saved. The list matches the saved draft.';
                     }
                 } catch (error) {
                     if (epoch !== this.orderEpoch) return;
@@ -408,6 +453,12 @@
         };
     </script>
     <div x-data="syvEditor()"
+        data-editing-mine="{{ ($editing['active'] ?? false) && ($editing['mine'] ?? false) ? '1' : '0' }}"
+        data-editing-status="{{ json_encode(array_diff_key($editing, ['changes' => true]) + ['pending' => $draft?->pending ?? false, 'revision' => $draft?->revision ?? 0]) }}"
+        x-on:keydown.capture="editingActivity($event)"
+        x-on:pointerdown.capture="editingActivity($event)"
+        x-on:vibe-editing-acquired.window="$el.dataset.editingMine = '1'"
+        x-on:vibe-editing-state.window="editingState = $event.detail.state"
         data-pending="{{ $draft?->pending ? 'true' : 'false' }}"
         data-saved-pending="{{ $draft?->pending ? '1' : '0' }}"
         data-poll="{{ !empty($statusPoll) ? '1' : '0' }}"
@@ -521,7 +572,7 @@
                     Shop Your Vibes ({{ $vibeCountLabel }})
                 </button>
             </div>
-            @if (filled($draft->desired['unavailable_collections'] ?? null))
+            @if (! $unavailableNoticeDismissed && filled($draft->desired['unavailable_collections'] ?? null))
                 <div role="status" class="syv-load syv-load-failed">
                     <strong>A linked collection could not be loaded</strong>
                     @foreach ($draft->desired['unavailable_collections'] as $missing)
@@ -537,6 +588,8 @@
                 Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
             @php($operationBusy = in_array($draft->status, ['creating', 'deleting', 'pushing'], true))
+            @include('filament.pages.partials.shop-your-vibe-editing')
+            <fieldset @disabled($editing['blocked'] || (! $editing['active'] && !empty($editing['owner']))) x-bind:disabled="scopeBlocked()" class="space-y-6 min-w-0">
             @php($operationFailed = $draft->status === 'failed' && ! $draft->pending && ! empty($draft->operation))
             @php($hydrationFailed = ! $productsLoaded && ($syvProgress['state'] ?? null) === 'failed')
             @php($hydrationLoading = ! $productsLoaded && ! $hydrationFailed && ! $draft->pending && ! $operationBusy)
@@ -616,8 +669,8 @@
                     @else
                         <button type="button" wire:click="reviewPush" x-bind:disabled="!canPush()" class="fi-btn relative inline-grid grid-flow-col items-center justify-center gap-1.5 rounded-lg bg-custom-600 px-3 py-2 text-sm font-semibold text-white shadow-sm outline-none transition duration-75 hover:bg-custom-500 focus-visible:ring-2 focus-visible:ring-custom-500/50 disabled:pointer-events-none disabled:opacity-70" style="--c-400:var(--primary-400);--c-500:var(--primary-500);--c-600:var(--primary-600);">Push Changes to Shopify</button>
                     @endif
-                    <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
-                    <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
+                    <x-filament::button color="gray" wire:click="reviewDiscard" wire:loading.attr="disabled">Discard Changes</x-filament::button>
+                    <x-filament::button color="gray" wire:click="refreshDraft" wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
                 </div>
                 @if ($confirmingPush)
                     <x-filament::section heading="Ready to push">
@@ -1000,6 +1053,7 @@
                 </div>
                 @endif
             </div>
+            </fieldset>
         @endif
 
         <x-filament::modal id="shop-your-vibe-collections" width="3xl"

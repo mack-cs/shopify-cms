@@ -83,7 +83,10 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
                     'message' => $payload['message'],
                 ], 600);
             });
-            $workflow->refresh($this->draftId, $this->revision, $this->discard);
+            if ($draft->pending) {
+                throw new \RuntimeException('Pending changes require an audited discard with a reason. Refresh did not discard them.');
+            }
+            $workflow->refresh($this->draftId, $this->revision, false, true, $this->userId);
             Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
                 'state' => 'success',
                 'kind' => 'refresh',

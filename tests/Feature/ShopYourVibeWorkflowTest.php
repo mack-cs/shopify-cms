@@ -967,7 +967,7 @@ it('renders the workflow and only dispatches a push after the explicit action', 
     Bus::assertDispatched(PushShopYourVibe::class);
 });
 
-it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
+it('requires audited discard before refreshing a pending Shop Your Vibe draft', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
@@ -982,27 +982,15 @@ it('queues refresh from Shopify for an open Shop Your Vibe draft', function () {
 
     $page->call('refreshDraft', true)
         ->assertHasNoErrors()
-        ->assertSee('Refreshing collection products')
-        ->assertDontSee('Up to date with Shopify')
-        ->assertSee('data-refresh="1"', false);
+        ->assertSet('confirmingDiscard', true)
+        ->assertSet('refreshingCollection', false)
+        ->assertSee('Reason (required');
 
     expect($this->fake->calls)->toBe([])
         ->and($this->draft->fresh()->pending)->toBeTrue()
         ->and($this->draft->fresh()->status)->toBe('pending')
         ->and($this->draft->fresh()->last_error)->toBeNull();
-    Bus::assertDispatched(RefreshShopYourVibeDraft::class, function (RefreshShopYourVibeDraft $job) use ($revision): bool {
-        $reflection = new ReflectionClass($job);
-        $draftId = $reflection->getProperty('draftId');
-        $draftId->setAccessible(true);
-        $jobRevision = $reflection->getProperty('revision');
-        $jobRevision->setAccessible(true);
-        $discard = $reflection->getProperty('discard');
-        $discard->setAccessible(true);
-
-        return $draftId->getValue($job) === $this->draft->id
-            && $jobRevision->getValue($job) === $revision + 1
-            && $discard->getValue($job) === true;
-    });
+    Bus::assertNotDispatched(RefreshShopYourVibeDraft::class);
 });
 
 it('clears the refresh banner after Refresh from Shopify fails', function () {
@@ -1102,7 +1090,7 @@ it('dismisses a missing linked collection notice and still opens the push review
 
     $after = $this->draft->fresh();
     expect($after->pending)->toBeTrue()
-        ->and($after->desired['unavailable_collections'] ?? null)->toBeNull()
+        ->and($after->desired['unavailable_collections'] ?? null)->not->toBeNull()
         ->and($after->desired['collections'][$gid]['products'][0]['id'])->toBe($moved)
         ->and($this->fake->mutations())->toBe([]);
 
@@ -1130,7 +1118,7 @@ it('dismisses a failed refresh notice without changing the draft', function () {
         ->and($this->fake->mutations())->toBe([]);
 });
 
-it('queues a push when the open page is behind a failed push revision', function () {
+it('does not queue an unreviewed newer failed revision from a stale page', function () {
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
@@ -1148,9 +1136,9 @@ it('queues a push when the open page is behind a failed push revision', function
     ]);
 
     $page->call('pushChanges')->assertSet('confirmingPush', false);
-    Bus::assertDispatched(PushShopYourVibe::class);
-    expect($this->draft->fresh()->status)->toBe('pushing')
-        ->and($this->draft->fresh()->last_error)->toBeNull();
+    Bus::assertNotDispatched(PushShopYourVibe::class);
+    expect($this->draft->fresh()->status)->toBe('failed')
+        ->and($this->draft->fresh()->last_error)->not->toBeNull();
 });
 
 it('stops a failed refresh and leaves the loaded products visible', function () {
@@ -1445,6 +1433,7 @@ it('renders Filament sortable grids and saves the final drop position for cards 
     vibeEdit($this, 'add_card', ['collection_gid' => 'gid://shopify/Collection/4']);
     $page = Livewire::test(ShopYourVibe::class)
         ->call('manage', 'gid://shopify/Collection/1')
+        ->call('startEditing')
         ->call('setActiveTab', 'vibes');
     $html = new DOMDocument;
     @$html->loadHTML($page->html());
@@ -2060,7 +2049,7 @@ it('uploads an edited vibe card image to Shopify during push', function () {
     Http::assertSentCount(1);
 });
 
-it('queues a shopify update when an uploaded vibe card image is saved', function () {
+it('keeps an uploaded vibe card image pending until the whole draft is reviewed', function () {
     Storage::fake('public');
     Role::findOrCreate(RolesEnum::Admin->value);
     $this->user->assignRole(RolesEnum::Admin->value);
@@ -2080,8 +2069,8 @@ it('queues a shopify update when an uploaded vibe card image is saved', function
     expect($saved['image'])->toBe('')
         ->and($saved['image_url'])->toContain('/storage/shop-your-vibe/')
         ->and($this->draft->fresh()->pending)->toBeTrue()
-        ->and($this->draft->fresh()->status)->toBe('pushing');
-    Bus::assertDispatched(PushShopYourVibe::class);
+        ->and($this->draft->fresh()->status)->toBe('pending');
+    Bus::assertNotDispatched(PushShopYourVibe::class);
 });
 
 it('accepts an uploaded image in the new collection modal without publishing it', function () {

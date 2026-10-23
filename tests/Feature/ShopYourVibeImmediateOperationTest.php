@@ -279,6 +279,9 @@ it('records a shopify api failure and keeps the uploaded image for retry', funct
 });
 
 it('retries a failed immediate operation from its checkpoint after the job is resumed', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
     $this->fake->fail = 'mutation VibeCreate';
     $draft = queueAndRunCreate($this, ['mode' => 'existing', 'collection_gid' => 'gid://shopify/Collection/4']);
     expect($draft->status)->toBe('failed')->and($this->fake->references)->toHaveCount(2);

@@ -22,11 +22,23 @@ class ShopYourVibeShopify
     /** @var null|callable(int, int, string): void */
     public $productProgress = null;
 
+    /** @var null|callable(): void Authorization rechecked immediately before each remote write. */
+    public $beforeMutation = null;
+
+    private function graphql(string $query, array $variables = []): array
+    {
+        if (preg_match('/^\s*mutation\b/', $query) && $this->beforeMutation) {
+            ($this->beforeMutation)();
+        }
+
+        return $this->client->graphql($query, $variables);
+    }
+
     public function __construct(private readonly ShopifyGraphqlGateway $client) {}
 
     public function definition(): array
     {
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeDefinition { metaobjectDefinitionByType(type: "shop_your_vibe_card_preview") {
   type capabilities { publishable { enabled } } fieldDefinitions { key type { name } }
 } }
@@ -49,7 +61,7 @@ GQL);
         $result = [];
         $after = null;
         do {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibeParents($after: String) { collections(first: 100, after: $after) {
   nodes { id title handle image { url } updatedAt productsCount { count }
     metafield(namespace: "custom", key: "shop_your_vibe_preview") { type value }
@@ -73,7 +85,7 @@ GQL, ['after' => $after]);
     public function parent(string $gid): array
     {
         $this->gid($gid, 'Collection');
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeParent($id: ID!) { collection(id: $id) { id title handle image { url } productsCount { count }
   metafield(namespace: "custom", key: "shop_your_vibe_preview") { type value compareDigest }
 } }
@@ -82,7 +94,7 @@ GQL, ['id' => $gid]);
         $ids = $this->references($node['metafield']);
         $cards = [];
         foreach (array_chunk($ids, 100) as $chunk) {
-            $objects = $this->client->graphql(<<<'GQL'
+            $objects = $this->graphql(<<<'GQL'
 query VibeCards($ids: [ID!]!) { nodes(ids: $ids) { ... on Metaobject {
   id type handle fields { key value reference { ... on MediaImage { image { url } } } }
 } } }
@@ -124,7 +136,7 @@ GQL, ['ids' => $chunk]);
         if ($local && preg_match('~^gid://shopify/Collection/\d+$~', $local)) {
             return $local;
         }
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeLinkedCollection($query: String!) { collections(first: 10, query: $query) { nodes { id handle } } }
 GQL, ['query' => 'handle:'.json_encode($handle)]);
 
@@ -139,7 +151,7 @@ GQL, ['query' => 'handle:'.json_encode($handle)]);
         $products = [];
         $seenCursors = [];
         do {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   id title handle sortOrder productsCount { count }
   ruleSet { appliedDisjunctively rules { column relation condition } }
@@ -244,7 +256,7 @@ GQL, ['id' => $gid, 'after' => $after]);
     public function collectionMapping(string $gid): array
     {
         $this->gid($gid, 'Collection');
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeCollectionMapping($id: ID!) { collection(id: $id) {
   id title handle productsCount { count }
   ruleSet { appliedDisjunctively rules { column relation condition } }
@@ -273,7 +285,7 @@ GQL, ['id' => $gid]);
         $result = [];
         $after = null;
         do {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibeSiblingCollections($after: String) { collections(first: 100, after: $after) {
   nodes {
     id title handle
@@ -313,7 +325,7 @@ GQL, ['after' => $after]);
         $after = null;
         $products = [];
         do {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibeParentProducts($id: ID!, $after: String) { collection(id: $id) {
   products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
     nodes {
@@ -342,7 +354,7 @@ GQL, ['id' => $gid, 'after' => $after]);
     public function productTags(string $gid): array
     {
         $this->gid($gid, 'Product');
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeProductTags($id: ID!) { product(id: $id) { id tags } }
 GQL, ['id' => $gid]);
 
@@ -390,7 +402,7 @@ GQL, ['id' => $gid]);
     private function tagMutation(string $field, string $operation, string $gid, array $tags): void
     {
         $this->gid($gid, 'Product');
-        $data = $this->client->graphql("mutation {$operation}(\$id: ID!, \$tags: [String!]!) { {$field}(id: \$id, tags: \$tags) { node { id } userErrors { field message } } }", [
+        $data = $this->graphql("mutation {$operation}(\$id: ID!, \$tags: [String!]!) { {$field}(id: \$id, tags: \$tags) { node { id } userErrors { field message } } }", [
             'id' => $gid, 'tags' => array_values(array_unique($tags)),
         ]);
         $errors = data_get($data, $field.'.userErrors', []);
@@ -401,7 +413,7 @@ GQL, ['id' => $gid]);
 
     public function images(string $search = '', ?string $after = null): array
     {
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeImages($query: String!, $after: String) { files(first: 24, after: $after, query: $query) {
   nodes { ... on MediaImage { id alt fileStatus image { url } } } pageInfo { hasNextPage endCursor }
 } }
@@ -447,7 +459,7 @@ GQL, ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']], 'input' =
     {
         $this->gid($gid, 'MediaImage');
         for ($attempt = 0; $attempt < ($wait ? 10 : 1); $attempt++) {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibeImage($id: ID!) { node(id: $id) { ... on MediaImage { id alt fileStatus image { url } } } }
 GQL, ['id' => $gid]);
             $image = $data['node'] ?? null;
@@ -472,7 +484,7 @@ GQL, ['id' => $gid]);
             $selection = $card['id'] ? 'metaobject(id: $id)' : 'metaobjectByHandle(handle: $handle)';
             $argument = $card['id'] ? '$id: ID!' : '$handle: MetaobjectHandleInput!';
             $variables = $card['id'] ? ['id' => $card['id']] : ['handle' => ['type' => self::TYPE, 'handle' => $card['handle']]];
-            $data = $this->client->graphql('query VibeDeletionCheck('.$argument.', $after: String) { object: '.$selection.' {
+            $data = $this->graphql('query VibeDeletionCheck('.$argument.', $after: String) { object: '.$selection.' {
                 id type fields { key value }
                 referencedBy(first: 100, after: $after) {
                     nodes { namespace key referencer { ... on Collection { id } } }
@@ -533,7 +545,7 @@ GQL, ['id' => $gid], 'metaobjectDelete');
         }
         $argument = $isNew ? '$handle: String!' : '$id: ID!';
         $selection = $isNew ? 'collectionByIdentifier(identifier: {handle: $handle})' : 'collection(id: $id)';
-        $data = $this->client->graphql('query VibeCollectionDeletionCheck('.$argument.') { target: '.$selection.' {
+        $data = $this->graphql('query VibeCollectionDeletionCheck('.$argument.') { target: '.$selection.' {
             id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
         } }', $isNew ? ['handle' => $deletion['handle']] : ['id' => $deletion['gid']]);
         if (! array_key_exists('target', $data)) {
@@ -574,7 +586,7 @@ GQL, ['input' => ['id' => $collection['id']]], 'collectionDelete');
         }
         $filename = 'cms-vibe-'.$token.'.'.pathinfo($path, PATHINFO_EXTENSION);
         // A stable filename and RAISE_ERROR prevent duplicate files after a lost response.
-        $found = $this->client->graphql(<<<'GQL'
+        $found = $this->graphql(<<<'GQL'
 query VibeUploadedImage($query: String!) { files(first: 2, query: $query) { nodes { ... on MediaImage { id } } } }
 GQL, ['query' => 'filename:'.json_encode($filename)]);
         if ($gid = data_get($found, 'files.nodes.0.id')) {
@@ -592,6 +604,9 @@ GQL, ['input' => [['resource' => 'FILE', 'filename' => $filename, 'mimeType' => 
         $target = $staged['stagedTargets'][0] ?? throw new RuntimeException('Shopify did not provide an upload target.');
         $stream = $disk->readStream($path);
         try {
+            if ($this->beforeMutation) {
+                ($this->beforeMutation)();
+            }
             Http::timeout(120)->attach('file', $stream, $filename)
                 ->post($target['url'], array_column($target['parameters'], 'value', 'name'))->throw();
         } finally {
@@ -641,7 +656,7 @@ GQL, ['files' => [['originalSource' => $target['resourceUrl'], 'filename' => $fi
 
     public function findCollectionByHandle(string $handle): ?array
     {
-        $data = $this->client->graphql(<<<'GQL'
+        $data = $this->graphql(<<<'GQL'
 query VibeCollectionByHandle($handle: String!) { collectionByIdentifier(identifier: {handle: $handle}) {
   id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
 } }
@@ -652,7 +667,7 @@ GQL, ['handle' => $handle]);
 
     public function createCollection(array $creation, ?string $imageUrl): array
     {
-        $existing = $this->client->graphql(<<<'GQL'
+        $existing = $this->graphql(<<<'GQL'
 query VibeCollectionByHandle($handle: String!) { collectionByIdentifier(identifier: {handle: $handle}) {
   id title handle metafield(namespace: "custom", key: "syv_creation_token") { value }
 } }
@@ -688,7 +703,7 @@ GQL, ['input' => $input], 'collectionCreate');
     {
         $after = null;
         do {
-            $data = $this->client->graphql(<<<'GQL'
+            $data = $this->graphql(<<<'GQL'
 query VibePublications($after: String) { publications(first: 100, after: $after) {
   nodes { id name app { title } } pageInfo { hasNextPage endCursor }
 } }
@@ -710,7 +725,7 @@ mutation VibePublishCollection($id: ID!, $input: [PublicationInput!]!) { publish
   userErrors { field message }
 } }
 GQL, ['id' => $gid, 'input' => [['publicationId' => $publication]]], 'publishablePublish');
-        $result = $this->client->graphql(<<<'GQL'
+        $result = $this->graphql(<<<'GQL'
 query VibePublicationStatus($id: ID!, $publication: ID!) { collection(id: $id) { publishedOnPublication(publicationId: $publication) } }
 GQL, ['id' => $gid, 'publication' => $publication]);
         if (data_get($result, 'collection.publishedOnPublication') !== true) {
@@ -780,7 +795,7 @@ GQL, ['id' => $gid, 'moves' => $moves], 'collectionReorderProducts');
 
     public function jobDone(string $gid): bool
     {
-        $data = $this->client->graphql('query VibeJob($id: ID!) { job(id: $id) { id done } }', ['id' => $gid]);
+        $data = $this->graphql('query VibeJob($id: ID!) { job(id: $id) { id done } }', ['id' => $gid]);
         if (! isset($data['job'])) {
             throw new RuntimeException('The Shopify job could not be confirmed. Changes remain pending.');
         }
@@ -790,7 +805,7 @@ GQL, ['id' => $gid, 'moves' => $moves], 'collectionReorderProducts');
 
     private function mutation(string $query, array $variables, string $key): array
     {
-        $data = $this->client->graphql($query, $variables);
+        $data = $this->graphql($query, $variables);
         $payload = $data[$key] ?? throw new RuntimeException('Shopify returned an incomplete response.');
         if (! array_key_exists('userErrors', $payload) || $payload['userErrors'] !== []) {
             throw new RuntimeException(collect($payload['userErrors'] ?? [])->pluck('message')->implode('; ') ?: 'Shopify did not confirm the operation.');

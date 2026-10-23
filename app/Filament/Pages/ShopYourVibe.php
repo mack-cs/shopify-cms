@@ -28,6 +28,8 @@ use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeSiblingService;
 use App\Services\ShopYourVibeTagService;
 use App\Services\ShopYourVibeWorkflow;
+use App\Services\ShopYourVibeEditing;
+use App\Models\ChangeLog;
 use App\Services\SiblingCollectionResolver;
 use Filament\Actions\Action;
 use Filament\Forms\Components\FileUpload;
@@ -113,6 +115,90 @@ class ShopYourVibe extends Page
     public bool $choosingImage = false;
 
     public bool $confirmingPush = false;
+
+    #[Locked]
+    public ?string $editingToken = null;
+
+    #[Locked]
+    public ?int $reviewedRevision = null;
+
+    public bool $confirmingDiscard = false;
+
+    public string $discardReason = '';
+
+    public ?string $discardError = null;
+
+    public bool $showEditingHistory = false;
+
+    public bool $unavailableNoticeDismissed = false;
+
+    public function startEditing(): void
+    {
+        $this->guard();
+        $revision = $this->revision;
+        $this->attempt(function () use ($revision): void {
+            $service = app(ShopYourVibeEditing::class);
+            $draft = $service->acquire($this->draftId, $revision);
+            $this->editingToken = $service->token;
+            $this->accept($draft);
+        });
+    }
+
+    public function editingHeartbeat(): array
+    {
+        $this->guard();
+        $this->skipRender();
+        if (! $this->editingToken || ! $this->draftId) {
+            return [];
+        }
+        return app(ShopYourVibeEditing::class)->heartbeat($this->draftId, $this->revision);
+    }
+
+    public function editingStatus(): array
+    {
+        $this->guard();
+        $this->skipRender();
+        $draft = $this->draftId ? ShopYourVibeDraft::select(['id', 'editing_state', 'pending', 'revision'])->find($this->draftId) : null;
+        return $draft ? array_diff_key(app(ShopYourVibeEditing::class)->view($draft), ['changes' => true]) + ['pending' => $draft->pending, 'revision' => $draft->revision] : [];
+    }
+
+    public function reviewDiscard(): void
+    {
+        $this->guard();
+        $this->discardReason = '';
+        $this->discardError = null;
+        $this->confirmingDiscard = true;
+    }
+
+    public function cancelDiscard(): void
+    {
+        $this->guard();
+        $this->confirmingDiscard = false;
+        $this->discardReason = '';
+        $this->discardError = null;
+        $this->resetValidation('discardReason');
+    }
+
+    public function discardChanges(): void
+    {
+        $this->guard();
+        $this->resetValidation('discardReason');
+        $this->discardError = null;
+        $revision = $this->revision;
+        $this->attempt(function () use ($revision): void {
+            $this->accept(app(ShopYourVibeEditing::class)->discard($this->draftId, $revision, $this->discardReason));
+            $this->editingToken = null;
+            $this->confirmingDiscard = false;
+            $this->confirmingPush = false;
+            $this->reviewedRevision = null;
+            $this->productPatches = [];
+            $this->dispatch('vibe-form-saved');
+            Notification::make()->title('Pending changes discarded locally. A permanent history record was saved.')->success()->send();
+        });
+        if ($this->confirmingDiscard && $this->loadError) {
+            $this->discardError = $this->loadError;
+        }
+    }
 
     public bool $confirmingAdd = false;
 
@@ -243,6 +329,7 @@ class ShopYourVibe extends Page
                 ->first();
             $this->refreshingCollection = false;
             $this->refreshError = null;
+            $this->unavailableNoticeDismissed = false;
             $this->selectedCollection = $gid;
             $this->activeTab = 'products';
             $this->productPatches = [];
@@ -334,6 +421,10 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function () use ($discard): void {
+            if ($this->draft()?->pending) {
+                $this->confirmingDiscard = true;
+                throw new \RuntimeException('Pending work must be reviewed and discarded with a reason before refreshing.');
+            }
             $this->activeCard = null;
             $this->cardForm = [];
             $this->confirmingPush = false;
@@ -386,6 +477,12 @@ class ShopYourVibe extends Page
         $this->guard();
         abort_if($forCard && ! $this->draftId, 422);
         if ($forCard) {
+            try {
+                $this->authorizeEditing();
+            } catch (Throwable $e) {
+                $this->loadError = $e->getMessage();
+                return;
+            }
             $this->activeTab = 'vibes';
         }
         $this->addingParent = ! $forCard;
@@ -648,7 +745,7 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function (): void {
-            $draft = app(ShopYourVibeWorkflow::class)->resumeOperation($this->draftId);
+            $draft = app(ShopYourVibeWorkflow::class)->resumeOperation($this->draftId, $this->revision);
             $this->accept($draft);
             $this->dispatchImmediate($draft);
             $draft = $draft->fresh();
@@ -845,6 +942,7 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function () use ($key): void {
+            $this->authorizeEditing();
             $this->activeTab = 'vibes';
             $draft = $this->draft();
             $card = collect($draft->desired['cards'])->firstWhere('key', $key);
@@ -972,6 +1070,7 @@ class ShopYourVibe extends Page
         return [
             'applied' => $applied,
             'ids' => $this->savedProductIds($gid),
+            'message' => $this->loadError,
         ];
     }
 
@@ -1075,6 +1174,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
         abort_unless($this->collectionProduct($this->managingSiblingProductGid), 422);
         $this->attempt(function (): void {
+            $this->authorizeEditing();
             $parent = $this->draft()->desired['parent'] ?? [];
             PushShopYourVibeProductSiblings::dispatch(
                 $parent,
@@ -1132,6 +1232,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingTagProductGid, 422);
         abort_unless($this->collectionProduct($this->managingTagProductGid), 422);
         $this->attempt(function (): void {
+            $this->authorizeEditing();
             $this->tagForm = $this->productTagForm->getState();
             PushShopYourVibeProductTags::dispatch(
                 $this->managingTagProductGid,
@@ -1238,6 +1339,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingComplementaryProductGid, 422);
         abort_unless($this->collectionProduct($this->managingComplementaryProductGid), 422);
         $this->attempt(function (): void {
+            $this->authorizeEditing();
             $service = app(ShopYourVibeComplementaryService::class);
             $result = $service->saveLocal(
                 $this->managingComplementaryProductGid,
@@ -1283,6 +1385,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingProductGid && $this->confirmingAssignments, 422);
         abort_unless($this->collectionProduct($this->managingProductGid), 422);
         $this->attempt(function (): void {
+            $this->authorizeEditing();
             $confirmed = app(ShopYourVibeAssignmentService::class)->assign(
                 $this->draft()->collection_gid,
                 $this->managingProductGid,
@@ -1348,24 +1451,23 @@ class ShopYourVibe extends Page
     public function reviewPush(): void
     {
         $this->guard();
-        $this->confirmingPush = $this->draft()?->pending ?? false;
+        $revision = $this->revision;
+        $this->attempt(function () use ($revision): void {
+            DB::transaction(function () use ($revision): void {
+                $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($this->draftId);
+                app(ShopYourVibeEditing::class)->authorize($draft, $revision);
+                $this->accept($draft);
+                $this->reviewedRevision = $revision;
+                $this->confirmingPush = $draft->pending;
+            });
+        });
     }
 
     public function dismissUnavailableNotice(): void
     {
         $this->guard();
-        $draft = $this->draft(true);
-        if (! $draft) {
-            return;
-        }
-        $desired = $draft->desired;
-        $snapshot = $draft->snapshot ?? [];
-        unset($desired['unavailable_collections'], $snapshot['unavailable_collections']);
-        $draft->update([
-            'desired' => $desired,
-            'snapshot' => $snapshot,
-        ]);
-        $this->accept($draft->fresh());
+        // Hiding a notice is local UI state, never a shared draft mutation.
+        $this->unavailableNoticeDismissed = true;
     }
 
     public function dismissRefreshNotice(): void
@@ -1403,25 +1505,20 @@ class ShopYourVibe extends Page
             return;
         }
 
-        $this->queueDraftPush();
         Notification::make()
-            ->title('Image queued for Shopify')
-            ->body('The new image is being sent to Shopify now and will update this Shop Your Vibe card. You can change the image again after this update finishes.')
+            ->title('Image saved in your pending draft')
+            ->body('Review all pending changes before pushing this image to Shopify.')
             ->success()
             ->send();
     }
 
     private function queueDraftPush(): void
     {
-        $saved = $this->draftId ? ShopYourVibeDraft::query()->find($this->draftId) : null;
-        if ($saved && $saved->revision !== $this->revision
-            && $saved->pending
-            && in_array($saved->status, ['pending', 'failed'], true)
-            && empty($saved->remote_jobs)
-            && empty($saved->operation)) {
-            $this->revision = $saved->revision;
+        if ($this->reviewedRevision === null || $this->reviewedRevision !== $this->revision) {
+            throw new \RuntimeException('Review the current saved changes before pushing. Another editor’s pending revision cannot be adopted.');
         }
-        $draft = app(ShopYourVibeWorkflow::class)->queue($this->draftId, $this->revision);
+        $draft = app(ShopYourVibeWorkflow::class)->queue($this->draftId, $this->reviewedRevision);
+        $this->reviewedRevision = null;
         $this->accept($draft);
         try {
             PushShopYourVibe::dispatch($draft->id);
@@ -1439,7 +1536,11 @@ class ShopYourVibe extends Page
             if (! $draft || $draft->status !== 'pushing') {
                 return;
             }
-
+            $authorization = $draft->editing_state['push'] ?? null;
+            if (($authorization['actor_id'] ?? null) !== auth()->id()) {
+                throw new \RuntimeException('Only the original editor may retry this reviewed push.');
+            }
+            app(ShopYourVibeEditing::class)->validateJob($draft->id, $authorization);
             PushShopYourVibe::dispatch($draft->id);
             Notification::make()
                 ->title('Push check queued')
@@ -1589,6 +1690,13 @@ class ShopYourVibe extends Page
 
     private function accept(ShopYourVibeDraft $draft): void
     {
+        if (! empty($draft->editing_state)) {
+            $this->dispatch('vibe-editing-state', state: array_diff_key(app(ShopYourVibeEditing::class)->view($draft), ['changes' => true]) + ['pending' => $draft->pending, 'revision' => $draft->revision]);
+        }
+        if (app(ShopYourVibeEditing::class)->token && $this->editingToken !== app(ShopYourVibeEditing::class)->token) {
+            $this->dispatch('vibe-editing-acquired');
+        }
+        $this->editingToken = app(ShopYourVibeEditing::class)->token ?? $this->editingToken;
         $this->loadedDraft = null;
         $this->loadedDraftHasSnapshot = false;
         $this->draftId = $draft->id;
@@ -1648,6 +1756,7 @@ class ShopYourVibe extends Page
             $query->select([
                 'id', 'collection_gid', 'desired', 'revision', 'pending', 'status', 'last_error',
                 'progress', 'remote_jobs', 'operation', 'refreshed_at', 'created_at', 'updated_at',
+                'editing_state',
             ]);
         }
         $this->loadedDraft = $query->findOrFail($this->draftId);
@@ -1659,6 +1768,16 @@ class ShopYourVibe extends Page
     private function guard(): void
     {
         abort_unless(static::canAccess(), 403);
+        app(ShopYourVibeEditing::class)->token = $this->editingToken;
+    }
+
+    private function authorizeEditing(): void
+    {
+        DB::transaction(function (): void {
+            $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($this->draftId);
+            app(ShopYourVibeEditing::class)->authorize($draft, $this->revision);
+            $this->accept($draft);
+        });
     }
 
     private function attempt(callable $callback): void
@@ -2328,7 +2447,7 @@ class ShopYourVibe extends Page
     protected function getViewData(): array
     {
         $this->guard();
-        $draft = $this->confirmingPush ? $this->draft(true) : $this->draft();
+        $draft = $this->confirmingPush || $this->confirmingDiscard ? $this->draft(true) : $this->draft();
         $pendingDrafts = collect();
         $operationDrafts = collect();
         if (! $draft) {
@@ -2440,6 +2559,9 @@ class ShopYourVibe extends Page
             : ($hydrationState === 'failed' ? 'Not loaded' : 'Loading…');
 
         return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel', 'progressStage', 'progressCount', 'progressDone', 'progressTotal', 'unavailableCollectionIds') + [
+            'editing' => $draft ? app(ShopYourVibeEditing::class)->view($draft) : [],
+            'discardSummary' => $draft && $this->confirmingDiscard ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
+            'editingHistory' => $draft && $this->showEditingHistory ? ChangeLog::where('model_type', ShopYourVibeDraft::class)->where('model_id', $draft->id)->where('source', 'shop_your_vibe_discard')->latest('id')->limit(30)->get() : collect(),
             'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
         ];
     }

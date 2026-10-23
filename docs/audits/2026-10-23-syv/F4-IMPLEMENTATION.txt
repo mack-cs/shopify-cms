@@ -1,0 +1,199 @@
+F4 implementation review — 23 October 2026
+
+Safety and scope
+Implemented pending draft ownership, editing leases, reviewed push authorization,
+and audited local discards. No deployment, Shopify mutation, queue clearing,
+worker restart/configuration change, or application/production record update was
+performed. The application database migration has NOT been applied. The new
+column must exist before running this code against the application database.
+The prior accepted fixes remain in place. No F5 work was undertaken.
+
+Root cause and boundary
+The page previously adopted a newer pending/failed revision before queueing a
+push. Changes had no owner or editing token, discard was implemented as a
+refresh, and a worker received only a draft ID rather than captured approval.
+Parent ordering, vibe layout, vibe metadata, linked membership, deletion intent,
+and checkpoints share one JSON draft and one whole-draft push. Independent
+ownership within that parent would require scoped merge, review and push
+semantics that do not exist. This implementation locks the parent DRAFT, including
+its linked vibe draft changes. Other parent drafts remain available. A selected
+discard therefore means the entire selected parent draft, not one vibe inside
+that parent. The UI explicitly identifies this boundary and its discard effects.
+
+Ownership and 14-minute lease
+The nullable editing_state JSON column stores owner ID/name, a hashed random
+editing token, last activity and expiry, pending owner ID/name, modification time,
+revision, pending operation/target details, and captured push authorization.
+Repeated drags coalesce to the latest pending intent for that operation/target
+instead of accumulating an unbounded list of complete product orders.
+
+Start editing acquires the lease. Saving an edit is verified activity. Trusted
+keyboard/pointer activity in a visible owner tab sends at most one lightweight
+heartbeat per 30 seconds. Read-only ownership polling never renews a lease.
+Synthetic events, hidden tabs and viewers do not send activity heartbeats.
+Expiry is enforced using server time, not the browser countdown. It never
+discards work. Returning owners must explicitly reacquire a new token against
+the expected revision. A different owner cannot adopt saved pending work.
+
+Atomicity and push authorization
+Acquisition, heartbeat, ownership checks, editing, queueing, and discard use
+transactions and SELECT FOR UPDATE on the same draft row. A renewal/discard
+race is serialized. Discard and its ChangeLog entry commit together.
+No collaboration transaction spans a Shopify network request.
+
+The page records the reviewed revision and does not adopt a newer pending one.
+Image saves remain pending until the whole draft is reviewed. Queued pushes and
+immediate operations capture a server-created authorization ticket: owner,
+reviewed and queued revisions, desired-state hash, token hash, expiry and ID.
+Workers recheck permission/account state, lease, token, ticket and revision before
+execution; the Shopify adapter rechecks authorization before each mutation and
+image upload. Old queue failure callbacks cannot mark a newer ticket as failed.
+These checks do not promise cancellation of a request already in flight.
+
+Discard and history
+An active lock blocks OTHER users, including administrators, from discarding.
+An owner can explicitly discard their own saved pending work. After expiry,
+another authorized user can review and discard it. Active/unconfirmed Shopify
+operations block discard until reconciled. Reasons must contain at least ten
+letters/numbers and at most 4000 characters; whitespace-only and punctuation-only
+reasons fail. The validated submitted reason is stored without trimming it.
+
+Discard restores the selected parent draft's last confirmed local baseline,
+preserves missing-collection tombstones, clears that pending intent, advances its
+revision, releases editing authorization, and leaves refreshed_at unchanged.
+It never contacts Shopify and cannot undo previously completed Shopify changes.
+
+Existing immutable ChangeLog infrastructure is reused. source is
+shop_your_vibe_discard; model_type/model_id identify the draft. old_value contains
+confirmed and proposed state, original editor ID/name, collection/scope, pending
+revision, change time and operation details. new_value contains the exact reason,
+discarding user ID/name, server time, restored state and discarded_locally result.
+The existing ChangeLog CMS resource is read-only, and model updates/deletes are
+rejected. The SYV page exposes the latest 30 discard records in read-only details;
+the existing Change Log resource retains access to the complete history.
+Notice dismissal now changes only local UI state, so it cannot bypass the draft
+lock by writing a stale copy of shared JSON.
+
+Files and principal methods
+app/Services/ShopYourVibeEditing.php (new): permitted, acquire, authorize,
+  heartbeat, readPublication, record, ticket, validateJob, discard, view.
+database/migrations/2026_10_23_100000_add_editing_state_to_shop_your_vibe_drafts.php
+  (new): up/down; adds one nullable JSON column, no backfill or history table.
+app/Models/ShopYourVibeDraft.php: editing_state array cast.
+app/Providers/AppServiceProvider.php: scoped editing-service registration.
+app/Services/ShopYourVibeWorkflow.php: refresh, loadProducts, edit, queue,
+  queueCreateVibe, queueDeleteVibe, resumeOperation, runImmediate, push.
+app/Services/ShopYourVibeShopify.php: guarded graphql dispatch and image upload;
+  existing queries/mutations route through the dispatcher.
+app/Jobs/PushShopYourVibe.php: constructor, handle, failed.
+app/Jobs/ApplyShopYourVibeOperation.php: constructor, handle, failed.
+app/Jobs/RefreshShopYourVibeDraft.php: handle rejects refresh-as-discard.
+app/Filament/Pages/ShopYourVibe.php: new ownership/status/heartbeat/discard actions;
+  reviewPush, queueDraftPush, queueImagePush, retryPush, retryImmediateOperation,
+  refreshDraft, editCard, openCollectionPicker, product-save entry points,
+  dismissUnavailableNotice, guard, authorizeEditing, accept, getViewData.
+resources/views/filament/pages/shop-your-vibe.blade.php: activity signals,
+  read-only ownership polling, conflicting controls, audited discard entry.
+resources/views/filament/pages/partials/shop-your-vibe-editing.blade.php (new):
+  owner/expiry/pending notices, required reason, summary and read-only history.
+tests/Feature/ShopYourVibeEditingTest.php (new): 29 F4 regression cases.
+tests/Feature/ShopYourVibeWorkflowTest.php: intentional expectation updates for
+  reviewed pushes, explicit reacquisition, local notice dismissal, audited
+  discard and pending image saves.
+tests/Feature/ShopYourVibeImmediateOperationTest.php: authenticated retry fixture.
+tests/Feature/ShopYourVibeMissingCollectionsTest.php: queued refresh cannot discard
+  pending missing-target work or infer deletion without a verified lookup.
+tests/Support/syv-editing-client.cjs (new): runs the actual editor heartbeat code.
+tests/Support/syv-editing-mysql.php (new): opt-in localhost-only disposable MySQL
+  test with two PHP processes contending on the draft row.
+
+Verification
+Final relevant suite: 287 passed, 1731 assertions, 55.17 seconds. Includes F1/F2,
+source-precedence and browser-grid invalidation regressions. An earlier run had
+one unchanged wall-clock throttle assertion fail at 0.9964 seconds against 1.0;
+its isolated rerun and the final complete rerun passed. No throttle code changed.
+Node heartbeat harness: passed activity, throttling, hidden tab, viewer and idle
+polling checks. MySQL harness: both forced two-process interleavings passed;
+renewal blocked discard, and discard invalidated stale renewal. Audit and pending
+state were checked. Its uniquely named isolated database was removed afterward.
+git diff --check: passed. No authenticated browser test was performed.
+
+Commands (isolated test configuration; do not run migrations on production)
+php -d memory_limit=512M -d allow_url_fopen=0
+  -d disable_functions=curl_exec,fsockopen,stream_socket_client
+  vendor/bin/pest --filter ShopYourVibe
+node tests/Support/syv-editing-client.cjs
+SYV_RUN_ISOLATED_MYSQL=1 php tests/Support/syv-editing-mysql.php
+The MySQL harness refuses non-local hosts and validates the disposable database
+identifier before creation/removal. It does not migrate application tables.
+
+Manual browser verification AFTER review
+1. Use a disposable local test database/store. Apply the single new migration to
+   that test database, and load the reviewed code in local SYV workers. Do not
+   clear queues or change production worker settings. Open two browser sessions
+   with different authorized users, A and B.
+2. A opens a clean parent and chooses Start editing, then saves a reorder.
+   Expect A's name, pending status, revision, and a 14-minute remaining lease.
+3. B opens the same parent. Expect view access, A's name/time, conflicting editing
+   controls disabled, and discard blocked even if B is an administrator. Attempt
+   a stale/direct mutation too: backend must reject it without changing intent.
+4. B opens a different parent draft and saves an unrelated reorder. Expect it to
+   work without changing A's draft. Shared Shopify target locking is still F6.
+5. A types/edits while visible. Expect expiry to extend from verified activity.
+   Leave A idle, hidden or disconnected for 14 minutes: pending work must remain,
+   and read-only status polling must not prolong the lease.
+6. After expiry, B reviews the selected parent discard. Expect A's name, target,
+   summary, revision and modification time. Empty/whitespace/short/punctuation-only
+   reasons must fail. A valid reason must restore only this parent draft locally,
+   preserve other parents' pending work, and leave the confirmation time unchanged.
+7. Open Change history. Expect original/proposed state, both user identities,
+   exact reason, time, scope/revision and result. There must be no edit/delete UI.
+8. A returns with the old token/revision. Saving must fail until the current
+   revision is reviewed and a new lease explicitly acquired. A second delayed
+   discard against the old revision must not add another audit entry.
+9. Without clicking a real Shopify push, inspect the review flow: a newer pending
+   revision requires review again; uploading an image stays pending. Use the
+   automated fake-Shopify tests to verify revoked/expired queued authorization.
+
+Remaining limits
+One parent draft is the safe boundary; different vibes inside it are not claimed
+to be independent editing scopes. Browser/Alpine behavior still needs the manual
+two-user checks above. Pre-existing unowned pending drafts are labeled unknown
+legacy editor and cannot be silently adopted; they need audited review/discard.
+Old queued writes without reviewed tickets are rejected rather than trusted.
+Interrupted Shopify operations need reconciliation before local discard. F5 queue
+uniqueness, F6 target/long-operation exclusion, and other audit findings remain
+outside this implementation. A request already sent to Shopify cannot be recalled.
+
+Follow-up: legacy discard compatibility and confirmation feedback
+The reported Elevated Basics Bracelets draft was inspected read-only: its
+unowned pushing flag dated to 30 September, and there were no SYV queue rows,
+operation lock, receipts, or checkpoints. The application record was not changed.
+Audited local discard now recognizes only a checkpoint-free, unowned legacy
+pushing flag older than one day, on the same database-backed queue, when the
+entire dedicated queue has no pending/reserved jobs and no operation lock exists.
+The queue range is locked within the discard transaction. Current/owned pushes,
+remote receipts, operation checkpoints, unknown queue backends and active editor
+locks remain blocked. The audit records previous_status and abandoned_legacy_push.
+This does not cancel remote work, clear queues, or advance Shopify confirmation.
+The reason counter and validation hint are displayed beside Confirm, and backend
+discard errors now remain visible inside that review. Cancel has a dedicated
+local-UI action that clears reason/validation and closes review without discarding.
+
+Follow-up: Livewire PublicPropertyNotFoundException [$]
+The dollar sign is exception formatting; the failed property name is empty.
+The installed Livewire 3.8.1 diff emits a root replacement at path "" when
+component property keys have equal counts but different order. Its snapshot
+merge can also create an empty reactive property for that root replacement.
+An offline reproduction executes the installed diff and merge implementation.
+The SYV editor now aligns canonical root key order before snapshot merges and
+request preparation. Values, signed snapshots, nested changes and server-side
+property/permission checks are preserved. Other Livewire components are untouched.
+The hook is removed with the editor. No vendor or global framework changes.
+Regression: node tests/Support/syv-livewire-properties.cjs (empty-path reproduction,
+fresh server values, pending input retention, unchanged snapshot and scope isolation).
+Manual check: fully reload the page, open discard review, enter No longer needed,
+then confirm. Expect local discard or an inline safety rejection, never this 500.
+Verification after the fix: 297 ShopYourVibe tests passed (1782 assertions).
+Both offline JavaScript regressions passed; git diff --check passed.
+No live browser verification was available, and no application records were changed.

@@ -191,9 +191,14 @@ class ShopYourVibeWorkflow
         ]);
     }
 
-    public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false): ShopYourVibeDraft
+    public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false, ?int $actorId = null): ShopYourVibeDraft
     {
         $draft = $this->editable($id, $revision, false, $strictRevision);
+        $actorId ??= auth()->id();
+        app(ShopYourVibeEditing::class)->readPublication($draft, $actorId);
+        if ($draft->pending && (auth()->check() || ! empty($draft->editing_state))) {
+            throw new RuntimeException('Review and discard pending changes with a reason before refreshing. Refresh cannot discard another editor’s work.');
+        }
         $revision = $draft->revision;
         if ($draft->pending && ! $discard) {
             throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
@@ -207,9 +212,10 @@ class ShopYourVibeWorkflow
         $state = $this->pullState($draft);
         // Different parents share catalogue products. Serialize only publication,
         // after network reads, so the mirror sees the latest committed provenance.
-        $refreshed = Cache::lock('syv-confirmed-state-publication', 960)->block(5, fn () => DB::transaction(function () use ($id, $revision, $state, $discard) {
+        $refreshed = Cache::lock('syv-confirmed-state-publication', 960)->block(5, fn () => DB::transaction(function () use ($id, $revision, $state, $discard, $actorId) {
             // Never publish an older lookup over a newer deletion or local edit.
             $draft = $this->editable($id, $revision, true, true);
+            app(ShopYourVibeEditing::class)->readPublication($draft, $actorId);
             if ($draft->pending && ! $discard) {
                 throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
             }
@@ -318,6 +324,7 @@ class ShopYourVibeWorkflow
 
         return DB::transaction(function () use ($id, $revision, $gid, $collection) {
             $draft = $this->editable($id, $revision, true, true);
+            app(ShopYourVibeEditing::class)->readPublication($draft, auth()->id());
             $desired = $draft->desired;
             $snapshot = $draft->snapshot;
             $desired['collections'][$gid] = $snapshot['collections'][$gid] = $collection;
@@ -334,6 +341,7 @@ class ShopYourVibeWorkflow
     {
         return DB::transaction(function () use ($id, $revision, $operation, $input) {
             $draft = $this->editable($id, $revision, true);
+            app(ShopYourVibeEditing::class)->authorize($draft, $revision);
             if ($draft->remote_jobs) {
                 throw new RuntimeException('Shopify is still processing this draft. Retry the push to confirm completion before editing.');
             }
@@ -527,6 +535,7 @@ class ShopYourVibeWorkflow
             $pending = $this->different($draft->snapshot, $state);
             $draft->update(['desired' => $state, 'pending' => $pending, 'status' => $pending ? 'pending' : 'synced',
                 'last_error' => null, 'revision' => $draft->revision + 1]);
+            app(ShopYourVibeEditing::class)->record($draft, $operation, $input);
 
             return $draft;
         });
@@ -536,6 +545,7 @@ class ShopYourVibeWorkflow
     {
         return DB::transaction(function () use ($id, $revision) {
             $draft = $this->editable($id, $revision, true);
+            app(ShopYourVibeEditing::class)->authorize($draft, $revision);
             if (! empty($draft->operation) && in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
                 throw new RuntimeException('Finish or retry the in-progress Vibe operation before pushing other changes.');
             }
@@ -544,6 +554,7 @@ class ShopYourVibeWorkflow
             }
             $this->assertMissingTargetsUnchanged($draft, $draft->desired, $draft->snapshot);
             $draft->update(['status' => 'pushing', 'last_error' => null, 'operation' => null, 'revision' => $draft->revision + 1]);
+            app(ShopYourVibeEditing::class)->ticket($draft);
 
             return $draft;
         });
@@ -560,6 +571,7 @@ class ShopYourVibeWorkflow
 
         return DB::transaction(function () use ($id, $revision, $payload) {
             $draft = $this->editable($id, $revision, true);
+            app(ShopYourVibeEditing::class)->authorize($draft, $revision);
             $this->assertImmediateAllowed($draft);
             if (! empty($draft->operation)) {
                 throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
@@ -592,6 +604,7 @@ class ShopYourVibeWorkflow
                 'revision' => $draft->revision + 1,
             ]);
 
+            app(ShopYourVibeEditing::class)->ticket($draft, 'create_vibe');
             return $draft->refresh();
         });
     }
@@ -613,6 +626,7 @@ class ShopYourVibeWorkflow
 
         return DB::transaction(function () use ($id, $revision, $payload) {
             $draft = $this->editable($id, $revision, true);
+            app(ShopYourVibeEditing::class)->authorize($draft, $revision);
             $this->assertImmediateAllowed($draft);
             if (! empty($draft->operation)) {
                 throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
@@ -637,14 +651,16 @@ class ShopYourVibeWorkflow
                 'revision' => $draft->revision + 1,
             ]);
 
+            app(ShopYourVibeEditing::class)->ticket($draft, 'delete_vibe');
             return $draft->refresh();
         });
     }
 
-    public function resumeOperation(int $id): ShopYourVibeDraft
+    public function resumeOperation(int $id, ?int $revision = null): ShopYourVibeDraft
     {
-        return DB::transaction(function () use ($id) {
+        return DB::transaction(function () use ($id, $revision) {
             $draft = ShopYourVibeDraft::query()->lockForUpdate()->findOrFail($id);
+            app(ShopYourVibeEditing::class)->authorize($draft, $revision ?? $draft->revision);
             if ($draft->status !== 'failed' || ! in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
                 throw new RuntimeException('There is no failed Shopify operation to retry.');
             }
@@ -661,17 +677,21 @@ class ShopYourVibeWorkflow
                 'revision' => $draft->revision + 1,
             ]);
 
+            app(ShopYourVibeEditing::class)->ticket($draft, $operation['type']);
             return $draft->refresh();
         });
     }
 
-    public function runImmediate(int $id, string $attempt): void
+    public function runImmediate(int $id, string $attempt, ?array $authorization = null): void
     {
         $draft = ShopYourVibeDraft::findOrFail($id);
         if (! in_array($draft->status, ['creating', 'deleting'], true) || ($draft->operation['attempt'] ?? null) !== $attempt) {
             return;
         }
+        $authorization ??= auth()->check() ? ($draft->editing_state['push'] ?? null) : null;
+        app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
         $this->holdOperationLock($draft);
+        $this->shopify->beforeMutation = fn () => app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
         try {
             $draft->refresh();
             if (! in_array($draft->status, ['creating', 'deleting'], true) || ($draft->operation['attempt'] ?? null) !== $attempt) {
@@ -696,6 +716,7 @@ class ShopYourVibeWorkflow
                 ]);
             }
         } finally {
+            $this->shopify->beforeMutation = null;
             $this->releaseOperationLock($draft);
         }
     }
@@ -732,13 +753,16 @@ class ShopYourVibeWorkflow
     }
 
     /** Called by the queue worker only after the explicit push action. */
-    public function push(int $id): void
+    public function push(int $id, ?array $authorization = null): void
     {
         $draft = ShopYourVibeDraft::findOrFail($id);
         if ($draft->status !== 'pushing' || in_array($draft->operation['type'] ?? null, ['create_vibe', 'delete_vibe'], true)) {
             return;
         }
+        $authorization ??= auth()->check() ? ($draft->editing_state['push'] ?? null) : null;
+        app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
         $this->holdOperationLock($draft);
+        $this->shopify->beforeMutation = fn () => app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
         try {
             $this->shopify->definition();
             $state = $draft->desired;
@@ -990,6 +1014,7 @@ class ShopYourVibeWorkflow
             report($e);
             $draft->update(['pending' => true, 'status' => 'failed', 'last_error' => $e->getMessage(), 'revision' => $draft->revision + 1]);
         } finally {
+            $this->shopify->beforeMutation = null;
             $this->releaseOperationLock($draft);
         }
     }
