@@ -774,6 +774,35 @@ it('keeps failed pushes pending and preserves successful metaobject creation for
     expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeCreate')))->toHaveCount(1);
 });
 
+it('hides archived products and counts visible products while preserving membership when sorting', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+    $state = $this->draft->desired;
+    $state['collections'][$gid]['products'] = [
+        ['id' => 'gid://shopify/Product/101', 'title' => 'Visible first', 'status' => 'ACTIVE'],
+        ['id' => 'gid://shopify/Product/102', 'title' => 'Archived Desert Muse', 'status' => 'ARCHIVED'],
+        ['id' => 'gid://shopify/Product/103', 'title' => 'Visible draft', 'status' => 'DRAFT'],
+    ];
+    $state['collections'][$gid]['sort'] = 'MANUAL';
+    $state['collections'][$gid]['products'] = array_map(fn (array $product): array =>
+        $product + ['image' => null, 'sku' => null, 'tags' => []], $state['collections'][$gid]['products']);
+    $this->draft->update(['desired' => $state]);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page->assertDontSee('Archived Desert Muse')->assertSee('Visible first')->assertSee('Visible draft');
+    $view = (new ReflectionMethod(ShopYourVibe::class, 'getViewData'))->invoke($page->instance());
+    expect($view['productTotal'])->toBe(2);
+    $this->draft = $this->workflow->placeProduct($this->draft->id, $this->draft->revision, $gid, 'gid://shopify/Product/103', 1);
+    expect(array_column($this->draft->desired['collections'][$gid]['products'], 'id'))->toBe([
+        'gid://shopify/Product/103', 'gid://shopify/Product/102', 'gid://shopify/Product/101',
+    ]);
+    vibeEdit($this, 'reorder_products', ['collection_gid' => $gid, 'ids' => ['gid://shopify/Product/101', 'gid://shopify/Product/103']]);
+    expect(array_column($this->draft->desired['collections'][$gid]['products'], 'id'))->toBe([
+        'gid://shopify/Product/101', 'gid://shopify/Product/102', 'gid://shopify/Product/103',
+    ]);
+});
+
 it('requests manual sorting when supported products are reordered', function () {
     $this->fake->collections['gid://shopify/Collection/2']['sortOrder'] = 'BEST_SELLING';
     vibeLoadProducts($this);

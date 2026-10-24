@@ -1858,7 +1858,9 @@ class ShopYourVibe extends Page
                 'title' => $collection['title'] ?? $card['name'],
                 'handle' => $collection['handle'] ?? basename((string) parse_url($card['link'] ?? '', PHP_URL_PATH)),
                 'detected_membership_tag' => $collection['detected_membership_tag'] ?? null,
-                'product_count' => (int) ($collection['product_count'] ?? count($collection['products'] ?? [])),
+                'product_count' => isset($collection['products'])
+                    ? count(\App\Services\ShopYourVibeVisibleProducts::visible($collection['products']))
+                    : (int) ($collection['product_count'] ?? 0),
             ];
         }
 
@@ -2378,7 +2380,7 @@ class ShopYourVibe extends Page
         $draft = ShopYourVibeDraft::query()->select(['id', 'desired'])->find($this->draftId);
         $products = $draft->desired['collections'][$gid]['products'] ?? [];
 
-        return array_values(array_column(is_array($products) ? $products : [], 'id'));
+        return array_column(\App\Services\ShopYourVibeVisibleProducts::visible(is_array($products) ? $products : []), 'id');
     }
 
     private function orderEpochKey(string $gid, string $session = ''): string
@@ -2480,6 +2482,7 @@ class ShopYourVibe extends Page
         $products = collect();
         if ($this->addingProducts && $collection && $collection['membership_supported']) {
             $products = Product::with(['images', 'variants'])->whereNotNull('shopify_id')
+                ->where(fn ($query) => $query->whereNull('status')->orWhereRaw('LOWER(status) != ?', ['archived']))
                 ->whereNotIn('shopify_id', array_column($collection['products'], 'id'))
                 ->where(fn ($query) => $query->where('title', 'like', '%'.$this->productSearch.'%')
                     ->orWhereHas('variants', fn ($variants) => $variants->where('sku', 'like', '%'.$this->productSearch.'%')))
@@ -2494,7 +2497,7 @@ class ShopYourVibe extends Page
         $filteredParentProducts = [];
         $productMembership = '0';
         if ($showProductList) {
-            $source = $draft->desired['collections'][$draft->collection_gid]['products'] ?? [];
+            $source = \App\Services\ShopYourVibeVisibleProducts::visible($draft->desired['collections'][$draft->collection_gid]['products'] ?? []);
             $ids = array_column($source, 'id');
             $sorted = $ids;
             sort($sorted);
@@ -2530,7 +2533,7 @@ class ShopYourVibe extends Page
             : null;
 
         $parentProductIds = $draft
-            ? array_fill_keys(array_column($draft->desired['collections'][$draft->collection_gid]['products'] ?? [], 'id'), true)
+            ? array_fill_keys(array_column(\App\Services\ShopYourVibeVisibleProducts::visible($draft->desired['collections'][$draft->collection_gid]['products'] ?? []), 'id'), true)
             : [];
         $productTotal = count($parentProductIds);
         $productsLoaded = $draft && ShopYourVibeWorkflow::productsAreLoaded($draft->desired, $draft->collection_gid);
@@ -2572,6 +2575,7 @@ class ShopYourVibe extends Page
      */
     private function presentProducts(?ShopYourVibeDraft $draft, array $products): array
     {
+        $products = \App\Services\ShopYourVibeVisibleProducts::visible($products);
         $membershipLabels = collect($this->vibeMappings)
             ->filter(fn ($mapping): bool => filled($mapping['membership_tag'] ?? null))
             ->mapWithKeys(fn ($mapping): array => [

@@ -854,7 +854,7 @@
                                 @php($vibeCollection = $draft->desired['collections'][$vibe['collection_gid'] ?? ''] ?? null)
                                 @php($fallbackHandle = $vibeCollection['handle'] ?? basename((string) parse_url($vibe['link'] ?? '', PHP_URL_PATH)))
                                 @php($fallbackTag = $vibeCollection['detected_membership_tag'] ?? null)
-                                @php($fallbackProductCount = $vibeCollection ? (($vibeCollection['product_count'] ?? null) ?? count($vibeCollection['products'] ?? [])) : null)
+                                @php($fallbackProductCount = $vibeCollection ? (isset($vibeCollection['products']) ? count(\App\Services\ShopYourVibeVisibleProducts::visible($vibeCollection['products'])) : ($vibeCollection['product_count'] ?? null)) : null)
                                 @if ($vibeMapping || $fallbackHandle || $fallbackTag || $fallbackProductCount !== null)
                                     <dl class="space-y-1 text-xs text-gray-500">
                                         <div><dt class="inline font-semibold">Handle:</dt> <dd class="inline">{{ $vibeMapping['collection_handle'] ?? $fallbackHandle }}</dd></div>

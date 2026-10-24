@@ -488,7 +488,11 @@ class ShopYourVibeWorkflow
                             $collection['manual_supported'] = true;
                             $collection['enable_manual'] = true;
                         }
-                        $collection['products'] = $this->reorder($collection['products'], $input['ids'], 'id');
+                        $ids = $input['ids'];
+                        if (count($ids) !== count($collection['products'])) {
+                            $ids = ShopYourVibeVisibleProducts::fullOrder($collection['products'], $ids);
+                        }
+                        $collection['products'] = $this->reorder($collection['products'], $ids, 'id');
                         $this->markPlacedDrafts($state, $gid, $collection['products']);
                     } else {
                         if (! $collection['membership_supported']) {
@@ -1399,7 +1403,7 @@ class ShopYourVibeWorkflow
         if (! is_array($products)) {
             throw new RuntimeException('Open this collection’s products before changing their order.');
         }
-        $ids = array_column($products, 'id');
+        $ids = array_column(ShopYourVibeVisibleProducts::visible($products), 'id');
         $count = count($ids);
         if ($position < 1 || $position > $count) {
             throw new RuntimeException('Enter a position from 1 to '.$count.'.');
