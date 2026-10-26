@@ -10,12 +10,35 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
-it('downloads a template of images that have no alt text', function (): void {
+it('exports every active image and its alt text beyond 1000 rows while excluding inactive images and products', function (): void {
     $product = altTextProduct('LA0550');
     altTextImage($product, 1, null);
     altTextImage($product, 2, 'Already described');
+    $rows = [];
+    for ($position = 3; $position <= 1005; $position++) {
+        $rows[] = [
+            'product_id' => $product->id,
+            'position' => $position,
+            'alt_text' => 'Description '.$position,
+            'sync_state' => Image::SYNC_STATE_SYNCED,
+        ];
+    }
+    foreach (array_chunk($rows, 100) as $chunk) {
+        Image::query()->insert($chunk);
+    }
+    foreach ([Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED] as $state) {
+        altTextImage($product, 1006, 'Excluded '.$state)->update(['sync_state' => $state]);
+    }
+    altTextImage($product, 1007, 'Excluded hidden')->update(['is_duplicate_hidden' => true]);
+    foreach (['draft', 'archived'] as $status) {
+        $inactive = altTextProduct('EXCLUDED-'.$status);
+        Product::withoutEvents(fn () => $inactive->update(['status' => $status]));
+        altTextImage($inactive, 1, 'Excluded '.$status);
+    }
+    $withoutSku = altTextProduct('');
+    altTextImage($withoutSku, 1, 'Included without SKU');
 
-    $response = app(ImageAltTextBackfillService::class)->downloadMissing();
+    $response = app(ImageAltTextBackfillService::class)->downloadActive();
     ob_start();
     $response->sendContent();
     $bytes = ob_get_clean();
@@ -32,7 +55,11 @@ it('downloads a template of images that have no alt text', function (): void {
         ->and($sheet)->toContain('LA0550')
         ->and($sheet)->toContain('https://cdn.shopify.com/1.jpg')
         ->and($sheet)->toContain('IMAGE(E2)')
-        ->and($sheet)->not->toContain('Already described');
+        ->and($sheet)->toContain('Already described')
+        ->and($sheet)->toContain('Description 1005')
+        ->and($sheet)->toContain('Included without SKU')
+        ->and($sheet)->not->toContain('Excluded ')
+        ->and(substr_count($sheet, '<row '))->toBe(1007);
 });
 
 it('reads alt text back from the excel template', function (): void {

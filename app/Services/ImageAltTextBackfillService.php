@@ -9,7 +9,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class ImageAltTextBackfillService
 {
-    public function downloadMissing(): StreamedResponse
+    public function downloadActive(): StreamedResponse
     {
         $filename = 'image-alt-text-template-'.now()->format('Y-m-d').'.xlsx';
 
@@ -272,10 +272,7 @@ final class ImageAltTextBackfillService
         $rowNumber = 1;
         Image::query()
             ->active()
-            ->where(function ($query): void {
-                $query->whereNull('alt_text')
-                    ->orWhereRaw("TRIM(COALESCE(alt_text, '')) = ''");
-            })
+            ->whereHas('product', fn ($query) => $query->whereRaw('LOWER(status) = ?', ['active']))
             ->with([
                 'imageAsset',
                 'product.variants' => fn ($query) => $query->orderBy('id'),
@@ -291,15 +288,11 @@ final class ImageAltTextBackfillService
                 }
 
                 $sku = trim((string) ($image->product?->variants->first()?->sku ?? ''));
-                if ($sku === '') {
-                    return;
-                }
-
                 $rowNumber++;
                 $this->writeSheetRow($sheet, $rowNumber, [
                     $sku,
                     (string) (int) ($image->position ?? 1),
-                    '',
+                    (string) ($image->alt_text ?? ''),
                     (string) ($image->product?->title ?? ''),
                     $this->shopifyImageUrl($image),
                 ], true);
