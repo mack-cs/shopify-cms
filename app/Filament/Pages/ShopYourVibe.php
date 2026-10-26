@@ -10,7 +10,6 @@ use App\Jobs\PushShopYourVibe;
 use App\Jobs\PushShopYourVibeComplementaryProducts;
 use App\Jobs\PushShopYourVibeProductSiblings;
 use App\Jobs\PushShopYourVibeProductTags;
-use App\Jobs\RefreshShopYourVibeDraft;
 use App\Jobs\RefreshShopYourVibeParents;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -364,13 +363,10 @@ class ShopYourVibe extends Page
     {
         $progress = Cache::get(ShopYourVibeWorkflow::progressKey($gid));
         $state = is_array($progress) ? ($progress['state'] ?? null) : null;
-        if (! $force && in_array($state, ['queued', 'running', 'failed'], true)) {
+        if (in_array($state, ['queued', 'running'], true) || (! $force && $state === 'failed')) {
             $this->hydratingCollection = true;
 
             return;
-        }
-        if ($force) {
-            HydrateShopYourVibeDraft::releaseUniqueLock($gid);
         }
         Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
             'state' => 'queued',
@@ -436,26 +432,17 @@ class ShopYourVibe extends Page
                 // retain its pending edits and historical snapshot for recovery.
             }
             if ($gid = $this->draft()?->collection_gid) {
+                $request = app(\App\Services\ShopYourVibeRefresh::class)->request($this->draftId, $this->revision, auth()->id());
                 $this->refreshError = null;
                 $this->refreshingCollection = true;
-                Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
-                    'state' => 'running',
-                    'kind' => 'refresh',
-                    'stage' => 'Refreshing collection products',
-                    'done' => null,
-                    'total' => null,
-                    'message' => 'Refreshing collection products',
-                ], 600);
             }
-            RefreshShopYourVibeDraft::releaseUniqueLock($this->draftId);
-            RefreshShopYourVibeDraft::dispatch($this->draftId, $this->revision, $discard, auth()->id());
             $this->dispatch('vibe-refresh-started');
             if ($fresh = $this->draft()) {
                 $this->accept($fresh);
             }
             Notification::make()
-                ->title('Shopify refresh queued')
-                ->body('This Shop Your Vibe draft will reload from Shopify in the background.')
+                ->title(($request['created'] ?? false) ? 'Shopify refresh queued' : 'This collection is already refreshing.')
+                ->body(($request['created'] ?? false) ? 'This Shop Your Vibe draft will reload from Shopify in the background.' : 'The existing refresh will continue. Its current progress is shown below.')
                 ->success()
                 ->send();
         });
@@ -1591,7 +1578,8 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $refreshEnded = false;
-        if ($this->refreshingCollection && is_string($this->selectedCollection)) {
+        if ($this->refreshingCollection && $this->draftId && is_string($this->selectedCollection)) {
+            app(\App\Services\ShopYourVibeRefresh::class)->status($this->draftId);
             $refreshProgress = Cache::get(ShopYourVibeWorkflow::progressKey($this->selectedCollection));
             $refreshState = is_array($refreshProgress) ? ($refreshProgress['state'] ?? null) : null;
             if (in_array($refreshState, ['success', 'failed', 'skipped'], true) || $refreshState === null) {
@@ -2243,6 +2231,9 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->skipRender();
         $gid = $this->selectedCollection;
+        if ($this->refreshingCollection && $this->draftId) {
+            app(\App\Services\ShopYourVibeRefresh::class)->status($this->draftId);
+        }
         $progress = is_string($gid) ? Cache::get(ShopYourVibeWorkflow::progressKey($gid)) : null;
         $columns = ['id', 'collection_gid', 'revision', 'pending', 'status', 'progress', 'remote_jobs'];
         $draft = $this->draftId ? ShopYourVibeDraft::query()->select($columns)->find($this->draftId) : null;

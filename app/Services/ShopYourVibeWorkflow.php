@@ -66,6 +66,11 @@ class ShopYourVibeWorkflow
 
     public function __construct(private readonly ShopYourVibeShopify $shopify) {}
 
+    public function trackRefreshAttempt(?callable $guard): void
+    {
+        $this->shopify->refreshGuard = $guard;
+    }
+
     public static function progressKey(string $gid): string
     {
         return 'syv-progress:'.$gid;
@@ -191,7 +196,7 @@ class ShopYourVibeWorkflow
         ]);
     }
 
-    public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false, ?int $actorId = null): ShopYourVibeDraft
+    public function refresh(int $id, int $revision, bool $discard = false, bool $strictRevision = false, ?int $actorId = null, ?string $refreshToken = null): ShopYourVibeDraft
     {
         $draft = $this->editable($id, $revision, false, $strictRevision);
         $actorId ??= auth()->id();
@@ -212,9 +217,12 @@ class ShopYourVibeWorkflow
         $state = $this->pullState($draft);
         // Different parents share catalogue products. Serialize only publication,
         // after network reads, so the mirror sees the latest committed provenance.
-        $refreshed = Cache::lock('syv-confirmed-state-publication', 960)->block(5, fn () => DB::transaction(function () use ($id, $revision, $state, $discard, $actorId) {
+        $refreshed = Cache::lock('syv-confirmed-state-publication', 960)->block(5, fn () => DB::transaction(function () use ($id, $revision, $state, $discard, $actorId, $refreshToken) {
             // Never publish an older lookup over a newer deletion or local edit.
             $draft = $this->editable($id, $revision, true, true);
+            if ($refreshToken !== null) {
+                app(ShopYourVibeRefresh::class)->assertCurrent($draft, $refreshToken);
+            }
             app(ShopYourVibeEditing::class)->readPublication($draft, $actorId);
             if ($draft->pending && ! $discard) {
                 throw new RuntimeException('You have pending changes. Confirm refresh and discard changes first.');
@@ -302,6 +310,12 @@ class ShopYourVibeWorkflow
             $freshState = $state;
             $freshState['collections'] = array_filter($state['collections'], fn ($collection) => empty($collection['unavailable']));
             app(ShopYourVibeProductMirror::class)->mirrorFromDraftState($freshState);
+
+            if ($refreshToken !== null) {
+                if (! app(ShopYourVibeRefresh::class)->finish($id, $refreshToken, 'success', self::HYDRATION_SUCCESS_MESSAGE)) {
+                    throw new \App\Exceptions\ShopYourVibeRefreshExpiredException('Refresh expired before publication completed. Existing products were kept.');
+                }
+            }
 
             return $draft;
         }));

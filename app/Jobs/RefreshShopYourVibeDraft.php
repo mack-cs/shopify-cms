@@ -2,22 +2,20 @@
 
 namespace App\Jobs;
 
+use App\Exceptions\ShopYourVibeRefreshExpiredException;
 use App\Models\ShopYourVibeDraft;
 use App\Services\AdminNotification;
+use App\Services\ShopYourVibeRefresh;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
-use Illuminate\Bus\UniqueLock;
-use Illuminate\Contracts\Cache\Repository as CacheRepository;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Cache;
 use Throwable;
 
-class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
+class RefreshShopYourVibeDraft implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
@@ -25,149 +23,92 @@ class RefreshShopYourVibeDraft implements ShouldBeUnique, ShouldQueue
 
     public int $timeout = 840;
 
-    public int $uniqueFor = 960;
+    public bool $failOnTimeout = true;
+
+    private ?string $refreshToken = null;
 
     public function __construct(
         private readonly int $draftId,
         private readonly int $revision,
         private readonly bool $discard,
         private readonly ?int $userId = null,
+        ?string $refreshToken = null,
     ) {
+        $this->refreshToken = $refreshToken;
         $this->onConnection('shop-your-vibe');
         $this->onQueue('shop-your-vibe');
     }
 
-    public function uniqueId(): string
-    {
-        return 'syv-refresh:'.$this->draftId;
-    }
-
-    public static function releaseUniqueLock(int $draftId): void
-    {
-        (new UniqueLock(app(CacheRepository::class)))->release(new self($draftId, 0, false));
-    }
-
     public function handle(ShopYourVibeWorkflow $workflow): void
     {
-        $draft = ShopYourVibeDraft::find($this->draftId);
-        if (! $draft) {
-            throw new \RuntimeException('This Shop Your Vibe draft no longer exists.');
-        }
-        if (($draft->pending && ! $this->discard) || (int) $draft->revision !== $this->revision) {
-            Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                'state' => 'skipped',
-                'done' => null,
-                'total' => null,
-                'message' => 'Refresh skipped. Newer local changes were kept.',
-            ], 120);
-            $this->notify(
-                'Shop Your Vibe refresh skipped',
-                'This collection changed after the refresh was requested. Local edits were kept.',
-                false
-            );
-
-            return;
-        }
-
-        try {
-            $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = '') use ($draft): void {
-                $payload = ShopYourVibeWorkflow::productProgressPayload($draft->collection_gid, $gid, $done, $total, $title);
-                Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                    'state' => 'running',
-                    'kind' => 'refresh',
-                    'stage' => $payload['stage'],
-                    'done' => $payload['done'],
-                    'total' => $payload['total'],
-                    'percent' => $payload['percent'],
-                    'stage_gid' => $gid,
-                    'message' => $payload['message'],
-                ], 600);
-            });
+        $refresh = app(ShopYourVibeRefresh::class);
+        $draft = ShopYourVibeDraft::findOrFail($this->draftId);
+        // Legacy payloads may claim an idle collection, but cannot adopt a newer queued attempt.
+        if ($this->refreshToken === null) {
+            if ($draft->revision !== $this->revision || $refresh->active($draft->refresh_state)) {
+                return;
+            }
             if ($draft->pending) {
                 throw new \RuntimeException('Pending changes require an audited discard with a reason. Refresh did not discard them.');
             }
-            $workflow->refresh($this->draftId, $this->revision, false, true, $this->userId);
-            Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                'state' => 'success',
-                'kind' => 'refresh',
-                'done' => null,
-                'total' => null,
-                'message' => ShopYourVibeWorkflow::HYDRATION_SUCCESS_MESSAGE,
-            ], 120);
-        } catch (Throwable $exception) {
-            $current = ShopYourVibeDraft::find($this->draftId);
-            if ($current && (($current->pending && ! $this->discard) || (int) $current->revision !== $this->revision)) {
-                Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                    'state' => 'skipped',
-                    'kind' => 'refresh',
-                    'done' => null,
-                    'total' => null,
-                    'message' => 'Refresh skipped. Newer local changes were kept.',
-                ], 120);
-                $this->notify(
-                    'Shop Your Vibe refresh skipped',
-                    'This collection changed after the refresh was requested. Local edits were kept.',
-                    false
-                );
+            $claim = $refresh->request($this->draftId, $this->revision, $this->userId, false);
+            if (! $claim['created']) {
+                return;
+            }
+            $this->refreshToken = $claim['operation']['token'];
+        }
+        $token = $this->refreshToken;
+        if (! $refresh->start($this->draftId, $token)) {
+            return; // Duplicate delivery, expired queue entry, or an older attempt.
+        }
+
+        try {
+            if ($draft->pending || $draft->revision !== $this->revision) {
+                $refresh->finish($this->draftId, $token, 'skipped', 'Refresh skipped. Newer local changes were kept.');
 
                 return;
             }
-            Cache::put(ShopYourVibeWorkflow::progressKey($draft->collection_gid), [
-                'state' => 'failed',
-                'kind' => 'refresh',
-                'done' => null,
-                'total' => null,
-                'message' => $exception->getMessage(),
-            ], 3600);
-            $this->notify(
-                'Shop Your Vibe refresh failed',
-                $exception->getMessage(),
-                false
-            );
+            $workflow->trackRefreshAttempt(fn () => $refresh->heartbeat($this->draftId, $token));
+            $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = '') use ($refresh, $token, $draft): void {
+                $refresh->heartbeat($this->draftId, $token,
+                    ShopYourVibeWorkflow::productProgressPayload($draft->collection_gid, $gid, $done, $total, $title) + ['stage_gid' => $gid]);
+            });
+            $workflow->refresh($this->draftId, $this->revision, false, true, $this->userId, $token);
+        } catch (ShopYourVibeRefreshExpiredException) {
+            return; // Expired workers cannot change a newer attempt's progress or notification.
+        } catch (Throwable $exception) {
+            $current = ShopYourVibeDraft::find($this->draftId);
+            $changed = $current && ($current->pending || $current->revision !== $this->revision);
+            if ($refresh->finish($this->draftId, $token, $changed ? 'skipped' : 'failed',
+                $changed ? 'Refresh skipped. Newer local changes were kept.' : $exception->getMessage())) {
+                $this->notify($changed ? 'Shop Your Vibe refresh skipped' : 'Shop Your Vibe refresh failed',
+                    $changed ? 'Local edits were kept.' : $exception->getMessage(), false);
+            }
+            if (! $changed) {
+                throw $exception;
+            }
 
-            throw $exception;
+            return;
         } finally {
+            $workflow->trackRefreshAttempt(null);
             $workflow->trackProductProgress(null);
         }
 
-        $this->notify(
-            'Shop Your Vibe refreshed',
-            'Latest Shopify state has been loaded.',
-            true
-        );
+        $this->notify('Shop Your Vibe refreshed', 'Latest Shopify state has been loaded.', true);
     }
 
     public function failed(Throwable $exception): void
     {
-        $draft = ShopYourVibeDraft::find($this->draftId);
-        if (! $draft) {
-            return;
+        if ($this->refreshToken !== null) {
+            app(ShopYourVibeRefresh::class)->finish($this->draftId, $this->refreshToken, 'failed', $exception->getMessage());
         }
-        $key = ShopYourVibeWorkflow::progressKey($draft->collection_gid);
-        $current = Cache::get($key);
-        if (is_array($current) && in_array($current['state'] ?? null, ['success', 'failed', 'skipped'], true)) {
-            return;
-        }
-        Cache::put($key, [
-            'state' => 'failed',
-            'kind' => 'refresh',
-            'done' => null,
-            'total' => null,
-            'message' => $exception->getMessage(),
-        ], 3600);
     }
 
     private function notify(string $title, string $body, bool $success): void
     {
-        if (! $this->userId) {
-            return;
+        if ($this->userId) {
+            $notification = Notification::make()->title($title)->body($body);
+            AdminNotification::sendToUserId($success ? $notification->success() : $notification->danger(), $this->userId);
         }
-
-        $notification = Notification::make()
-            ->title($title)
-            ->body($body);
-
-        $notification = $success ? $notification->success() : $notification->danger();
-        AdminNotification::sendToUserId($notification, $this->userId);
     }
 }

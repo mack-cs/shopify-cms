@@ -1038,11 +1038,12 @@ it('clears the refresh banner after Refresh from Shopify fails', function () {
     expect(substr_count($page->html(), 'Waiting to load collection products'))->toBe(1);
     Bus::assertDispatchedTimes(RefreshShopYourVibeDraft::class, 1);
 
-    Cache::put(ShopYourVibeWorkflow::progressKey($gid), [
-        'state' => 'failed',
-        'kind' => 'refresh',
-        'message' => 'Could not refresh linked collection Pearl (gid://shopify/Collection/2). Existing products and Shop Your Vibe assignments were kept.',
-    ], 3600);
+    app(\App\Services\ShopYourVibeRefresh::class)->finish(
+        $this->draft->id,
+        $this->draft->fresh()->refresh_state['token'],
+        'failed',
+        'Could not refresh linked collection Pearl (gid://shopify/Collection/2). Existing products and Shop Your Vibe assignments were kept.',
+    );
 
     expect($page->instance()->statusSnapshot()['phase'])->toBe('refresh_failed');
     $page->call('pollPush')

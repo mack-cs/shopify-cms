@@ -25,13 +25,24 @@ class ShopYourVibeShopify
     /** @var null|callable(): void Authorization rechecked immediately before each remote write. */
     public $beforeMutation = null;
 
+    /** @var null|callable(): void Fences expired refresh workers around each complete API read. */
+    public $refreshGuard = null;
+
     private function graphql(string $query, array $variables = []): array
     {
+        if ($this->refreshGuard) {
+            ($this->refreshGuard)();
+        }
         if (preg_match('/^\s*mutation\b/', $query) && $this->beforeMutation) {
             ($this->beforeMutation)();
         }
 
-        return $this->client->graphql($query, $variables);
+        $result = $this->client->graphql($query, $variables);
+        if ($this->refreshGuard) {
+            ($this->refreshGuard)();
+        }
+
+        return $result;
     }
 
     public function __construct(private readonly ShopifyGraphqlGateway $client) {}
