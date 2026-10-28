@@ -46,6 +46,14 @@ final class StackFulfillmentInventoryService
     /** @return array{stack_lines:int,consumed:int,already_completed:int} */
     private function processLocked(ShopifyFulfillment $fulfillment, string $orderId): array
     {
+        if ((! config('engraved_beads.enabled', true) || ! config('engraved_beads.inventory_writes_enabled', false))
+            && ShopifyStackInventoryReservation::query()->where('shopify_order_id', $orderId)
+                ->where(fn ($q) => $q->whereNotNull('bead_family_id')->orWhere('ledger_document_uri', 'like', 'leighavenue-cms://engraved-bead-reservations/%'))->exists()) {
+            $fulfillment->update(['processing_status' => ShopifyFulfillment::STATUS_PENDING,
+                'error_message' => 'Deferred: engraved bead inventory writes are disabled.']);
+
+            return ['stack_lines' => 0, 'consumed' => 0, 'already_completed' => 0];
+        }
         $fulfillment->forceFill([
             'processing_status' => ShopifyFulfillment::STATUS_PROCESSING,
             'attempts' => (int) $fulfillment->attempts + 1,
@@ -77,6 +85,13 @@ final class StackFulfillmentInventoryService
 
                 $summary['stack_lines']++;
                 foreach ($reservations as $reservation) {
+                    if ((int) $reservation->historical_quantity > 0
+                        && ($fulfillment->fulfilled_at_shopify === null
+                            || $fulfillment->fulfilled_at_shopify->lte($reservation->created_at))) {
+                        // No evidence that this fulfillment belongs to the CMS-controlled remainder.
+                        $summary['already_completed']++;
+                        continue;
+                    }
                     $quantity = (int) $lineItem['quantity'] * (int) $reservation->component_quantity_per_stack;
                     if (str_starts_with((string) $reservation->ledger_document_uri, 'leighavenue-cms://engraved-bead-reservations/')) {
                         $quantity = min($quantity, $reservation->remainingReserved());
@@ -88,7 +103,7 @@ final class StackFulfillmentInventoryService
                     }
                     $source = "fulfillment:{$fulfillment->shopify_fulfillment_id}:{$lineId}";
                     $eventKey = hash('sha256', implode('|', [
-                        $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME, $quantity,
+                        $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME,
                     ]));
                     if ($reservation->movements()->where('event_key', $eventKey)
                         ->where('status', ShopifyStackInventoryMovement::STATUS_COMPLETED)->exists()) {

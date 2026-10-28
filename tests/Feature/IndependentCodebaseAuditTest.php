@@ -16,6 +16,7 @@ use App\Services\Shopify\StackOrderLineMapper;
 use App\Services\Shopify\StackOrderReservationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/EngravedBeadFamilyFixture.php';
 beforeEach(function () {
     config(['engraved_beads.enabled' => true, 'engraved_beads.inventory_writes_enabled' => true]);
     Illuminate\Support\Facades\Http::preventStrayRequests();
@@ -66,7 +67,7 @@ it('AUDIT does not allow an old historical fulfillment to consume the new remain
         ['id'=>11001,'variant_id'=>9401,'quantity'=>3,'unfulfilled_quantity'=>1],
     ]));
     (new StackFulfillmentInventoryService($movements))->process(auditBeadFulfillment(9903,9003,2));
-    expect(ShopifyStackInventoryReservation::query()->first()->remainingReserved())->toBe(3);
+    expect(ShopifyStackInventoryReservation::query()->first()->remainingReserved())->toBe(4);
 });
 
 it('AUDIT ignores an unauthorized launch request at the service boundary', function () {
@@ -92,7 +93,7 @@ it('AUDIT deduplicates a repeated partial refund independently of remaining quan
     $refunds=[['id'=>702,'refund_line_items'=>[['line_item_id'=>11001,'quantity'=>2,'restock_type'=>'return']]]];
     $service->process(auditBeadOrder(9004,$lines,'orders/updated','refund-first',$refunds));
     $service->process(auditBeadOrder(9004,$lines,'orders/updated','refund-replay',$refunds));
-    expect(ShopifyStackInventoryReservation::query()->value('restocked_quantity'))->toBe(6);
+    expect(ShopifyStackInventoryReservation::query()->value('restocked_quantity'))->toBe(8);
 });
 it('AUDIT retry after consumption does not consume another partial fulfillment quantity', function () {
     auditBeadSku('FOUR','4-engraved-beads',9401);
@@ -109,7 +110,7 @@ it('AUDIT retry after consumption does not consume another partial fulfillment q
     // Reproduce the durable state after movement commit but before fulfillment completion.
     $fulfillment->update(['processing_status'=>ShopifyFulfillment::STATUS_PENDING]);
     $service->process($fulfillment->fresh());
-    expect(ShopifyStackInventoryReservation::query()->value('consumed_quantity'))->toBe(6);
+    expect(ShopifyStackInventoryReservation::query()->value('consumed_quantity'))->toBe(8);
 });
 function auditBeadInventory(): ShopifyInventoryAdjustmentService
 {
@@ -166,6 +167,14 @@ function auditBeadReservationService(
 /** @return array{product:Product,variant:Variant} */
 function auditBeadSku(string $sku, string $tags, int $variantId, ?string $inventoryItem = 'auto'): array
 {
+    // The audit now exercises a verified shared pool; all original safety assertions remain.
+    $fixture = sharedBeadFamily('audit-design-bead-family', $variantId - 4, active: true);
+    $member = $fixture['members'][4];
+    $member['variant']->update(['sku' => $sku]);
+    $fixture['family']->members()->where('required_beads', 4)->update(['sku' => $sku]);
+
+    return $member;
+    /* Legacy independent-pool fixture retained below for audit provenance.
     $user = User::factory()->create();
     $import = Import::query()->create([
         'filename' => strtolower($sku).'.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
@@ -191,7 +200,7 @@ function auditBeadSku(string $sku, string $tags, int $variantId, ?string $invent
         'sync_state' => Variant::SYNC_STATE_SYNCED,
     ]);
 
-    return compact('product', 'variant');
+    return compact('product', 'variant'); */
 }
 
 function auditBeadOrder(int $orderId, array $lines, string $topic = 'orders/create', ?string $webhookId = null, array $refunds = []): ShopifyStackOrderEvent

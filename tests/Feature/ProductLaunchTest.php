@@ -31,44 +31,44 @@ it('does not launch a product when it is approved', function (): void {
 });
 
 it('launches an approved tracked product and does not write inventory again on a repeat', function (): void {
-    $product = launchProduct('draft', tracked: true, onHand: 0, quantity: 5);
+    $product = launchProduct('draft', tracked: true, onHand: 5, quantity: 5);
     approveLaunchProduct($product);
     $writes = 0;
     $activated = false;
-    bindLaunchClients($writes, $activated);
+    bindLaunchClients($writes, $activated, liveOnHand: 5);
 
     $service = app(ProductLaunchService::class);
-    $first = $service->queue(collect([$product]), ['gid://shopify/Publication/1'], User::factory()->create()->id);
-    $second = $service->queue(collect([$product->fresh()]), ['gid://shopify/Publication/1'], User::factory()->create()->id);
+    $first = $service->queue(collect([$product]), ['gid://shopify/Publication/1'], launchActor()->id);
+    $second = $service->queue(collect([$product->fresh()]), ['gid://shopify/Publication/1'], launchActor()->id);
 
     expect($first->fresh()->status)->toBe(ProductLaunchRun::STATUS_COMPLETED)
         ->and($first->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_LAUNCHED)
         ->and($first->items()->first()->status_confirmed_at)->not->toBeNull()
         ->and($second->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_SKIPPED)
-        ->and($writes)->toBe(1)
+        ->and($writes)->toBe(0)
         ->and($product->fresh()->status)->toBe('active')
         ->and($product->variants()->first()->current_on_hand_quantity)->toBe(5);
 });
 
 it('blocks products that fail validation and still launches the valid ones', function (): void {
-    $ready = launchProduct('draft', tracked: true, onHand: 0, quantity: 4);
+    $ready = launchProduct('draft', tracked: true, onHand: 4, quantity: 4);
     $blocked = launchProduct('draft', tracked: true, onHand: 0, quantity: 4, handle: 'blocked-launch');
     approveLaunchProduct($ready);
     $writes = 0;
     $activated = false;
-    bindLaunchClients($writes, $activated);
+    bindLaunchClients($writes, $activated, liveOnHand: 4);
 
     $run = app(ProductLaunchService::class)->queue(
         collect([$ready, $blocked]),
         ['gid://shopify/Publication/1'],
-        User::factory()->create()->id,
+        launchActor()->id,
     );
 
     expect($run->fresh()->status)->toBe(ProductLaunchRun::STATUS_COMPLETED_WITH_FAILURES)
         ->and($run->items()->where('product_id', $ready->id)->value('outcome'))->toBe(ProductLaunchItem::OUTCOME_LAUNCHED)
         ->and($run->items()->where('product_id', $blocked->id)->value('outcome'))->toBe(ProductLaunchItem::OUTCOME_BLOCKED)
         ->and($blocked->fresh()->status)->toBe('draft')
-        ->and($writes)->toBe(1);
+        ->and($writes)->toBe(0);
 });
 
 it('does not launch when CMS inventory is stale compared with Shopify', function (): void {
@@ -81,7 +81,7 @@ it('does not launch when CMS inventory is stale compared with Shopify', function
     $run = app(ProductLaunchService::class)->queue(
         collect([$product]),
         ['gid://shopify/Publication/1'],
-        User::factory()->create()->id,
+        launchActor()->id,
     );
 
     expect($run->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_BLOCKED)
@@ -100,7 +100,7 @@ it('launches a stack without enabling inventory tracking or assigning a quantity
     $run = app(ProductLaunchService::class)->queue(
         collect([$product]),
         ['gid://shopify/Publication/1'],
-        User::factory()->create()->id,
+        launchActor()->id,
     );
 
     expect($run->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_LAUNCHED)
@@ -121,12 +121,41 @@ it('reports a failed launch when Shopify does not confirm publication', function
     $run = app(ProductLaunchService::class)->queue(
         collect([$product]),
         ['gid://shopify/Publication/1'],
-        User::factory()->create()->id,
+        launchActor()->id,
     );
 
     expect($run->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_FAILED)
         ->and($run->items()->first()->detail)->toContain('did not confirm')
         ->and($product->fresh()->status)->toBe('draft');
+});
+
+function launchActor(): User
+{
+    Spatie\Permission\Models\Permission::findOrCreate('ShopifyPushProducts', 'web');
+    $user = User::factory()->create();
+    $user->givePermissionTo('ShopifyPushProducts');
+
+    return $user;
+}
+
+it('does not convert available stock into an implicit on-hand correction', function () {
+    $product = launchProduct('draft', tracked: true, onHand: 10, quantity: 7);
+    approveLaunchProduct($product);
+    $writes = 0;
+    $activated = false;
+    bindLaunchClients($writes, $activated, liveOnHand: 10);
+    $run = app(ProductLaunchService::class)->queue(collect([$product]), ['gid://shopify/Publication/1'], launchActor()->id);
+    expect($writes)->toBe(0)->and($activated)->toBeFalse()
+        ->and($run->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_BLOCKED);
+});
+
+it('checks the launch kill switch when queued work executes', function () {
+    Illuminate\Support\Facades\Bus::fake();
+    $product = launchProduct('draft', tracked: false);
+    $service = app(ProductLaunchService::class);
+    $run = $service->queue(collect([$product]), ['gid://shopify/Publication/1'], launchActor()->id);
+    config(['product_launch.enabled' => false]);
+    expect(fn () => $service->run($run))->toThrow(RuntimeException::class, 'disabled');
 });
 
 function launchProduct(

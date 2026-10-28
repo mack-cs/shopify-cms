@@ -7,6 +7,7 @@ use App\Models\ShopifyStackInventoryReservation;
 use App\Models\Variant;
 use App\Services\Inventory\InventoryAuditContext;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
 final class StackInventoryMovementService
@@ -19,11 +20,24 @@ final class StackInventoryMovementService
         int $quantity,
         string $sourceEventKey,
     ): ShopifyStackInventoryMovement {
+        $pool = implode('|', [$reservation->shopify_inventory_item_id, $reservation->shopify_location_id]);
+
+        return Cache::lock('inventory-pool:'.hash('sha256', $pool), 420)->block(5,
+            fn () => $this->executeLocked($reservation->fresh(), $action, $quantity, $sourceEventKey));
+    }
+
+    private function executeLocked(
+        ShopifyStackInventoryReservation $reservation,
+        string $action,
+        int $quantity,
+        string $sourceEventKey,
+    ): ShopifyStackInventoryMovement {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Stack inventory movement quantity must be positive.');
         }
 
-        $eventKey = hash('sha256', implode('|', [$sourceEventKey, $reservation->id, $action, $quantity]));
+        // Identity belongs to the immutable business event, never a clamped remainder.
+        $eventKey = hash('sha256', implode('|', [$sourceEventKey, $reservation->id, $action]));
         $movement = ShopifyStackInventoryMovement::query()->firstOrCreate(
             ['event_key' => $eventKey],
             [
@@ -37,6 +51,16 @@ final class StackInventoryMovementService
         if ($movement->status === ShopifyStackInventoryMovement::STATUS_COMPLETED) {
             return $movement;
         }
+        // Retry the persisted intent after remote success/local failure, including its quantity.
+        $quantity = (int) $movement->quantity;
+        $engraved = $reservation->bead_family_id !== null
+            || str_starts_with((string) $reservation->ledger_document_uri, 'leighavenue-cms://engraved-bead-reservations/');
+        if ($engraved && (! config('engraved_beads.enabled', true) || ! config('engraved_beads.inventory_writes_enabled', false))) {
+            throw new \RuntimeException('Engraved bead inventory writes are disabled; operation remains pending.');
+        }
+        if ($engraved && $reservation->bead_family_id === null) {
+            throw new \RuntimeException('Legacy independent bead reservation requires explicit reconciliation before inventory mutations.');
+        }
 
         $reservation->loadMissing('componentVariant');
         $variant = $reservation->componentVariant;
@@ -44,6 +68,9 @@ final class StackInventoryMovementService
             $message = 'The snapshotted component variant no longer exists.';
             $this->fail($movement, $reservation, $message);
             throw new \RuntimeException($message);
+        }
+        if ($variant->shopify_inventory_item_id !== $reservation->shopify_inventory_item_id) {
+            throw new \RuntimeException('The inventory identity changed; the snapshotted movement must be reconciled.');
         }
 
         $movement->forceFill([
@@ -108,6 +135,10 @@ final class StackInventoryMovementService
         }
 
         DB::transaction(function () use ($movement, $reservation, $action, $quantity, $response): void {
+            $movement = ShopifyStackInventoryMovement::query()->lockForUpdate()->findOrFail($movement->id);
+            if ($movement->status === ShopifyStackInventoryMovement::STATUS_COMPLETED) {
+                return;
+            }
             $locked = ShopifyStackInventoryReservation::query()->lockForUpdate()->findOrFail($reservation->id);
             $column = match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RESERVE => 'reserved_quantity',

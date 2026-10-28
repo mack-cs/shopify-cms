@@ -11,9 +11,8 @@ use App\Services\Shopify\StackInventoryMovementService;
 use Closure;
 
 /**
- * Reserves only the beads Shopify does not already commit.
- * Additional quantity = (beads per product - 1) × ordered quantity.
- * The stock pool is the ordered variant's own inventory item. See EngravedBeadStockPool.
+ * Multi-bead members reserve their FULL physical demand against the approved source.
+ * Shopify alone commits the tracked one-bead member.
  */
 final class EngravedBeadOrderProcessor
 {
@@ -85,7 +84,9 @@ final class EngravedBeadOrderProcessor
             return 'recorded';
         }
 
-        if (! $this->stockPool->identifiable($variant)) {
+        $member = $this->stockPool->member($variant);
+        $source = $this->stockPool->source($variant);
+        if ($member === null || $source === null || $variant->inventory_tracked !== false) {
             $this->remember($attributes, [
                 'configuration' => EngravedBeadOrderLine::CONFIGURATION_BLOCKED,
                 'stock_pool' => 'unresolved',
@@ -101,16 +102,22 @@ final class EngravedBeadOrderProcessor
             $lineId,
             $lineItem,
             $variant,
-            (int) $variant->product_id,
-            $configuration->additionalPerUnit(),
+            (int) $source->product_id,
+            (int) $member->required_beads,
             $current,
             $fulfilledBaseline,
             $orderCreatedAt,
         );
+        $reservation->forceFill([
+            'bead_family_id' => $member->family_id,
+            'bead_configuration_version' => $member->family->configuration_version,
+            'shopify_location_id' => $member->family->source_location_id,
+            'ledger_document_uri' => 'leighavenue-cms://engraved-bead-reservations/'.$reservation->id,
+        ])->save();
         $this->remember($attributes, [
             'configuration' => EngravedBeadOrderLine::CONFIGURATION_VALID,
-            'stock_pool' => 'self',
-            'shopify_inventory_item_id' => $variant->shopify_inventory_item_id,
+            'stock_pool' => 'family:'.$member->family_id,
+            'shopify_inventory_item_id' => $source->shopify_inventory_item_id,
             'reservation_id' => $reservation->id,
             'error_message' => null,
         ]);

@@ -23,6 +23,7 @@ final class ProductLaunchService
     /** @param Collection<int, Product> $products @param array<int, string> $publicationIds */
     public function queue(Collection $products, array $publicationIds, ?int $userId): ProductLaunchRun
     {
+        $this->authorizeActor($userId);
         if (! (bool) config('product_launch.enabled', true)) {
             throw new \RuntimeException('Product launch is disabled.');
         }
@@ -32,6 +33,9 @@ final class ProductLaunchService
         ))));
         if ($publicationIds === []) {
             throw new \RuntimeException('Choose at least one Shopify sales channel.');
+        }
+        if (array_diff($publicationIds, (array) config('product_launch.publications', [])) !== []) {
+            throw new \InvalidArgumentException('Only configured Shopify publications may be selected.');
         }
 
         $run = ProductLaunchRun::query()->create([
@@ -63,6 +67,7 @@ final class ProductLaunchService
 
     public function run(ProductLaunchRun $run): ProductLaunchRun
     {
+        $this->assertEnabled($run);
         $run->forceFill([
             'status' => ProductLaunchRun::STATUS_RUNNING,
             'started_at' => $run->started_at ?? now(),
@@ -103,6 +108,7 @@ final class ProductLaunchService
 
     private function launchItem(ProductLaunchRun $run, ProductLaunchItem $item): void
     {
+        $this->assertEnabled($run);
         $product = $item->product;
         if (! $product instanceof Product) {
             $this->block($item, 'The product no longer exists.');
@@ -146,6 +152,7 @@ final class ProductLaunchService
         ])->save();
 
         if ($inventoryPlan['action'] === 'write' && $item->inventory_written_at === null) {
+            $this->assertEnabled($run);
             $this->inventory->setOnHand(
                 $variant,
                 (int) $inventoryPlan['proposed'],
@@ -175,9 +182,11 @@ final class ProductLaunchService
 
         $confirmedStatus = $remote['status'];
         if ($confirmedStatus !== 'ACTIVE') {
+            $this->assertEnabled($run);
             $confirmedStatus = $this->shopify->activate($product);
         }
         if ($missingPublications !== []) {
+            $this->assertEnabled($run);
             $this->shopify->publish($product, $missingPublications);
         }
         $confirmedPublications = [];
@@ -291,7 +300,28 @@ final class ProductLaunchService
             ];
         }
 
-        return ['action' => 'write', 'current' => (int) $live['on_hand'], 'proposed' => $proposed];
+        // inventory_qty is AVAILABLE, never an approved absolute on-hand correction.
+        return ['action' => 'block', 'current' => (int) $live['on_hand'], 'proposed' => $proposed,
+            'detail' => 'Launch cannot use available stock as an on-hand target. Apply an approved inventory correction, refresh, then retry launch.'];
+    }
+
+    private function authorizeActor(?int $userId): void
+    {
+        $actor = $userId === null ? null : \App\Models\User::query()->find($userId);
+        if (! $actor?->can('ShopifyPushProducts')) {
+            throw new \Illuminate\Auth\Access\AuthorizationException('Shopify product permission is required to launch products.');
+        }
+    }
+
+    private function assertEnabled(ProductLaunchRun $run): void
+    {
+        if (! config('product_launch.enabled', true)) {
+            throw new \RuntimeException('Product launch is disabled; queued work cannot publish.');
+        }
+        $this->authorizeActor($run->user_id);
+        if (array_diff((array) $run->publication_ids, (array) config('product_launch.publications', [])) !== []) {
+            throw new \RuntimeException('Selected publication is no longer configured.');
+        }
     }
 
     private function pendingAdjustment(Variant $variant): bool

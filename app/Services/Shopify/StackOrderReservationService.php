@@ -261,9 +261,6 @@ final class StackOrderReservationService
         }
 
         foreach ($reservations as $reservation) {
-            if ($reservation->status === ShopifyStackInventoryReservation::STATUS_RELEASED) {
-                continue;
-            }
             $perStack = (int) $reservation->component_quantity_per_stack;
             $required = $currentStack * $perStack;
             $reservation->forceFill(array_filter([
@@ -273,7 +270,8 @@ final class StackOrderReservationService
             ], fn (mixed $value): bool => $value !== null))->save();
 
             $targetRemaining = $unfulfilledStack * $perStack;
-            $pendingConsume = max(0, (($currentStack - $unfulfilledStack) * $perStack) - (int) $reservation->consumed_quantity);
+            $pendingConsume = max(0, (($currentStack - $unfulfilledStack) * $perStack)
+                - (int) $reservation->historical_quantity - (int) $reservation->consumed_quantity);
             $remaining = $reservation->remainingReserved();
             if ($targetRemaining > $remaining) {
                 $quantity = $targetRemaining - $remaining;
@@ -281,7 +279,7 @@ final class StackOrderReservationService
                     $reservation,
                     ShopifyStackInventoryMovement::ACTION_RESERVE,
                     $quantity,
-                    "order-target:{$event->shopify_order_id}:{$lineId}:{$required}:{$remaining}",
+                    "order-event:{$event->webhook_id}:{$lineId}",
                 );
                 $summary['reserved']++;
             } else {
@@ -291,7 +289,7 @@ final class StackOrderReservationService
                         $reservation,
                         ShopifyStackInventoryMovement::ACTION_RELEASE,
                         $releasable,
-                        "order-target:{$event->shopify_order_id}:{$lineId}:{$required}:{$remaining}",
+                        "order-event:{$event->webhook_id}:{$lineId}",
                     );
                     $summary['released']++;
                 } else {
@@ -374,8 +372,9 @@ final class StackOrderReservationService
                 'component_title' => $component->title,
                 'component_quantity_per_stack' => $quantityPerStack,
                 'total_component_quantity_required' => $stackQuantity * $quantityPerStack,
-                'reserved_quantity' => $baseline,
-                'consumed_quantity' => $baseline,
+                'reserved_quantity' => 0,
+                'consumed_quantity' => 0,
+                'historical_quantity' => $baseline,
                 'shopify_location_id' => $locationId,
                 'ledger_document_uri' => $ledgerUri,
                 'status' => ShopifyStackInventoryReservation::STATUS_PENDING_PROCESSING,
@@ -397,7 +396,7 @@ final class StackOrderReservationService
             $reservation,
             ShopifyStackInventoryMovement::ACTION_RELEASE,
             $remaining,
-            $eventKey.':remaining:'.$remaining,
+            $eventKey,
         );
 
         return true;

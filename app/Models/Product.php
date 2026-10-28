@@ -67,6 +67,20 @@ class Product extends Model
         });
     }
 
+    // Quiet imports suppress observers, but must still derive procurement eligibility.
+    public function save(array $options = [])
+    {
+        EngravedBeadConfiguration::fromTags(is_string($this->tags) ? $this->tags : null)->apply($this);
+
+        return parent::save($options);
+    }
+
+    public function scopeValidProcurementConfiguration(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $q) => $q->whereNull('engraved_bead_configuration')
+            ->orWhere('engraved_bead_configuration', '!=', 'invalid'));
+    }
+
     public function getGoogleProductCategoryAttribute($value): ?string
     {
         $current = is_string($value) ? trim($value) : '';
@@ -160,6 +174,7 @@ class Product extends Model
 
     public function scopeProcurementCatalogEligible(Builder $query): Builder
     {
+        $query->validProcurementConfiguration();
         $query->where(function (Builder $eligible): void {
             $eligible->where(fn (Builder $listed): Builder => $listed->activeStatus()->nonBundle())
                 ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
@@ -174,6 +189,7 @@ class Product extends Model
 
     public function scopeProcurementOrderEligible(Builder $query): Builder
     {
+        $query->validProcurementConfiguration();
         $query->where(function (Builder $eligible): void {
             $eligible->where(fn (Builder $standard): Builder => $standard->inventoryEditableStatus()->nonBundle())
                 ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());

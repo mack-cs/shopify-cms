@@ -19,19 +19,20 @@ use App\Services\Shopify\StackOrderReservationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/EngravedBeadFamilyFixture.php';
 
 beforeEach(function (): void {
     config(['engraved_beads.enabled' => true, 'engraved_beads.inventory_writes_enabled' => true]);
 });
 
-it('reserves only the additional beads and leaves Shopify responsible for one unit', function (): void {
+it('reserves full multi-bead demand on the family source and leaves one-bead commitments to Shopify', function (): void {
     $four = beadSku('FOUR', '4-engraved-beads', 9401);
     $three = beadSku('THREE', '3-engraved-beads', 9402);
     $one = beadSku('ONE', '1-engraved-beads', 9403);
     $inventory = beadInventory();
     $inventory->shouldReceive('moveQuantity')->twice()->withArgs(
-        fn (Variant $variant, int $quantity): bool => ($variant->is($four['variant']) && $quantity === 6)
-            || ($variant->is($three['variant']) && $quantity === 4)
+        fn (Variant $variant, int $quantity): bool => ($variant->is($four['source']) && $quantity === 8)
+            || ($variant->is($three['source']) && $quantity === 6)
     )->andReturn(['createdAt' => now()->toIso8601String()]);
 
     beadReservationService($inventory)->process(beadOrder(8101, [
@@ -40,19 +41,19 @@ it('reserves only the additional beads and leaves Shopify responsible for one un
         ['id' => 11003, 'variant_id' => 9403, 'sku' => 'ONE', 'quantity' => 3],
     ]));
 
-    expect(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(10)
+    expect(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(14)
         ->and(ShopifyStackInventoryReservation::query()->where('component_sku', 'ONE')->exists())->toBeFalse()
         ->and(EngravedBeadOrderLine::query()->where('sku', 'ONE')->value('configuration'))->toBe('zero');
 });
 
-it('finalizes only the fulfilled additional quantity and keeps the rest reserved', function (): void {
+it('consumes only the fulfilled physical quantity and keeps the rest reserved', function (): void {
     beadSku('FOUR', '4-engraved-beads', 9401);
     $inventory = beadInventory();
     $inventory->shouldReceive('moveQuantity')->once()->withArgs(
-        fn (Variant $variant, int $quantity, string $from, string $to): bool => $quantity === 9 && $from === 'available' && $to === 'reserved'
+        fn (Variant $variant, int $quantity, string $from, string $to): bool => $quantity === 12 && $from === 'available' && $to === 'reserved'
     )->andReturn(['createdAt' => now()->toIso8601String()]);
     $inventory->shouldReceive('consumeReserved')->once()->withArgs(
-        fn (Variant $variant, int $quantity): bool => $quantity === 3
+        fn (Variant $variant, int $quantity): bool => $quantity === 4
     )->andReturn(['createdAt' => now()->toIso8601String()]);
     $movements = new StackInventoryMovementService($inventory);
     $orders = beadReservationService($inventory, $movements);
@@ -66,8 +67,8 @@ it('finalizes only the fulfilled additional quantity and keeps the rest reserved
     $fulfillments->process($fulfillment->fresh());
 
     $reservation = ShopifyStackInventoryReservation::query()->first();
-    expect($reservation->consumed_quantity)->toBe(3)
-        ->and($reservation->remainingReserved())->toBe(6)
+    expect($reservation->consumed_quantity)->toBe(4)
+        ->and($reservation->remainingReserved())->toBe(8)
         ->and(ShopifyStackInventoryMovement::query()->where('action', 'consume')->count())->toBe(1);
 });
 
@@ -84,8 +85,8 @@ it('releases an outstanding reservation on cancellation and does not release it 
     ], 'orders/cancelled', 'cancel-8103'));
 
     $reservation = ShopifyStackInventoryReservation::query()->first();
-    expect($reservation->reserved_quantity)->toBe(2)
-        ->and($reservation->released_quantity)->toBe(2)
+    expect($reservation->reserved_quantity)->toBe(4)
+        ->and($reservation->released_quantity)->toBe(4)
         ->and($reservation->remainingReserved())->toBe(0)
         ->and($reservation->status)->toBe(ShopifyStackInventoryReservation::STATUS_RELEASED);
 });
@@ -110,7 +111,7 @@ it('does not deduct already fulfilled historical quantity and reserves only the 
     beadSku('FOUR', '4-engraved-beads', 9401);
     $inventory = beadInventory();
     $inventory->shouldReceive('moveQuantity')->once()->withArgs(
-        fn (Variant $variant, int $quantity): bool => $quantity === 3
+        fn (Variant $variant, int $quantity): bool => $quantity === 4
     )->andReturn(['createdAt' => now()->toIso8601String()]);
 
     beadReservationService($inventory)->process(beadOrder(8106, [[
@@ -122,18 +123,19 @@ it('does not deduct already fulfilled historical quantity and reserves only the 
     ]]));
 
     $reservation = ShopifyStackInventoryReservation::query()->first();
-    expect($reservation->consumed_quantity)->toBe(6)
-        ->and($reservation->reserved_quantity)->toBe(9)
-        ->and($reservation->remainingReserved())->toBe(3);
+    expect($reservation->consumed_quantity)->toBe(0)
+        ->and($reservation->historical_quantity)->toBe(8)
+        ->and($reservation->reserved_quantity)->toBe(4)
+        ->and($reservation->remainingReserved())->toBe(4);
 });
 
-it('restocks only the additional quantity when Shopify restocks, and ignores refunds that do not', function (): void {
+it('restocks consumed physical beads only on a confirmed restock and ignores refunds that do not', function (): void {
     beadSku('THREE', '3-engraved-beads', 9402);
     $inventory = beadInventory();
     $inventory->shouldReceive('moveQuantity')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
     $inventory->shouldReceive('consumeReserved')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
     $inventory->shouldReceive('restockAvailable')->once()->withArgs(
-        fn (Variant $variant, int $quantity): bool => $quantity === 2
+        fn (Variant $variant, int $quantity): bool => $quantity === 3
     )->andReturn(['createdAt' => now()->toIso8601String()]);
     $movements = new StackInventoryMovementService($inventory);
     $orders = beadReservationService($inventory, $movements);
@@ -187,7 +189,7 @@ it('restocks only the additional quantity when Shopify restocks, and ignores ref
         ]],
     ]]));
 
-    expect(ShopifyStackInventoryReservation::query()->value('restocked_quantity'))->toBe(2)
+    expect(ShopifyStackInventoryReservation::query()->value('restocked_quantity'))->toBe(3)
         ->and(ShopifyStackInventoryMovement::query()->where('action', 'restock')->count())->toBe(1);
 });
 
@@ -207,7 +209,7 @@ it('waits for the order reservation when fulfillment arrives first and then cons
     ]));
     $fulfillments->process($fulfillment->fresh());
 
-    expect(ShopifyStackInventoryReservation::query()->value('consumed_quantity'))->toBe(1)
+    expect(ShopifyStackInventoryReservation::query()->value('consumed_quantity'))->toBe(2)
         ->and(ShopifyStackInventoryReservation::query()->value('remaining_reserved') ?? ShopifyStackInventoryReservation::query()->first()->remainingReserved())->toBe(0);
 });
 
@@ -296,32 +298,25 @@ function beadReservationService(
 /** @return array{product:Product,variant:Variant} */
 function beadSku(string $sku, string $tags, int $variantId, ?string $inventoryItem = 'auto'): array
 {
-    $user = User::factory()->create();
-    $import = Import::query()->create([
-        'filename' => strtolower($sku).'.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
-    ]);
-    $product = Product::query()->create([
-        'import_id' => $import->id,
-        'shopify_id' => 'gid://shopify/Product/'.$variantId,
-        'handle' => strtolower($sku).'-'.$variantId,
-        'title' => 'Large Facets 4 engraved beads',
-        'status' => 'unlisted',
-        'tags' => $tags,
-        'is_bundle' => false,
-    ]);
-    $variant = Variant::query()->create([
-        'product_id' => $product->id,
-        'shopify_id' => 'gid://shopify/ProductVariant/'.$variantId,
-        'shopify_inventory_item_id' => $inventoryItem === 'auto'
-            ? 'gid://shopify/InventoryItem/'.$variantId
-            : $inventoryItem,
-        'sku' => $sku,
-        'inventory_tracked' => true,
-        'inventory_qty' => 20,
-        'sync_state' => Variant::SYNC_STATE_SYNCED,
-    ]);
+    $fixture = sharedBeadFamily('test-'.$variantId.'-bead-family', $variantId * 10, active: true);
+    $q = App\Services\EngravedBeads\EngravedBeadConfiguration::fromTags($tags)->beads() ?? 4;
+    $product = $fixture['members'][$q]['product'];
+    $variant = $fixture['members'][$q]['variant'];
+    $product->update(['tags' => $fixture['family']->family_tag.', '.$tags]);
+    $variant->update(['shopify_id' => 'gid://shopify/ProductVariant/'.$variantId,
+        'shopify_inventory_item_id' => $inventoryItem === 'auto' ? 'gid://shopify/InventoryItem/'.$variantId : $inventoryItem,
+        'sku' => $sku]);
+    if ($inventoryItem !== null) {
+        $fixture['family']->members()->where('required_beads', $q)->update([
+            'shopify_variant_id' => $variant->shopify_id, 'shopify_inventory_item_id' => $variant->shopify_inventory_item_id, 'sku' => $sku,
+        ]);
+    }
+    if ($q === 1) {
+        $fixture['family']->update(['source_variant_id' => $variant->shopify_id, 'source_inventory_item_id' => $variant->shopify_inventory_item_id]);
+    }
+    $source = $q === 1 ? $variant : $fixture['members'][1]['variant'];
 
-    return compact('product', 'variant');
+    return compact('product', 'variant', 'source');
 }
 
 function beadOrder(int $orderId, array $lines, string $topic = 'orders/create', ?string $webhookId = null, array $refunds = []): ShopifyStackOrderEvent
