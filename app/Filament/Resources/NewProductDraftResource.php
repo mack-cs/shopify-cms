@@ -2600,7 +2600,7 @@ class NewProductDraftResource extends Resource
             }
         }
 
-        return app(NewInTagService::class)->tagsForNewProduct($normalized) !== $normalized;
+        return app(NewInTagService::class)->removeManagedTags($normalized) !== $normalized;
     }
 
     /**

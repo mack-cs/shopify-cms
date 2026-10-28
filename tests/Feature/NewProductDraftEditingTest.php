@@ -11,6 +11,58 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
+it('adds new in tags immediately through the draft edit switch and keeps them after saving', function (): void {
+    \Spatie\Permission\Models\Role::findOrCreate(\App\Enums\RolesEnum::Admin->value);
+    $user = User::factory()->create();
+    $user->assignRole(\App\Enums\RolesEnum::Admin->value);
+    $this->actingAs($user);
+    $draft = NewProductDraft::create([
+        'title' => 'Market Day in Oaxaca Bracelet',
+        'sku' => 'NEW-IN-REGRESSION-001',
+        'sibling_collection' => NewProductDraft::NO_SIBLING_COLLECTION,
+        'type' => 'Bracelets',
+        'tags' => 'livi-road, livi-road-bracelets, bracelet, bracelets',
+        'status' => 'draft',
+    ]);
+    // Reproduce an existing imported product with no New In tags.
+    $draft->updateQuietly(['tags' => 'livi-road, livi-road-bracelets, bracelet, bracelets']);
+
+    \Livewire\Livewire::test(\App\Filament\Resources\NewProductDraftResource\Pages\EditNewProductDraft::class, ['record' => $draft->id])
+        ->assertSet('data.is_new_in', false)
+        ->set('data.is_new_in', true)
+        ->assertSet('data.tags', fn ($tags) => count(array_intersect(
+            ['new-arrivals', 'new-in', 'newbies', 'livi-road-new-in'], $tags
+        )) === 4)
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect(TagNormalizer::parseTokens($draft->fresh()->tags))
+        ->toContain('new-arrivals', 'new-in', 'newbies', 'livi-road-new-in');
+});
+
+it('keeps the new in switch off for Livi Road bracelets without new in tags', function (): void {
+    $tags = ['all-products', 'all-products-collections', 'livi-road', 'bracelets',
+        'bracelet', 'livi-road-bracelets', 'lr-bracelets-gold-silver',
+        'livi-road-uneven-sibling', 'exclude-from-the-sale'];
+    $state = new ReflectionMethod(NewProductDraftResource::class, 'newInStateFromTags');
+
+    expect($state->invoke(null, $tags))->toBeFalse();
+
+    $updated = (new ReflectionMethod(NewProductDraftResource::class, 'defaultedDraftTags'))
+        ->invoke(null, $tags, 'Bracelets', false, true);
+
+    expect($updated)->toContain('new-arrivals', 'new-in', 'newbies', 'livi-road-new-in')
+        ->and($state->invoke(null, $updated))->toBeTrue()
+        ->and($state->invoke(null, ['livi-road', 'livi-road-new-in']))->toBeTrue();
+
+    $removed = (new ReflectionMethod(NewProductDraftResource::class, 'defaultedDraftTags'))
+        ->invoke(null, $updated, 'Bracelets', false, false);
+
+    expect($state->invoke(null, $removed))->toBeFalse()
+        ->and($removed)->toContain('livi-road-bracelets', 'livi-road-uneven-sibling')
+        ->not->toContain('new-arrivals', 'new-in', 'newbies', 'livi-road-new-in');
+});
+
 it('lets a user acquire refresh and release a draft edit lock', function (): void {
     $user = User::factory()->create();
 
