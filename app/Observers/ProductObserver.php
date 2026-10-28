@@ -43,6 +43,8 @@ class ProductObserver
             'image_import_status',
             'seo_updated_at',
             'seo_updated_by',
+            'engraved_bead_quantity',
+            'engraved_bead_configuration',
         ];
 
         if (InventoryOperationContext::active()) {
@@ -93,6 +95,8 @@ class ProductObserver
             'image_import_status',
             'seo_updated_at',
             'seo_updated_by',
+            'engraved_bead_quantity',
+            'engraved_bead_configuration',
         ];
 
         $userId = Auth::id();

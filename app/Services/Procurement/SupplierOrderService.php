@@ -138,13 +138,7 @@ final class SupplierOrderService
     {
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()
-            ->whereHas('product', function ($query): void {
-                $query->inventoryEditableStatus()->nonBundle();
-
-                if (! (bool) config('procurement.include_test_products', false)) {
-                    $query->excludeTestProducts();
-                }
-            })
+            ->whereHas('product', fn ($query) => $query->procurementOrderEligible())
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product:id,shopify_id,handle')->get();
         $drafts = NewProductDraft::query()
             ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
@@ -180,13 +174,7 @@ final class SupplierOrderService
         }
 
         $variants = Variant::query()->active()
-            ->whereHas('product', function ($query): void {
-                $query->inventoryEditableStatus()->nonBundle();
-
-                if (! (bool) config('procurement.include_test_products', false)) {
-                    $query->excludeTestProducts();
-                }
-            })
+            ->whereHas('product', fn ($query) => $query->procurementOrderEligible())
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])
             ->get();
         if ($variants->count() !== 1) {

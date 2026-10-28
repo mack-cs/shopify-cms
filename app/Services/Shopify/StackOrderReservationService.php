@@ -3,6 +3,7 @@
 namespace App\Services\Shopify;
 
 use App\Models\NewProductDraft;
+use App\Services\EngravedBeads\EngravedBeadOrderProcessor;
 use App\Models\Product;
 use App\Models\ShopifyStackInventoryMovement;
 use App\Models\ShopifyStackInventoryReservation;
@@ -17,6 +18,7 @@ final class StackOrderReservationService
         private readonly StackInventoryMovementService $movements,
         private readonly StackOrderLineMapper $lines,
         private readonly StackOrderFulfillmentInspector $fulfillment,
+        private ?EngravedBeadOrderProcessor $engravedBeads = null,
     ) {}
 
     /** @return array{stack_lines:int,reserved:int,released:int} */
@@ -70,6 +72,7 @@ final class StackOrderReservationService
             }
             if ($live['fulfilled'] && ! $live['cancelled']) {
                 $skipNote = 'Skipped reservation because live Shopify shows this order as fulfilled.';
+                $this->beads()->recordHistoricalSkip($event);
             } elseif ($event->topic === 'orders/cancelled' || $live['cancelled']) {
                 $summary = $this->releaseAll($event->shopify_order_id, 'cancel:'.$event->shopify_order_id, $summary);
             } else {
@@ -80,6 +83,7 @@ final class StackOrderReservationService
                     $summary = $this->reconcileLine($event, $lineItem, $summary, $live);
                 }
             }
+            $this->beads()->reconcileRefunds($event);
         } catch (\Throwable $exception) {
             $event->forceFill([
                 'status' => ShopifyStackOrderEvent::STATUS_FAILED,
@@ -217,6 +221,24 @@ final class StackOrderReservationService
         $stackVariant = $this->findVariant($lineItem['variant_id'] ?? null);
         $draft = $stackVariant instanceof Variant ? $this->findStackDraft($stackVariant, $lineItem) : null;
         if ($reservations->isEmpty() && ! $draft instanceof NewProductDraft) {
+            $outcome = $this->beads()->prepareLine(
+                $event,
+                $lineId,
+                $lineItem,
+                $stackVariant,
+                $liveLine,
+                $this->lines->orderCreatedAt((array) $event->payload),
+                fn (...$arguments) => $this->createReservation(...$arguments),
+            );
+            if ($outcome !== 'reservation_ready') {
+                return $summary;
+            }
+            $reservations = ShopifyStackInventoryReservation::query()
+                ->where('shopify_order_id', $event->shopify_order_id)
+                ->where('shopify_order_line_item_id', $lineId)
+                ->get();
+        }
+        if ($reservations->isEmpty() && ! $draft instanceof NewProductDraft) {
             return $summary;
         }
 
@@ -320,7 +342,10 @@ final class StackOrderReservationService
         /** @var Variant $componentVariant */
         $componentVariant = $componentVariants->first();
         $locationId = $this->gid('Location', $this->inventory->resolveLocationId($componentVariant));
-        $ledgerUri = 'leighavenue-cms://stack-reservations/'.rawurlencode($event->shopify_order_id)
+        $ledgerPrefix = (int) $stackVariant->product_id === $componentProductId
+            ? 'leighavenue-cms://engraved-bead-reservations/'
+            : 'leighavenue-cms://stack-reservations/';
+        $ledgerUri = $ledgerPrefix.rawurlencode($event->shopify_order_id)
             .'/'.rawurlencode($lineId).'/'.$componentProductId;
         $baseline = max(0, min($stackQuantity, $fulfilledBaseline)) * $quantityPerStack;
 
@@ -425,6 +450,11 @@ final class StackOrderReservationService
         }
 
         return $configured;
+    }
+
+    private function beads(): EngravedBeadOrderProcessor
+    {
+        return $this->engravedBeads ??= new EngravedBeadOrderProcessor($this->movements);
     }
 
     private function gid(string $type, mixed $id): string

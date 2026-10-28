@@ -58,6 +58,7 @@ final class StackInventoryMovementService
             workflow: match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'stack_release',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'stack_consume',
+                ShopifyStackInventoryMovement::ACTION_RESTOCK => 'engraved_bead_restock',
                 default => 'stack_reserve',
             },
             action: $action,
@@ -67,6 +68,7 @@ final class StackInventoryMovementService
             explanation: match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'The stack reservation was released.',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'Reserved component inventory was consumed when the stack was fulfilled.',
+                ShopifyStackInventoryMovement::ACTION_RESTOCK => 'Additional engraved beads were restored because Shopify restocked the returned units.',
                 default => 'Component inventory was reserved because an order included this stack.',
             },
             variantId: $variant->id ? (int) $variant->id : null,
@@ -94,6 +96,10 @@ final class StackInventoryMovementService
                     $variant, $quantity, $reference, $reservation->ledger_document_uri,
                     $movement->idempotency_key, $reservation->shopify_location_id, $context,
                 ),
+                ShopifyStackInventoryMovement::ACTION_RESTOCK => $this->inventory->restockAvailable(
+                    $variant, $quantity, $reservation->ledger_document_uri,
+                    $movement->idempotency_key, $reservation->shopify_location_id, $context,
+                ),
                 default => throw new \InvalidArgumentException("Unsupported stack inventory action [{$action}]."),
             };
         } catch (\Throwable $exception) {
@@ -107,6 +113,7 @@ final class StackInventoryMovementService
                 ShopifyStackInventoryMovement::ACTION_RESERVE => 'reserved_quantity',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'consumed_quantity',
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'released_quantity',
+                ShopifyStackInventoryMovement::ACTION_RESTOCK => 'restocked_quantity',
             };
             $locked->{$column} = (int) $locked->{$column} + $quantity;
             $locked->error_message = null;

@@ -3,6 +3,7 @@
 namespace App\Services\Shopify;
 
 use App\Models\NewProductDraft;
+use App\Services\EngravedBeads\EngravedBeadOrderProcessor;
 use App\Models\ShopifyFulfillment;
 use App\Models\ShopifyStackInventoryMovement;
 use App\Models\ShopifyStackInventoryReservation;
@@ -67,6 +68,9 @@ final class StackFulfillmentInventoryService
                     if ($this->isConfiguredStack($lineItem)) {
                         throw new \RuntimeException("No component reservation exists for fulfilled Stack line {$lineId}; retrying after the order webhook.");
                     }
+                    if ((new EngravedBeadOrderProcessor($this->movements))->fulfillmentMustWait($lineItem, $orderId)) {
+                        throw new \RuntimeException("No engraved bead reservation exists for fulfilled line {$lineId}; retrying after the order webhook.");
+                    }
 
                     continue;
                 }
@@ -74,6 +78,14 @@ final class StackFulfillmentInventoryService
                 $summary['stack_lines']++;
                 foreach ($reservations as $reservation) {
                     $quantity = (int) $lineItem['quantity'] * (int) $reservation->component_quantity_per_stack;
+                    if (str_starts_with((string) $reservation->ledger_document_uri, 'leighavenue-cms://engraved-bead-reservations/')) {
+                        $quantity = min($quantity, $reservation->remainingReserved());
+                        if ($quantity === 0) {
+                            $summary['already_completed']++;
+
+                            continue;
+                        }
+                    }
                     $source = "fulfillment:{$fulfillment->shopify_fulfillment_id}:{$lineId}";
                     $eventKey = hash('sha256', implode('|', [
                         $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME, $quantity,

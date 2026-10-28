@@ -92,7 +92,10 @@ final class GenerateProductMovementReportJob implements ShouldQueue
         ];
 
         Product::query()
-            ->activeStatus()
+            ->where(function ($query): void {
+                $query->activeStatus()
+                    ->orWhere(fn ($exception) => $exception->unlistedEngravedBeadProcurementException());
+            })
             ->where(function ($query): void {
                 $query->whereNotNull('shopify_id')
                     ->where('shopify_id', '!=', '')

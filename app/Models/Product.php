@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\DB;
 use App\Services\CategoryTypeMap;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
 
 class Product extends Model
 {
@@ -23,6 +24,7 @@ class Product extends Model
         'batch','sync_batch_id','last_synced_at','is_bundle','you_save',
         'image_import_batch_id','image_imported_at','image_import_status',
         'has_errors','error_fields',
+        'engraved_bead_quantity','engraved_bead_configuration',
     ];
 
     protected $casts = [
@@ -58,6 +60,10 @@ class Product extends Model
             if ($google !== '') {
                 $product->google_product_category = $google;
             }
+        });
+
+        static::saving(function (Product $product): void {
+            EngravedBeadConfiguration::fromTags(is_string($product->tags) ? $product->tags : null)->apply($product);
         });
     }
 
@@ -132,15 +138,57 @@ class Product extends Model
             ->whereRaw('LOWER(COALESCE(handle, "")) NOT LIKE ?', ['%test%']);
     }
 
+    public function scopeUnlistedEngravedBeadProcurementException(Builder $query): Builder
+    {
+        if (! (bool) config('engraved_beads.enabled', true)) {
+            return $query->whereRaw('0 = 1');
+        }
+
+        return $query
+            ->whereRaw('LOWER(TRIM(COALESCE(status, ""))) = ?', ['unlisted'])
+            ->where('engraved_bead_configuration', 'valid')
+            ->whereBetween('engraved_bead_quantity', [1, 4]);
+    }
+
+    public function scopeInventoryWorkspaceStatus(Builder $query): Builder
+    {
+        return $query->where(function (Builder $eligible): void {
+            $eligible->inventoryEditableStatus()
+                ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException());
+        });
+    }
+
     public function scopeProcurementCatalogEligible(Builder $query): Builder
     {
-        $query->activeStatus()->nonBundle();
+        $query->where(function (Builder $eligible): void {
+            $eligible->where(fn (Builder $listed): Builder => $listed->activeStatus()->nonBundle())
+                ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
+        });
 
         if (! (bool) config('procurement.include_test_products', false)) {
             $query->excludeTestProducts();
         }
 
         return $query;
+    }
+
+    public function scopeProcurementOrderEligible(Builder $query): Builder
+    {
+        $query->where(function (Builder $eligible): void {
+            $eligible->where(fn (Builder $standard): Builder => $standard->inventoryEditableStatus()->nonBundle())
+                ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
+        });
+
+        if (! (bool) config('procurement.include_test_products', false)) {
+            $query->excludeTestProducts();
+        }
+
+        return $query;
+    }
+
+    public function isStackProduct(): bool
+    {
+        return (bool) $this->is_bundle || \App\Services\TagNormalizer::containsBundleOrStackTag($this->tags);
     }
 
     public function scopeMissingImageAltText(Builder $query): Builder

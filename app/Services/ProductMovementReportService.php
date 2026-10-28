@@ -10,6 +10,8 @@ use App\Models\NewProductDraft;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\ShopifyOrderItem;
 use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\EngravedBeads\EngravedBeadDemand;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -564,6 +566,18 @@ final class ProductMovementReportService
         array $sales,
         array $snapshots,
     ): array {
+        $beadDemandNote = null;
+        $beadConfiguration = EngravedBeadConfiguration::fromProduct($product);
+        if ($beadConfiguration->valid()) {
+            $finishedUnits = (int) ($sales['direct_net'] ?? 0);
+            $sales = (new EngravedBeadDemand)->scaleDirectSales($sales, (int) $beadConfiguration->beads());
+            $beadDemandNote = 'Physical engraved bead demand counts '.$beadConfiguration->beads()
+                .' beads per finished product. '.$finishedUnits
+                .' finished units are included once inside that physical total.';
+        } elseif ($beadConfiguration->participating()) {
+            $beadDemandNote = EngravedBeadConfiguration::INVALID_MESSAGE
+                .' Physical bead demand was not converted.';
+        }
         $periodDays = $start->diffInDays($end) + 1;
         $months = max(0.01, (float) $run->months_analysed);
         $calendarMonths = $this->calendarMonths($start, $end);
@@ -623,6 +637,9 @@ final class ProductMovementReportService
             $snapshot,
         );
         $notes = $this->qualityNotes($run, $variant, $product, $sales, $snapshot, $createdAt);
+        if ($beadDemandNote !== null) {
+            $notes[] = $beadDemandNote;
+        }
 
         return [
             'product_movement_report_run_id' => $run->id,
