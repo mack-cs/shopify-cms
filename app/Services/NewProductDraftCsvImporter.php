@@ -260,6 +260,15 @@ final class NewProductDraftCsvImporter
                 $data = $this->applyImportedTypeCategoryMapping($data);
                 [$data, $appliedCollectionRule] = $this->applyCollectionPrepopulation($data);
                 $data = $this->mergeImportedTagSources($data);
+                if ($appliedCollectionRule === true) {
+                    $data['tags'] = TagNormalizer::normalizeFromArray(
+                        app(NewInTagService::class)->tagsForNewProduct(
+                            TagNormalizer::parseTokens($data['tags'] ?? null),
+                            $data['type'] ?? null,
+                            $data['title'] ?? null
+                        )
+                    );
+                }
                 $payload = $this->applyDefaultExtraShopifyPayload($payload);
                 if ($appliedCollectionRule === true) {
                     $prepopulationApplied++;

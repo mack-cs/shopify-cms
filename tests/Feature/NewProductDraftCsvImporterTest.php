@@ -147,7 +147,22 @@ it('prepopulates draft fields from an imported collection tag', function (): voi
             'livi-road',
             'bracelets',
             'bracelet',
-            'livi-road-bracelets'
+            'livi-road-bracelets',
+            'new-arrivals',
+            'new-in',
+            'newbies',
+            'livi-road-new-in'
+        );
+
+    // Importing the same SKU must restore New In tags even on an existing draft.
+    $draft->updateQuietly(['tags' => 'livi-road, livi-road-bracelets']);
+    $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['created'])->toBe(0)
+        ->and(App\Services\TagNormalizer::parseTokens($draft->fresh()->tags))->toContain(
+            'manual-tag', 'livi-road', 'bracelet', 'livi-road-bracelets',
+            'new-arrivals', 'new-in', 'newbies', 'livi-road-new-in'
         );
 
     @unlink($path);
