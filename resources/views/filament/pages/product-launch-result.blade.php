@@ -10,6 +10,9 @@
                 @endif
                 A product is launched only after Shopify confirms both ACTIVE status and every selected sales channel.
             </div>
+            @if ($launch->isFinished() && $launch->items->contains('outcome', 'failed'))
+                <x-filament::button wire:click="retryLaunch">Retry failed launch items</x-filament::button>
+            @endif
             <div class="overflow-auto rounded-xl border border-gray-200">
                 <table class="w-full text-sm">
                     <thead class="bg-gray-50 text-left">

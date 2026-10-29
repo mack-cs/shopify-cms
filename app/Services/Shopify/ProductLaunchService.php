@@ -2,15 +2,22 @@
 
 namespace App\Services\Shopify;
 
+use App\Jobs\LaunchProductsOnShopifyJob;
 use App\Models\ChangeLog;
 use App\Models\InventoryAdjustmentRequest;
 use App\Models\InventoryAdjustmentRequestItem;
 use App\Models\Product;
 use App\Models\ProductLaunchItem;
 use App\Models\ProductLaunchRun;
+use App\Models\User;
 use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\EngravedBeads\EngravedBeadStockPool;
+use App\Services\EngravedBeads\EngravedBeadWriteGuard;
 use App\Services\Inventory\InventoryAuditContext;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
 final class ProductLaunchService
@@ -60,7 +67,7 @@ final class ProductLaunchService
             ]);
         }
 
-        \App\Jobs\LaunchProductsOnShopifyJob::dispatch($run->id);
+        LaunchProductsOnShopifyJob::dispatch($run->id);
 
         return $run;
     }
@@ -78,10 +85,12 @@ final class ProductLaunchService
         foreach ($run->items()->with('product.variants')->orderBy('id')->get() as $item) {
             if (in_array($item->outcome, [ProductLaunchItem::OUTCOME_LAUNCHED, ProductLaunchItem::OUTCOME_SKIPPED, ProductLaunchItem::OUTCOME_BLOCKED], true)) {
                 $failed = $failed || $item->outcome === ProductLaunchItem::OUTCOME_BLOCKED;
+
                 continue;
             }
             try {
-                $this->launchItem($run, $item);
+                Cache::lock('product-launch:'.$item->product_id, 960)
+                    ->block(5, fn () => $this->launchItem($run, $item));
             } catch (\Throwable $exception) {
                 $failed = true;
                 $item->forceFill([
@@ -104,6 +113,17 @@ final class ProductLaunchService
         ])->save();
 
         return $run->fresh(['items']) ?? $run;
+    }
+
+    public function retry(ProductLaunchRun $run, int $actorId): void
+    {
+        $this->authorizeActor($actorId);
+        $this->assertEnabled($run);
+        if (! $run->isFinished()) {
+            throw new \RuntimeException('Wait for the running launch to finish before retrying.');
+        }
+        $run->update(['status' => ProductLaunchRun::STATUS_QUEUED, 'finished_at' => null, 'error_message' => null]);
+        LaunchProductsOnShopifyJob::dispatch($run->id);
     }
 
     private function launchItem(ProductLaunchRun $run, ProductLaunchItem $item): void
@@ -231,6 +251,23 @@ final class ProductLaunchService
 
     private function blocker(Product $product, ?Variant $variant, bool $stack): ?string
     {
+        if (EngravedBeadConfiguration::fromProduct($product)->participating()) {
+            try {
+                app(EngravedBeadWriteGuard::class)->check();
+                $pool = app(EngravedBeadStockPool::class);
+                $member = $variant ? $pool->member($variant) : null;
+                $source = $variant ? $pool->source($variant) : null;
+                if ($member === null || $source === null || $member->manual_disabled || $member->automation_disabled) {
+                    return 'Engraved family mapping and sellability must be approved before launch.';
+                }
+                $stock = $this->inventory->currentQuantities($source, $member->family->source_location_id);
+                if ((int) $stock['available'] + (int) $member->family->automation_held_quantity <= $member->disable_threshold) {
+                    return 'Shared physical bead stock is below the member launch threshold.';
+                }
+            } catch (\Throwable $error) {
+                return $error->getMessage();
+            }
+        }
         if (! $product->isApprovedByTwo()) {
             return 'The product is not fully approved. Approval does not launch it, and launch requires approval.';
         }
@@ -307,9 +344,9 @@ final class ProductLaunchService
 
     private function authorizeActor(?int $userId): void
     {
-        $actor = $userId === null ? null : \App\Models\User::query()->find($userId);
+        $actor = $userId === null ? null : User::query()->find($userId);
         if (! $actor?->can('ShopifyPushProducts')) {
-            throw new \Illuminate\Auth\Access\AuthorizationException('Shopify product permission is required to launch products.');
+            throw new AuthorizationException('Shopify product permission is required to launch products.');
         }
     }
 

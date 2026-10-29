@@ -27,7 +27,7 @@ final class EngravedBeadFamilyAdministration
             if (! config('engraved_beads.store_contract_verified', false)) {
                 throw new \RuntimeException('Store location, sellability, checkout and API contract verification is required before activation.');
             }
-            $family->forceFill(['status' => 'active', 'activated_at' => now(), 'approved_by' => $actor->id])->save();
+            $family->forceFill(['status' => 'active', 'activated_at' => now(), 'approved_by' => $actor->id, 'recalculate_at' => now()])->save();
             $family->members()->update(['status' => 'active']);
             $family->audits()->create(['user_id' => $actor->id, 'action' => 'activation', 'details' => [
                 'mapping_hash' => $family->mapping_hash, 'configuration_version' => $family->configuration_version,
@@ -47,6 +47,7 @@ final class EngravedBeadFamilyAdministration
             $previous = $member->disable_threshold;
             $member->update(['disable_threshold' => $threshold]);
             $family->increment('configuration_version');
+            $family->update(['recalculate_at' => now()]);
             $family->audits()->create(['user_id' => $actor->id, 'action' => 'threshold_changed', 'details' => [
                 'member' => $member->shopify_variant_id, 'previous' => $previous, 'threshold' => $threshold,
                 'configuration_version' => $family->configuration_version,
@@ -55,6 +56,19 @@ final class EngravedBeadFamilyAdministration
             $family->audits()->create(['action' => 'recalculation_required', 'details' => [
                 'configuration_version' => $family->configuration_version,
             ]]);
+        });
+    }
+
+    public function manualDisable(EngravedBeadFamilyMember $member, bool $disabled, User $actor): void
+    {
+        $this->authorize($actor);
+        DB::transaction(function () use ($member, $disabled, $actor): void {
+            $family = EngravedBeadFamily::query()->lockForUpdate()->findOrFail($member->family_id);
+            $member->update(['manual_disabled' => $disabled]);
+            $family->increment('configuration_version');
+            $family->update(['recalculate_at' => now()]);
+            $family->audits()->create(['user_id' => $actor->id, 'action' => 'automatic_enable_permission',
+                'details' => ['variant' => $member->shopify_variant_id, 'manual_disabled' => $disabled]]);
         });
     }
 }

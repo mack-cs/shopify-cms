@@ -2,7 +2,7 @@
 
 return [
     'enabled' => filter_var(env('PRODUCT_LAUNCH_ENABLED', true), FILTER_VALIDATE_BOOLEAN),
-    'queue' => env('PRODUCT_LAUNCH_QUEUE', 'default'),
+    'queue' => env('PRODUCT_LAUNCH_QUEUE', 'product-launch'),
     /*
     | Comma-separated Shopify publication GIDs offered in the launch confirmation.
     | Launch never publishes a product that was not explicitly selected.

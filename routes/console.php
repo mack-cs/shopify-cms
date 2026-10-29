@@ -1,44 +1,50 @@
 <?php
 
+Schedule::call(fn () => app(EngravedBeadRecalculation::class)->dispatchPending())
+    ->everyMinute()->name('engraved-bead-reconciliation')->withoutOverlapping();
+
+use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
-use App\Jobs\DailyShopifyInventoryRefreshJob;
+use App\Jobs\ReportDirectShopifyInventoryCorrectionsJob;
 use App\Jobs\Shopify\RunDailyShopifyPipeline;
 use App\Jobs\Shopify\RunHistoricalShopifyOrdersImport;
 use App\Jobs\Shopify\RunShopifyOrdersBackfill;
 use App\Jobs\Shopify\StartShopifyInventoryBulkExport;
-use App\Models\ShopifySyncRun;
-use App\Models\ShopifyStackOrderEvent;
 use App\Models\NewProductDraftAssignment;
 use App\Models\PrepopulationRule;
 use App\Models\ShopifyAudit;
+use App\Models\ShopifyStackOrderEvent;
+use App\Models\ShopifySyncRun;
 use App\Models\SiteAuditRun;
 use App\Notifications\PendingWorkSlackReminderNotification;
 use App\Services\AsyncJobStateService;
-use App\Services\ShopifyApiClient;
-use App\Services\Shopify\StackOrderLineMapper;
-use App\Services\Shopify\StackOrderReservationService;
-use App\Services\Shopify\StackReservationStaleAlertService;
 use App\Services\ComplementaryProductMaintenanceService;
-use App\Services\StackBundleSellabilityService;
-use App\Services\StackSellabilityShopifyPushService;
-use App\Services\StackSellabilitySlackNotifier;
-use App\Services\SiteAudit\SitemapDiscoveryService;
-use App\Services\SiteAudit\SiteAuditRunnerService;
-use App\Services\GoogleSearchConsoleClient;
-use App\Services\SearchConsoleCsvImporter;
-use App\Services\SearchConsoleMetricImportService;
-use App\Services\DuplicateSkuReminderService;
 use App\Services\DropdownCollectionMatrixExporter;
+use App\Services\DuplicateSkuReminderService;
+use App\Services\EngravedBeads\EngravedBeadRecalculation;
+use App\Services\GoogleSearchConsoleClient;
 use App\Services\MaintenanceTaskNotificationService;
+use App\Services\NewProductDraftAssignmentService;
 use App\Services\PrepopulationRuleImportService;
 use App\Services\Procurement\PendingSupplierReceiptPushReminderService;
 use App\Services\Procurement\SupplierOrderReportingReconciliationService;
 use App\Services\Procurement\SupplierReceiptService;
+use App\Services\SearchConsoleCsvImporter;
+use App\Services\SearchConsoleMetricImportService;
+use App\Services\Shopify\StackOrderLineMapper;
+use App\Services\Shopify\StackOrderReservationService;
+use App\Services\Shopify\StackReservationStaleAlertService;
+use App\Services\ShopifyApiClient;
+use App\Services\SiteAudit\SiteAuditRunnerService;
+use App\Services\SiteAudit\SitemapDiscoveryService;
+use App\Services\StackBundleSellabilityService;
+use App\Services\StackSellabilityShopifyPushService;
+use App\Services\StackSellabilitySlackNotifier;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Schedule;
 use League\Csv\Reader;
@@ -151,7 +157,7 @@ Artisan::command(
     {--end= : Optional YYYY-MM-DD period end}',
     function (string $file): int {
         $type = strtolower(trim((string) $this->option('type')));
-        if (!in_array($type, ['site', 'query', 'page'], true)) {
+        if (! in_array($type, ['site', 'query', 'page'], true)) {
             $this->error('--type must be site, query, or page.');
 
             return self::FAILURE;
@@ -160,7 +166,7 @@ Artisan::command(
         $start = trim((string) ($this->option('start') ?? '')) ?: null;
         $end = trim((string) ($this->option('end') ?? '')) ?: null;
         foreach (['start' => $start, 'end' => $end] as $name => $date) {
-            if ($date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            if ($date !== null && ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
                 $this->error("--{$name} must be formatted as YYYY-MM-DD.");
 
                 return self::FAILURE;
@@ -170,7 +176,7 @@ Artisan::command(
         $label = trim((string) ($this->option('label') ?? ''));
         if ($label === '') {
             $label = $start && $end
-                ? Carbon::parse($start)->format('M Y') . ' - ' . Carbon::parse($end)->format('M Y')
+                ? Carbon::parse($start)->format('M Y').' - '.Carbon::parse($end)->format('M Y')
                 : pathinfo($file, PATHINFO_FILENAME);
         }
 
@@ -209,7 +215,7 @@ Artisan::command(
         }
 
         foreach (['start' => $start, 'end' => $end] as $name => $date) {
-            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
                 $this->error("--{$name} must be formatted as YYYY-MM-DD.");
 
                 return self::FAILURE;
@@ -229,7 +235,7 @@ Artisan::command(
         }
 
         $type = strtolower(trim((string) $this->option('type')));
-        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+        if (! in_array($type, ['site', 'query', 'page', 'all'], true)) {
             $this->error('--type must be site, query, page, or all.');
 
             return self::FAILURE;
@@ -241,7 +247,7 @@ Artisan::command(
             $endDate = Carbon::parse($end);
             $label = $startDate->isSameMonth($endDate)
                 ? $startDate->format('M Y')
-                : $startDate->format('Y-m-d') . ' to ' . $endDate->format('Y-m-d');
+                : $startDate->format('Y-m-d').' to '.$endDate->format('Y-m-d');
         }
 
         $rowLimit = (int) ($this->option('row-limit') ?: config('search_console.row_limit', 25000));
@@ -278,7 +284,7 @@ Artisan::command(
         $parseMonth = function (string $value, string $optionName) use ($timezone): ?Carbon {
             $value = trim($value);
             if (preg_match('/^\d{4}-\d{2}$/', $value) === 1) {
-                return Carbon::createFromFormat('Y-m-d', $value . '-01', $timezone)->startOfMonth();
+                return Carbon::createFromFormat('Y-m-d', $value.'-01', $timezone)->startOfMonth();
             }
 
             if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1) {
@@ -291,7 +297,7 @@ Artisan::command(
         };
 
         $fromMonth = $parseMonth((string) ($this->option('from') ?: '2023-12'), 'from');
-        if (!$fromMonth instanceof Carbon) {
+        if (! $fromMonth instanceof Carbon) {
             return self::FAILURE;
         }
 
@@ -302,7 +308,7 @@ Artisan::command(
                 ? $now->copy()->startOfMonth()
                 : $now->copy()->subMonthNoOverflow()->startOfMonth());
 
-        if (!$toMonth instanceof Carbon) {
+        if (! $toMonth instanceof Carbon) {
             return self::FAILURE;
         }
 
@@ -313,7 +319,7 @@ Artisan::command(
         }
 
         $type = strtolower(trim((string) $this->option('type')));
-        if (!in_array($type, ['site', 'query', 'page', 'all'], true)) {
+        if (! in_array($type, ['site', 'query', 'page', 'all'], true)) {
             $this->error('--type must be site, query, page, or all.');
 
             return self::FAILURE;
@@ -343,6 +349,7 @@ Artisan::command(
 
             if ($endDate->lt($startDate)) {
                 $this->warn("Skipping {$month->format('M Y')}: no finalized days are available yet.");
+
                 continue;
             }
 
@@ -357,7 +364,7 @@ Artisan::command(
 
                 try {
                     $rows = $client->searchAnalyticsRows($start, $end, $dimension, $rowLimit, $maxRows);
-                } catch (\Throwable $exception) {
+                } catch (Throwable $exception) {
                     $summary['failed']++;
                     $this->error("{$label} {$dimension} failed: {$exception->getMessage()}");
 
@@ -371,6 +378,7 @@ Artisan::command(
                 if ($rows === []) {
                     $summary['skipped_empty']++;
                     $this->warn("{$label} {$dimension}: no rows returned; skipped.");
+
                     continue;
                 }
 
@@ -382,7 +390,7 @@ Artisan::command(
         }
 
         $this->info(
-            "Search Console backfill complete. Months: {$summary['months']}; dimension pulls: {$summary['dimensions']}; " .
+            "Search Console backfill complete. Months: {$summary['months']}; dimension pulls: {$summary['dimensions']}; ".
             "rows imported: {$summary['imported']}; empty skipped: {$summary['skipped_empty']}; failed: {$summary['failed']}."
         );
 
@@ -414,7 +422,7 @@ Artisan::command('slack:pending-work-reminder', function (): int {
     }
 
     NotificationFacade::route('slack', $channel)
-        ->notify(new PendingWorkSlackReminderNotification());
+        ->notify(new PendingWorkSlackReminderNotification);
 
     NewProductDraftAssignment::query()
         ->where('work_status', 'open')
@@ -433,13 +441,13 @@ Artisan::command('slack:pending-work-reminder', function (): int {
 Artisan::command('slack:assignment-complete {assignment_id}', function (string $assignment_id): int {
     $assignment = NewProductDraftAssignment::query()->find((int) $assignment_id);
 
-    if (!$assignment instanceof NewProductDraftAssignment) {
+    if (! $assignment instanceof NewProductDraftAssignment) {
         $this->error("Assignment #{$assignment_id} was not found.");
 
         return self::FAILURE;
     }
 
-    app(\App\Services\NewProductDraftAssignmentService::class)->markCompleted($assignment);
+    app(NewProductDraftAssignmentService::class)->markCompleted($assignment);
 
     $this->info("Assignment #{$assignment->id} marked completed.");
 
@@ -451,7 +459,7 @@ Artisan::command('notifications:send-daily-task-reminders', function (Maintenanc
 
     $this->info(
         "Daily task reminders complete: {$result['missing_alt']} missing-alt products; "
-        . "{$result['url_404']} URLs returning 404; {$result['slack_messages']} Slack messages sent."
+        ."{$result['url_404']} URLs returning 404; {$result['slack_messages']} Slack messages sent."
     );
 
     return self::SUCCESS;
@@ -470,7 +478,7 @@ Artisan::command('notifications:send-monthly-maintenance-reports', function (Mai
 
     $this->info(
         "Monthly maintenance emails complete: {$result['missing_alt']} missing-alt products for Nicky; "
-        . "{$result['url_404']} 404 URLs for Mack and Freddy. The same-time daily task run sends each owner one Slack reminder."
+        ."{$result['url_404']} 404 URLs for Mack and Freddy. The same-time daily task run sends each owner one Slack reminder."
     );
 
     return self::SUCCESS;
@@ -501,6 +509,7 @@ GRAPHQL);
         );
         if ($alreadyRegistered) {
             $this->line("{$topic} is already registered at {$uri}.");
+
             continue;
         }
 
@@ -517,7 +526,7 @@ GRAPHQL, [
         ]);
         $errors = data_get($result, 'webhookSubscriptionCreate.userErrors', []);
         if ($errors !== []) {
-            $this->error("{$topic} failed: " . collect($errors)->pluck('message')->implode('; '));
+            $this->error("{$topic} failed: ".collect($errors)->pluck('message')->implode('; '));
 
             return self::FAILURE;
         }
@@ -591,6 +600,7 @@ GRAPHQL, ['orderId' => $order['id'], 'after' => $lineCursor]);
                 $mapped = $mapper->fromGraphqlLine($line);
                 if ($mapped === null) {
                     $skippedLines++;
+
                     continue;
                 }
                 $lines[] = $mapped;
@@ -656,7 +666,7 @@ Artisan::command('shopify:alert-stale-stack-reservations', function (StackReserv
     return $result['errors'] === [] ? self::SUCCESS : self::FAILURE;
 })->purpose('Email stale stack reservations for a manual fix. Does not change Shopify inventory or reservation rows.');
 
-Schedule::job(new \App\Jobs\ReportDirectShopifyInventoryCorrectionsJob)
+Schedule::job(new ReportDirectShopifyInventoryCorrectionsJob)
     ->dailyAt('07:30')
     ->timezone('Africa/Johannesburg')
     ->withoutOverlapping()
@@ -703,8 +713,8 @@ Artisan::command('sku:audit-duplicates', function (DuplicateSkuReminderService $
 
     $this->info(
         "Found {$result['conflict_count']} duplicate SKU(s) across {$result['product_count']} products. "
-        . 'Email: ' . ($result['email_sent'] ? 'sent' : 'not sent') . '. '
-        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+        .'Email: '.($result['email_sent'] ? 'sent' : 'not sent').'. '
+        .'Slack: '.($result['slack_sent'] ? 'sent' : 'not sent').'.'
     );
 
     foreach ($result['errors'] as $error) {
@@ -726,8 +736,8 @@ Artisan::command('procurement:remind-pending-receipt-pushes', function (PendingS
 
     $this->info(
         "Pending receipt push reminders: {$result['pending_count']} due. "
-        . "Emails sent: {$result['email_sent']}. "
-        . 'Slack: ' . ($result['slack_sent'] ? 'sent' : 'not sent') . '.'
+        ."Emails sent: {$result['email_sent']}. "
+        .'Slack: '.($result['slack_sent'] ? 'sent' : 'not sent').'.'
     );
 
     foreach ($result['errors'] as $error) {
@@ -761,8 +771,8 @@ Artisan::command('procurement:reconcile-supplier-reporting {--dry-run : Preview 
 
     $this->info(
         "Supplier reporting {$mode}: {$result['lines_checked']} line(s) checked, "
-        . "{$result['lines_updated']} line status update(s), "
-        . "{$result['variants_refreshed']} variant summary refresh(es)."
+        ."{$result['lines_updated']} line status update(s), "
+        ."{$result['variants_refreshed']} variant summary refresh(es)."
     );
 
     return self::SUCCESS;
@@ -775,7 +785,7 @@ Schedule::command('procurement:remind-pending-receipt-pushes')
     ->onOneServer()
     ->name('pending-supplier-receipt-push-reminders');
 
-Schedule::job(new ReconcileProductImageBackupsJob())
+Schedule::job(new ReconcileProductImageBackupsJob)
     ->dailyAt('02:00')
     ->withoutOverlapping();
 
@@ -793,7 +803,7 @@ Artisan::command(
     {--scheduled : Mark the run as scheduler-created instead of manual}',
     function (): int {
         $date = trim((string) ($this->option('date') ?? ''));
-        if ($date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        if ($date !== '' && ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
             $this->error('--date must be formatted as YYYY-MM-DD.');
 
             return self::FAILURE;
@@ -838,7 +848,7 @@ Artisan::command(
     'shopify:orders-import-history
     {--force : Skip confirmation for the one-time full historical import}',
     function (): int {
-        if (!$this->option('force') && !$this->confirm('Queue a full unfiltered Shopify orders historical import?')) {
+        if (! $this->option('force') && ! $this->confirm('Queue a full unfiltered Shopify orders historical import?')) {
             $this->warn('Aborted.');
 
             return self::SUCCESS;
@@ -858,7 +868,7 @@ Artisan::command(
     {--force : Allow queueing even when another run already exists for the same date}
     {--capture-current-inventory : Also capture a late current inventory snapshot}',
     function (string $business_date): int {
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $business_date)) {
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $business_date)) {
             $this->error('business_date must be formatted as YYYY-MM-DD.');
 
             return self::FAILURE;
@@ -878,7 +888,7 @@ Artisan::command(
             ])
             ->exists();
 
-        if ($exists && !$this->option('force')) {
+        if ($exists && ! $this->option('force')) {
             $this->error("An orders sync is already active for {$business_date}. Use --force to queue another run intentionally.");
 
             return self::FAILURE;
@@ -943,7 +953,7 @@ Artisan::command(
             $this->info("Site audit run #{$run->id} queued {$run->total_urls} URL check(s).");
 
             return self::SUCCESS;
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             SiteAuditRun::query()->create([
                 'type' => $type,
                 'status' => SiteAuditRun::STATUS_FAILED,
@@ -952,7 +962,7 @@ Artisan::command(
                 'error_message' => $exception->getMessage(),
             ]);
 
-            $this->error('Site audit failed to start: ' . $exception->getMessage());
+            $this->error('Site audit failed to start: '.$exception->getMessage());
 
             return self::FAILURE;
         }
@@ -982,7 +992,7 @@ Artisan::command(
     {--include-batches : Also delete rows from job_batches}
     {--force : Skip the safety confirmation in local}',
     function (): int {
-        if (!app()->environment('local')) {
+        if (! app()->environment('local')) {
             $this->error('This command is restricted to the local environment.');
 
             return self::FAILURE;
@@ -1020,12 +1030,12 @@ Artisan::command(
             $parts[] = "job batches: {$batchCount}";
         }
 
-        if (!$force) {
+        if (! $force) {
             $confirmed = $this->confirm(
-                'Delete ' . implode(', ', $parts) . ($queueName !== '' ? " for queue '{$queueName}'" : '') . '?'
+                'Delete '.implode(', ', $parts).($queueName !== '' ? " for queue '{$queueName}'" : '').'?'
             );
 
-            if (!$confirmed) {
+            if (! $confirmed) {
                 $this->warn('Aborted.');
 
                 return self::SUCCESS;
@@ -1107,7 +1117,7 @@ Artisan::command(
             ],
         );
 
-        if (!$dryRun) {
+        if (! $dryRun) {
             $summary['source'] = 'Manual stack sellability enforcement';
             $summary = app(StackSellabilityShopifyPushService::class)->queuePushForChangedStacks($summary, $effectiveUserId);
             app(StackSellabilitySlackNotifier::class)->notifyIfChanged($summary);
@@ -1129,8 +1139,8 @@ Artisan::command(
         $this->line("Shopify component variants refreshed: {$summary['shopify_component_refreshes']}");
         $this->line("Shopify component refresh failures: {$summary['shopify_component_refresh_failures']}");
         $this->line("Stacks skipped after refresh failure: {$summary['shopify_refresh_failed_stacks']}");
-        $this->line('Shopify push queued products: ' . (int) ($summary['shopify_push_queued_products'] ?? 0));
-        $this->line('Shopify push queued variants: ' . (int) ($summary['shopify_push_queued_variants'] ?? 0));
+        $this->line('Shopify push queued products: '.(int) ($summary['shopify_push_queued_products'] ?? 0));
+        $this->line('Shopify push queued variants: '.(int) ($summary['shopify_push_queued_variants'] ?? 0));
 
         return self::SUCCESS;
     }
@@ -1170,10 +1180,10 @@ Artisan::command(
             $this->line("Flagged: {$summary['flagged']}");
             $this->line("Alerted: {$summary['notified']}");
 
-            $flagged = \App\Models\ShopifyAudit::query()
+            $flagged = ShopifyAudit::query()
                 ->with('product')
-                ->where('audit_type', \App\Models\ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
-                ->where('status', \App\Models\ShopifyAudit::STATUS_FLAGGED)
+                ->where('audit_type', ShopifyAudit::TYPE_COMPLEMENTARY_PRODUCTS)
+                ->where('status', ShopifyAudit::STATUS_FLAGGED)
                 ->orderByDesc('last_checked_at')
                 ->get();
 
@@ -1186,7 +1196,7 @@ Artisan::command(
             $this->warn('Products still needing complementary-product audit attention:');
             foreach ($flagged as $audit) {
                 $product = $audit->product;
-                $title = trim((string) ($product?->title ?? '')) ?: ('Product #' . $audit->product_id);
+                $title = trim((string) ($product?->title ?? '')) ?: ('Product #'.$audit->product_id);
                 $this->line(sprintf(
                     '- %s | %s | local=%d | shopify=%d | valid=%d | checked=%s',
                     $title,
@@ -1218,8 +1228,9 @@ Artisan::command(
             $first = 250;
         }
 
-        if (!str_starts_with($definitionId, 'gid://shopify/MetaobjectDefinition/')) {
+        if (! str_starts_with($definitionId, 'gid://shopify/MetaobjectDefinition/')) {
             $this->error('definitionId must be gid://shopify/MetaobjectDefinition/...');
+
             return self::FAILURE;
         }
 
@@ -1246,6 +1257,7 @@ Artisan::command(
             if ($type === '') {
                 $this->error('Could not resolve metaobject definition type from this definition ID.');
                 $this->line(json_encode($nodeData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
                 return self::FAILURE;
             }
 
@@ -1269,8 +1281,9 @@ Artisan::command(
             ]);
 
             $nodes = data_get($metaobjectsData, 'metaobjects.nodes', []);
-            if (!is_array($nodes) || empty($nodes)) {
+            if (! is_array($nodes) || empty($nodes)) {
                 $this->warn("No metaobjects found for resolved type '{$type}'.");
+
                 return self::SUCCESS;
             }
 
@@ -1284,8 +1297,9 @@ Artisan::command(
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1324,18 +1338,19 @@ Artisan::command(
             ]);
 
             $validations = data_get($definitionData, 'metafieldDefinition.validations', []);
-            if (!is_array($validations) || empty($validations)) {
+            if (! is_array($validations) || empty($validations)) {
                 $this->warn("No validations found for {$namespace}.{$key}.");
+
                 return self::SUCCESS;
             }
 
             $definitionIds = [];
             foreach ($validations as $validation) {
-                if (!is_array($validation)) {
+                if (! is_array($validation)) {
                     continue;
                 }
                 $name = strtolower(trim((string) ($validation['name'] ?? '')));
-                if (!str_contains($name, 'metaobject')) {
+                if (! str_contains($name, 'metaobject')) {
                     continue;
                 }
                 $value = trim((string) ($validation['value'] ?? ''));
@@ -1375,6 +1390,7 @@ Artisan::command(
                 $this->warn("No MetaobjectDefinition IDs found in validations for {$namespace}.{$key}.");
                 $this->line('Validations:');
                 $this->line(json_encode($validations, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
                 return self::SUCCESS;
             }
 
@@ -1393,8 +1409,9 @@ Artisan::command(
             ]);
 
             $nodes = data_get($nodeData, 'nodes', []);
-            if (!is_array($nodes) || empty($nodes)) {
+            if (! is_array($nodes) || empty($nodes)) {
                 $this->warn('Could not resolve metaobject definition nodes.');
+
                 return self::SUCCESS;
             }
 
@@ -1424,13 +1441,14 @@ Artisan::command(
                 ]);
 
                 $metaobjectNodes = data_get($metaobjectsData, 'metaobjects.nodes', []);
-                if (!is_array($metaobjectNodes) || empty($metaobjectNodes)) {
+                if (! is_array($metaobjectNodes) || empty($metaobjectNodes)) {
                     $this->line("  No entries found for type '{$type}'.");
+
                     continue;
                 }
 
                 foreach ($metaobjectNodes as $metaobjectNode) {
-                    $this->line('  - ' . implode(' | ', [
+                    $this->line('  - '.implode(' | ', [
                         (string) data_get($metaobjectNode, 'id', ''),
                         (string) data_get($metaobjectNode, 'handle', ''),
                         (string) data_get($metaobjectNode, 'displayName', ''),
@@ -1439,8 +1457,9 @@ Artisan::command(
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1479,8 +1498,9 @@ Artisan::command(
             ]);
 
             $nodes = data_get($result, 'metaobjects.nodes', []);
-            if (!is_array($nodes) || empty($nodes)) {
+            if (! is_array($nodes) || empty($nodes)) {
                 $this->warn("No metaobjects found for type '{$type}'.");
+
                 return self::SUCCESS;
             }
 
@@ -1493,8 +1513,9 @@ Artisan::command(
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1527,25 +1548,25 @@ Artisan::command(
                 }
                 }
             GQL, [
-                            'productId' => $productId,
-                            'categoryId' => $categoryId,
-                        ]);
+                'productId' => $productId,
+                'categoryId' => $categoryId,
+            ]);
 
             $userErrors = data_get($result, 'productUpdate.userErrors', []);
-            if (!empty($userErrors)) {
+            if (! empty($userErrors)) {
                 $this->error('Shopify returned userErrors:');
                 foreach ($userErrors as $error) {
                     $field = is_array($error['field'] ?? null)
                         ? implode('.', $error['field'])
                         : ($error['field'] ?? 'unknown');
-                    $this->line("- [{$field}] " . ($error['message'] ?? 'Unknown error'));
+                    $this->line("- [{$field}] ".($error['message'] ?? 'Unknown error'));
                 }
 
                 return self::FAILURE;
             }
 
             $product = data_get($result, 'productUpdate.product');
-            if (!$product) {
+            if (! $product) {
                 $this->error('No product returned from Shopify.');
                 $this->line(json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 
@@ -1553,13 +1574,13 @@ Artisan::command(
             }
 
             $this->info('Product category updated successfully.');
-            $this->line('Product: ' . data_get($product, 'id', 'n/a'));
-            $this->line('Category: ' . data_get($product, 'category.id', 'n/a'));
-            $this->line('Category Name: ' . data_get($product, 'category.name', 'n/a'));
+            $this->line('Product: '.data_get($product, 'id', 'n/a'));
+            $this->line('Category: '.data_get($product, 'category.id', 'n/a'));
+            $this->line('Category Name: '.data_get($product, 'category.name', 'n/a'));
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
 
             return self::FAILURE;
         }
@@ -1592,6 +1613,7 @@ Artisan::command(
 
             if (empty($nodes)) {
                 $this->warn("No categories found for: {$search}");
+
                 return self::SUCCESS;
             }
 
@@ -1605,8 +1627,9 @@ Artisan::command(
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1631,10 +1654,12 @@ Artisan::command(
 
         if ($namespace === '' || $key === '') {
             $this->error('Namespace and key are required.');
+
             return self::FAILURE;
         }
-        if (!preg_match('/^[a-z0-9_]+$/', $key)) {
+        if (! preg_match('/^[a-z0-9_]+$/', $key)) {
             $this->error("Invalid key '{$key}'. Use only lowercase letters, numbers, and underscores.");
+
             return self::FAILURE;
         }
 
@@ -1679,13 +1704,13 @@ Artisan::command(
             ]);
 
             $userErrors = data_get($result, 'metafieldsSet.userErrors', []);
-            if (is_array($userErrors) && !empty($userErrors)) {
+            if (is_array($userErrors) && ! empty($userErrors)) {
                 $this->error('Shopify returned userErrors:');
                 foreach ($userErrors as $error) {
                     $field = is_array($error['field'] ?? null)
                         ? implode('.', $error['field'])
                         : ($error['field'] ?? 'unknown');
-                    $this->line("- [{$field}] " . ($error['message'] ?? 'Unknown error'));
+                    $this->line("- [{$field}] ".($error['message'] ?? 'Unknown error'));
                 }
 
                 return self::FAILURE;
@@ -1693,9 +1718,9 @@ Artisan::command(
 
             $metafields = data_get($result, 'metafieldsSet.metafields', []);
             $this->info('UVP metafield set successfully.');
-            $this->line('Owner: ' . $ownerId);
-            $this->line('Namespace/Key: ' . $namespace . '.' . $key);
-            $this->line('Text: ' . $text);
+            $this->line('Owner: '.$ownerId);
+            $this->line('Namespace/Key: '.$namespace.'.'.$key);
+            $this->line('Text: '.$text);
             $this->line('Returned metafields:');
             $this->line(json_encode($metafields, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
@@ -1727,8 +1752,9 @@ Artisan::command(
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1766,6 +1792,7 @@ Artisan::command(
         if ($rawComplementary === '') {
             $this->error('Provide at least one complementary product GID via --complementary.');
             $this->line('Example: --complementary="gid://shopify/Product/222222222,gid://shopify/Product/333333333"');
+
             return self::FAILURE;
         }
 
@@ -1777,12 +1804,14 @@ Artisan::command(
 
         if (empty($complementaryIds)) {
             $this->error('No valid complementary product IDs were provided.');
+
             return self::FAILURE;
         }
 
         foreach ($complementaryIds as $id) {
-            if (!str_starts_with($id, 'gid://shopify/Product/')) {
+            if (! str_starts_with($id, 'gid://shopify/Product/')) {
                 $this->error("Invalid complementary product GID: {$id}");
+
                 return self::FAILURE;
             }
         }
@@ -1796,16 +1825,19 @@ Artisan::command(
             $stdCompKey === ''
         ) {
             $this->error('Namespace and key options cannot be empty.');
+
             return self::FAILURE;
         }
 
-        if (!in_array($patternType, ['single_line_text_field', 'metaobject_reference'], true)) {
+        if (! in_array($patternType, ['single_line_text_field', 'metaobject_reference'], true)) {
             $this->error("Invalid --pattern-type '{$patternType}'. Allowed: single_line_text_field, metaobject_reference.");
+
             return self::FAILURE;
         }
 
-        if ($patternType === 'single_line_text_field' && !in_array($patternValue, ['solid', 'multicolor'], true)) {
+        if ($patternType === 'single_line_text_field' && ! in_array($patternValue, ['solid', 'multicolor'], true)) {
             $this->error("Invalid --pattern value '{$patternValue}'. Allowed for single_line_text_field: solid, multicolor.");
+
             return self::FAILURE;
         }
 
@@ -1813,8 +1845,9 @@ Artisan::command(
             if ($patternMetaobjectId === '' && str_starts_with($patternValue, 'gid://shopify/Metaobject/')) {
                 $patternMetaobjectId = $patternValue;
             }
-            if (!str_starts_with($patternMetaobjectId, 'gid://shopify/Metaobject/')) {
+            if (! str_starts_with($patternMetaobjectId, 'gid://shopify/Metaobject/')) {
                 $this->error('When --pattern-type=metaobject_reference, provide --pattern-metaobject-id=gid://shopify/Metaobject/...');
+
                 return self::FAILURE;
             }
         }
@@ -1822,6 +1855,7 @@ Artisan::command(
         $complementaryJson = json_encode($complementaryIds, JSON_UNESCAPED_SLASHES);
         if ($complementaryJson === false) {
             $this->error('Failed to encode complementary product references.');
+
             return self::FAILURE;
         }
 
@@ -1835,7 +1869,7 @@ Artisan::command(
                 : $patternValue,
         ]];
 
-        if (!$skipAppComplementary) {
+        if (! $skipAppComplementary) {
             $metafields[] = [
                 'ownerId' => $ownerId,
                 'namespace' => $appCompNamespace,
@@ -1845,7 +1879,7 @@ Artisan::command(
             ];
         }
 
-        if (!$skipStandard) {
+        if (! $skipStandard) {
             $metafields[] = [
                 'ownerId' => $ownerId,
                 'namespace' => $stdCompNamespace,
@@ -1882,7 +1916,7 @@ Artisan::command(
             ]);
 
             $setErrors = data_get($setResult, 'metafieldsSet.userErrors', []);
-            if (is_array($setErrors) && !empty($setErrors)) {
+            if (is_array($setErrors) && ! empty($setErrors)) {
                 $this->error('Shopify returned userErrors during metafieldsSet:');
                 foreach ($setErrors as $error) {
                     $field = is_array($error['field'] ?? null)
@@ -1957,8 +1991,9 @@ Artisan::command(
             ));
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }
@@ -1979,8 +2014,9 @@ Artisan::command(
     function (string $product, ?string $price = null): int {
         $priceInput = trim((string) ($price ?? ''));
         $hasPrice = $priceInput !== '';
-        if ($hasPrice && !preg_match('/^\d+(?:\.\d{1,2})?$/', $priceInput)) {
+        if ($hasPrice && ! preg_match('/^\d+(?:\.\d{1,2})?$/', $priceInput)) {
             $this->error("Invalid price '{$priceInput}'. Use a numeric value with up to 2 decimals.");
+
             return self::FAILURE;
         }
 
@@ -1993,16 +2029,19 @@ Artisan::command(
         $weightInput = trim((string) ($this->option('weight') ?? ''));
         $costPerItemInput = trim((string) ($this->option('cost-per-item') ?? ''));
 
-        if ($compareAtInput !== '' && !preg_match('/^\d+(?:\.\d{1,2})?$/', $compareAtInput)) {
+        if ($compareAtInput !== '' && ! preg_match('/^\d+(?:\.\d{1,2})?$/', $compareAtInput)) {
             $this->error("Invalid compare-at '{$compareAtInput}'. Use a numeric value with up to 2 decimals.");
+
             return self::FAILURE;
         }
-        if ($costPerItemInput !== '' && !preg_match('/^\d+(?:\.\d{1,2})?$/', $costPerItemInput)) {
+        if ($costPerItemInput !== '' && ! preg_match('/^\d+(?:\.\d{1,2})?$/', $costPerItemInput)) {
             $this->error("Invalid cost-per-item '{$costPerItemInput}'. Use a numeric value with up to 2 decimals.");
+
             return self::FAILURE;
         }
-        if ($weightInput !== '' && !preg_match('/^\d+(?:\.\d{1,6})?$/', $weightInput)) {
+        if ($weightInput !== '' && ! preg_match('/^\d+(?:\.\d{1,6})?$/', $weightInput)) {
             $this->error("Invalid weight '{$weightInput}'. Use a numeric value.");
+
             return self::FAILURE;
         }
 
@@ -2017,6 +2056,7 @@ Artisan::command(
             };
             if ($weightEnum === null) {
                 $this->error("Invalid --weight-unit '{$weightUnitInput}'. Allowed: g, kg, oz, lb.");
+
                 return self::FAILURE;
             }
         }
@@ -2027,17 +2067,20 @@ Artisan::command(
             || $weightEnum !== null
             || $weightInput !== ''
             || $costPerItemInput !== '';
-        if (!$hasAnyFieldUpdate) {
+        if (! $hasAnyFieldUpdate) {
             $this->error('Nothing to update. Provide price and/or any of --sku-barcode, --compare-at, --weight-unit, --weight, --cost-per-item.');
+
             return self::FAILURE;
         }
         if ($weightInput !== '' && $weightEnum === null) {
             $this->error('When using --weight, also provide --weight-unit.');
+
             return self::FAILURE;
         }
 
         if ($targetSku !== '' && $targetVariantId !== '') {
             $this->error('Use either --sku or --variant-id, not both.');
+
             return self::FAILURE;
         }
 
@@ -2097,25 +2140,28 @@ GQL;
                 $productNode = data_get($result, 'productByHandle');
             }
 
-            if (!is_array($productNode) || empty($productNode['id'])) {
+            if (! is_array($productNode) || empty($productNode['id'])) {
                 $this->error("Product not found for '{$product}'.");
+
                 return self::FAILURE;
             }
 
             $productId = (string) ($productNode['id'] ?? '');
             $productHandle = (string) ($productNode['handle'] ?? '');
             $variantNodes = data_get($productNode, 'variants.nodes', []);
-            if (!is_array($variantNodes) || empty($variantNodes)) {
+            if (! is_array($variantNodes) || empty($variantNodes)) {
                 $this->error('No variants found for this product.');
+
                 return self::FAILURE;
             }
 
             $variants = collect($variantNodes)
-                ->filter(fn ($node) => is_array($node) && !empty($node['id']))
+                ->filter(fn ($node) => is_array($node) && ! empty($node['id']))
                 ->values();
 
             if ($variants->isEmpty()) {
                 $this->error('No valid variants found for this product.');
+
                 return self::FAILURE;
             }
 
@@ -2136,13 +2182,15 @@ GQL;
                 $this->error('Product has multiple variants. Pass --sku=<sku>, --variant-id=<gid>, or --all.');
                 $this->line('Available variants:');
                 foreach ($variants as $v) {
-                    $this->line('- ' . (string) ($v['id'] ?? '') . ' | sku=' . (string) ($v['sku'] ?? '') . ' | current=' . (string) ($v['price'] ?? ''));
+                    $this->line('- '.(string) ($v['id'] ?? '').' | sku='.(string) ($v['sku'] ?? '').' | current='.(string) ($v['price'] ?? ''));
                 }
+
                 return self::FAILURE;
             }
 
             if ($selected->isEmpty()) {
                 $this->error('No matching variant found for provided selector.');
+
                 return self::FAILURE;
             }
 
@@ -2177,7 +2225,7 @@ GQL;
                                 ],
                             ];
                         }
-                        if (!empty($inventoryItem)) {
+                        if (! empty($inventoryItem)) {
                             $input['inventoryItem'] = $inventoryItem;
                         }
                     }
@@ -2220,7 +2268,7 @@ mutation ProductVariantsBulkPriceUpdate($productId: ID!, $variants: [ProductVari
 GQL;
 
             $mutationResult = null;
-            if (!empty($inputs)) {
+            if (! empty($inputs)) {
                 $mutationResult = $client->graphql($mutation, [
                     'productId' => $productId,
                     'variants' => $inputs,
@@ -2228,44 +2276,46 @@ GQL;
             }
 
             $userErrors = data_get($mutationResult, 'productVariantsBulkUpdate.userErrors', []);
-            if (is_array($userErrors) && !empty($userErrors)) {
+            if (is_array($userErrors) && ! empty($userErrors)) {
                 $this->error('Shopify returned userErrors:');
                 foreach ($userErrors as $error) {
                     $field = is_array($error['field'] ?? null)
                         ? implode('.', $error['field'])
                         : ($error['field'] ?? 'unknown');
-                    $this->line("- [{$field}] " . ($error['message'] ?? 'Unknown error'));
+                    $this->line("- [{$field}] ".($error['message'] ?? 'Unknown error'));
                 }
+
                 return self::FAILURE;
             }
 
             $updated = data_get($mutationResult, 'productVariantsBulkUpdate.productVariants', []);
 
             $this->info('Variant update succeeded.');
-            $this->line('Product: ' . $productId . ($productHandle !== '' ? " ({$productHandle})" : ''));
+            $this->line('Product: '.$productId.($productHandle !== '' ? " ({$productHandle})" : ''));
             if ($hasPrice) {
-                $this->line('Price: ' . number_format((float) $priceInput, 2, '.', ''));
+                $this->line('Price: '.number_format((float) $priceInput, 2, '.', ''));
             }
             if ($skuBarcode !== '') {
-                $this->line('SKU/Barcode: ' . $skuBarcode);
+                $this->line('SKU/Barcode: '.$skuBarcode);
             }
             if ($compareAtInput !== '') {
-                $this->line('Compare-at: ' . number_format((float) $compareAtInput, 2, '.', ''));
+                $this->line('Compare-at: '.number_format((float) $compareAtInput, 2, '.', ''));
             }
             if ($weightEnum !== null) {
-                $this->line('Weight unit: ' . $weightEnum . ($weightInput !== '' ? (' | weight=' . $weightInput) : ''));
+                $this->line('Weight unit: '.$weightEnum.($weightInput !== '' ? (' | weight='.$weightInput) : ''));
             }
             if ($costPerItemInput !== '') {
-                $this->line('Cost per item: ' . number_format((float) $costPerItemInput, 2, '.', ''));
+                $this->line('Cost per item: '.number_format((float) $costPerItemInput, 2, '.', ''));
             }
             $this->line('Updated variants:');
             foreach ((array) $updated as $row) {
-                $this->line('- ' . (string) data_get($row, 'id', '') . ' | sku=' . (string) data_get($row, 'sku', '') . ' | price=' . (string) data_get($row, 'price', ''));
+                $this->line('- '.(string) data_get($row, 'id', '').' | sku='.(string) data_get($row, 'sku', '').' | price='.(string) data_get($row, 'price', ''));
             }
 
             return self::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Request failed: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            $this->error('Request failed: '.$e->getMessage());
+
             return self::FAILURE;
         }
     }

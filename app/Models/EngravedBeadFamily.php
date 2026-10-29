@@ -12,6 +12,7 @@ final class EngravedBeadFamily extends Model
     protected $casts = [
         'validation_errors' => 'array', 'observed_mapping' => 'array',
         'validated_at' => 'datetime', 'activated_at' => 'datetime',
+        'automation_held_quantity' => 'integer', 'recalculate_at' => 'datetime', 'last_reconciled_at' => 'datetime',
     ];
 
     public function members(): HasMany

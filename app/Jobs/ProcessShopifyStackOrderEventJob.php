@@ -23,7 +23,10 @@ final class ProcessShopifyStackOrderEventJob implements ShouldBeUnique, ShouldQu
 
     public array $backoff = [15, 30, 60, 120, 300, 600, 1200];
 
-    public function __construct(public readonly int $eventId) {}
+    public function __construct(public readonly int $eventId)
+    {
+        $this->onConnection('inventory-ledger')->onQueue('inventory-ledger');
+    }
 
     public function uniqueId(): string
     {

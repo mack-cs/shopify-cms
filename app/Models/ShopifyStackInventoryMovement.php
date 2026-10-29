@@ -27,6 +27,7 @@ final class ShopifyStackInventoryMovement extends Model
 
     protected $casts = [
         'shopify_response' => 'array',
+        'bead_intent' => 'array',
         'processed_at' => 'datetime',
     ];
 

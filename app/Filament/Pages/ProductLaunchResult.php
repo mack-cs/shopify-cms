@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Enums\PermissionEnum;
 use App\Models\ProductLaunchRun;
+use App\Services\Shopify\ProductLaunchService;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Auth;
 
@@ -26,6 +27,15 @@ final class ProductLaunchResult extends Page
         $this->launch = $runId > 0
             ? ProductLaunchRun::query()->with(['items.product', 'user'])->find($runId)
             : null;
+    }
+
+    public function retryLaunch(): void
+    {
+        abort_unless(Auth::user()?->can(PermissionEnum::ShopifyPushProducts->value), 403);
+        if ($this->launch !== null) {
+            app(ProductLaunchService::class)->retry($this->launch, (int) Auth::id());
+            $this->refreshLaunch();
+        }
     }
 
     public function refreshLaunch(): void

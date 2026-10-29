@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Services\EngravedBeads\EngravedBeadRecalculation;
 use App\Services\StackBundleSellabilityService;
 use App\Services\StackSellabilityShopifyPushService;
 use App\Services\StackSellabilitySlackNotifier;
@@ -12,7 +13,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class HandleShopifyInventoryLevelUpdatedJob implements ShouldQueue, ShouldBeUnique
+class HandleShopifyInventoryLevelUpdatedJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
@@ -21,18 +22,17 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldQueue, ShouldBeUniq
     public int $uniqueFor = 60;
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     public function __construct(
         public string $inventoryItemId,
         public array $payload = [],
         public ?string $webhookId = null,
-    ) {
-    }
+    ) {}
 
     public function uniqueId(): string
     {
-        return 'shopify-inventory-level:' . $this->inventoryItemId;
+        return 'shopify-inventory-level:'.$this->inventoryItemId;
     }
 
     public function handle(
@@ -40,6 +40,7 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldQueue, ShouldBeUniq
         StackSellabilityShopifyPushService $pushService,
         StackSellabilitySlackNotifier $slackNotifier,
     ): void {
+        app(EngravedBeadRecalculation::class)->inventoryItem($this->inventoryItemId);
         $summary = $sellabilityService->enforceForInventoryItem($this->inventoryItemId, null, [
             'refresh_components' => true,
         ]);

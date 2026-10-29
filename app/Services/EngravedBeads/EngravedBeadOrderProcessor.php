@@ -35,7 +35,7 @@ final class EngravedBeadOrderProcessor
         mixed $orderCreatedAt,
         Closure $createReservation,
     ): string {
-        if (! $this->enabled() || ! $variant instanceof Variant || $variant->product === null) {
+        if (! $variant instanceof Variant || $variant->product === null) {
             return 'ignore';
         }
 
@@ -96,11 +96,20 @@ final class EngravedBeadOrderProcessor
             return 'recorded';
         }
 
-        $fulfilledBaseline = max(0, $current - $unfulfilled);
+        // Post-cutover shipments still owe CMS consumption even if their webhook is late.
+        $fulfilledBaseline = 0;
+        if ($orderCreatedAt === null || $orderCreatedAt->lt($member->family->activated_at)) {
+            $this->remember($attributes, ['configuration' => EngravedBeadOrderLine::CONFIGURATION_HISTORICAL,
+                'error_message' => 'Order predates the approved family cutover; no new inventory movement was created.']);
+
+            return 'recorded';
+        }
         $reservation = $createReservation(
             $event,
             $lineId,
-            $lineItem,
+            $lineItem + ['_bead_family_id' => $member->family_id,
+                '_bead_configuration_version' => $member->family->configuration_version,
+                '_bead_location_id' => $member->family->source_location_id],
             $variant,
             (int) $source->product_id,
             (int) $member->required_beads,
@@ -233,24 +242,17 @@ final class EngravedBeadOrderProcessor
         if ($lineId === '') {
             return;
         }
-        $reservation = $this->reservation($event->shopify_order_id, $lineId);
-        if (! $reservation instanceof ShopifyStackInventoryReservation) {
-            return;
+        foreach (ShopifyStackInventoryReservation::query()->where('shopify_order_id', $event->shopify_order_id)
+            ->where('shopify_order_line_item_id', $lineId)->whereNotNull('bead_family_id')->get() as $reservation) {
+            $requested = max(0, (int) ($refundLine['quantity'] ?? 0)) * (int) $reservation->component_quantity_per_stack;
+            $restockable = max(0, (int) $reservation->consumed_quantity - (int) $reservation->restocked_quantity);
+            $quantity = min($requested, $restockable);
+            if ($quantity <= 0) {
+                continue;
+            }
+            $this->movements->execute($reservation, ShopifyStackInventoryMovement::ACTION_RESTOCK,
+                $quantity, 'refund:'.$refundId.':'.$lineId);
         }
-        $perUnit = (int) $reservation->component_quantity_per_stack;
-        $requested = max(0, (int) ($refundLine['quantity'] ?? 0)) * $perUnit;
-        $restockable = max(0, (int) $reservation->consumed_quantity - (int) ($reservation->restocked_quantity ?? 0));
-        $quantity = min($requested, $restockable);
-        if ($quantity <= 0) {
-            return;
-        }
-
-        $this->movements->execute(
-            $reservation,
-            ShopifyStackInventoryMovement::ACTION_RESTOCK,
-            $quantity,
-            'refund:'.$refundId.':'.$lineId,
-        );
     }
 
     /**
@@ -272,7 +274,7 @@ final class EngravedBeadOrderProcessor
             'variant_id' => $variant?->id,
             'sku' => trim((string) ($variant?->sku ?: ($lineItem['sku'] ?? ''))) ?: null,
             'beads' => $configuration->beads(),
-            'additional_per_unit' => $configuration->additionalPerUnit(),
+            'additional_per_unit' => ($configuration->beads() ?? 0) > 1 ? $configuration->beads() : 0,
             'ordered_quantity' => $orderedQuantity,
             'stock_pool' => null,
             'shopify_inventory_item_id' => $variant?->shopify_inventory_item_id,
@@ -287,7 +289,7 @@ final class EngravedBeadOrderProcessor
                 'shopify_order_id' => $keys['shopify_order_id'],
                 'shopify_order_line_item_id' => $keys['shopify_order_line_item_id'],
             ],
-            $keys + $values,
+            array_replace($keys, $values),
         );
     }
 

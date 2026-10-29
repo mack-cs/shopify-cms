@@ -11,12 +11,16 @@ use App\Models\Variant;
 use App\Services\Shopify\ProductLaunchService;
 use App\Services\Shopify\ShopifyInventoryAdjustmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Bus;
+use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
 
 beforeEach(function (): void {
     config([
         'product_launch.enabled' => true,
+        'queue.connections.product-launch.driver' => 'sync',
+        'queue.connections.product-launch.after_commit' => false,
         'product_launch.publications' => ['gid://shopify/Publication/1'],
     ]);
 });
@@ -112,6 +116,7 @@ it('launches a stack without enabling inventory tracking or assigning a quantity
 });
 
 it('reports a failed launch when Shopify does not confirm publication', function (): void {
+    Bus::fake();
     $product = launchProduct('draft', tracked: false);
     approveLaunchProduct($product);
     $writes = 0;
@@ -124,6 +129,7 @@ it('reports a failed launch when Shopify does not confirm publication', function
         launchActor()->id,
     );
 
+    app(ProductLaunchService::class)->run($run);
     expect($run->items()->first()->outcome)->toBe(ProductLaunchItem::OUTCOME_FAILED)
         ->and($run->items()->first()->detail)->toContain('did not confirm')
         ->and($product->fresh()->status)->toBe('draft');
@@ -131,7 +137,7 @@ it('reports a failed launch when Shopify does not confirm publication', function
 
 function launchActor(): User
 {
-    Spatie\Permission\Models\Permission::findOrCreate('ShopifyPushProducts', 'web');
+    Permission::findOrCreate('ShopifyPushProducts', 'web');
     $user = User::factory()->create();
     $user->givePermissionTo('ShopifyPushProducts');
 
@@ -150,7 +156,7 @@ it('does not convert available stock into an implicit on-hand correction', funct
 });
 
 it('checks the launch kill switch when queued work executes', function () {
-    Illuminate\Support\Facades\Bus::fake();
+    Bus::fake();
     $product = launchProduct('draft', tracked: false);
     $service = app(ProductLaunchService::class);
     $run = $service->queue(collect([$product]), ['gid://shopify/Publication/1'], launchActor()->id);

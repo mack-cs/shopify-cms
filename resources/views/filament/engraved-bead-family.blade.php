@@ -12,6 +12,9 @@
     @foreach ($family->validation_errors ?? [] as $error)
         <p class="text-danger-600">{{ $error }}</p>
     @endforeach
+    @if ($family->sync_error)
+        <p class="text-danger-600">Synchronization blocked: {{ $family->sync_error }}</p>
+    @endif
     <table class="w-full text-sm">
         <thead><tr><th>Beads</th><th>SKU</th><th>Variant</th><th>Threshold ≤</th><th>Tracked</th><th>Sellable</th></tr></thead>
         <tbody>
@@ -27,6 +30,9 @@
         <pre class="overflow-auto text-xs">{{ json_encode($family->observed_mapping, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>
     @endif
     <h3>Recent audit history</h3>
+    @foreach (\App\Models\EngravedBeadSellabilityOperation::query()->where('family_id', $family->id)->where('status', '!=', 'confirmed')->get() as $operation)
+        <p class="text-danger-600">Operation {{ $operation->id }}: {{ $operation->status }} — {{ $operation->error_message }}</p>
+    @endforeach
     @foreach ($family->audits()->latest('id')->limit(50)->get() as $audit)
         <p>{{ $audit->created_at }} · {{ $audit->action }} · actor {{ $audit->user_id ?? 'system' }}</p>
         <pre class="overflow-auto text-xs">{{ json_encode($audit->details, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>

@@ -1,12 +1,12 @@
 <?php
 
+use App\Enums\PermissionEnum;
 use App\Filament\Resources\InventoryResource\Pages\ListInventories;
 use App\Models\Import;
 use App\Models\ProcurementSupplierOrderLine;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\Variant;
-use App\Enums\PermissionEnum;
 use App\Services\Procurement\SupplierOrderService;
 use App\Services\ProductInventoryCsvExporter;
 use Illuminate\Foundation\Testing\RefreshDatabase;

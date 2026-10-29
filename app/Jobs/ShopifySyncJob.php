@@ -5,11 +5,12 @@ namespace App\Jobs;
 use App\Models\Import;
 use App\Models\Setting;
 use App\Services\AdminNotification;
+use App\Services\EngravedBeads\EngravedBeadFamilyDiscovery;
+use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftSeeder;
 use App\Services\ShopifyApiImporter;
 use App\Services\ShopifyMissingDraftWorkflowService;
 use App\Services\ShopifyMissingProductDetector;
-use App\Services\NewProductDraftProductSync;
-use App\Services\NewProductDraftSeeder;
 use App\Services\ShopifySyncSnapshotService;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -17,6 +18,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Schema;
 
 class ShopifySyncJob implements ShouldQueue
 {
@@ -24,9 +26,7 @@ class ShopifySyncJob implements ShouldQueue
 
     public int $timeout = 1800;
 
-    public function __construct(private readonly int $importId)
-    {
-    }
+    public function __construct(private readonly int $importId) {}
 
     public function handle(
         ShopifyApiImporter $importer,
@@ -35,12 +35,11 @@ class ShopifySyncJob implements ShouldQueue
         NewProductDraftProductSync $draftSync,
         NewProductDraftSeeder $draftSeeder,
         ShopifySyncSnapshotService $snapshotService
-    ): void
-    {
+    ): void {
         set_time_limit(0);
 
         $import = Import::find($this->importId);
-        if (!$import) {
+        if (! $import) {
             return;
         }
 
@@ -54,6 +53,9 @@ class ShopifySyncJob implements ShouldQueue
                 ->first();
 
             $importer->importIntoExistingImport($import);
+            if (Schema::hasTable('engraved_bead_families')) {
+                app(EngravedBeadFamilyDiscovery::class)->synchronize();
+            }
             $missingCount = $missingProductDetector->detect($import->fresh(), $previousImport);
             $blockedDraftCount = $missingDraftWorkflow->flagFromMissingProducts($import->id);
             $snapshotService->generateForImport($import->fresh());
@@ -65,8 +67,8 @@ class ShopifySyncJob implements ShouldQueue
                 Notification::make()
                     ->title('Shopify sync complete')
                     ->body(
-                        "Import #{$import->id} is ready. Shopify image changes were queued for backup and the Shopify snapshot CSV is ready." .
-                        ($missingCount > 0 ? " {$missingCount} product(s) were missing from the latest Shopify sync. See Audit & History -> Shopify Missing Products." : '') .
+                        "Import #{$import->id} is ready. Shopify image changes were queued for backup and the Shopify snapshot CSV is ready.".
+                        ($missingCount > 0 ? " {$missingCount} product(s) were missing from the latest Shopify sync. See Audit & History -> Shopify Missing Products." : '').
                         ($blockedDraftCount > 0 ? " {$blockedDraftCount} draft recovery record(s) were blocked from automatic re-sync. Review them in New Products." : '')
                     )
                     ->success(),

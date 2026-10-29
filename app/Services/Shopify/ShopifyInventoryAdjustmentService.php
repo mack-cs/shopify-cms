@@ -5,6 +5,7 @@ namespace App\Services\Shopify;
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Models\ShopifyInventorySnapshot;
 use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadRecalculation;
 use App\Services\Inventory\InventoryAuditContext;
 use App\Services\Inventory\InventoryAuditRecorder;
 
@@ -109,13 +110,19 @@ GRAPHQL, ['id' => $inventoryItemId]);
     /** @return array<string, mixed> */
     public function decreaseOnHand(Variant $variant, int $quantity, string $referenceUri, string $idempotencyKey, ?string $locationId = null, ?int $expectedOnHand = null, ?InventoryAuditContext $audit = null): array
     {
-        if ($quantity <= 0) throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException('Inventory deduction quantity must be greater than zero.');
+        }
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
         $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
-        if ($inventoryItemId === '' || $locationId === '') throw new \RuntimeException('The inventory item and location are required.');
+        if ($inventoryItemId === '' || $locationId === '') {
+            throw new \RuntimeException('The inventory item and location are required.');
+        }
         $expectedOnHand ??= $this->currentQuantities($variant, $locationId)['on_hand'];
         $targetOnHand = $expectedOnHand - $quantity;
-        if ($targetOnHand < 0) throw new \RuntimeException("Cannot deduct {$quantity}; Shopify On Hand is {$expectedOnHand}.");
+        if ($targetOnHand < 0) {
+            throw new \RuntimeException("Cannot deduct {$quantity}; Shopify On Hand is {$expectedOnHand}.");
+        }
         $context = $this->auditContext($audit, $variant, [
             'correlationKey' => $idempotencyKey,
             'workflow' => 'manual_stock',
@@ -142,7 +149,7 @@ mutation DeductManualStock($input: InventorySetQuantitiesInput!, $idempotencyKey
 GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceDocumentUri' => $referenceUri,
                 'quantities' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId,
                     'quantity' => $targetOnHand, 'changeFromQuantity' => $expectedOnHand]]],
-            'idempotencyKey' => $idempotencyKey]);
+                'idempotencyKey' => $idempotencyKey]);
 
             return $this->confirmedGroup($data, 'inventorySetQuantities');
         });
@@ -207,9 +214,14 @@ GRAPHQL, ['input' => [
         string $idempotencyKey,
         ?string $locationId = null,
         ?InventoryAuditContext $audit = null,
+        string $inventoryState = 'available',
+        ?string $ledgerDocumentUri = null,
     ): array {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Restock quantity must be greater than zero.');
+        }
+        if (! in_array($inventoryState, ['available', 'safety_stock'], true) || ($inventoryState === 'safety_stock' && ! $ledgerDocumentUri)) {
+            throw new \InvalidArgumentException('A restock requires a supported state and an owned safety-stock ledger.');
         }
         $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
         if ($inventoryItemId === '') {
@@ -223,14 +235,14 @@ GRAPHQL, ['input' => [
             'processName' => 'Order processing',
             'explanation' => 'Additional engraved beads were restored because the returned units were restocked.',
             'shopifyReason' => 'restock',
-            'inventoryState' => 'available',
+            'inventoryState' => $inventoryState,
             'delta' => $quantity,
             'inventoryItemId' => $inventoryItemId,
             'locationId' => $locationId,
             'referenceDocumentUri' => $referenceUri,
         ]);
 
-        return $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri, $idempotencyKey): array {
+        return $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri, $idempotencyKey, $inventoryState, $ledgerDocumentUri): array {
             $data = $this->client->graphql(<<<'GRAPHQL'
 mutation RestockEngravedBeadInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
   inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
@@ -240,13 +252,14 @@ mutation RestockEngravedBeadInventory($input: InventoryAdjustQuantitiesInput!, $
 }
 GRAPHQL, [
                 'input' => [
-                    'name' => 'available',
+                    'name' => $inventoryState,
                     'reason' => 'restock',
                     'referenceDocumentUri' => $referenceUri,
                     'changes' => [[
                         'inventoryItemId' => $inventoryItemId,
                         'locationId' => $locationId,
                         'delta' => $quantity,
+                        ...($inventoryState === 'safety_stock' ? ['ledgerDocumentUri' => $ledgerDocumentUri] : []),
                     ]],
                 ],
                 'idempotencyKey' => $idempotencyKey,
@@ -413,6 +426,7 @@ GRAPHQL, [
         string $idempotencyKey,
         ?string $locationId = null,
         ?InventoryAuditContext $audit = null,
+        ?string $sourceLedgerDocumentUri = null,
     ): array {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Inventory movement quantity must be greater than zero.');
@@ -439,7 +453,7 @@ GRAPHQL, [
         $terminal = fn (string $name): array => array_filter([
             'locationId' => $locationId,
             'name' => $name,
-            'ledgerDocumentUri' => $name === 'available' ? null : $ledgerDocumentUri,
+            'ledgerDocumentUri' => $name === 'available' ? null : ($name === $from ? ($sourceLedgerDocumentUri ?? $ledgerDocumentUri) : $ledgerDocumentUri),
         ], fn (mixed $value): bool => $value !== null);
 
         $data = $this->graphqlAudited($context, <<<'GRAPHQL'
@@ -549,7 +563,7 @@ GRAPHQL, [
     }
 
     /**
-     * @param array<string, mixed> $defaults
+     * @param  array<string, mixed>  $defaults
      */
     private function auditContext(?InventoryAuditContext $audit, Variant $variant, array $defaults): InventoryAuditContext
     {
@@ -570,7 +584,7 @@ GRAPHQL, [
     }
 
     /**
-     * @param callable():array<string, mixed> $callback
+     * @param  callable():array<string, mixed>  $callback
      * @return array<string, mixed>
      */
     private function audited(InventoryAuditContext $context, callable $callback): array
@@ -578,6 +592,9 @@ GRAPHQL, [
         try {
             $group = $callback();
             $this->auditRecorder()->succeeded($context, $group);
+            if ($context->inventoryItemId) {
+                app(EngravedBeadRecalculation::class)->inventoryItem($context->inventoryItemId);
+            }
 
             return $group;
         } catch (\Throwable $exception) {
@@ -593,7 +610,7 @@ GRAPHQL, [
     }
 
     /**
-     * @param array<string, mixed> $variables
+     * @param  array<string, mixed>  $variables
      * @return array<string, mixed>
      */
     private function graphqlAudited(InventoryAuditContext $context, string $query, array $variables): array

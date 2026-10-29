@@ -2,8 +2,8 @@
 
 namespace App\Services\EngravedBeads;
 
-use App\Models\Variant;
 use App\Models\EngravedBeadFamilyMember;
+use App\Models\Variant;
 
 /** Approved Shopify identities, never SKU-based or ordered-member stock pools. */
 final class EngravedBeadStockPool

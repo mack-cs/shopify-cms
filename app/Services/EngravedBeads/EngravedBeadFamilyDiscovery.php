@@ -6,6 +6,8 @@ use App\Models\EngravedBeadFamily;
 use App\Models\EngravedBeadFamilyMember;
 use App\Models\Product;
 use App\Models\ShopifyInventorySnapshot;
+use App\Models\Variant;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -20,6 +22,8 @@ final class EngravedBeadFamilyDiscovery
 
     public function inspect(): array
     {
+        $skuKey = fn ($sku) => mb_strtoupper(preg_replace('/\s+/u', '', trim((string) $sku)));
+        $skuCounts = Variant::query()->active()->pluck('sku')->map($skuKey)->countBy();
         $groups = [];
         foreach (Product::query()->with('variants')->orderBy('id')->cursor() as $product) {
             $tags = $this->tags($product->tags);
@@ -47,6 +51,9 @@ final class EngravedBeadFamilyDiscovery
                 if (trim((string) $variant?->sku) === '') {
                     $errors[] = "Product {$product->shopify_id}: missing SKU.";
                 }
+                if (($skuCounts[$skuKey($variant?->sku)] ?? 0) > 1) {
+                    $errors[] = "Product {$product->shopify_id}: SKU is not unique across the synchronized catalog.";
+                }
                 if ($beads === 1 && $variant?->inventory_tracked !== true) {
                     $errors[] = "Product {$product->shopify_id}: the 1-bead source must be tracked.";
                 } elseif ($beads !== null && $beads > 1 && $variant?->inventory_tracked !== false) {
@@ -54,6 +61,9 @@ final class EngravedBeadFamilyDiscovery
                     if (! ($approved?->automation_disabled && $variant?->inventory_tracked === true)) {
                         $errors[] = "Product {$product->shopify_id}: multi-bead member must be untracked unless disabled by automation.";
                     }
+                }
+                if ($beads !== null && $beads > 1 && $variant?->current_on_hand_quantity !== 0) {
+                    $errors[] = "Product {$product->shopify_id}: verify zero independent on-hand member inventory before cutover.";
                 }
                 $groups[$tag]['members'][] = [
                     'shopify_product_id' => $product->shopify_id,
@@ -100,7 +110,7 @@ final class EngravedBeadFamilyDiscovery
     public function synchronize(): array
     {
         // Global discovery serialization also protects cross-family unique identities.
-        return \Illuminate\Support\Facades\Cache::lock('engraved-bead-discovery', 120)->block(5, function (): array {
+        return Cache::lock('engraved-bead-discovery', 120)->block(5, function (): array {
             $groups = $this->inspect();
             DB::transaction(function () use ($groups): void {
                 foreach ($groups as $tag => $group) {
@@ -132,21 +142,36 @@ final class EngravedBeadFamilyDiscovery
                 $errors[] = 'Member identity already belongs to another persisted family; explicit reconciliation required.';
             }
         }
-        $status = $protected ? (($conflict || $errors !== [] || $family->status === 'mapping_conflict') ? 'mapping_conflict' : 'active') : 'pending_validation';
+        $status = $protected ? (($conflict || $errors !== []) ? 'mapping_conflict'
+            : ($family->status !== 'active' ? $family->status : 'active')) : 'pending_validation';
         if ($family->observed_mapping !== $group || $family->status !== $status) {
             $family->audits()->create(['action' => 'discovery', 'details' => ['errors' => $errors, 'observed' => $group, 'status' => $status]]);
         }
         $family->fill(['status' => $status, 'validation_errors' => $errors, 'observed_mapping' => $group,
             'validated_at' => $errors === [] ? now() : null]);
         if (! $protected && $errors === []) {
-            $family->members()->delete();
+            if ($family->mapping_hash !== $group['mapping_hash']) {
+                $family->members()->delete();
+            }
             foreach ($group['members'] as $member) {
-                $family->members()->create($member + ['disable_threshold' => $member['required_beads']]);
+                $existing = $family->members()->where('shopify_variant_id', $member['shopify_variant_id'])->first();
+                if ($existing) {
+                    $existing->update($member);
+                } else {
+                    $family->members()->create($member + ['disable_threshold' => $member['required_beads']]);
+                }
             }
             $source = collect($group['members'])->firstWhere('required_beads', 1);
             $family->fill(['mapping_hash' => $group['mapping_hash'], 'source_product_id' => $source['shopify_product_id'],
                 'source_variant_id' => $source['shopify_variant_id'], 'source_inventory_item_id' => $source['shopify_inventory_item_id'],
                 'source_location_id' => $group['source_location_id']]);
+        }
+        if ($protected && ! $conflict && $errors === []) {
+            foreach ($group['members'] as $member) {
+                $family->members()->where('shopify_variant_id', $member['shopify_variant_id'])->update([
+                    'last_verified_tracked' => $member['last_verified_tracked'], 'last_verified_sellable' => $member['last_verified_sellable'],
+                ]);
+            }
         }
         $family->save();
     }

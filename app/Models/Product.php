@@ -2,29 +2,31 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Support\Facades\DB;
 use App\Services\CategoryTypeMap;
 use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\TagNormalizer;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class Product extends Model
 {
     protected $fillable = [
-        'import_id','shopify_id','shopify_created_at','handle','approved_handle','title','body_html','vendor','tags',
-        'type','published',
-        'product_category','google_product_category','status',
-        'seo_title','seo_description','color_string','uvp_short_paragraph','approval_version',
-        'first_image_auto_rename_completed_at','first_image_auto_rename_approval_version',
-        'first_handle_auto_lock_completed_at','first_handle_auto_lock_approval_version',
-        'batch','sync_batch_id','last_synced_at','is_bundle','you_save',
-        'image_import_batch_id','image_imported_at','image_import_status',
-        'has_errors','error_fields',
-        'engraved_bead_quantity','engraved_bead_configuration',
+        'import_id', 'shopify_id', 'shopify_created_at', 'handle', 'approved_handle', 'title', 'body_html', 'vendor', 'tags',
+        'type', 'published',
+        'product_category', 'google_product_category', 'status',
+        'seo_title', 'seo_description', 'color_string', 'uvp_short_paragraph', 'approval_version',
+        'first_image_auto_rename_completed_at', 'first_image_auto_rename_approval_version',
+        'first_handle_auto_lock_completed_at', 'first_handle_auto_lock_approval_version',
+        'batch', 'sync_batch_id', 'last_synced_at', 'is_bundle', 'you_save',
+        'image_import_batch_id', 'image_imported_at', 'image_import_status',
+        'has_errors', 'error_fields',
+        'engraved_bead_quantity', 'engraved_bead_configuration',
     ];
 
     protected $casts = [
@@ -95,6 +97,7 @@ class Product extends Model
         );
 
         $google = trim((string) ($resolved['google_product_category'] ?? ''));
+
         return $google === '' ? null : $google;
     }
 
@@ -175,6 +178,7 @@ class Product extends Model
     public function scopeProcurementCatalogEligible(Builder $query): Builder
     {
         $query->validProcurementConfiguration();
+        $query->sharedBeadProcurementSource();
         $query->where(function (Builder $eligible): void {
             $eligible->where(fn (Builder $listed): Builder => $listed->activeStatus()->nonBundle())
                 ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
@@ -190,6 +194,7 @@ class Product extends Model
     public function scopeProcurementOrderEligible(Builder $query): Builder
     {
         $query->validProcurementConfiguration();
+        $query->sharedBeadProcurementSource();
         $query->where(function (Builder $eligible): void {
             $eligible->where(fn (Builder $standard): Builder => $standard->inventoryEditableStatus()->nonBundle())
                 ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
@@ -202,9 +207,22 @@ class Product extends Model
         return $query;
     }
 
+    public function scopeSharedBeadProcurementSource(Builder $query): Builder
+    {
+        return $query->where(function (Builder $q): void {
+            $q->whereNull('products.tags')->orWhere('products.tags', 'not like', '%-bead-family%')
+                ->orWhereExists(function ($member): void {
+                    $member->selectRaw('1')->from('engraved_bead_family_members as bm')
+                        ->join('engraved_bead_families as bf', 'bf.id', '=', 'bm.family_id')
+                        ->whereColumn('bm.shopify_product_id', 'products.shopify_id')
+                        ->where('bf.status', 'active')->where('bm.required_beads', 1);
+                });
+        });
+    }
+
     public function isStackProduct(): bool
     {
-        return (bool) $this->is_bundle || \App\Services\TagNormalizer::containsBundleOrStackTag($this->tags);
+        return (bool) $this->is_bundle || TagNormalizer::containsBundleOrStackTag($this->tags);
     }
 
     public function scopeMissingImageAltText(Builder $query): Builder
@@ -278,7 +296,7 @@ class Product extends Model
         return $this->approvalsForCurrentVersionCount() >= 2;
     }
 
-    public function latestApprovalAt(): ?\Illuminate\Support\Carbon
+    public function latestApprovalAt(): ?Carbon
     {
         $approval = $this->approvalsForCurrentVersion()
             ->latest('created_at')
@@ -287,7 +305,7 @@ class Product extends Model
         return $approval?->created_at;
     }
 
-    public function latestPartialApprovalAt(): ?\Illuminate\Support\Carbon
+    public function latestPartialApprovalAt(): ?Carbon
     {
         $request = $this->partialApprovalRequests()
             ->where('approval_version', $this->approval_version)
@@ -326,6 +344,7 @@ class Product extends Model
         }
 
         $handle = trim((string) ($this->handle ?? ''));
+
         return $handle === '' ? null : $handle;
     }
 
@@ -336,7 +355,7 @@ class Product extends Model
 
     public function shopifySyncState(): string
     {
-        if (!$this->hasBeenSynced()) {
+        if (! $this->hasBeenSynced()) {
             return 'No Sync';
         }
 
@@ -361,7 +380,7 @@ class Product extends Model
 
     public function isSyncedAndCurrent(): bool
     {
-        return $this->last_synced_at !== null && !$this->hasChangesSinceLastSync();
+        return $this->last_synced_at !== null && ! $this->hasChangesSinceLastSync();
     }
 
     public function hasDuplicateImagePositions(): bool
@@ -385,7 +404,4 @@ class Product extends Model
             ->fromSub($duplicatePositions, 'duplicate_image_positions')
             ->exists();
     }
-
-
-
 }

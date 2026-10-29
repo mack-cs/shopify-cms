@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Models\ProductLaunchItem;
 use App\Models\ProductLaunchRun;
 use App\Services\Shopify\ProductLaunchService;
 use Illuminate\Bus\Queueable;
@@ -23,7 +24,7 @@ final class LaunchProductsOnShopifyJob implements ShouldBeUnique, ShouldQueue
 
     public function __construct(public readonly int $runId)
     {
-        $this->onQueue((string) config('product_launch.queue', 'default'));
+        $this->onConnection('product-launch')->onQueue((string) config('product_launch.queue', 'product-launch'));
     }
 
     public function uniqueId(): string
@@ -38,6 +39,18 @@ final class LaunchProductsOnShopifyJob implements ShouldBeUnique, ShouldQueue
             return;
         }
 
-        $launch->run($run);
+        $result = $launch->run($run);
+        if ($result->items()->where('outcome', ProductLaunchItem::OUTCOME_FAILED)->exists()) {
+            $result->update(['status' => ProductLaunchRun::STATUS_QUEUED, 'finished_at' => null]);
+            throw new \RuntimeException('Some launch items failed; retrying the same persisted operations.');
+        }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        ProductLaunchRun::query()->whereKey($this->runId)->update([
+            'status' => ProductLaunchRun::STATUS_COMPLETED_WITH_FAILURES,
+            'finished_at' => now(), 'error_message' => $exception->getMessage(),
+        ]);
     }
 }

@@ -46,10 +46,12 @@ final class EngravedBeadConfiguration
         foreach (TagNormalizer::parseTokens($tags) as $token) {
             if (isset(self::QUANTITY_TAGS[$token])) {
                 $quantities[] = self::QUANTITY_TAGS[$token];
+
                 continue;
             }
             if (in_array($token, self::IDENTIFYING_TAGS, true)) {
                 $identified = true;
+
                 continue;
             }
             if (preg_match('/^\d+-engraved-beads$/', $token) === 1) {

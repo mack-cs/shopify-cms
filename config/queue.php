@@ -30,6 +30,16 @@ return [
     */
 
     'connections' => [
+        'product-launch' => [
+            'driver' => 'database', 'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'), 'queue' => 'product-launch',
+            'retry_after' => 1020, 'after_commit' => true,
+        ],
+        'inventory-ledger' => [
+            'driver' => 'database', 'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'), 'queue' => 'inventory-ledger',
+            'retry_after' => 480, 'after_commit' => true,
+        ],
 
         // Preview pushes may paginate large collections and wait for Shopify jobs.
         // Use a dedicated worker so the default 90-second reservation cannot expire mid-push.
