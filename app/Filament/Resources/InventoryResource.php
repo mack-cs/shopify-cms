@@ -96,6 +96,24 @@ class InventoryResource extends Resource
                     ->searchable()
                     ->toggleable(isToggledHiddenByDefault: true)
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'),
+                TextColumn::make('procurement_eligibility')
+                    ->label('Procurement')
+                    ->state(function (mixed $record): ?string {
+                        if (! $record instanceof Variant) {
+                            return null;
+                        }
+                        $status = strtolower(trim((string) ($record->product?->status ?? '')));
+                        if ($status === 'unlisted' && $record->product?->engraved_bead_configuration === 'valid') {
+                            return 'Unlisted — Procurement Eligible';
+                        }
+
+                        return null;
+                    })
+                    ->badge()
+                    ->color('info')
+                    ->placeholder('-')
+                    ->visible(fn ($livewire): bool => ($livewire->activeTab ?? null) === 'everyday')
+                    ->toggleable(),
                 TextColumn::make('product.status')
                     ->label('Status')
                     ->badge()

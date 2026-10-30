@@ -2,9 +2,14 @@
 
 namespace App\Services;
 
+use App\Models\EngravedBeadFamilyMember;
 use App\Models\ProcurementPredictionRun;
+use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\EngravedBeads\EngravedBeadProcurementContract;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
@@ -77,6 +82,27 @@ final class ProcurementPredictionIngestService
             'predictions.*.data_quality_warning' => ['nullable', 'string'],
             'predictions.*.generated_at' => ['required', 'date'],
         ])->validate();
+
+        $mapped = Schema::hasTable('engraved_bead_family_members')
+            ? EngravedBeadFamilyMember::query()->with('family')->whereIn('shopify_variant_id', array_column($validated['predictions'], 'shopify_variant_id'))->get()
+            : collect();
+        $sources = collect(app(EngravedBeadProcurementContract::class)->export()['families'])->keyBy('source_variant_id');
+        foreach ($mapped as $member) {
+            if ($member->required_beads !== 1 || ! $sources->has($member->shopify_variant_id)) {
+                throw ValidationException::withMessages(['predictions' => 'Only an approved tracked 1-bead source may receive a forecast.']);
+            }
+        }
+        foreach ($validated['predictions'] as $row) {
+            $variant = Variant::query()->with('product')->where('shopify_id', $row['shopify_variant_id'])->first();
+            $bead = $variant && (EngravedBeadConfiguration::fromProduct($variant->product)->participating()
+                || str_contains((string) $variant->product?->tags, '-bead-family'));
+            $source = $sources->get($row['shopify_variant_id']);
+            $skuKey = fn ($sku) => mb_strtoupper(preg_replace('/\s+/u', '', trim((string) $sku)));
+            if (($bead && $source === null) || ($source !== null && ($skuKey($row['sku']) !== $skuKey($source['source_sku'])
+                || (! empty($row['shopify_product_id']) && $row['shopify_product_id'] !== $source['source_product_id'])))) {
+                throw ValidationException::withMessages(['predictions' => 'The forecast source identity or SKU differs from the approved mapping.']);
+            }
+        }
 
         Log::info('Procurement prediction persistence started', [
             'run_uuid' => $validated['run_uuid'],

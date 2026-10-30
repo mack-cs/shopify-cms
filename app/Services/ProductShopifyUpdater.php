@@ -11,7 +11,7 @@ use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\Variant;
-use App\Services\TagNormalizer;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
 use Illuminate\Support\Collection;
 
 final class ProductShopifyUpdater
@@ -19,35 +19,65 @@ final class ProductShopifyUpdater
     private const COMPLEMENTARY_PRODUCTS_SYNC_LIMIT = 3;
 
     public const SYNC_SCOPE_PRODUCT = 'product';
+
     public const SYNC_SCOPE_SEO = 'seo';
+
     public const SYNC_SCOPE_METAFIELDS = 'metafields';
+
     public const SYNC_SCOPE_VARIANTS = 'variants';
+
     public const SYNC_SCOPE_PRICE = 'price';
+
     public const SYNC_SCOPE_COMPARE_AT = 'compare_at';
+
     public const SYNC_SCOPE_IMAGES = 'images';
+
     public const CORE_FIELD_TITLE = 'title';
+
     public const CORE_FIELD_VENDOR = 'vendor';
+
     public const CORE_FIELD_PRODUCT_TYPE = 'product_type';
+
     public const CORE_FIELD_BODY_HTML = 'body_html';
+
     public const CORE_FIELD_TAGS = 'tags';
+
     public const CORE_FIELD_STATUS = 'status';
+
     public const CORE_FIELD_HANDLE = 'handle';
+
     public const CORE_FIELD_CATEGORY = 'category';
+
     public const CORE_FIELD_COLOR = 'color';
+
     public const CORE_FIELD_MATERIALS_AND_DIMENSIONS = 'materials_and_dimensions';
+
     public const CORE_FIELD_JEWELRY_MATERIAL = 'jewelry_material';
+
     public const CORE_FIELD_JEWELRY_TYPE = 'jewelry_type';
+
     public const CORE_FIELD_TARGET_GENDER = 'target_gender';
+
     public const CORE_FIELD_AGE_GROUP = 'age_group';
+
     public const CORE_FIELD_BRACELET_DESIGN = 'bracelet_design';
+
     public const CORE_FIELD_PATTERN_CATEGORY = 'pattern_category';
+
     public const CORE_FIELD_PRODUCT_METALS = 'product_metals';
+
     public const CORE_FIELD_SIBLINGS = 'siblings';
+
     public const CORE_FIELD_SIBLING_OPTION_NAME = 'sibling_option_name';
+
     public const CORE_FIELD_SIBLING_COLLECTION = 'sibling_collection';
+
     public const CORE_FIELD_COMPLEMENTARY_PRODUCTS = 'complementary_products';
+
     public const CORE_FIELD_UVP_SHORT_PARAGRAPH = 'uvp_short_paragraph';
+
     public const CORE_FIELD_BEAD_COLOUR_FINISH = 'bead_colour_finish';
+
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
 
     public const VARIANT_FIELD_SKU = 'variant_sku';
@@ -80,10 +110,13 @@ final class ProductShopifyUpdater
 
     /** @var array<string, array<int, array{id:string,displayName:string,handle:string,fields:array<int, array{key:string,value:string}>}>> */
     private array $metaobjectsByTypeCache = [];
+
     /** @var array<string, string>|null */
     private ?array $productReferenceLookupCache = null;
+
     /** @var array<string, string>|null */
     private ?array $collectionReferenceLookupCache = null;
+
     /** @var array<string, string|null> */
     private array $productReferenceRemoteCache = [];
 
@@ -92,8 +125,10 @@ final class ProductShopifyUpdater
 
     /** @var array<string, string|null> */
     private array $categoryIdByTypeCache = [];
+
     /** @var array<string, string|null> */
     private array $categoryIdByNameCache = [];
+
     /** @var array<string, string|null> */
     private array $categoryNameByGidCache = [];
 
@@ -191,7 +226,7 @@ final class ProductShopifyUpdater
     /**
      * Push the existing-product tag/metafield editor values from Shop Your Vibe.
      *
-     * @param array<string, string> $updates HeaderStore header => normalized display value
+     * @param  array<string, string>  $updates  HeaderStore header => normalized display value
      */
     public function syncShopYourVibeTagFields(Product $product, array $updates): void
     {
@@ -276,7 +311,7 @@ final class ProductShopifyUpdater
         $saleUpdate->loadMissing(['product', 'variant']);
 
         $product = $saleUpdate->product;
-        if (!$product instanceof Product) {
+        if (! $product instanceof Product) {
             throw new \RuntimeException('Sale update has no linked product.');
         }
 
@@ -307,7 +342,7 @@ final class ProductShopifyUpdater
         $details = $this->productDetails($product, null, $productId);
         $shopifyVariantId = $this->shopifyVariantIdForSaleUpdate($saleUpdate, $details);
         if ($shopifyVariantId === null) {
-            throw new \RuntimeException('Could not resolve Shopify variant for sale SKU ' . $saleUpdate->sku . '.');
+            throw new \RuntimeException('Could not resolve Shopify variant for sale SKU '.$saleUpdate->sku.'.');
         }
 
         $price = number_format((float) $saleUpdate->sale_price, 2, '.', '');
@@ -442,9 +477,9 @@ final class ProductShopifyUpdater
     }
 
     /**
-     * @param Collection<int, Product> $products
-     * @param array<int, string>|null $scopes
-     * @param array<int, string>|null $coreFields
+     * @param  Collection<int, Product>  $products
+     * @param  array<int, string>|null  $scopes
+     * @param  array<int, string>|null  $coreFields
      * @return array{
      *   updated:int,
      *   updated_product_ids:array<int, int>,
@@ -485,7 +520,7 @@ final class ProductShopifyUpdater
         $failures = [];
 
         foreach ($products as $product) {
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 continue;
             }
 
@@ -498,11 +533,12 @@ final class ProductShopifyUpdater
                 'is_fully_approved' => $product->isApprovedByTwo(),
             ]);
 
-            if (!$product->handle) {
+            if (! $product->handle) {
                 $skippedMissingHandle++;
                 logger()->warning('Shopify product sync skipped: missing handle', [
                     'product_id' => $product->id,
                 ]);
+
                 continue;
             }
 
@@ -512,17 +548,19 @@ final class ProductShopifyUpdater
                     'product_id' => $product->id,
                     'handle' => $product->handle,
                 ]);
+
                 continue;
             }
 
             if ($product->isApprovedByTwo()
-                && !$this->complementaryProducts->hasRequiredMinimumForProduct($product)) {
+                && ! $this->complementaryProducts->hasRequiredMinimumForProduct($product)) {
                 $skippedBlocked++;
                 logger()->warning('Shopify product sync skipped: missing required complementary products', [
                     'product_id' => $product->id,
                     'handle' => $product->handle,
                     'minimum' => ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT,
                 ]);
+
                 continue;
             }
 
@@ -540,7 +578,7 @@ final class ProductShopifyUpdater
                     $scopeSource = 'explicit_full_request';
                 }
             } else {
-                if (!$this->partialApprovalService->isActiveProduct($product)) {
+                if (! $this->partialApprovalService->isActiveProduct($product)) {
                     $skippedNotApproved++;
                     logger()->warning('Shopify product sync rejected', [
                         'origin' => 'products',
@@ -550,6 +588,7 @@ final class ProductShopifyUpdater
                         'reason' => 'Partial approval sync only runs for active products.',
                         'requested_scopes' => $scopes,
                     ]);
+
                     continue;
                 }
 
@@ -588,6 +627,7 @@ final class ProductShopifyUpdater
                         'requested_scopes' => $scopes,
                         'requested_core_fields' => $coreFields,
                     ]);
+
                     continue;
                 }
 
@@ -630,6 +670,7 @@ final class ProductShopifyUpdater
                         'requested_scopes' => $scopes,
                         'requested_core_fields' => $coreFields,
                     ]);
+
                     continue;
                 }
             }
@@ -649,6 +690,7 @@ final class ProductShopifyUpdater
                     'effective_scopes' => $effectiveScopes,
                     'effective_core_fields' => $effectiveCoreFields,
                 ]);
+
                 continue;
             }
 
@@ -914,7 +956,7 @@ final class ProductShopifyUpdater
     }
 
     /**
-     * @param Collection<int, Product> $products
+     * @param  Collection<int, Product>  $products
      * @return array{
      *   synced:int,
      *   synced_product_ids:array<int, int>,
@@ -938,28 +980,31 @@ final class ProductShopifyUpdater
         $failures = [];
 
         foreach ($products as $product) {
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 continue;
             }
 
-            if (!$product->handle) {
+            if (! $product->handle) {
                 $skippedMissingHandle++;
+
                 continue;
             }
 
             if ($this->isBlockedByShopifyMissingDraft($product)) {
                 $skippedBlocked++;
+
                 continue;
             }
 
-            if (!$product->isApprovedByTwo()) {
+            if (! $product->isApprovedByTwo()) {
                 $skippedNotApproved++;
+
                 continue;
             }
 
             try {
                 $productId = $this->resolveProductId($product);
-                if (!$productId) {
+                if (! $productId) {
                     throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
                 }
 
@@ -995,7 +1040,7 @@ final class ProductShopifyUpdater
     }
 
     /**
-     * @param array<int, int> $selectedImageIds
+     * @param  array<int, int>  $selectedImageIds
      * @return array{
      *   synced:int,
      *   processed_images:int,
@@ -1033,24 +1078,27 @@ final class ProductShopifyUpdater
             return $result;
         }
 
-        if (!$product->handle) {
+        if (! $product->handle) {
             $result['skipped_missing_handle'] = 1;
+
             return $result;
         }
 
         if ($this->isBlockedByShopifyMissingDraft($product)) {
             $result['skipped_blocked'] = 1;
+
             return $result;
         }
 
-        if (!$allowRemoteDeletedRestore && !$product->isApprovedByTwo()) {
+        if (! $allowRemoteDeletedRestore && ! $product->isApprovedByTwo()) {
             $result['skipped_not_approved'] = 1;
+
             return $result;
         }
 
         try {
             $productId = $this->resolveProductId($product);
-            if (!$productId) {
+            if (! $productId) {
                 throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
             }
 
@@ -1097,19 +1145,21 @@ final class ProductShopifyUpdater
             'failures' => [],
         ];
 
-        if (!$product->handle) {
+        if (! $product->handle) {
             $result['skipped_missing_handle'] = 1;
+
             return $result;
         }
 
         if ($this->isBlockedByShopifyMissingDraft($product)) {
             $result['skipped_blocked'] = 1;
+
             return $result;
         }
 
         try {
             $productId = $this->resolveProductId($product);
-            if (!$productId) {
+            if (! $productId) {
                 throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
             }
 
@@ -1135,7 +1185,7 @@ final class ProductShopifyUpdater
     }
 
     /**
-     * @param Collection<int, Product> $products
+     * @param  Collection<int, Product>  $products
      * @return array{
      *   updated:int,
      *   updated_product_ids:array<int, int>,
@@ -1157,17 +1207,19 @@ final class ProductShopifyUpdater
         $failures = [];
 
         foreach ($products as $product) {
-            if (!$product instanceof Product) {
+            if (! $product instanceof Product) {
                 continue;
             }
 
-            if (!$product->handle) {
+            if (! $product->handle) {
                 $skippedMissingHandle++;
+
                 continue;
             }
 
             if ($this->isBlockedByShopifyMissingDraft($product)) {
                 $skippedBlocked++;
+
                 continue;
             }
 
@@ -1371,284 +1423,285 @@ final class ProductShopifyUpdater
     //     return $warnings;
     // }
 
+    /**
+     * @param  array<int, string>  $coreFields
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    private function updateProduct(Product $product, array $scopes, array $coreFields): array
+    {
+        $warnings = [];
+        $syncProduct = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRODUCT) && ! empty($coreFields);
+        $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
+        $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
+        $syncPrice = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRICE);
+        $syncCompareAt = $this->scopeEnabled($scopes, self::SYNC_SCOPE_COMPARE_AT);
+        $syncImages = $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES);
+        $selectedMetafieldHeaders = $this->selectedCoreMetafieldHeaders($coreFields);
 
-/**
- * @param array<int, string> $coreFields
- * @return array<int, array{product_id:int, warning:string}>
- */
-private function updateProduct(Product $product, array $scopes, array $coreFields): array
-{
-    $warnings = [];
-    $syncProduct = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRODUCT) && !empty($coreFields);
-    $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
-    $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
-    $syncPrice = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRICE);
-    $syncCompareAt = $this->scopeEnabled($scopes, self::SYNC_SCOPE_COMPARE_AT);
-    $syncImages = $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES);
-    $selectedMetafieldHeaders = $this->selectedCoreMetafieldHeaders($coreFields);
-
-    $currentHandle = trim((string) ($product->handle ?? ''));
-    $targetHandle = trim((string) ($product->desiredHandle() ?? ''));
-    $productId = $this->resolveProductId($product);
-    if (!$productId) {
-        throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
-    }
-
-    [$primaryRow, $variantRows, $imageRows] = $this->loadRows($product);
-    $primaryData = $primaryRow?->data ?? [];
-
-    // Prefer current Product model values from the tool; row data is fallback only.
-    $title = $this->nullIfEmpty($product->title)
-        ?? $this->valueFromRow($primaryData, HeaderStore::TITLE, null);
-    // Prefer model value for vendor so UI edits are not overridden by stale imported row data.
-    $vendor = $this->nullIfEmpty($product->vendor)
-        ?? $this->valueFromRow($primaryData, HeaderStore::VENDOR, null);
-    $productType = $this->nullIfEmpty($product->type)
-        ?? $this->valueFromRow($primaryData, HeaderStore::TYPE, null);
-    $bodyHtml = $this->nullIfEmpty($product->body_html)
-        ?? $this->valueFromRow($primaryData, HeaderStore::BODY_HTML, null);
-    $statusRaw = $this->nullIfEmpty($product->status)
-        ?? $this->valueFromRow($primaryData, HeaderStore::STATUS, 'draft');
-    $tagsRaw = $this->nullIfEmpty($product->tags)
-        ?? $this->valueFromRow($primaryData, HeaderStore::TAGS, null);
-
-    $productCategory = $this->nullIfEmpty($product->product_category)
-        ?? $this->valueFromRow($primaryData, HeaderStore::PRODUCT_CATEGORY, null);
-    if ($productCategory !== null) {
-        $productCategory = $this->normalizeSingleAcceptedValue(HeaderStore::PRODUCT_CATEGORY, $productCategory) ?? $productCategory;
-    }
-
-    // ✅ Resolve category to a Shopify taxonomy GID if possible
-    $resolvedCategoryGid = $this->resolveProductCategoryGid($productCategory, $productType);
-
-    // ✅ IMPORTANT FIX:
-    // If we resolved a taxonomy GID, inject it into row data BEFORE metafields.
-    // This guarantees "hasCategoryContext" becomes true for subtype-constrained metafields
-    // even if Shopify details query returns "uncategorized" or lags.
-    if ($resolvedCategoryGid !== null) {
-        $primaryData[HeaderStore::PRODUCT_CATEGORY] = $resolvedCategoryGid;
-    }
-
-    $input = [
-        'id' => $productId,
-    ];
-
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TITLE) && $title !== null) {
-        $input['title'] = $title;
-    }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_VENDOR) && $vendor !== null) {
-        $input['vendor'] = $vendor;
-    }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_PRODUCT_TYPE) && $productType !== null) {
-        $input['productType'] = $productType;
-    }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_BODY_HTML) && $bodyHtml !== null) {
-        $input['descriptionHtml'] = $bodyHtml;
-    }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TAGS) && $tagsRaw !== null) {
-        $input['tags'] = TagNormalizer::parseTokens((string) $tagsRaw);
-    }
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
-        $mappedStatus = $this->mapStatusForSync((string) $statusRaw);
-        if ($mappedStatus !== null) {
-            $input['status'] = $mappedStatus;
+        $currentHandle = trim((string) ($product->handle ?? ''));
+        $targetHandle = trim((string) ($product->desiredHandle() ?? ''));
+        $productId = $this->resolveProductId($product);
+        if (! $productId) {
+            throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
         }
-    }
-    $handleChangeRequested = $syncProduct
-        && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE)
-        && $targetHandle !== ''
-        && $targetHandle !== $currentHandle;
 
-    logger()->info('Shopify product update prepared', [
-        'product_id' => $product->id,
-        'current_handle' => $currentHandle,
-        'target_handle' => $targetHandle,
-        'scopes' => $scopes,
-        'core_fields' => $coreFields,
-        'handle_change_requested' => $handleChangeRequested,
-    ]);
+        [$primaryRow, $variantRows, $imageRows] = $this->loadRows($product);
+        $primaryData = $primaryRow?->data ?? [];
 
-    if ($handleChangeRequested) {
-        $input['handle'] = $targetHandle;
-    }
+        // Prefer current Product model values from the tool; row data is fallback only.
+        $title = $this->nullIfEmpty($product->title)
+            ?? $this->valueFromRow($primaryData, HeaderStore::TITLE, null);
+        // Prefer model value for vendor so UI edits are not overridden by stale imported row data.
+        $vendor = $this->nullIfEmpty($product->vendor)
+            ?? $this->valueFromRow($primaryData, HeaderStore::VENDOR, null);
+        $productType = $this->nullIfEmpty($product->type)
+            ?? $this->valueFromRow($primaryData, HeaderStore::TYPE, null);
+        $bodyHtml = $this->nullIfEmpty($product->body_html)
+            ?? $this->valueFromRow($primaryData, HeaderStore::BODY_HTML, null);
+        $statusRaw = $this->nullIfEmpty($product->status)
+            ?? $this->valueFromRow($primaryData, HeaderStore::STATUS, 'draft');
+        $tagsRaw = $this->nullIfEmpty($product->tags)
+            ?? $this->valueFromRow($primaryData, HeaderStore::TAGS, null);
 
-    if ($syncSeo) {
-        $seoTitle = $this->nullIfEmpty($product->seo_title)
-            ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, '')) : null);
-        $seoDescription = $this->nullIfEmpty($product->seo_description)
-            ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, '')) : null);
-        if ($seoTitle !== null || $seoDescription !== null) {
-            $input['seo'] = [
-                'title' => $seoTitle,
-                'description' => $seoDescription,
-            ];
+        $productCategory = $this->nullIfEmpty($product->product_category)
+            ?? $this->valueFromRow($primaryData, HeaderStore::PRODUCT_CATEGORY, null);
+        if ($productCategory !== null) {
+            $productCategory = $this->normalizeSingleAcceptedValue(HeaderStore::PRODUCT_CATEGORY, $productCategory) ?? $productCategory;
         }
-    }
 
-    // ✅ Modern Shopify expects ProductInput.category to be a STRING ID (GID)
-    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null) {
-        $candidates = $this->taxonomyIdCandidates($resolvedCategoryGid);
-        if (!empty($candidates)) {
-            $input['category'] = $candidates[0];
+        // ✅ Resolve category to a Shopify taxonomy GID if possible
+        $resolvedCategoryGid = $this->resolveProductCategoryGid($productCategory, $productType);
+
+        // ✅ IMPORTANT FIX:
+        // If we resolved a taxonomy GID, inject it into row data BEFORE metafields.
+        // This guarantees "hasCategoryContext" becomes true for subtype-constrained metafields
+        // even if Shopify details query returns "uncategorized" or lags.
+        if ($resolvedCategoryGid !== null) {
+            $primaryData[HeaderStore::PRODUCT_CATEGORY] = $resolvedCategoryGid;
         }
-    }
 
-    if (count($input) > 1) {
-        logger()->info('Shopify mutation executed', [
-            'origin' => 'products',
-            'product_id' => $product->id,
-            'mutation' => 'productUpdate',
-            'fields' => array_values(array_diff(array_keys($input), ['id'])),
-        ]);
-        // 1) Update product (and category if provided)
-        $data = $this->client->graphql($this->productUpdateMutation(), [
-            'input' => $input,
-        ]);
+        $input = [
+            'id' => $productId,
+        ];
 
-        $errors = data_get($data, 'productUpdate.userErrors', []);
-        if (is_array($errors) && !empty($errors)) {
-            $messages = $this->formatUserErrors($errors);
-
-            // If category field is rejected/unsupported, try fallback category update, then retry without category
-            if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
-                $this->categoryGraphqlSupported = false;
-
-                $warnings = array_merge(
-                    $warnings,
-                    $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
-                );
-
-                unset($input['category']);
-
-                $data = $this->client->graphql($this->productUpdateMutation(), [
-                    'input' => $input,
-                ]);
-
-                $errors = data_get($data, 'productUpdate.userErrors', []);
-                if (is_array($errors) && !empty($errors)) {
-                    $messages = $this->formatUserErrors($errors);
-                    throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
-                }
-            } else {
-                throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TITLE) && $title !== null) {
+            $input['title'] = $title;
+        }
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_VENDOR) && $vendor !== null) {
+            $input['vendor'] = $vendor;
+        }
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_PRODUCT_TYPE) && $productType !== null) {
+            $input['productType'] = $productType;
+        }
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_BODY_HTML) && $bodyHtml !== null) {
+            $input['descriptionHtml'] = $bodyHtml;
+        }
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TAGS) && $tagsRaw !== null) {
+            $input['tags'] = TagNormalizer::parseTokens((string) $tagsRaw);
+        }
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
+            $mappedStatus = $this->mapStatusForSync((string) $statusRaw);
+            if ($mappedStatus === 'ACTIVE' && EngravedBeadConfiguration::fromProduct($product)->participating()) {
+                // Engraved publication goes through launch, including shared-source checks.
+                $mappedStatus = null;
+            }
+            if ($mappedStatus !== null) {
+                $input['status'] = $mappedStatus;
             }
         }
+        $handleChangeRequested = $syncProduct
+            && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_HANDLE)
+            && $targetHandle !== ''
+            && $targetHandle !== $currentHandle;
+
+        logger()->info('Shopify product update prepared', [
+            'product_id' => $product->id,
+            'current_handle' => $currentHandle,
+            'target_handle' => $targetHandle,
+            'scopes' => $scopes,
+            'core_fields' => $coreFields,
+            'handle_change_requested' => $handleChangeRequested,
+        ]);
 
         if ($handleChangeRequested) {
-            $remoteHandle = trim((string) data_get($data, 'productUpdate.product.handle', ''));
+            $input['handle'] = $targetHandle;
+        }
 
-            logger()->info('Shopify handle update response', [
+        if ($syncSeo) {
+            $seoTitle = $this->nullIfEmpty($product->seo_title)
+                ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_TITLE, '')) : null);
+            $seoDescription = $this->nullIfEmpty($product->seo_description)
+                ?? ($primaryRow ? $this->nullIfEmpty($primaryRow->get(HeaderStore::SEO_DESCRIPTION, '')) : null);
+            if ($seoTitle !== null || $seoDescription !== null) {
+                $input['seo'] = [
+                    'title' => $seoTitle,
+                    'description' => $seoDescription,
+                ];
+            }
+        }
+
+        // ✅ Modern Shopify expects ProductInput.category to be a STRING ID (GID)
+        if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null) {
+            $candidates = $this->taxonomyIdCandidates($resolvedCategoryGid);
+            if (! empty($candidates)) {
+                $input['category'] = $candidates[0];
+            }
+        }
+
+        if (count($input) > 1) {
+            logger()->info('Shopify mutation executed', [
+                'origin' => 'products',
                 'product_id' => $product->id,
-                'current_handle' => $currentHandle,
-                'target_handle' => $targetHandle,
-                'remote_handle' => $remoteHandle,
+                'mutation' => 'productUpdate',
+                'fields' => array_values(array_diff(array_keys($input), ['id'])),
+            ]);
+            // 1) Update product (and category if provided)
+            $data = $this->client->graphql($this->productUpdateMutation(), [
+                'input' => $input,
             ]);
 
-            if ($remoteHandle === '' || $remoteHandle !== $targetHandle) {
-                throw new \RuntimeException(
-                    "Shopify did not confirm the requested handle change. Expected '{$targetHandle}', got '" . ($remoteHandle !== '' ? $remoteHandle : 'empty') . "'."
-                );
-            }
-        }
-    }
+            $errors = data_get($data, 'productUpdate.userErrors', []);
+            if (is_array($errors) && ! empty($errors)) {
+                $messages = $this->formatUserErrors($errors);
 
-    // 2) Fetch latest details
-    $detailsHandle = $handleChangeRequested ? $targetHandle : $currentHandle;
-    $details = $this->productDetails($product, $detailsHandle, $productId);
+                // If category field is rejected/unsupported, try fallback category update, then retry without category
+                if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
+                    $this->categoryGraphqlSupported = false;
 
-    $currentCategoryId = trim((string) data_get($details, 'category.id', ''));
-    if ($currentCategoryId === '') {
-        $currentCategoryId = trim((string) data_get($details, 'productCategory.productTaxonomyNode.id', ''));
-    }
+                    $warnings = array_merge(
+                        $warnings,
+                        $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
+                    );
 
-    $currentCategoryName = trim((string) data_get($details, 'category.name', ''));
-    if ($currentCategoryName === '') {
-        $currentCategoryName = trim((string) data_get($details, 'productCategory.productTaxonomyNode.fullName', ''));
-    }
+                    unset($input['category']);
 
-    // 3) Pull current metafields from Shopify for fallback reference support
-    $shopifyRawMetafields = $this->productMetafieldRawValues($product, $detailsHandle, $productId);
+                    $data = $this->client->graphql($this->productUpdateMutation(), [
+                        'input' => $input,
+                    ]);
 
-    if ($handleChangeRequested) {
-        $this->handleService->promoteApprovedHandle($product);
-        logger()->info('Shopify handle update promoted locally', [
-            'product_id' => $product->id,
-            'old_handle' => $currentHandle,
-            'new_handle' => $targetHandle,
-        ]);
-    }
-
-    // Metafields are sent only for headers named in the approved field list.
-    if ($selectedMetafieldHeaders !== [] && $primaryRow) {
-        $metafieldRowData = [];
-        foreach ($selectedMetafieldHeaders as $header) {
-            $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
-            if ($metafieldValue === null) {
-                continue;
+                    $errors = data_get($data, 'productUpdate.userErrors', []);
+                    if (is_array($errors) && ! empty($errors)) {
+                        $messages = $this->formatUserErrors($errors);
+                        throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+                    }
+                } else {
+                    throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+                }
             }
 
-            $metafieldRowData[$header] = $metafieldValue;
+            if ($handleChangeRequested) {
+                $remoteHandle = trim((string) data_get($data, 'productUpdate.product.handle', ''));
+
+                logger()->info('Shopify handle update response', [
+                    'product_id' => $product->id,
+                    'current_handle' => $currentHandle,
+                    'target_handle' => $targetHandle,
+                    'remote_handle' => $remoteHandle,
+                ]);
+
+                if ($remoteHandle === '' || $remoteHandle !== $targetHandle) {
+                    throw new \RuntimeException(
+                        "Shopify did not confirm the requested handle change. Expected '{$targetHandle}', got '".($remoteHandle !== '' ? $remoteHandle : 'empty')."'."
+                    );
+                }
+            }
         }
 
-        if (array_key_exists(HeaderStore::PRODUCT_CATEGORY, $primaryData)) {
-            $metafieldRowData[HeaderStore::PRODUCT_CATEGORY] = $primaryData[HeaderStore::PRODUCT_CATEGORY];
+        // 2) Fetch latest details
+        $detailsHandle = $handleChangeRequested ? $targetHandle : $currentHandle;
+        $details = $this->productDetails($product, $detailsHandle, $productId);
+
+        $currentCategoryId = trim((string) data_get($details, 'category.id', ''));
+        if ($currentCategoryId === '') {
+            $currentCategoryId = trim((string) data_get($details, 'productCategory.productTaxonomyNode.id', ''));
         }
 
-        $warnings = array_merge(
-            $warnings,
-            $this->updateMetafields(
-                $product,
-                $productId,
-                $metafieldRowData,
-                $shopifyRawMetafields,
-                $currentCategoryId !== '' ? $currentCategoryId : null,
-                $currentCategoryName !== '' ? $currentCategoryName : null
-            )
-        );
+        $currentCategoryName = trim((string) data_get($details, 'category.name', ''));
+        if ($currentCategoryName === '') {
+            $currentCategoryName = trim((string) data_get($details, 'productCategory.productTaxonomyNode.fullName', ''));
+        }
+
+        // 3) Pull current metafields from Shopify for fallback reference support
+        $shopifyRawMetafields = $this->productMetafieldRawValues($product, $detailsHandle, $productId);
+
+        if ($handleChangeRequested) {
+            $this->handleService->promoteApprovedHandle($product);
+            logger()->info('Shopify handle update promoted locally', [
+                'product_id' => $product->id,
+                'old_handle' => $currentHandle,
+                'new_handle' => $targetHandle,
+            ]);
+        }
+
+        // Metafields are sent only for headers named in the approved field list.
+        if ($selectedMetafieldHeaders !== [] && $primaryRow) {
+            $metafieldRowData = [];
+            foreach ($selectedMetafieldHeaders as $header) {
+                $metafieldValue = $this->selectedCoreMetafieldValue($product, $primaryData, $header);
+                if ($metafieldValue === null) {
+                    continue;
+                }
+
+                $metafieldRowData[$header] = $metafieldValue;
+            }
+
+            if (array_key_exists(HeaderStore::PRODUCT_CATEGORY, $primaryData)) {
+                $metafieldRowData[HeaderStore::PRODUCT_CATEGORY] = $primaryData[HeaderStore::PRODUCT_CATEGORY];
+            }
+
+            $warnings = array_merge(
+                $warnings,
+                $this->updateMetafields(
+                    $product,
+                    $productId,
+                    $metafieldRowData,
+                    $shopifyRawMetafields,
+                    $currentCategoryId !== '' ? $currentCategoryId : null,
+                    $currentCategoryName !== '' ? $currentCategoryName : null
+                )
+            );
+        }
+
+        // 5) Variant fields are approved one by one. Price and compare-at stay separate scopes.
+        // Inventory quantities, tracking, and policy are never written from this path.
+        $variantFields = array_values(array_intersect($coreFields, self::availableVariantFields()));
+        if ($syncVariants && $variantFields !== []) {
+            $warnings = array_merge(
+                $warnings,
+                $this->updateVariantAndInventory($product, $productId, $variantRows, $details, $syncPrice, $syncCompareAt, $variantFields)
+            );
+        } elseif ($syncPrice || $syncCompareAt) {
+            $warnings = array_merge(
+                $warnings,
+                $this->updateVariantPrices($product, $productId, $syncPrice, $syncCompareAt)
+            );
+        }
+
+        // 6) Images
+        if ($syncImages) {
+            $warnings = array_merge(
+                $warnings,
+                $this->updateImages($product, $productId, $imageRows, $details)
+            );
+        }
+
+        if ($syncImages) {
+            $warnings = array_merge(
+                $warnings,
+                $this->syncVariantMediaAssignments($product, $productId, $variantRows)
+            );
+        }
+
+        // 7) Coverage warnings
+        if ($syncProduct) {
+            $warnings = array_merge(
+                $warnings,
+                $this->buildSyncCoverageWarnings($product, $primaryData, $variantRows, $imageRows)
+            );
+        }
+
+        return $warnings;
     }
-
-    // 5) Variant fields are approved one by one. Price and compare-at stay separate scopes.
-    // Inventory quantities, tracking, and policy are never written from this path.
-    $variantFields = array_values(array_intersect($coreFields, self::availableVariantFields()));
-    if ($syncVariants && $variantFields !== []) {
-        $warnings = array_merge(
-            $warnings,
-            $this->updateVariantAndInventory($product, $productId, $variantRows, $details, $syncPrice, $syncCompareAt, $variantFields)
-        );
-    } elseif ($syncPrice || $syncCompareAt) {
-        $warnings = array_merge(
-            $warnings,
-            $this->updateVariantPrices($product, $productId, $syncPrice, $syncCompareAt)
-        );
-    }
-
-    // 6) Images
-    if ($syncImages) {
-        $warnings = array_merge(
-            $warnings,
-            $this->updateImages($product, $productId, $imageRows, $details)
-        );
-    }
-
-    if ($syncImages) {
-        $warnings = array_merge(
-            $warnings,
-            $this->syncVariantMediaAssignments($product, $productId, $variantRows)
-        );
-    }
-
-    // 7) Coverage warnings
-    if ($syncProduct) {
-        $warnings = array_merge(
-            $warnings,
-            $this->buildSyncCoverageWarnings($product, $primaryData, $variantRows, $imageRows)
-        );
-    }
-
-    return $warnings;
-}
-
-
 
     /**
      * @return array<int, array{product_id:int, warning:string}>
@@ -1660,8 +1713,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         array $shopifyRawValues = [],
         ?string $currentCategoryId = null,
         ?string $currentCategoryName = null
-    ): array
-    {
+    ): array {
         $warnings = [];
         $payload = $this->metafieldsFromRow(
             $product,
@@ -1683,7 +1735,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         ]);
 
         $errors = data_get($data, 'metafieldsSet.userErrors', []);
-        if (is_array($errors) && !empty($errors)) {
+        if (is_array($errors) && ! empty($errors)) {
             foreach ($errors as $error) {
                 $field = $error['field'] ?? null;
                 $index = null;
@@ -1714,8 +1766,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         array $shopifyRawValues = [],
         ?string $currentCategoryId = null,
         ?string $currentCategoryName = null
-    ): array
-    {
+    ): array {
         $definitions = ShopifyMetafield::query()
             ->where('import_id', $product->import_id)
             ->get()
@@ -1742,11 +1793,11 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             }
 
             $identifier = $this->metafieldIdentifierFromHeader((string) $header);
-            if (!$identifier) {
+            if (! $identifier) {
                 continue;
             }
 
-            $lookup = $identifier['namespace'] . '.' . $identifier['key'];
+            $lookup = $identifier['namespace'].'.'.$identifier['key'];
 
             $stringValue = is_scalar($value) ? trim((string) $value) : '';
             if ($stringValue === '') {
@@ -1754,24 +1805,25 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             }
 
             $type = $definitions->get($lookup)?->first()?->type;
-            if (!$type) {
+            if (! $type) {
                 $type = $this->fallbackMetafieldType($header, $stringValue);
             }
-            if (!$type) {
+            if (! $type) {
                 continue;
             }
 
             if ($this->isSubtypeConstrainedShopifyMetafield($identifier['namespace'], $identifier['key'])) {
                 // For constrained Shopify taxonomy metafields, trust the actual current Shopify category.
-                if (!$hasShopifyCategoryContext) {
+                if (! $hasShopifyCategoryContext) {
                     $warnings[] = [
                         'product_id' => $product->id,
                         'warning' => "Skipped metafield {$lookup}: missing Shopify taxonomy category on the product.",
                     ];
+
                     continue;
                 }
 
-                if (!$this->categorySupportsSubtypeConstrainedMetafield($identifier['namespace'], $identifier['key'], $currentCategoryId, $currentCategoryName)) {
+                if (! $this->categorySupportsSubtypeConstrainedMetafield($identifier['namespace'], $identifier['key'], $currentCategoryId, $currentCategoryName)) {
                     // Gift Cards products should sync without noise even if jewelry-only CSV fields are present.
                     if (
                         $this->isGiftCardsCategoryContext($currentCategoryId, $currentCategoryName)
@@ -1785,6 +1837,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                         'product_id' => $product->id,
                         'warning' => "Skipped metafield {$lookup}: product category '{$categoryLabel}' is not compatible with this Shopify taxonomy metafield.",
                     ];
+
                     continue;
                 }
             }
@@ -1806,6 +1859,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                         'warning' => "Skipped metafield {$lookup}: unable to resolve reference value to a Shopify GID.",
                     ];
                 }
+
                 continue;
             }
 
@@ -1880,6 +1934,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         }
 
         $handle = trim((string) ($handleOverride ?: $product->handle));
+
         return $handle !== '' ? $this->productByHandleDetails($handle) : [];
     }
 
@@ -1893,13 +1948,13 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         ]);
 
         $nodes = data_get($data, 'productByHandle.metafields.nodes', []);
-        if (!is_array($nodes) || empty($nodes)) {
+        if (! is_array($nodes) || empty($nodes)) {
             return [];
         }
 
         $map = [];
         foreach ($nodes as $node) {
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -1926,13 +1981,13 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         ]);
 
         $nodes = data_get($data, 'product.metafields.nodes', []);
-        if (!is_array($nodes) || empty($nodes)) {
+        if (! is_array($nodes) || empty($nodes)) {
             return [];
         }
 
         $map = [];
         foreach ($nodes as $node) {
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -1960,6 +2015,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         }
 
         $handle = trim((string) ($handleOverride ?: $product->handle));
+
         return $handle !== '' ? $this->productMetafieldRawValuesByHandle($handle) : [];
     }
 
@@ -2032,8 +2088,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         bool $syncPrice = false,
         bool $syncCompareAt = false,
         array $variantFields = []
-    ): array
-    {
+    ): array {
         $warnings = [];
         $primaryRow = ShopifyRow::query()
             ->where('import_id', $product->import_id)
@@ -2087,11 +2142,11 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         }
 
         $variantNodes = data_get($details, 'variants.nodes', []);
-        if (!is_array($variantNodes) || empty($variantNodes)) {
+        if (! is_array($variantNodes) || empty($variantNodes)) {
             return $warnings;
         }
 
-        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
+        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && ! empty($node['id'])));
         $shopifyVariantsBySku = [];
         $shopifyVariantsBySignature = [];
         foreach ($variantNodesOrdered as $variantNode) {
@@ -2138,7 +2193,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                 $variantNode = $variantNodesOrdered[$rowIndex] ?? null;
             }
 
-            if (!$variantNode) {
+            if (! $variantNode) {
                 continue;
             }
 
@@ -2213,7 +2268,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                 if (($syncBarcode || $syncSku) && $barcode !== null && trim((string) $barcode) !== '') {
                     $input['barcode'] = (string) $barcode;
                 }
-                if ($syncOptions && !empty($optionValues)) {
+                if ($syncOptions && ! empty($optionValues)) {
                     $input['optionValues'] = $optionValues;
                 }
                 if ($syncWeight && ($grams !== null || $weightUnit !== null)) {
@@ -2250,7 +2305,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
                     $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
                 }
 
-                if (!empty($inventoryItemInput)) {
+                if (! empty($inventoryItemInput)) {
                     $input['inventoryItem'] = $inventoryItemInput;
                 }
 
@@ -2286,7 +2341,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             }
         }
 
-        if (!empty($variantInputs)) {
+        if (! empty($variantInputs)) {
             logger()->info('Shopify mutation executed', [
                 'origin' => 'products',
                 'product_id' => $product->id,
@@ -2308,7 +2363,7 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             ]);
 
             $errors = data_get($data, 'productVariantsBulkUpdate.userErrors', []);
-            if (is_array($errors) && !empty($errors)) {
+            if (is_array($errors) && ! empty($errors)) {
                 logger()->error('Shopify variant bulk update errors', [
                     'product_id' => $product->id,
                     'handle' => $product->handle,
@@ -2345,12 +2400,12 @@ private function updateProduct(Product $product, array $scopes, array $coreField
         }
 
         $nodes = data_get($details, 'variants.nodes', []);
-        if (!is_array($nodes)) {
+        if (! is_array($nodes)) {
             return null;
         }
 
         foreach ($nodes as $node) {
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -2763,6 +2818,7 @@ GQL;
     private function mapStatus(string $status): string
     {
         $normalized = strtolower(trim($status));
+
         return match ($normalized) {
             'active' => 'ACTIVE',
             'archived' => 'ARCHIVED',
@@ -2788,7 +2844,7 @@ GQL;
             return $normalizedCategory;
         }
 
-        if ($normalizedCategory !== '' && !$this->looksUncategorizedCategory($normalizedCategory)) {
+        if ($normalizedCategory !== '' && ! $this->looksUncategorizedCategory($normalizedCategory)) {
             $seededCategoryGid = $this->seededCategoryGidByName($normalizedCategory);
             if ($seededCategoryGid !== null) {
                 return $seededCategoryGid;
@@ -2812,6 +2868,7 @@ GQL;
             $mappedTypeGid = $this->normalizeTaxonomyGid($mappedType['shopify_taxonomy_gid'] ?? null);
             if ($mappedTypeGid !== null) {
                 $this->categoryIdByTypeCache[$typeCategory] = $mappedTypeGid;
+
                 return $mappedTypeGid;
             }
 
@@ -2820,6 +2877,7 @@ GQL;
                 $seededByTypeCategory = $this->seededCategoryGidByName($mappedTypeCategory);
                 if ($seededByTypeCategory !== null) {
                     $this->categoryIdByTypeCache[$typeCategory] = $seededByTypeCategory;
+
                     return $seededByTypeCategory;
                 }
             }
@@ -2854,12 +2912,12 @@ GQL;
 
     private function normalizeTaxonomyGid(mixed $value): ?string
     {
-        if (!is_string($value)) {
+        if (! is_string($value)) {
             return null;
         }
 
         $gid = trim($value);
-        if ($gid === '' || !str_starts_with($gid, 'gid://shopify/')) {
+        if ($gid === '' || ! str_starts_with($gid, 'gid://shopify/')) {
             return null;
         }
 
@@ -2894,12 +2952,14 @@ GQL;
                         break;
                     }
                     $lastError = $message;
+
                     continue;
                 }
 
                 $errors = data_get($data, 'productUpdate.userErrors', []);
-                if (!is_array($errors) || empty($errors)) {
+                if (! is_array($errors) || empty($errors)) {
                     $this->categoryGraphqlSupported = true;
+
                     return $warnings; // success
                 }
 
@@ -2946,6 +3006,7 @@ GQL;
                     'product_taxonomy_node_id' => $taxonomyNodeId,
                 ],
             ]);
+
             return true;
         } catch (\Throwable) {
             return false;
@@ -2954,7 +3015,7 @@ GQL;
 
     private function extractNumericId(string $gid, string $resource): ?string
     {
-        if (!preg_match('#gid://shopify/' . preg_quote($resource, '#') . '/([0-9]+)$#', trim($gid), $m)) {
+        if (! preg_match('#gid://shopify/'.preg_quote($resource, '#').'/([0-9]+)$#', trim($gid), $m)) {
             return null;
         }
 
@@ -2964,11 +3025,12 @@ GQL;
     // ✅ KEY FIX: don’t force numeric tail; Shopify can change formats
     private function extractTaxonomyNodeTail(string $gid): ?string
     {
-        if (!preg_match('#gid://shopify/(?:TaxonomyCategory|ProductTaxonomyNode)/(.+)$#', trim($gid), $m)) {
+        if (! preg_match('#gid://shopify/(?:TaxonomyCategory|ProductTaxonomyNode)/(.+)$#', trim($gid), $m)) {
             return null;
         }
 
         $tail = trim((string) ($m[1] ?? ''));
+
         return $tail === '' ? null : $tail;
     }
 
@@ -2996,12 +3058,14 @@ GQL;
         }
 
         $candidates = array_values(array_unique(array_filter($candidates, fn ($v) => is_string($v) && trim($v) !== '')));
+
         return $candidates;
     }
 
     private function isUnsupportedCategoryInputMessage(string $message): bool
     {
         $normalized = strtolower($message);
+
         return str_contains($normalized, 'field is not defined on productinput')
             || str_contains($normalized, 'unknown argument')
             || str_contains($normalized, 'cannot query field')
@@ -3010,6 +3074,7 @@ GQL;
             || str_contains($normalized, 'provided invalid value for productcategory')
             || str_contains($normalized, 'provided invalid value for producttaxonomynodeid');
     }
+
     private function looksUncategorizedCategory(string $value): bool
     {
         return str_contains(strtolower(trim($value)), 'uncategorized');
@@ -3023,7 +3088,8 @@ GQL;
         }
 
         $name = trim((string) ($currentCategoryName ?? ''));
-        return $name === '' || !$this->looksUncategorizedCategory($name);
+
+        return $name === '' || ! $this->looksUncategorizedCategory($name);
     }
 
     private function metafieldIdentifierFromHeader(string $header): ?array
@@ -3035,7 +3101,7 @@ GQL;
             ];
         }
 
-        if (!preg_match('/\\(product\\.metafields\\.([^.]+)\\.([^)]+)\\)/', $header, $matches)) {
+        if (! preg_match('/\\(product\\.metafields\\.([^.]+)\\.([^)]+)\\)/', $header, $matches)) {
             return null;
         }
 
@@ -3052,6 +3118,7 @@ GQL;
         }
 
         $trimmed = trim((string) $value);
+
         return $trimmed === '' ? null : $trimmed;
     }
 
@@ -3073,8 +3140,7 @@ GQL;
         ?string $existingRawValue = null,
         ?string $lookup = null,
         ?string $header = null
-    ): ?string
-    {
+    ): ?string {
         $trimmed = trim($value);
         if ($trimmed === '') {
             return null;
@@ -3082,16 +3148,19 @@ GQL;
 
         if ($type === 'boolean') {
             $normalized = strtolower($trimmed);
+
             return in_array($normalized, ['1', 'true', 'yes', 'y'], true) ? 'true' : 'false';
         }
 
         if ($type === 'number_integer') {
             $number = $this->normalizeNumeric($trimmed);
+
             return $number === null ? null : (string) (int) $number;
         }
 
         if ($type === 'number_decimal') {
             $number = $this->normalizeNumeric($trimmed);
+
             return $number === null ? null : rtrim(rtrim(number_format($number, 6, '.', ''), '0'), '.');
         }
 
@@ -3110,7 +3179,7 @@ GQL;
                 if (empty($items) && $lookup !== null) {
                     $resolved = [];
                     foreach ($decoded as $item) {
-                        if (!is_string($item)) {
+                        if (! is_string($item)) {
                             continue;
                         }
                         $gid = $this->resolveReferenceTokenFromShopify($lookup, trim($item));
@@ -3131,7 +3200,7 @@ GQL;
             $parts = $this->referenceTokensFromRaw($trimmed);
 
             $items = array_values(array_filter($parts, fn ($item) => str_starts_with($item, 'gid://')));
-            if (!empty($items)) {
+            if (! empty($items)) {
                 $items = $this->limitReferenceItemsForLookup($lookup, $items);
                 if (empty($items)) {
                     return $this->shouldClearEmptyReferenceList($lookup) ? json_encode([]) : null;
@@ -3149,6 +3218,7 @@ GQL;
             if ($this->shouldClearEmptyReferenceList($lookup)) {
                 return json_encode([]);
             }
+
             return $this->referenceFallbackFromExistingRaw($type, $existingRawValue);
         }
 
@@ -3167,6 +3237,7 @@ GQL;
                     return $resolved;
                 }
             }
+
             return $this->referenceFallbackFromExistingRaw($type, $existingRawValue, $lookup);
         }
 
@@ -3174,6 +3245,7 @@ GQL;
             $decoded = json_decode($trimmed, true);
             if (is_array($decoded)) {
                 $items = array_values(array_filter(array_map('trim', $decoded)));
+
                 return empty($items) ? null : json_encode($items);
             }
 
@@ -3181,6 +3253,7 @@ GQL;
                 ? array_map('trim', explode(';', $trimmed))
                 : array_map('trim', explode(',', $trimmed));
             $items = array_values(array_filter($parts, fn ($item) => $item !== ''));
+
             return empty($items) ? null : json_encode($items);
         }
 
@@ -3241,22 +3314,22 @@ GQL;
 
     private function richTextRootFromHtml(string $html): ?array
     {
-        if (!class_exists(\DOMDocument::class)) {
+        if (! class_exists(\DOMDocument::class)) {
             return null;
         }
 
         $dom = new \DOMDocument('1.0', 'UTF-8');
         $prev = libxml_use_internal_errors(true);
-        $loaded = $dom->loadHTML('<?xml encoding="utf-8" ?><body>' . $html . '</body>');
+        $loaded = $dom->loadHTML('<?xml encoding="utf-8" ?><body>'.$html.'</body>');
         libxml_clear_errors();
         libxml_use_internal_errors($prev);
-        if (!$loaded) {
+        if (! $loaded) {
             return null;
         }
 
         $bodyNodes = $dom->getElementsByTagName('body');
         $body = $bodyNodes->length > 0 ? $bodyNodes->item(0) : null;
-        if (!$body instanceof \DOMNode) {
+        if (! $body instanceof \DOMNode) {
             return null;
         }
 
@@ -3264,33 +3337,35 @@ GQL;
         foreach ($body->childNodes as $node) {
             if ($node instanceof \DOMText && trim((string) $node->textContent) !== '') {
                 $inline = $this->richTextInlineNodesFromDom([$node]);
-                if (!empty($inline)) {
+                if (! empty($inline)) {
                     $paragraphs[] = [
                         'type' => 'paragraph',
                         'children' => $inline,
                     ];
                 }
+
                 continue;
             }
 
-            if (!$node instanceof \DOMElement) {
+            if (! $node instanceof \DOMElement) {
                 continue;
             }
 
             $tag = strtolower($node->tagName);
             if (in_array($tag, ['p', 'div'], true)) {
                 $inline = $this->richTextInlineNodesFromDom(iterator_to_array($node->childNodes));
-                if (!empty($inline)) {
+                if (! empty($inline)) {
                     $paragraphs[] = [
                         'type' => 'paragraph',
                         'children' => $inline,
                     ];
                 }
+
                 continue;
             }
 
             $inline = $this->richTextInlineNodesFromDom([$node]);
-            if (!empty($inline)) {
+            if (! empty($inline)) {
                 $paragraphs[] = [
                     'type' => 'paragraph',
                     'children' => $inline,
@@ -3309,7 +3384,7 @@ GQL;
     }
 
     /**
-     * @param array<int, \DOMNode> $nodes
+     * @param  array<int, \DOMNode>  $nodes
      * @return array<int, array<string, mixed>>
      */
     private function richTextInlineNodesFromDom(array $nodes): array
@@ -3325,10 +3400,11 @@ GQL;
                     'type' => 'text',
                     'value' => $text,
                 ];
+
                 continue;
             }
 
-            if (!$node instanceof \DOMElement) {
+            if (! $node instanceof \DOMElement) {
                 continue;
             }
 
@@ -3338,6 +3414,7 @@ GQL;
                     'type' => 'text',
                     'value' => "\n",
                 ];
+
                 continue;
             }
 
@@ -3353,6 +3430,7 @@ GQL;
                     }
                     $result[] = $child;
                 }
+
                 continue;
             }
 
@@ -3377,7 +3455,7 @@ GQL;
 
         if (str_starts_with($type, 'list.') && str_ends_with($type, 'reference')) {
             $decoded = json_decode($trimmed, true);
-            if (!is_array($decoded)) {
+            if (! is_array($decoded)) {
                 return null;
             }
 
@@ -3457,7 +3535,7 @@ GQL;
 
     private function resolveProductReferenceTokenFromShopify(string $lookup, string $token): ?string
     {
-        if (!$this->isProductReferenceLookup($lookup)) {
+        if (! $this->isProductReferenceLookup($lookup)) {
             return null;
         }
 
@@ -3550,7 +3628,7 @@ GQL;
                         trim((string) ($product->title ?? '')),
                     ] as $label) {
                         $normalized = $this->normalizeReferenceLabel($label);
-                        if ($normalized !== '' && !isset($map[$normalized])) {
+                        if ($normalized !== '' && ! isset($map[$normalized])) {
                             $map[$normalized] = $gid;
                         }
                     }
@@ -3574,13 +3652,14 @@ GQL;
                     }
 
                     $normalized = $this->normalizeReferenceLabel($sku);
-                    if ($normalized !== '' && !isset($map[$normalized])) {
+                    if ($normalized !== '' && ! isset($map[$normalized])) {
                         $map[$normalized] = $gid;
                     }
                 }
             });
 
         $this->productReferenceLookupCache = $map;
+
         return $map;
     }
 
@@ -3633,6 +3712,7 @@ GQL;
         }
 
         $gid = trim((string) data_get($data, 'productByHandle.id', ''));
+
         return $gid !== '' ? $gid : null;
     }
 
@@ -3652,11 +3732,12 @@ GQL;
         }
 
         $nodes = data_get($data, 'products.nodes', []);
-        if (!is_array($nodes) || empty($nodes)) {
+        if (! is_array($nodes) || empty($nodes)) {
             return null;
         }
 
         $gid = trim((string) data_get($nodes, '0.id', ''));
+
         return $gid !== '' ? $gid : null;
     }
 
@@ -3672,6 +3753,7 @@ GQL;
         [$namespace, $key] = array_pad(explode('.', $lookup, 2), 2, null);
         if ($namespace === null || $key === null) {
             $this->referenceLookupCache[$lookup] = [];
+
             return [];
         }
 
@@ -3700,6 +3782,7 @@ GQL;
         }
 
         $this->referenceLookupCache[$lookup] = $map;
+
         return $map;
     }
 
@@ -3728,11 +3811,11 @@ GQL;
 
         if (is_array($validations)) {
             foreach ($validations as $validation) {
-                if (!is_array($validation)) {
+                if (! is_array($validation)) {
                     continue;
                 }
                 $name = strtolower(trim((string) ($validation['name'] ?? '')));
-                if (!str_contains($name, 'metaobject')) {
+                if (! str_contains($name, 'metaobject')) {
                     continue;
                 }
                 $value = trim((string) ($validation['value'] ?? ''));
@@ -3769,7 +3852,7 @@ GQL;
         }
 
         $definitionIds = array_values(array_unique($definitionIds));
-        if (!empty($definitionIds)) {
+        if (! empty($definitionIds)) {
             try {
                 $nodeData = $this->client->graphql($this->metaobjectDefinitionTypesQuery(), [
                     'ids' => $definitionIds,
@@ -3792,18 +3875,19 @@ GQL;
             $types[] = str_replace('-', '_', $key);
             $types[] = str_replace('_', '-', $key);
             $types[] = "shopify--{$key}";
-            $types[] = "shopify--" . str_replace('_', '-', $key);
+            $types[] = 'shopify--'.str_replace('_', '-', $key);
             $types[] = "{$namespace}--{$key}";
-            $types[] = "{$namespace}--" . str_replace('_', '-', $key);
+            $types[] = "{$namespace}--".str_replace('_', '-', $key);
         }
 
         $overrideTypes = self::METAOBJECT_TYPE_OVERRIDES_BY_LOOKUP[$lookup] ?? [];
-        if (!empty($overrideTypes)) {
+        if (! empty($overrideTypes)) {
             $types = array_merge($overrideTypes, $types);
         }
 
         $types = array_values(array_unique(array_filter($types)));
         $this->metaobjectTypesByLookupCache[$lookup] = $types;
+
         return $types;
     }
 
@@ -3825,14 +3909,15 @@ GQL;
         }
 
         $nodes = data_get($data, 'metaobjects.nodes', []);
-        if (!is_array($nodes)) {
+        if (! is_array($nodes)) {
             $this->metaobjectsByTypeCache[$type] = [];
+
             return [];
         }
 
         $result = [];
         foreach ($nodes as $node) {
-            if (!is_array($node)) {
+            if (! is_array($node)) {
                 continue;
             }
 
@@ -3845,7 +3930,7 @@ GQL;
             $fieldNodes = $node['fields'] ?? [];
             if (is_array($fieldNodes)) {
                 foreach ($fieldNodes as $fieldNode) {
-                    if (!is_array($fieldNode)) {
+                    if (! is_array($fieldNode)) {
                         continue;
                     }
                     $fieldValue = trim((string) ($fieldNode['value'] ?? ''));
@@ -3868,6 +3953,7 @@ GQL;
         }
 
         $this->metaobjectsByTypeCache[$type] = $result;
+
         return $result;
     }
 
@@ -3877,6 +3963,7 @@ GQL;
         $normalized = str_replace(['_', ' '], '-', $normalized);
         $normalized = preg_replace('/[^a-z0-9-]+/', '', $normalized) ?? '';
         $normalized = preg_replace('/-+/', '-', $normalized) ?? '';
+
         return trim($normalized, '-');
     }
 
@@ -3897,6 +3984,7 @@ GQL;
     {
         $normalized = $this->normalizeReferenceLabel($token);
         $normalized = $this->applyLookupReferenceAlias($lookup, $normalized);
+
         return $this->resolveHardcodedReferenceByNormalized($lookup, $normalized);
     }
 
@@ -3946,7 +4034,7 @@ GQL;
                         trim((string) ($collection->handle ?? '')),
                     ] as $label) {
                         $normalized = $this->normalizeReferenceLabel($label);
-                        if ($normalized !== '' && !isset($map[$normalized])) {
+                        if ($normalized !== '' && ! isset($map[$normalized])) {
                             $map[$normalized] = $gid;
                         }
                     }
@@ -3965,11 +4053,12 @@ GQL;
     {
         $parts = preg_split('/[,\n\r;]+/', $raw) ?: [];
         $parts = array_map(static fn ($item) => trim((string) $item), $parts);
+
         return array_values(array_filter($parts, static fn ($item) => $item !== ''));
     }
 
     /**
-     * @param array<int, string> $items
+     * @param  array<int, string>  $items
      * @return array<int, string>
      */
     private function limitReferenceItemsForLookup(?string $lookup, array $items): array
@@ -4009,7 +4098,7 @@ GQL;
     }
 
     /**
-     * @param array<string, string> $map
+     * @param  array<string, string>  $map
      */
     private function fuzzyReferenceMatch(array $map, string $normalized): ?string
     {
@@ -4019,7 +4108,7 @@ GQL;
 
         $bestKey = null;
         foreach ($map as $key => $gid) {
-            if (!str_contains($normalized, $key) && !str_contains($key, $normalized)) {
+            if (! str_contains($normalized, $key) && ! str_contains($key, $normalized)) {
                 continue;
             }
 
@@ -4065,7 +4154,7 @@ GQL;
             return true;
         }
 
-        if (!$this->isJewelryOnlyShopifyMetafield($namespace, $key)) {
+        if (! $this->isJewelryOnlyShopifyMetafield($namespace, $key)) {
             return true;
         }
 
@@ -4107,6 +4196,7 @@ GQL;
         }
 
         $label = strtolower(trim($this->categoryContextLabel($currentCategoryId, $currentCategoryName)));
+
         return $label === 'gift cards' || str_contains($label, 'gift card');
     }
 
@@ -4224,7 +4314,7 @@ GQL;
     }
 
     /**
-     * @param array<string, string> $map
+     * @param  array<string, string>  $map
      */
     private function fuzzyAcceptedToken(array $map, string $normalized): ?string
     {
@@ -4234,7 +4324,7 @@ GQL;
 
         $best = null;
         foreach ($map as $key => $canonical) {
-            if (!str_contains($normalized, $key) && !str_contains($key, $normalized)) {
+            if (! str_contains($normalized, $key) && ! str_contains($key, $normalized)) {
                 continue;
             }
 
@@ -4256,26 +4346,30 @@ GQL;
         }
 
         $path = $this->acceptedValuesCsvPath();
-        if ($path === null || !is_file($path)) {
+        if ($path === null || ! is_file($path)) {
             $this->acceptedValuesByHeaderCache = [];
+
             return [];
         }
 
         $handle = fopen($path, 'rb');
         if ($handle === false) {
             $this->acceptedValuesByHeaderCache = [];
+
             return [];
         }
 
         $headers = fgetcsv($handle);
-        if (!is_array($headers) || empty($headers)) {
+        if (! is_array($headers) || empty($headers)) {
             fclose($handle);
             $this->acceptedValuesByHeaderCache = [];
+
             return [];
         }
 
         $headers = array_map(function ($header): string {
             $value = trim((string) $header);
+
             return ltrim($value, "\xEF\xBB\xBF");
         }, $headers);
 
@@ -4304,6 +4398,7 @@ GQL;
 
         fclose($handle);
         $this->acceptedValuesByHeaderCache = $map;
+
         return $map;
     }
 
@@ -4321,6 +4416,7 @@ GQL;
             $parts = str_contains($trimmed, ';')
                 ? array_map('trim', explode(';', $trimmed))
                 : array_map('trim', explode(',', $trimmed));
+
             return array_values(array_filter($parts, fn ($item) => $item !== ''));
         }
 
@@ -4353,8 +4449,7 @@ GQL;
         array $details,
         ?array $selectedImageIds = null,
         bool $allowRemoteDeletedRestore = false,
-    ): array
-    {
+    ): array {
         $warnings = [];
         $selectedImageIds = $selectedImageIds !== null
             ? array_values(array_unique(array_map('intval', $selectedImageIds)))
@@ -4425,7 +4520,7 @@ GQL;
                     ->orWhere('is_duplicate_hidden', false);
             });
 
-        if (!$allowRemoteDeletedRestore) {
+        if (! $allowRemoteDeletedRestore) {
             $imageQuery->where('sync_state', '!=', Image::SYNC_STATE_REMOTE_DELETED);
         }
 
@@ -4498,7 +4593,7 @@ GQL;
                 if ($matchedId !== '') {
                     $matchedExistingIds[] = $matchedId;
                     $desiredImage['matched_media_id'] = $matchedId;
-                    if (!$desiredImage['requires_republish']) {
+                    if (! $desiredImage['requires_republish']) {
                         $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
                     }
                 }
@@ -4536,12 +4631,13 @@ GQL;
             })
             ->values();
 
-        if (!$selectedSync) {
+        if (! $selectedSync) {
             // Non-destructive cleanup: remove product references for shared media files,
             // and never delete the underlying Shopify CDN asset from this sync path.
             $staleEntries = collect($existingEntriesByUrl)
                 ->reject(function (array $row) use ($matchedExistingIds): bool {
                     $id = trim((string) ($row['id'] ?? ''));
+
                     return $id !== '' && in_array($id, $matchedExistingIds, true);
                 })
                 ->values()
@@ -4565,14 +4661,14 @@ GQL;
                 ->values()
                 ->all();
 
-            if (!empty($fileDetachInputs)) {
+            if (! empty($fileDetachInputs)) {
                 try {
                     $detachData = $this->client->graphql($this->fileUpdateMutation(), [
                         'files' => $fileDetachInputs,
                     ]);
 
                     $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
-                    if (is_array($detachErrors) && !empty($detachErrors)) {
+                    if (is_array($detachErrors) && ! empty($detachErrors)) {
                         $messages = $this->formatUserErrors($detachErrors, 'files');
                         $warnings[] = [
                             'product_id' => $product->id,
@@ -4582,7 +4678,7 @@ GQL;
                 } catch (\Throwable $e) {
                     $warnings[] = [
                         'product_id' => $product->id,
-                        'warning' => 'Shopify image detach failed: ' . $e->getMessage(),
+                        'warning' => 'Shopify image detach failed: '.$e->getMessage(),
                     ];
                 }
             }
@@ -4627,17 +4723,18 @@ GQL;
             ]);
 
             $payload = $data['productCreateMedia'] ?? null;
-            if (!$payload) {
+            if (! $payload) {
                 $this->markImageSyncFailed($image, "Missing productCreateMedia payload for image {$image->id}.");
                 $warnings[] = [
                     'product_id' => $product->id,
                     'warning' => "Missing productCreateMedia payload for image {$image->id}.",
                 ];
+
                 return $desiredImage;
             }
 
             $errors = $payload['mediaUserErrors'] ?? [];
-            if (!empty($errors)) {
+            if (! empty($errors)) {
                 $messages = $this->formatUserErrors($errors, 'media');
                 $this->markImageSyncFailed(
                     $image,
@@ -4647,6 +4744,7 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => $messages !== '' ? $messages : "Unknown media error for image {$image->id}.",
                 ];
+
                 return $desiredImage;
             }
 
@@ -4711,7 +4809,7 @@ GQL;
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
+     * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function cleanupSelectedStaleImages(Product $product, string $productId, Collection $desiredImages): array
@@ -4736,6 +4834,7 @@ GQL;
                     'id' => $previousMediaId,
                     'referencesToRemove' => [$productId],
                 ];
+
                 continue;
             }
 
@@ -4749,14 +4848,14 @@ GQL;
             ->values()
             ->all();
 
-        if (!empty($fileDetachInputs)) {
+        if (! empty($fileDetachInputs)) {
             try {
                 $detachData = $this->client->graphql($this->fileUpdateMutation(), [
                     'files' => $fileDetachInputs,
                 ]);
 
                 $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
-                if (is_array($detachErrors) && !empty($detachErrors)) {
+                if (is_array($detachErrors) && ! empty($detachErrors)) {
                     $messages = $this->formatUserErrors($detachErrors, 'files');
                     $warnings[] = [
                         'product_id' => $product->id,
@@ -4766,13 +4865,13 @@ GQL;
             } catch (\Throwable $e) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify selected image detach failed: ' . $e->getMessage(),
+                    'warning' => 'Shopify selected image detach failed: '.$e->getMessage(),
                 ];
             }
         }
 
         $legacyMediaIds = array_values(array_unique(array_filter($legacyMediaIds)));
-        if (!empty($legacyMediaIds)) {
+        if (! empty($legacyMediaIds)) {
             try {
                 $deleteData = $this->client->graphql($this->productDeleteMediaMutation(), [
                     'productId' => $productId,
@@ -4780,7 +4879,7 @@ GQL;
                 ]);
 
                 $deleteErrors = data_get($deleteData, 'productDeleteMedia.mediaUserErrors', []);
-                if (is_array($deleteErrors) && !empty($deleteErrors)) {
+                if (is_array($deleteErrors) && ! empty($deleteErrors)) {
                     $messages = $this->formatUserErrors($deleteErrors, 'media');
                     $warnings[] = [
                         'product_id' => $product->id,
@@ -4790,7 +4889,7 @@ GQL;
             } catch (\Throwable $e) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify selected legacy image removal failed: ' . $e->getMessage(),
+                    'warning' => 'Shopify selected legacy image removal failed: '.$e->getMessage(),
                 ];
             }
         }
@@ -4799,7 +4898,7 @@ GQL;
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
+     * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function reorderSelectedProductImages(Product $product, string $productId, Collection $desiredImages): array
@@ -4849,6 +4948,7 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => "Selected image reorder skipped for image {$image->id} because the product media ID is not available yet.",
                 ];
+
                 continue;
             }
 
@@ -4869,7 +4969,7 @@ GQL;
 
         $desiredOrder = array_values(array_filter(
             $currentMediaIds,
-            fn (string $id): bool => !in_array($id, $selectedMediaIds, true)
+            fn (string $id): bool => ! in_array($id, $selectedMediaIds, true)
         ));
 
         foreach ($selectedPlacements as $placement) {
@@ -4901,7 +5001,7 @@ GQL;
             ]);
 
             $reorderErrors = data_get($reorderData, 'productReorderMedia.mediaUserErrors', []);
-            if (is_array($reorderErrors) && !empty($reorderErrors)) {
+            if (is_array($reorderErrors) && ! empty($reorderErrors)) {
                 $messages = $this->formatUserErrors($reorderErrors, 'media');
                 $warnings[] = [
                     'product_id' => $product->id,
@@ -4911,7 +5011,7 @@ GQL;
         } catch (\Throwable $e) {
             $warnings[] = [
                 'product_id' => $product->id,
-                'warning' => 'Shopify selected image reorder failed: ' . $e->getMessage(),
+                'warning' => 'Shopify selected image reorder failed: '.$e->getMessage(),
             ];
         }
 
@@ -4919,7 +5019,7 @@ GQL;
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}> $desiredImages
+     * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function reorderProductImages(Product $product, string $productId, Collection $desiredImages): array
@@ -4967,6 +5067,7 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => "Shopify image reorder skipped for image {$image->id} because the product media ID is not available yet.",
                 ];
+
                 continue;
             }
 
@@ -4983,7 +5084,7 @@ GQL;
             $desiredMediaIds,
             array_values(array_filter(
                 $currentMediaIds,
-                fn (string $id): bool => !in_array($id, $desiredMediaIds, true)
+                fn (string $id): bool => ! in_array($id, $desiredMediaIds, true)
             ))
         ));
 
@@ -5006,7 +5107,7 @@ GQL;
             ]);
 
             $reorderErrors = data_get($reorderData, 'productReorderMedia.mediaUserErrors', []);
-            if (is_array($reorderErrors) && !empty($reorderErrors)) {
+            if (is_array($reorderErrors) && ! empty($reorderErrors)) {
                 $messages = $this->formatUserErrors($reorderErrors, 'media');
                 $warnings[] = [
                     'product_id' => $product->id,
@@ -5016,7 +5117,7 @@ GQL;
         } catch (\Throwable $e) {
             $warnings[] = [
                 'product_id' => $product->id,
-                'warning' => 'Shopify image reorder failed: ' . $e->getMessage(),
+                'warning' => 'Shopify image reorder failed: '.$e->getMessage(),
             ];
         }
 
@@ -5024,7 +5125,7 @@ GQL;
     }
 
     /**
-     * @param array<int, array> $rowDataList
+     * @param  array<int, array>  $rowDataList
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function syncVariantMediaAssignments(Product $product, string $productId, array $rowDataList): array
@@ -5044,11 +5145,11 @@ GQL;
 
         $details = $this->productByHandleDetails($product->handle);
         $variantNodes = data_get($details, 'variants.nodes', []);
-        if (!is_array($variantNodes) || empty($variantNodes)) {
+        if (! is_array($variantNodes) || empty($variantNodes)) {
             return $warnings;
         }
 
-        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && !empty($node['id'])));
+        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && ! empty($node['id'])));
         $shopifyVariantsBySku = [];
         $shopifyVariantsBySignature = [];
 
@@ -5128,6 +5229,7 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => "Variant {$localVariant->sku} image assignment was skipped because the linked product image has not been synced to Shopify yet.",
                 ];
+
                 continue;
             }
 
@@ -5138,14 +5240,14 @@ GQL;
                     fn (string $mediaId): bool => $mediaId !== $desiredMediaId
                 ));
 
-            if (!empty($mediaIdsToDetach)) {
+            if (! empty($mediaIdsToDetach)) {
                 $detachInputs[] = [
                     'variantId' => $variantId,
                     'mediaIds' => $mediaIdsToDetach,
                 ];
             }
 
-            if ($desiredMediaId !== null && !in_array($desiredMediaId, $currentMediaIds, true)) {
+            if ($desiredMediaId !== null && ! in_array($desiredMediaId, $currentMediaIds, true)) {
                 $appendInputs[] = [
                     'variantId' => $variantId,
                     'mediaIds' => [$desiredMediaId],
@@ -5153,7 +5255,7 @@ GQL;
             }
         }
 
-        if (!empty($detachInputs)) {
+        if (! empty($detachInputs)) {
             try {
                 $detachData = $this->client->graphql($this->productVariantDetachMediaMutation(), [
                     'productId' => $productId,
@@ -5161,7 +5263,7 @@ GQL;
                 ]);
 
                 $detachErrors = data_get($detachData, 'productVariantDetachMedia.userErrors', []);
-                if (is_array($detachErrors) && !empty($detachErrors)) {
+                if (is_array($detachErrors) && ! empty($detachErrors)) {
                     $messages = $this->formatUserErrors($detachErrors, 'variantMedia');
                     $warnings[] = [
                         'product_id' => $product->id,
@@ -5171,12 +5273,12 @@ GQL;
             } catch (\Throwable $e) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify variant image detach failed: ' . $e->getMessage(),
+                    'warning' => 'Shopify variant image detach failed: '.$e->getMessage(),
                 ];
             }
         }
 
-        if (!empty($appendInputs)) {
+        if (! empty($appendInputs)) {
             try {
                 $appendData = $this->client->graphql($this->productVariantAppendMediaMutation(), [
                     'productId' => $productId,
@@ -5184,7 +5286,7 @@ GQL;
                 ]);
 
                 $appendErrors = data_get($appendData, 'productVariantAppendMedia.userErrors', []);
-                if (is_array($appendErrors) && !empty($appendErrors)) {
+                if (is_array($appendErrors) && ! empty($appendErrors)) {
                     $messages = $this->formatUserErrors($appendErrors, 'variantMedia');
                     $warnings[] = [
                         'product_id' => $product->id,
@@ -5194,7 +5296,7 @@ GQL;
             } catch (\Throwable $e) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => 'Shopify variant image attach failed: ' . $e->getMessage(),
+                    'warning' => 'Shopify variant image attach failed: '.$e->getMessage(),
                 ];
             }
         }
@@ -5203,10 +5305,10 @@ GQL;
     }
 
     /**
-     * @param array<int, array> $variantNodesOrdered
-     * @param array<string, array> $shopifyVariantsBySku
-     * @param array<string, array> $shopifyVariantsBySignature
-     * @param array<string, mixed> $rowData
+     * @param  array<int, array>  $variantNodesOrdered
+     * @param  array<string, array>  $shopifyVariantsBySku
+     * @param  array<string, array>  $shopifyVariantsBySignature
+     * @param  array<string, mixed>  $rowData
      */
     private function resolveShopifyVariantNode(
         array $variantNodesOrdered,
@@ -5237,8 +5339,8 @@ GQL;
     }
 
     /**
-     * @param array<int, string> $mediaIdByShopifyId
-     * @param array<string, string> $mediaIdByUrl
+     * @param  array<int, string>  $mediaIdByShopifyId
+     * @param  array<string, string>  $mediaIdByUrl
      */
     private function desiredVariantMediaId(Variant $variant, array $mediaIdByShopifyId, array $mediaIdByUrl): ?string
     {
@@ -5306,7 +5408,7 @@ GQL;
         }
 
         if (str_starts_with($trimmed, '//')) {
-            return 'https:' . $trimmed;
+            return 'https:'.$trimmed;
         }
 
         return $trimmed;
@@ -5319,11 +5421,12 @@ GQL;
         }
 
         $trimmed = trim((string) $value);
-        if ($trimmed === '' || !is_numeric($trimmed)) {
+        if ($trimmed === '' || ! is_numeric($trimmed)) {
             return null;
         }
 
         $position = (int) $trimmed;
+
         return $position > 0 ? $position : null;
     }
 
@@ -5419,7 +5522,6 @@ mutation ProductReorderMedia($id: ID!, $moves: [MoveInput!]!) {
 GQL;
     }
 
-
     /**
      * @return array{0:?ShopifyRow,1:array<int, array>,2:array<int, array>}
      */
@@ -5464,6 +5566,7 @@ GQL;
         }
 
         $fallbackTrimmed = trim((string) $fallback);
+
         return $fallbackTrimmed === '' ? null : $fallbackTrimmed;
     }
 
@@ -5483,8 +5586,9 @@ GQL;
         }
         $parts = explode('.', $normalized);
         if (count($parts) > 2) {
-            $normalized = array_shift($parts) . '.' . implode('', $parts);
+            $normalized = array_shift($parts).'.'.implode('', $parts);
         }
+
         return (float) $normalized;
     }
 
@@ -5522,7 +5626,7 @@ GQL;
     }
 
     /**
-     * @param Collection<int, Variant> $localVariantsOrdered
+     * @param  Collection<int, Variant>  $localVariantsOrdered
      * @return array<int, array{row:array, local:?Variant}>
      */
     private function buildVariantSources(array $rowDataList, Collection $localVariantsOrdered): array
@@ -5532,7 +5636,7 @@ GQL;
 
         for ($index = 0; $index < $max; $index++) {
             $rowData = $rowDataList[$index] ?? [];
-            if (!is_array($rowData)) {
+            if (! is_array($rowData)) {
                 $rowData = [];
             }
 
@@ -5569,8 +5673,8 @@ GQL;
     }
 
     /**
-     * @param array<int, array{row:array, local:?Variant}> $variantSources
-     * @param array<int, array{product_id:int, warning:string}> $warnings
+     * @param  array<int, array{row:array, local:?Variant}>  $variantSources
+     * @param  array<int, array{product_id:int, warning:string}>  $warnings
      */
     private function syncShopifyProductOptionsForVariants(
         Product $product,
@@ -5585,7 +5689,7 @@ GQL;
         }
 
         $currentOptions = data_get($details, 'options', []);
-        if (!is_array($currentOptions)) {
+        if (! is_array($currentOptions)) {
             $currentOptions = [];
         }
 
@@ -5593,7 +5697,7 @@ GQL;
 
         foreach ($desiredOptions as $position => $desiredOption) {
             $currentOption = $currentOptions[$position] ?? null;
-            if (!is_array($currentOption) || empty($currentOption['id'])) {
+            if (! is_array($currentOption) || empty($currentOption['id'])) {
                 $data = $this->client->graphql($this->productOptionsCreateMutation(), [
                     'productId' => $productId,
                     'options' => [[
@@ -5608,7 +5712,7 @@ GQL;
                 ]);
 
                 $errors = data_get($data, 'productOptionsCreate.userErrors', []);
-                if (is_array($errors) && !empty($errors)) {
+                if (is_array($errors) && ! empty($errors)) {
                     $messages = $this->formatUserErrors($errors, 'productOptionsCreate');
                     throw new \RuntimeException($messages !== '' ? $messages : 'Shopify product option creation failed.');
                 }
@@ -5616,9 +5720,10 @@ GQL;
                 $optionsChanged = true;
                 $details = $this->productByHandleDetails($product->handle);
                 $currentOptions = data_get($details, 'options', []);
-                if (!is_array($currentOptions)) {
+                if (! is_array($currentOptions)) {
                     $currentOptions = [];
                 }
+
                 continue;
             }
 
@@ -5638,7 +5743,7 @@ GQL;
             $currentValueNames = [];
 
             foreach ($currentOptionValues as $currentValue) {
-                if (!is_array($currentValue)) {
+                if (! is_array($currentValue)) {
                     continue;
                 }
 
@@ -5651,7 +5756,7 @@ GQL;
             if (
                 strcasecmp($currentOptionName, 'Title') === 0
                 && count($currentOptionValues) === 1
-                && !empty($desiredOption['values'])
+                && ! empty($desiredOption['values'])
             ) {
                 $currentValueId = trim((string) ($currentOptionValues[0]['id'] ?? ''));
                 $firstDesiredValue = $desiredOption['values'][0];
@@ -5685,16 +5790,16 @@ GQL;
                 'option' => $optionInput,
                 'variantStrategy' => 'LEAVE_AS_IS',
             ];
-            if (!empty($optionValuesToAdd)) {
+            if (! empty($optionValuesToAdd)) {
                 $variables['optionValuesToAdd'] = $optionValuesToAdd;
             }
-            if (!empty($optionValuesToUpdate)) {
+            if (! empty($optionValuesToUpdate)) {
                 $variables['optionValuesToUpdate'] = $optionValuesToUpdate;
             }
 
             $data = $this->client->graphql($this->productOptionUpdateMutation(), $variables);
             $errors = data_get($data, 'productOptionUpdate.userErrors', []);
-            if (is_array($errors) && !empty($errors)) {
+            if (is_array($errors) && ! empty($errors)) {
                 $messages = $this->formatUserErrors($errors, 'productOptionUpdate');
                 throw new \RuntimeException($messages !== '' ? $messages : 'Shopify product option update failed.');
             }
@@ -5702,12 +5807,12 @@ GQL;
             $optionsChanged = true;
             $details = $this->productByHandleDetails($product->handle);
             $currentOptions = data_get($details, 'options', []);
-            if (!is_array($currentOptions)) {
+            if (! is_array($currentOptions)) {
                 $currentOptions = [];
             }
         }
 
-        if (!$optionsChanged) {
+        if (! $optionsChanged) {
             return $details;
         }
 
@@ -5715,8 +5820,8 @@ GQL;
     }
 
     /**
-     * @param array<int, array{row:array, local:?Variant}> $variantSources
-     * @param array<int, array{product_id:int, warning:string}> $warnings
+     * @param  array<int, array{row:array, local:?Variant}>  $variantSources
+     * @param  array<int, array{product_id:int, warning:string}>  $warnings
      */
     private function createMissingShopifyVariants(
         Product $product,
@@ -5735,14 +5840,14 @@ GQL;
         bool $syncCompareAt = false
     ): array {
         $variantNodes = data_get($details, 'variants.nodes', []);
-        if (!is_array($variantNodes)) {
+        if (! is_array($variantNodes)) {
             $variantNodes = [];
         }
 
         $shopifyVariantsBySku = [];
         $shopifyVariantsBySignature = [];
         foreach ($variantNodes as $variantNode) {
-            if (!is_array($variantNode)) {
+            if (! is_array($variantNode)) {
                 continue;
             }
 
@@ -5827,7 +5932,7 @@ GQL;
                 $inventoryItemInput['cost'] = (float) number_format($costPerItem, 2, '.', '');
             }
 
-            if (!empty($inventoryItemInput)) {
+            if (! empty($inventoryItemInput)) {
                 $input['inventoryItem'] = $inventoryItemInput;
             }
 
@@ -5851,7 +5956,7 @@ GQL;
         ]);
 
         $errors = data_get($data, 'productVariantsBulkCreate.userErrors', []);
-        if (is_array($errors) && !empty($errors)) {
+        if (is_array($errors) && ! empty($errors)) {
             logger()->error('Shopify variant bulk create errors', [
                 'product_id' => $product->id,
                 'handle' => $product->handle,
@@ -5865,7 +5970,7 @@ GQL;
     }
 
     /**
-     * @param array<int, array{row:array, local:?Variant}> $variantSources
+     * @param  array<int, array{row:array, local:?Variant}>  $variantSources
      * @return array<int, array{name:string, values:array<int, string>}>
      */
     private function desiredProductOptionsFromVariantSources(array $variantSources): array
@@ -5886,13 +5991,13 @@ GQL;
                     $localVariant,
                     $rowData,
                     "option{$slotNumber}_name",
-                    constant(HeaderStore::class . "::OPTION{$slotNumber}_NAME")
+                    constant(HeaderStore::class."::OPTION{$slotNumber}_NAME")
                 );
                 $value = $this->variantDesiredValue(
                     $localVariant,
                     $rowData,
                     "option{$slotNumber}_value",
-                    constant(HeaderStore::class . "::OPTION{$slotNumber}_VALUE")
+                    constant(HeaderStore::class."::OPTION{$slotNumber}_VALUE")
                 );
 
                 if ($name === null || $value === null) {
@@ -5903,7 +6008,7 @@ GQL;
                     $slots[$slotIndex]['name'] = $name;
                 }
 
-                if (!in_array($value, $slots[$slotIndex]['values'], true)) {
+                if (! in_array($value, $slots[$slotIndex]['values'], true)) {
                     $slots[$slotIndex]['values'][] = $value;
                 }
             }
@@ -5911,7 +6016,7 @@ GQL;
 
         $desiredOptions = [];
         foreach ($slots as $slot) {
-            if (!is_string($slot['name']) || $slot['name'] === '' || empty($slot['values'])) {
+            if (! is_string($slot['name']) || $slot['name'] === '' || empty($slot['values'])) {
                 continue;
             }
 
@@ -5925,7 +6030,7 @@ GQL;
     }
 
     /**
-     * @param array<int, array{optionName:string,name:string}> $optionValues
+     * @param  array<int, array{optionName:string,name:string}>  $optionValues
      */
     private function variantOptionSignature(array $optionValues): string
     {
@@ -5952,7 +6057,7 @@ GQL;
         $optionValues = [];
         $selectedOptions = is_array($variantNode['selectedOptions'] ?? null) ? $variantNode['selectedOptions'] : [];
         foreach ($selectedOptions as $selectedOption) {
-            if (!is_array($selectedOption)) {
+            if (! is_array($selectedOption)) {
                 continue;
             }
 
@@ -5968,6 +6073,7 @@ GQL;
     private function mapWeightUnit(?string $value): string
     {
         $normalized = strtolower(trim((string) $value));
+
         return match ($normalized) {
             'kg', 'kilogram', 'kilograms' => 'KILOGRAMS',
             'oz', 'ounce', 'ounces' => 'OUNCES',
@@ -5987,7 +6093,7 @@ GQL;
     }
 
     /**
-     * @param array<int, array{field?:array|string|null,message?:string|null}> $errors
+     * @param  array<int, array{field?:array|string|null,message?:string|null}>  $errors
      */
     private function formatUserErrors(array $errors, string $fallbackField = 'input'): string
     {
@@ -6001,6 +6107,7 @@ GQL;
                     $fieldPath = $field;
                 }
                 $message = $error['message'] ?? 'Unknown error';
+
                 return "{$fieldPath}: {$message}";
             })
             ->filter()
@@ -6008,8 +6115,8 @@ GQL;
     }
 
     /**
-     * @param array<int, array> $variantRows
-     * @param array<int, array> $imageRows
+     * @param  array<int, array>  $variantRows
+     * @param  array<int, array>  $imageRows
      * @return array<int, array{product_id:int, warning:string}>
      */
     private function buildSyncCoverageWarnings(
@@ -6023,7 +6130,7 @@ GQL;
     }
 
     /**
-     * @param array<int, string>|null $scopes
+     * @param  array<int, string>|null  $scopes
      * @return array<int, string>
      */
     private function normalizeSyncScopes(?array $scopes): array
@@ -6037,7 +6144,7 @@ GQL;
 
         foreach ($scopes as $scope) {
             $scope = is_string($scope) ? trim($scope) : '';
-            if ($scope === '' || !isset($allowed[$scope])) {
+            if ($scope === '' || ! isset($allowed[$scope])) {
                 continue;
             }
 
@@ -6048,7 +6155,7 @@ GQL;
     }
 
     /**
-     * @param array<int, string>|null $coreFields
+     * @param  array<int, string>|null  $coreFields
      * @return array<int, string>
      */
     private function normalizeCoreFields(?array $coreFields): array
@@ -6066,7 +6173,7 @@ GQL;
 
         foreach ($coreFields as $field) {
             $field = is_string($field) ? trim($field) : '';
-            if ($field === '' || !isset($allowed[$field])) {
+            if ($field === '' || ! isset($allowed[$field])) {
                 continue;
             }
 
@@ -6077,7 +6184,7 @@ GQL;
     }
 
     /**
-     * @param array<int, string> $scopes
+     * @param  array<int, string>  $scopes
      */
     private function scopeEnabled(array $scopes, string $scope): bool
     {
@@ -6085,7 +6192,7 @@ GQL;
     }
 
     /**
-     * @param array<int, string> $coreFields
+     * @param  array<int, string>  $coreFields
      */
     private function coreFieldEnabled(array $coreFields, string $field): bool
     {
@@ -6118,7 +6225,7 @@ GQL;
     }
 
     /**
-     * @param array<int, string> $coreFields
+     * @param  array<int, string>  $coreFields
      * @return array<int, string>
      */
     private function selectedCoreMetafieldHeaders(array $coreFields): array
@@ -6127,7 +6234,7 @@ GQL;
         $headers = [];
 
         foreach ($coreFields as $field) {
-            if (!isset($map[$field])) {
+            if (! isset($map[$field])) {
                 continue;
             }
 
@@ -6194,11 +6301,12 @@ GQL;
         }
 
         $value = $primaryData[$header] ?? null;
-        if (!is_scalar($value)) {
+        if (! is_scalar($value)) {
             return null;
         }
 
         $stringValue = trim((string) $value);
+
         return $stringValue === '' ? null : $stringValue;
     }
 
@@ -6223,12 +6331,12 @@ GQL;
         }
 
         $draft = $draftQuery->first([$attribute]);
-        if (!$draft instanceof NewProductDraft) {
+        if (! $draft instanceof NewProductDraft) {
             return null;
         }
 
         $value = $draft->getAttribute($attribute);
-        if (!is_scalar($value)) {
+        if (! is_scalar($value)) {
             return null;
         }
 
@@ -6248,6 +6356,7 @@ GQL;
             return true;
         }
         $trimmed = trim((string) $value);
+
         return $trimmed === '';
     }
 

@@ -41,8 +41,8 @@ class ListProducts extends ListRecords
                 ->icon('heroicon-o-arrow-down-tray')
                 ->color('gray')
                 ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->tooltip('Download an Excel file of images with no alt text. The preview uses the Shopify image link. Fill Alt Text and upload the same file.')
-                ->action(fn (ImageAltTextBackfillService $backfill) => $backfill->downloadMissing()),
+                ->tooltip('Download all active images belonging to active products, including existing alt text. The preview uses the Shopify image link. Edit Alt Text and upload the same file.')
+                ->action(fn (ImageAltTextBackfillService $backfill) => $backfill->downloadActive()),
             Actions\Action::make('backfillImageAltText')
                 ->label('Backfill Image Alt Text')
                 ->icon('heroicon-o-language')

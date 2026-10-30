@@ -426,6 +426,14 @@ final class NewProductDraftCsvImporter
                     $seoCorrections[] = 'Row '.($total + 1)." ({$seoReference}): {$rule['label']} is {$length} characters; required {$rule['min']}-{$rule['max']}.";
                 }
 
+                $priceOverrides = array_values(array_unique(array_merge(
+                    (array) ($draft?->payload['_csv_price_overrides'] ?? []),
+                    array_keys(array_intersect_key($data, array_flip(['variant_price', 'variant_compare_at_price'])))
+                )));
+                if ($priceOverrides !== []) {
+                    $payload['_csv_price_overrides'] = $priceOverrides;
+                }
+
                 if ($draft) {
                     $mergedPayload = array_merge($draft->payload ?? [], $payload);
                     $draft->fill($data);

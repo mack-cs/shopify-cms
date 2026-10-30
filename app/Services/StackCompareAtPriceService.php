@@ -53,6 +53,10 @@ class StackCompareAtPriceService
      */
     public function applyToDraft(NewProductDraft $draft): array
     {
+        if ($draft->hasCsvPriceOverride('variant_compare_at_price')) {
+            return ['updated' => false, 'compare_at' => $draft->variant_compare_at_price, 'message' => ''];
+        }
+
         $componentIds = $this->componentIds($draft);
         $label = trim((string) ($draft->sku ?: $draft->handle ?: 'Draft #'.$draft->id));
         if ($componentIds === []) {

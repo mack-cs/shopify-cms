@@ -309,6 +309,10 @@ final class NewProductDraftSeeder
         $nonWarningFields = ['origin', 'payload', 'image_url', 'image_path', 'batch'];
 
         foreach ($data as $key => $incomingValue) {
+            if ($draft->hasCsvPriceOverride($key)) {
+                continue;
+            }
+
             if (in_array($key, $skipFields, true)) {
                 continue;
             }

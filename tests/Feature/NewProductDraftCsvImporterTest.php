@@ -760,6 +760,46 @@ it('overwrites the variant price and drops the shopify price clash', function ()
     @unlink($path);
 });
 
+it('keeps uploaded stack prices above calculations and subsequent Shopify reconciliation', function (): void {
+    $component = Product::create(['import_id' => $this->draftCsvImport->id, 'handle' => 'csv-component', 'title' => 'Component', 'status' => 'active']);
+    Variant::create(['product_id' => $component->id, 'sku' => 'CSV-COMP', 'price' => '100.00']);
+    $product = Product::create(['import_id' => $this->draftCsvImport->id, 'handle' => 'csv-stack', 'title' => 'Stack', 'status' => 'active']);
+    $variant = Variant::create(['product_id' => $product->id, 'sku' => 'CSV-STACK', 'price' => '80.00', 'shopify_id' => 'gid://shopify/ProductVariant/9000']);
+    $draft = NewProductDraft::create([
+        'handle' => 'csv-stack', 'sku' => 'CSV-STACK', 'title' => 'Stack',
+        'variant_price' => '80.00', 'bundle_product_ids' => [$component->id],
+    ]);
+    $path = tempnam(sys_get_temp_dir(), 'csv-stack-');
+    try {
+        file_put_contents($path, "SKU,Price,Compare-at Price\nCSV-STACK,70,150\n");
+        app(NewProductDraftCsvImporter::class)->importFromPath($path);
+        $draft->refresh();
+        $draft->update(['title' => 'Renamed stack']);
+        app(\App\Services\StackCompareAtPriceService::class)->applyToDraft($draft);
+        expect($draft->fresh()->variant_price)->toBe('70.00')
+            ->and($draft->fresh()->variant_compare_at_price)->toBe('150.00')
+            ->and($variant->fresh()->price)->toBe('70.00')
+            ->and($variant->fresh()->compare_at_price)->toBe('150.00');
+
+        $variant->refresh();
+        $payload = ['product_id' => $product->id, 'price' => '80.00', 'compare_at_price' => '100.00'];
+        $normalizer = app(\App\Services\Normalizer::class);
+        (new ReflectionMethod($normalizer, 'syncInboundVariant'))->invoke($normalizer, $variant, $payload, now());
+        expect($variant->fresh()->sync_state)->toBe(Variant::SYNC_STATE_LOCAL_UPDATED)
+            ->and($variant->fresh()->price)->toBe('70.00')
+            ->and($variant->fresh()->compare_at_price)->toBe('150.00');
+        $seeder = app(\App\Services\NewProductDraftSeeder::class);
+        $changes = (new ReflectionMethod($seeder, 'reconcileDraftWithImportedData'))->invoke(
+            $seeder, $draft->fresh(), ['variant_price' => '80.00', 'variant_compare_at_price' => '100.00']
+        );
+        expect($changes)->not->toHaveKey('variant_price')
+            ->not->toHaveKey('variant_compare_at_price')
+            ->not->toHaveKey('shopify_sync_warnings');
+    } finally {
+        @unlink($path);
+    }
+});
+
 it('falls back from sku to shopify gid and then handle when matching drafts', function (): void {
     $gidProduct = Product::create([
         'import_id' => $this->draftCsvImport->id,
