@@ -61,7 +61,7 @@ class ApplyShopYourVibeOperation implements ShouldQueue
 
             $draft->update([
                 'status' => 'failed',
-                'pending' => false,
+                'pending' => (bool) $draft->pending,
                 'last_error' => $exception?->getMessage() ?: 'The Shopify operation was interrupted. Retry to continue from the last completed step.',
                 'revision' => $draft->revision + 1,
             ]);

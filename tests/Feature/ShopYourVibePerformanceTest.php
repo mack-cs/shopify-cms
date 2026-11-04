@@ -105,6 +105,18 @@ it('measures shop your vibe collection opening', function () {
             'refreshed_at' => now(),
         ]);
 
+        $fake->collections[$gid] = [
+            'id' => $gid,
+            'title' => 'Performance',
+            'handle' => 'performance',
+            'sortOrder' => 'MANUAL',
+            'ruleSet' => null,
+            'productsCount' => ['count' => $count],
+            'products' => [
+                'nodes' => array_map(fn (array $product): array => ['id' => $product['id'], 'title' => $product['title']], $products),
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null],
+            ],
+        ];
         $page = Livewire::test(ShopYourVibe::class);
         $fake->calls = [];
         $queries = 0;
@@ -124,6 +136,8 @@ it('measures shop your vibe collection opening', function () {
             $state[$property->getName()] = $property->getValue($page->instance());
         }
 
+        $page->call('beginCollectionSorting', $gid);
+        $fake->calls = [];
         $ids = array_column($products, 'id');
         $rotated = $ids;
         $movedId = array_shift($rotated);

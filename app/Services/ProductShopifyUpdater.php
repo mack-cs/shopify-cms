@@ -1605,6 +1605,17 @@ final class ProductShopifyUpdater
                     );
                 }
             }
+
+            if (isset($input['tags']) && is_array($input['tags'])) {
+                $beforeTags = TagNormalizer::parseTokens((string) ($product->getOriginal('tags') ?? $product->tags ?? ''));
+                if ($beforeTags !== array_values($input['tags'])) {
+                    app(ShopYourVibeSorting::class)->reconcileMembershipTags(
+                        $productId,
+                        $beforeTags,
+                        array_values($input['tags']),
+                    );
+                }
+            }
         }
 
         // 2) Fetch latest details

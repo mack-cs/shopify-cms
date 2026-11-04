@@ -191,6 +191,13 @@ class NewProductDraft extends Model
 
             $draft->applyDefaultSaleTags();
         });
+
+        static::saved(function (NewProductDraft $draft): void {
+            if (! $draft->wasRecentlyCreated && ! $draft->wasChanged('tags')) {
+                return;
+            }
+            app(\App\Services\ProductTagProvenanceService::class)->syncDraft($draft);
+        });
     }
 
     public function getGoogleProductCategoryAttribute($value): ?string

@@ -417,6 +417,11 @@ class ShopYourVibeAssignmentService
 
         $confirmed = $this->shopify->productTags($productGid);
         $this->reconcileConfirmedState($product, $primaryRow?->fresh(), $designHeader, $before, $confirmed['tags']);
+        app(ShopYourVibeSorting::class)->reconcileConfirmedMembership(
+            $productGid,
+            $addedMappings->pluck('shopify_collection_id')->filter()->map(fn ($gid) => (string) $gid)->values()->all(),
+            $removedMappings->pluck('shopify_collection_id')->filter()->map(fn ($gid) => (string) $gid)->values()->all(),
+        );
 
         return $confirmed;
     }
@@ -444,7 +449,17 @@ class ShopYourVibeAssignmentService
                     'colour_style' => $after['colour_style'] !== '' ? $after['colour_style'] : null,
                     'shopify_sync_warnings' => $warnings !== [] ? $warnings : null,
                 ])->save());
+                app(ProductTagProvenanceService::class)->sync(
+                    $draft,
+                    TagNormalizer::parseTokens($after['tags']),
+                    \App\Models\ProductTagProvenance::SHOPIFY,
+                );
             }
+            app(ProductTagProvenanceService::class)->sync(
+                $product,
+                TagNormalizer::parseTokens($after['tags']),
+                \App\Models\ProductTagProvenance::SHOPIFY,
+            );
             foreach ($after as $field => $newValue) {
                 $oldValue = (string) ($before[$field] ?? '');
                 if ($oldValue === (string) $newValue) {

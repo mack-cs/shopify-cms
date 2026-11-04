@@ -247,6 +247,111 @@ GQL, ['id' => $gid, 'after' => $after]);
             'product_count' => (int) data_get($node, 'productsCount.count', count($products)), 'products' => $products];
     }
 
+    /**
+     * Complete collection membership, product id and title only.
+     * An incomplete page is rejected and is never returned as an empty collection.
+     *
+     * @return array{gid:string,title:string,retrieval_started_at:string,product_count:int,products:array<int,array{id:string,title:string}>}
+     */
+    public function collectionMembership(string $gid): array
+    {
+        $this->gid($gid, 'Collection');
+        $last = null;
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            try {
+                return $this->readCollectionMembership($gid);
+            } catch (RuntimeException $e) {
+                if (! str_contains($e->getMessage(), 'changed while it was being read')) {
+                    throw $e;
+                }
+                $last = $e;
+            }
+        }
+
+        throw $last ?? new RuntimeException('Shopify membership for '.$gid.' could not be verified. Sorting was not started.');
+    }
+
+    /**
+     * @return array{gid:string,title:string,retrieval_started_at:string,product_count:int,products:array<int,array{id:string,title:string}>}
+     */
+    private function readCollectionMembership(string $gid): array
+    {
+        $retrievalStartedAt = now()->toISOString();
+        $after = null;
+        $products = [];
+        $seen = [];
+        $seenCursors = [];
+        $reported = null;
+        $title = '';
+        do {
+            if (count($seenCursors) > 100) {
+                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+            }
+            $data = $this->graphql(<<<'GQL'
+query VibeMembership($id: ID!, $after: String) { collection(id: $id) {
+  id title productsCount { count }
+  products(first: 100, after: $after, sortKey: COLLECTION_DEFAULT) {
+    nodes { id title }
+    pageInfo { hasNextPage endCursor }
+  }
+} }
+GQL, ['id' => $gid, 'after' => $after]);
+            if ($after !== null && array_key_exists('collection', $data) && $data['collection'] === null) {
+                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+            }
+            $node = $this->collectionResponseNode($data, $gid);
+            if (! is_string($node['title'] ?? null)
+                || ! is_array(data_get($node, 'products.nodes'))
+                || ! array_is_list($node['products']['nodes'])
+                || ! is_bool(data_get($node, 'products.pageInfo.hasNextPage'))
+                || ! array_key_exists('endCursor', $node['products']['pageInfo'] ?? [])
+                || ($node['products']['pageInfo']['endCursor'] !== null && ! is_string($node['products']['pageInfo']['endCursor']))) {
+                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+            }
+            $title = $node['title'];
+            $reported = data_get($node, 'productsCount.count');
+            foreach ($node['products']['nodes'] as $product) {
+                $id = $product['id'] ?? null;
+                if (! is_array($product) || ! is_string($id) || ! preg_match('~^gid://shopify/Product/\d+$~', $id) || ! is_string($product['title'] ?? null)) {
+                    throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+                }
+                if (isset($seen[$id])) {
+                    throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read. Sorting was not started.');
+                }
+                $seen[$id] = true;
+                $products[] = ['id' => $id, 'title' => $product['title']];
+            }
+            $after = $this->cursor($node['products']);
+            if ($after !== null) {
+                if (isset($seenCursors[$after])) {
+                    throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+                }
+                $seenCursors[$after] = true;
+            }
+        } while ($after !== null);
+
+        $fetched = count($products);
+        if (is_int($reported) || (is_string($reported) && ctype_digit($reported))) {
+            $reported = (int) $reported;
+            if ($reported > $fetched) {
+                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+            }
+            if ($reported > 0 && $fetched > $reported) {
+                throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read. Sorting was not started.');
+            }
+        } elseif ($fetched === 0 && $reported !== null && $reported !== 0) {
+            throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
+        }
+
+        return [
+            'gid' => $gid,
+            'title' => $title,
+            'retrieval_started_at' => $retrievalStartedAt,
+            'product_count' => $fetched,
+            'products' => $products,
+        ];
+    }
+
     /** Only an explicit null in a successful, parsed response establishes unavailability. */
     private function collectionResponseNode(array $data, string $gid): array
     {

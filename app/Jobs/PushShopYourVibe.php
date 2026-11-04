@@ -21,9 +21,9 @@ class PushShopYourVibe implements ShouldQueue
 
     public readonly ?array $authorization;
 
-    public function __construct(public readonly int $draftId)
+    public function __construct(public readonly int $draftId, ?array $authorization = null)
     {
-        $this->authorization = ShopYourVibeDraft::find($draftId)?->editing_state['push'] ?? null;
+        $this->authorization = $authorization ?? (ShopYourVibeDraft::find($draftId)?->editing_state['push'] ?? null);
         $this->onConnection('shop-your-vibe');
         $this->onQueue('shop-your-vibe');
     }

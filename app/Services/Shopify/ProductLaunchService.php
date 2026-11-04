@@ -247,6 +247,14 @@ final class ProductLaunchService
                 ? 'Already active and published. Inventory was not written again.'
                 : trim((string) ($inventoryPlan['warning'] ?? 'Shopify confirmed ACTIVE status and the selected sales channels.')),
         ])->save();
+
+        if ($item->outcome === ProductLaunchItem::OUTCOME_LAUNCHED) {
+            try {
+                app(\App\Services\ShopYourVibeSorting::class)->recordLaunchWarning($item);
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
+        }
     }
 
     private function blocker(Product $product, ?Variant $variant, bool $stack): ?string

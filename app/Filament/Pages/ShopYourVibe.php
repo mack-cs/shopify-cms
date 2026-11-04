@@ -19,8 +19,10 @@ use App\Models\ShopifyCollection;
 use App\Models\ShopifyRow;
 use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\ShopYourVibeDraft;
+use App\Models\SyvCollectionSortState;
 use App\Models\Variant;
 use App\Services\HeaderStore;
+use App\Models\User;
 use App\Services\ShopYourVibeAssignmentService;
 use App\Services\ShopYourVibeComplementaryService;
 use App\Services\ShopYourVibeShopify;
@@ -28,6 +30,7 @@ use App\Services\ShopYourVibeSiblingService;
 use App\Services\ShopYourVibeTagService;
 use App\Services\ShopYourVibeWorkflow;
 use App\Services\ShopYourVibeEditing;
+use App\Services\ShopYourVibeSorting;
 use App\Models\ChangeLog;
 use App\Services\SiblingCollectionResolver;
 use Filament\Actions\Action;
@@ -101,6 +104,8 @@ class ShopYourVibe extends Page
 
     private bool $committingVibeName = false;
 
+    private ?string $actionCollection = null;
+
     public string $productSearch = '';
 
     public string $imageSearch = '';
@@ -115,8 +120,43 @@ class ShopYourVibe extends Page
 
     public bool $confirmingPush = false;
 
+    public bool $confirmingSortSubmit = false;
+
+    public ?string $confirmingSortGid = null;
+
+    public ?string $otherPushNote = null;
+
+    /** @var array<string, mixed>|null */
+    public ?array $lockFeedback = null;
+
+    /** @var array{gid: string, message: string}|null */
+    public ?array $sortPublishError = null;
+
+    /** @var array<string, mixed>|null */
+    public ?array $membershipPrompt = null;
+
+    public ?string $membershipChecking = null;
+
+    /** @var array<string, bool> */
+    #[Locked]
+    public array $sortingUnlocked = [];
+
+    public ?string $sortingConfirmGid = null;
+
+    public ?int $sortReviewerId = null;
+
+    public string $sortChangeFeedback = '';
+
     #[Locked]
     public ?string $editingToken = null;
+
+    /** @var array<string, string> */
+    #[Locked]
+    public array $scopeTokens = [];
+
+    /** @var array<string, int> */
+    #[Locked]
+    public array $scopeRevisions = [];
 
     #[Locked]
     public ?int $reviewedRevision = null;
@@ -131,34 +171,264 @@ class ShopYourVibe extends Page
 
     public bool $unavailableNoticeDismissed = false;
 
-    public function startEditing(): void
+    public function startEditing(?string $gid = null): void
     {
         $this->guard();
-        $revision = $this->revision;
-        $this->attempt(function () use ($revision): void {
-            $service = app(ShopYourVibeEditing::class);
-            $draft = $service->acquire($this->draftId, $revision);
-            $this->editingToken = $service->token;
-            $this->accept($draft);
-        });
+        $gid = (is_string($gid) && $gid !== '')
+            ? $gid
+            : (is_string($this->selectedCollection) ? $this->selectedCollection : null);
+        if (! is_string($gid) || $gid === '') {
+            $this->attempt(function (): void {
+                $service = app(ShopYourVibeEditing::class);
+                $draft = $service->acquire($this->draftId, $this->revision);
+                $this->editingToken = $service->token;
+                $this->accept($draft);
+            });
+
+            return;
+        }
+        $this->beginCollectionSorting($gid);
+    }
+
+    public function askToStartSorting(string $gid): void
+    {
+        $this->guard();
+        $this->sortingConfirmGid = $gid;
+        $this->dispatch('open-modal', id: 'confirm-start-sorting');
+    }
+
+    public function cancelStartSorting(): void
+    {
+        $this->guard();
+        $this->sortingConfirmGid = null;
+        $this->dispatch('close-modal', id: 'confirm-start-sorting');
+    }
+
+    public function beginCollectionSorting(string $gid): void
+    {
+        $this->guard();
+        $this->actionCollection = $gid;
+        $this->membershipChecking = $gid;
+        try {
+            $this->attempt(function () use ($gid): void {
+                $this->verifyCollectionMembership($gid);
+            });
+        } finally {
+            $this->membershipChecking = null;
+            $this->actionCollection = null;
+            $this->dispatch('close-modal', id: 'confirm-start-sorting');
+        }
+    }
+
+    public function refreshMembershipPreservingSort(string $gid): void
+    {
+        $this->guard();
+        $this->actionCollection = $gid;
+        $this->membershipChecking = $gid;
+        try {
+            $this->attempt(function () use ($gid): void {
+                $live = $this->lockedMembershipRead($gid);
+                $draft = app(ShopYourVibeSorting::class)->reconcileMembership(
+                    (int) $this->draftId,
+                    $gid,
+                    $live,
+                    $this->scopeRevisions[$gid] ?? 0,
+                );
+                $this->membershipPrompt = null;
+                $this->sortPublishError = null;
+                $this->accept($draft);
+                $this->rememberScope($gid, $draft, $this->scopeTokens[$gid] ?? null);
+            });
+        } finally {
+            $this->membershipChecking = null;
+            $this->actionCollection = null;
+        }
+    }
+
+    private function verifyCollectionMembership(string $gid): void
+    {
+        $draft = ShopYourVibeDraft::query()->findOrFail((int) $this->draftId);
+        if (! isset($draft->desired['collections'][$gid]) || ! is_array($draft->desired['collections'][$gid])) {
+            throw new \RuntimeException('Open this collection’s products before sorting them.');
+        }
+        $editing = app(ShopYourVibeEditing::class);
+        $scope = ShopYourVibeEditing::sortScope($gid);
+        $lock = $draft->editing_state['locks'][$scope] ?? [];
+        $editing->token = $this->scopeTokens[$gid] ?? null;
+        if ($editing->active($lock) && (int) ($lock['owner_id'] ?? 0) !== (int) auth()->id()) {
+            throw new \RuntimeException(($lock['owner_name'] ?? 'Another editor').' is currently editing this collection. Their pending changes are protected for 14 minutes after their last activity.');
+        }
+        if ($editing->active($lock) && (int) ($lock['owner_id'] ?? 0) === (int) auth()->id() && ! $this->scopeTokenMatches($gid, $lock)) {
+            throw new \RuntimeException('This collection is open in another tab. Continue in that tab, or wait for its editing lock to expire.');
+        }
+        $alreadyMine = $editing->active($lock) && (int) ($lock['owner_id'] ?? 0) === (int) auth()->id();
+        $storedPrompt = $draft->editing_state['membership_prompt'] ?? null;
+        if (! $alreadyMine || (is_array($storedPrompt) && ($storedPrompt['gid'] ?? null) === $gid)) {
+            $live = $this->lockedMembershipRead($gid);
+            $saved = $draft->desired['collections'][$gid];
+            $diff = app(ShopYourVibeSorting::class)->describeMembershipChange($draft->fresh() ?? $draft, $gid, $saved, $live);
+            if (! $diff['matches']) {
+                unset($this->sortingUnlocked[$gid]);
+                $this->storeMembershipPrompt($gid, $diff);
+
+                throw new \RuntimeException('Shopify membership for '.$diff['title'].' no longer matches this draft. Sorting was not started.');
+            }
+        }
+        $editing->token = $this->scopeTokens[$gid] ?? null;
+        $known = $this->scopeRevisions[$gid] ?? 0;
+        $draft = $editing->acquireScope((int) $this->draftId, $known, $scope);
+        $draft = $this->releaseOwnParentLock($draft);
+        $this->clearMembershipPrompt($draft, $gid);
+        $this->rememberScope($gid, $draft, $editing->token);
+        $this->membershipPrompt = null;
+        $this->sortingUnlocked[$gid] = true;
+        $this->sortingConfirmGid = null;
+        $this->accept($draft);
+    }
+
+    /** @param array<string, mixed> $lock */
+    private function scopeTokenMatches(string $gid, array $lock): bool
+    {
+        $token = $this->scopeTokens[$gid] ?? null;
+        $hash = $lock['token_hash'] ?? null;
+
+        return is_string($token) && $token !== '' && is_string($hash) && $hash !== ''
+            && hash_equals($hash, hash('sha256', $token));
+    }
+
+    /**
+     * @return array{gid:string,title:string,retrieval_started_at:string,product_count:int,products:array<int,array{id:string,title:string}>}
+     */
+    private function lockedMembershipRead(string $gid): array
+    {
+        $key = ShopYourVibeSorting::membershipLockKey((int) $this->draftId, $gid);
+        $held = Cache::lock($key, 120);
+        if (! $held->get()) {
+            throw new \RuntimeException('Shopify membership is already being checked for this collection.');
+        }
+        try {
+            return app(ShopYourVibeShopify::class)->collectionMembership($gid);
+        } finally {
+            $held->release();
+        }
+    }
+
+    /** @param array<string, mixed> $diff */
+    private function storeMembershipPrompt(string $gid, array $diff): void
+    {
+        $draft = ShopYourVibeDraft::query()->findOrFail((int) $this->draftId);
+        $state = $draft->editing_state ?? [];
+        $state['membership_prompt'] = $diff;
+        $draft->editing_state = $state;
+        $draft->save();
+        $this->membershipPrompt = $diff;
+        $this->accept($draft->fresh() ?? $draft);
+    }
+
+    private function clearMembershipPrompt(ShopYourVibeDraft $draft, string $gid): void
+    {
+        $state = $draft->editing_state ?? [];
+        $prompt = $state['membership_prompt'] ?? null;
+        if (! is_array($prompt) || ($prompt['gid'] ?? null) !== $gid) {
+            return;
+        }
+        $state['membership_prompt'] = null;
+        $draft->editing_state = $state;
+        $draft->save();
     }
 
     public function editingHeartbeat(): array
     {
         $this->guard();
-        $this->skipRender();
-        if (! $this->editingToken || ! $this->draftId) {
-            return [];
+        $gid = is_string($this->selectedCollection) ? $this->selectedCollection : null;
+        try {
+            if ($gid && ! empty($this->scopeTokens[$gid]) && $this->draftId) {
+                app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid];
+                $state = app(ShopYourVibeEditing::class)->heartbeatScope((int) $this->draftId, ShopYourVibeEditing::sortScope($gid));
+                $this->skipRender();
+
+                return $state;
+            }
+            if (! $this->editingToken || ! $this->draftId) {
+                $this->skipRender();
+
+                return [];
+            }
+            $state = app(ShopYourVibeEditing::class)->heartbeat($this->draftId, $this->revision);
+            $this->skipRender();
+
+            return $state;
+        } catch (\RuntimeException $e) {
+            $this->rememberBlockedAction($e->getMessage(), $gid);
+
+            return ['ok' => false, 'blocked' => true, 'message' => $e->getMessage()] + ($this->lockFeedback ?? []);
         }
-        return app(ShopYourVibeEditing::class)->heartbeat($this->draftId, $this->revision);
+    }
+
+    public function exception(\Throwable $e, callable $stopPropagation): void
+    {
+        if (! $e instanceof \RuntimeException || ! $this->controlledEditorError($e->getMessage())) {
+            return;
+        }
+        $stopPropagation();
+        $this->rememberBlockedAction($e->getMessage(), is_string($this->selectedCollection) ? $this->selectedCollection : null);
+    }
+
+    public function dismissLockNotice(): void
+    {
+        $this->guard();
+        $this->lockFeedback = null;
+        $this->loadError = null;
     }
 
     public function editingStatus(): array
     {
         $this->guard();
-        $this->skipRender();
-        $draft = $this->draftId ? ShopYourVibeDraft::select(['id', 'editing_state', 'pending', 'revision'])->find($this->draftId) : null;
-        return $draft ? array_diff_key(app(ShopYourVibeEditing::class)->view($draft), ['changes' => true]) + ['pending' => $draft->pending, 'revision' => $draft->revision] : [];
+        $returned = $this->reconcileRevision();
+        $gid = is_string($this->selectedCollection) ? $this->selectedCollection : null;
+        $draftForScope = $this->draftId ? ShopYourVibeDraft::find($this->draftId) : null;
+        if ($gid && $draftForScope) {
+            $adopted = app(ShopYourVibeEditing::class)->adoptedScopeRevision($draftForScope, ShopYourVibeEditing::sortScope($gid), $this->scopeRevisions[$gid] ?? 0);
+            if ($adopted !== null) {
+                $this->scopeRevisions[$gid] = $adopted;
+                $this->scopeTokens[$gid] = null;
+                $returned = true;
+                $draftForScope->refresh();
+            }
+        }
+        $clearedNotice = false;
+        $noticeGid = is_string($this->lockFeedback['gid'] ?? null) ? $this->lockFeedback['gid'] : $gid;
+        if (is_array($this->lockFeedback) && is_string($noticeGid) && $noticeGid !== '' && $draftForScope) {
+            $scope = app(ShopYourVibeEditing::class)->viewScope($draftForScope, ShopYourVibeEditing::sortScope($noticeGid));
+            if (! ($scope['active'] ?? false) && ! ($scope['blocked'] ?? false)) {
+                $this->lockFeedback = null;
+                $this->loadError = null;
+                $clearedNotice = true;
+            } else {
+                $this->lockFeedback['owner'] = $scope['owner'] ?? ($this->lockFeedback['owner'] ?? null);
+                $this->lockFeedback['expires_at'] = $scope['expires_at'] ?? ($this->lockFeedback['expires_at'] ?? null);
+                $this->lockFeedback['collection'] = data_get($draftForScope->desired, 'collections.'.$noticeGid.'.title', $noticeGid);
+            }
+        }
+        if (! $returned && ! $clearedNotice && ! is_array($this->lockFeedback)) {
+            $this->skipRender();
+        }
+        $draft = $this->draftId
+            ? ShopYourVibeDraft::query()->select(['id', 'editing_state', 'pending', 'revision'])->find($this->draftId)
+            : null;
+        if (! $draft) {
+            return [];
+        }
+        $parentView = app(ShopYourVibeEditing::class)->view($draft);
+        $status = array_diff_key(app(ShopYourVibeEditing::class)->viewFor($draft, is_string($this->selectedCollection) ? $this->selectedCollection : null), ['changes' => true]) + ['pending' => $draft->pending, 'revision' => $draft->revision];
+        $status['parent_blocked'] = (bool) (($parentView['blocked'] ?? false) || (! ($parentView['active'] ?? false) && ! empty($parentView['owner'])));
+        $status['scopes'] = app(ShopYourVibeEditing::class)->scopeViews($draft);
+        if ($returned) {
+            $status['returned'] = true;
+            $status['orders'] = $this->savedCollectionOrders();
+        }
+
+        return $status;
     }
 
     public function reviewDiscard(): void
@@ -184,9 +454,18 @@ class ShopYourVibe extends Page
         $this->resetValidation('discardReason');
         $this->discardError = null;
         $revision = $this->revision;
-        $this->attempt(function () use ($revision): void {
-            $this->accept(app(ShopYourVibeEditing::class)->discard($this->draftId, $revision, $this->discardReason));
-            $this->editingToken = null;
+        $gid = is_string($this->selectedCollection) ? $this->selectedCollection : null;
+        $this->attempt(function () use ($revision, $gid): void {
+            $service = app(ShopYourVibeEditing::class);
+            if ($gid && $this->collectionSortCanBeDiscarded($gid)) {
+                $service->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+                $draft = $service->discardScope((int) $this->draftId, $gid, $this->scopeRevisions[$gid] ?? 0, $this->discardReason);
+                $this->scopeTokens[$gid] = null;
+                $this->accept($draft);
+            } else {
+                $this->accept($service->discard($this->draftId, $revision, $this->discardReason));
+                $this->editingToken = null;
+            }
             $this->confirmingDiscard = false;
             $this->confirmingPush = false;
             $this->reviewedRevision = null;
@@ -323,7 +602,7 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->attempt(function () use ($gid): void {
             $existing = ShopYourVibeDraft::query()
-                ->select(['id', 'revision', 'status', 'collection_gid', 'pending', 'desired'])
+                ->select(['id', 'revision', 'status', 'collection_gid', 'pending', 'desired', 'editing_state'])
                 ->where('collection_gid', $gid)
                 ->first();
             $this->refreshingCollection = false;
@@ -929,7 +1208,6 @@ class ShopYourVibe extends Page
     {
         $this->guard();
         $this->attempt(function () use ($key): void {
-            $this->authorizeEditing();
             $this->activeTab = 'vibes';
             $draft = $this->draft();
             $card = collect($draft->desired['cards'])->firstWhere('key', $key);
@@ -1050,13 +1328,32 @@ class ShopYourVibe extends Page
     /**
      * @return array{applied: bool, ids: array<int, string>}
      */
-    public function reorderProducts(string $gid, array $ids, int $epoch = 0, string $session = ''): array
+    public function reorderProducts(string $gid, array $ids, int $epoch = 0, string $session = '', string $explicitId = ''): array
     {
-        $applied = $this->applyProductOrder($gid, $ids, $epoch, $session);
+        $this->guard();
+        $prompt = $this->membershipPrompt;
+        $promptBlocks = is_array($prompt) && ($prompt['gid'] ?? null) === $gid;
+        if (empty($this->sortingUnlocked[$gid]) && ! $promptBlocks) {
+            $this->loadError = 'Check this collection against current Shopify before sorting.';
+
+            return [
+                'applied' => false,
+                'ids' => $this->savedProductIds($gid),
+                'explicit_ids' => [],
+                'message' => $this->loadError,
+            ];
+        }
+        $this->actionCollection = $gid;
+        try {
+            $applied = $this->applyProductOrder($gid, $ids, $epoch, $session, $explicitId);
+        } finally {
+            $this->actionCollection = null;
+        }
 
         return [
             'applied' => $applied,
             'ids' => $this->savedProductIds($gid),
+            'explicit_ids' => $explicitId !== '' ? [$explicitId] : [],
             'message' => $this->loadError,
         ];
     }
@@ -1075,6 +1372,12 @@ class ShopYourVibe extends Page
     public function moveProductToPosition(string $gid, string $productGid, int $position, int $epoch = 0, string $session = ''): void
     {
         $this->guard();
+        if (empty($this->sortingUnlocked[$gid])) {
+            $this->loadError = 'Check this collection against current Shopify before sorting.';
+
+            return;
+        }
+        $this->actionCollection = $gid;
         $this->attempt(function () use ($gid, $productGid, $position, $epoch, $session): void {
             $key = $this->orderEpochKey($gid, $session);
             Cache::lock($this->orderLockKey($gid), 15)->block(8, function () use ($key, $gid, $productGid, $position, $epoch): void {
@@ -1086,17 +1389,155 @@ class ShopYourVibe extends Page
                 if (! $draft) {
                     return;
                 }
-                $this->accept(app(ShopYourVibeWorkflow::class)->placeProduct($draft->id, $this->revision, $gid, $productGid, $position));
+                app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+                $saved = app(ShopYourVibeWorkflow::class)->placeProduct($draft->id, $this->revision, $gid, $productGid, $position, $this->scopeRevisions[$gid] ?? 0);
+                $this->rememberScope($gid, $saved, app(ShopYourVibeEditing::class)->token);
+                $this->accept($saved);
                 $this->confirmingPush = false;
                 $this->dispatch('vibe-draft-saved');
             });
         });
-        $this->skipRender();
+        $this->actionCollection = null;
+    }
+
+    public function beginSortSubmit(?string $gid = null): void
+    {
+        $this->guard();
+        $gid = $this->sortGid($gid);
+        $assigned = app(ShopYourVibeSorting::class)->view($this->draft(), $gid !== '' ? $gid : null)['reviewer_id'] ?? null;
+        if (! $this->sortReviewerId && $assigned) {
+            $this->sortReviewerId = (int) $assigned;
+        }
+        $this->confirmingSortGid = $gid !== '' ? $gid : null;
+        $this->confirmingSortSubmit = true;
+    }
+
+    public function reviewSorting(?string $gid = null): void
+    {
+        $gid = $this->sortGid($gid);
+        $this->startEditing($gid !== '' ? $gid : null);
+    }
+
+    public function submitSorting(?string $gid = null): void
+    {
+        $this->guard();
+        $gid = $this->sortGid($gid);
+        $this->attempt(function () use ($gid): void {
+            app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+            $draft = app(ShopYourVibeSorting::class)->submit((int) $this->draftId, $this->revision, (int) $this->sortReviewerId, $gid !== '' ? $gid : null, $this->scopeRevisions[$gid] ?? 0);
+            $this->editingToken = null;
+            if ($gid !== '') {
+                $this->scopeTokens[$gid] = null;
+            }
+            app(ShopYourVibeEditing::class)->token = null;
+            $this->accept($draft);
+            $this->confirmingSortSubmit = false;
+            $this->confirmingSortGid = null;
+        });
+    }
+
+    public function approveSorting(?string $gid = null): void
+    {
+        $this->guard();
+        $gid = $this->sortGid($gid);
+        $this->attempt(function () use ($gid): void {
+            if ($gid === '') {
+                $this->accept(app(ShopYourVibeSorting::class)->approve((int) $this->draftId, $this->revision));
+
+                return;
+            }
+            $this->accept(app(ShopYourVibeSorting::class)->approveScope((int) $this->draftId, $gid, $this->scopeRevisions[$gid] ?? 0));
+        });
+    }
+
+    public function approveAndPublishSorting(string $gid): void
+    {
+        $this->guard();
+        $this->attempt(function () use ($gid): void {
+            $this->sortPublishError = null;
+            $sorting = app(ShopYourVibeSorting::class);
+            $workflow = app(ShopYourVibeWorkflow::class);
+            $editing = app(ShopYourVibeEditing::class);
+            $scope = ShopYourVibeEditing::sortScope($gid);
+            $draft = ShopYourVibeDraft::query()->findOrFail((int) $this->draftId);
+            $lock = $draft->editing_state['locks'][$scope] ?? [];
+            if ($editing->active($lock) && (int) ($lock['owner_id'] ?? 0) !== (int) auth()->id()) {
+                throw new \RuntimeException(($lock['owner_name'] ?? 'Another editor').' owns this editing lock. This collection is open in another tab. Continue in that tab, or wait for its editing lock to expire.');
+            }
+            $revision = $this->scopeRevisions[$gid] ?? (int) ($lock['revision'] ?? 0);
+            $view = $sorting->view($draft, $gid);
+            if (empty($view['approved']) && ($view['awaiting'] ?? 0) > 0) {
+                $draft = $sorting->approveScope((int) $this->draftId, $gid, $revision);
+                $this->accept($draft);
+            }
+            $editing->token = $this->scopeTokens[$gid] ?? null;
+            [$queued, $ticket] = $workflow->queueCollection((int) $this->draftId, $revision, $gid);
+            $this->rememberScope($gid, $queued, $editing->token);
+            $this->accept($queued);
+            $workflow->push($queued->id, $ticket);
+            $fresh = $queued->fresh() ?? $queued;
+            $this->accept($fresh);
+            $prompt = $fresh->editing_state['membership_prompt'] ?? null;
+            if (is_array($prompt)) {
+                $this->membershipPrompt = $prompt;
+            }
+            if (filled($fresh->last_error)) {
+                $this->sortPublishError = ['gid' => $gid, 'message' => $fresh->last_error];
+                throw new \RuntimeException($fresh->last_error);
+            }
+        });
+    }
+
+    public function requestSortingChanges(?string $gid = null): void
+    {
+        $this->guard();
+        $gid = $this->sortGid($gid);
+        $this->attempt(function () use ($gid): void {
+            $draft = $gid === ''
+                ? app(ShopYourVibeSorting::class)->requestChanges((int) $this->draftId, $this->revision, $this->sortChangeFeedback)
+                : app(ShopYourVibeSorting::class)->requestScopeChanges((int) $this->draftId, $gid, $this->scopeRevisions[$gid] ?? 0, $this->sortChangeFeedback);
+            $this->editingToken = null;
+            if ($gid !== '') {
+                $this->scopeTokens[$gid] = null;
+            }
+            app(ShopYourVibeEditing::class)->token = null;
+            $this->accept($draft);
+            $this->sortChangeFeedback = '';
+        });
+    }
+
+    public function markProductReviewed(string $gid, string $productKey): void
+    {
+        $this->guard();
+        $this->attempt(function () use ($gid, $productKey): void {
+            app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+            app(ShopYourVibeSorting::class)->markReviewed((int) $this->draftId, $this->revision, $gid, $productKey, $this->scopeRevisions[$gid] ?? 0);
+        });
+    }
+
+    public function confirmSortingPublication(): void
+    {
+        $this->guard();
+        $this->attempt(function (): void {
+            $this->accept(app(ShopYourVibeSorting::class)->confirmMatchingOrder((int) $this->draftId, $this->revision));
+        });
     }
 
     public function enableManual(string $gid): void
     {
-        $this->change('enable_manual', ['collection_gid' => $gid, 'confirmed' => true]);
+        $this->guard();
+        $this->attempt(function () use ($gid): void {
+            app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+            $saved = app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'enable_manual', [
+                'collection_gid' => $gid,
+                'confirmed' => true,
+                'scope_revision' => $this->scopeRevisions[$gid] ?? 0,
+            ]);
+            $this->rememberScope($gid, $saved, app(ShopYourVibeEditing::class)->token);
+            $this->accept($saved);
+            $this->confirmingPush = false;
+            $this->dispatch('vibe-draft-saved');
+        });
     }
 
     public function addProducts(string $gid): void
@@ -1161,7 +1602,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingSiblingProductGid, 422);
         abort_unless($this->collectionProduct($this->managingSiblingProductGid), 422);
         $this->attempt(function (): void {
-            $this->authorizeEditing();
+            $this->withProductLock((string) $this->managingSiblingProductGid, function (): void {
             $parent = $this->draft()->desired['parent'] ?? [];
             PushShopYourVibeProductSiblings::dispatch(
                 $parent,
@@ -1193,6 +1634,7 @@ class ShopYourVibe extends Page
             $this->siblingOptions = [];
             $this->dispatch('close-modal', id: 'manage-sibling-assignments');
             Notification::make()->title('Sibling assignments queued')->success()->send();
+            });
         });
     }
 
@@ -1219,7 +1661,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingTagProductGid, 422);
         abort_unless($this->collectionProduct($this->managingTagProductGid), 422);
         $this->attempt(function (): void {
-            $this->authorizeEditing();
+            $this->withProductLock((string) $this->managingTagProductGid, function (): void {
             $this->tagForm = $this->productTagForm->getState();
             PushShopYourVibeProductTags::dispatch(
                 $this->managingTagProductGid,
@@ -1246,6 +1688,7 @@ class ShopYourVibe extends Page
                 ->body('Shopify will update in the background.')
                 ->success()
                 ->send();
+            });
         });
     }
 
@@ -1326,7 +1769,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingComplementaryProductGid, 422);
         abort_unless($this->collectionProduct($this->managingComplementaryProductGid), 422);
         $this->attempt(function (): void {
-            $this->authorizeEditing();
+            $this->withProductLock((string) $this->managingComplementaryProductGid, function (): void {
             $service = app(ShopYourVibeComplementaryService::class);
             $result = $service->saveLocal(
                 $this->managingComplementaryProductGid,
@@ -1347,6 +1790,7 @@ class ShopYourVibe extends Page
                 ->body('The full list was saved locally. Shopify will receive the first three sellable products in the background.')
                 ->success()
                 ->send();
+            });
         });
     }
 
@@ -1372,7 +1816,7 @@ class ShopYourVibe extends Page
         abort_unless($this->draftId && $this->managingProductGid && $this->confirmingAssignments, 422);
         abort_unless($this->collectionProduct($this->managingProductGid), 422);
         $this->attempt(function (): void {
-            $this->authorizeEditing();
+            $this->withProductLock((string) $this->managingProductGid, function (): void {
             $confirmed = app(ShopYourVibeAssignmentService::class)->assign(
                 $this->draft()->collection_gid,
                 $this->managingProductGid,
@@ -1388,6 +1832,7 @@ class ShopYourVibe extends Page
             $this->dispatch('close-modal', id: 'confirm-vibe-assignments');
             $this->dispatch('close-modal', id: 'manage-vibe-assignments');
             Notification::make()->title('Shop Your Vibe assignments updated')->success()->send();
+            });
         });
     }
 
@@ -1438,10 +1883,22 @@ class ShopYourVibe extends Page
     public function reviewPush(): void
     {
         $this->guard();
+        $draft = $this->draft(true);
+        if (! $draft || ! $draft->pending || app(ShopYourVibeWorkflow::class)->pendingExplicitSortingOnly($draft)) {
+            $this->confirmingPush = false;
+            $this->reviewedRevision = null;
+            $this->otherPushNote = 'Push Other Changes is unavailable. Product sorting is published from each collection, and this draft has no other eligible changes.';
+
+            return;
+        }
+        $this->otherPushNote = null;
         $revision = $this->revision;
         $this->attempt(function () use ($revision): void {
             DB::transaction(function () use ($revision): void {
                 $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($this->draftId);
+                if (app(ShopYourVibeWorkflow::class)->pendingExplicitSortingOnly($draft)) {
+                    throw new \RuntimeException('There are no eligible non-sorting changes to push. Publish sorting from the collection that was sorted.');
+                }
                 app(ShopYourVibeEditing::class)->authorize($draft, $revision);
                 $this->accept($draft);
                 $this->reviewedRevision = $revision;
@@ -1676,6 +2133,16 @@ class ShopYourVibe extends Page
         });
     }
 
+    private function rememberScope(string $gid, ShopYourVibeDraft $draft, ?string $token): void
+    {
+        $lock = $draft->editing_state['locks'][ShopYourVibeEditing::sortScope($gid)] ?? [];
+        $this->scopeRevisions[$gid] = (int) ($lock['revision'] ?? ($this->scopeRevisions[$gid] ?? 0));
+        if (is_string($token) && $token !== '') {
+            $this->scopeTokens[$gid] = $token;
+            $this->editingToken = $token;
+        }
+    }
+
     private function accept(ShopYourVibeDraft $draft): void
     {
         if (! empty($draft->editing_state)) {
@@ -1685,6 +2152,15 @@ class ShopYourVibe extends Page
             $this->dispatch('vibe-editing-acquired');
         }
         $this->editingToken = app(ShopYourVibeEditing::class)->token ?? $this->editingToken;
+        if (array_key_exists('editing_state', $draft->getAttributes())) {
+            $prompt = $draft->editing_state['membership_prompt'] ?? null;
+            $this->membershipPrompt = is_array($prompt) ? $prompt : null;
+        }
+        foreach ($draft->editing_state['locks'] ?? [] as $key => $lock) {
+            if (is_string($key) && str_starts_with($key, 'sort:') && is_array($lock)) {
+                $this->scopeRevisions[substr($key, 5)] = (int) ($lock['revision'] ?? 0);
+            }
+        }
         $this->loadedDraft = null;
         $this->loadedDraftHasSnapshot = false;
         $this->draftId = $draft->id;
@@ -1693,19 +2169,70 @@ class ShopYourVibe extends Page
         $this->productsRendered = ShopYourVibeWorkflow::productsAreLoaded($draft->desired, $draft->collection_gid);
     }
 
-    private function reconcileRevision(): void
+    private function reconcileRevision(): bool
     {
         if (! $this->draftId) {
-            return;
+            return false;
         }
-        $draft = ShopYourVibeDraft::find($this->draftId);
+        $draft = ShopYourVibeDraft::query()
+            ->select(['id', 'revision', 'status', 'pending', 'remote_jobs', 'operation', 'editing_state'])
+            ->find($this->draftId);
         if (! $draft || $draft->revision === $this->revision) {
-            return;
+            return false;
         }
         if ($draft->status === 'synced' && ! $draft->pending && empty($draft->remote_jobs) && empty($draft->operation)) {
             $this->revision = $draft->revision;
             $this->observedStatus = $draft->status;
+
+            return false;
         }
+        if (! $this->canAdoptReturnedRevision($draft)) {
+            return false;
+        }
+        $full = ShopYourVibeDraft::find($draft->id);
+        if (! $full) {
+            return false;
+        }
+        $this->editingToken = null;
+        app(ShopYourVibeEditing::class)->token = null;
+        $this->accept($full);
+
+        return true;
+    }
+
+    private function canAdoptReturnedRevision(ShopYourVibeDraft $draft): bool
+    {
+        $userId = auth()->id();
+        if (! $userId || $draft->revision <= $this->revision || ! $draft->pending) {
+            return false;
+        }
+        $state = is_array($draft->editing_state) ? $draft->editing_state : [];
+        if (app(ShopYourVibeEditing::class)->active($state)) {
+            return false;
+        }
+
+        return (int) ($state['pending_owner_id'] ?? 0) === (int) $userId;
+    }
+
+    /** @return array<string, list<string>> */
+    private function savedCollectionOrders(): array
+    {
+        $orders = [];
+        foreach (array_keys($this->savedProductDraft()['collections'] ?? []) as $gid) {
+            if (is_string($gid) && $gid !== '') {
+                $orders[$gid] = $this->savedProductIds($gid);
+            }
+        }
+
+        return $orders;
+    }
+
+    /** @return array<string, mixed> */
+    private function savedProductDraft(): array
+    {
+        $draft = $this->draftId ? ShopYourVibeDraft::query()->select(['id', 'desired'])->find($this->draftId) : null;
+
+        return is_array($draft?->desired) ? $draft->desired : [];
     }
 
     private function dispatchImmediate(ShopYourVibeDraft $draft): void
@@ -1719,7 +2246,7 @@ class ShopYourVibe extends Page
         } catch (Throwable $e) {
             $draft->update([
                 'status' => 'failed',
-                'pending' => false,
+                'pending' => $draft->pending,
                 'last_error' => 'The operation could not be queued. Please retry.',
                 'revision' => $draft->revision + 1,
             ]);
@@ -1753,10 +2280,68 @@ class ShopYourVibe extends Page
         return $this->loadedDraft;
     }
 
+    private function sortReviewers(): \Illuminate\Support\Collection
+    {
+        return User::query()->where('is_active', true)->orderBy('name')->get()
+            ->filter(fn (User $user): bool => ShopYourVibeEditing::permitted($user) && (int) $user->id !== (int) auth()->id())
+            ->values();
+    }
+
     private function guard(): void
     {
         abort_unless(static::canAccess(), 403);
         app(ShopYourVibeEditing::class)->token = $this->editingToken;
+    }
+
+    private function releaseOwnParentLock(ShopYourVibeDraft $draft): ShopYourVibeDraft
+    {
+        return DB::transaction(function () use ($draft): ShopYourVibeDraft {
+            $locked = ShopYourVibeDraft::query()->lockForUpdate()->findOrFail($draft->id);
+            $state = $locked->editing_state ?? [];
+            if ((int) ($state['owner_id'] ?? 0) !== (int) auth()->id()) {
+                return $locked;
+            }
+            $state['owner_id'] = null;
+            $state['owner_name'] = null;
+            $state['token_hash'] = null;
+            $state['expires_at'] = now()->subSecond()->toISOString();
+            $locked->update(['editing_state' => $state]);
+
+            return $locked->fresh() ?? $locked;
+        });
+    }
+
+    private function collectionSortCanBeDiscarded(string $gid): bool
+    {
+        $draft = $this->draftId ? ShopYourVibeDraft::query()->find($this->draftId) : null;
+        if (! $draft) {
+            return false;
+        }
+        $before = array_column($draft->snapshot['collections'][$gid]['products'] ?? [], 'id');
+        $after = array_column($draft->desired['collections'][$gid]['products'] ?? [], 'id');
+        if ($before !== $after) {
+            return true;
+        }
+
+        return SyvCollectionSortState::query()
+            ->where('draft_id', $draft->id)
+            ->where('collection_gid', $gid)
+            ->where('explicit', true)
+            ->where('status', '!=', SyvCollectionSortState::PUBLISHED)
+            ->exists();
+    }
+
+    private function withProductLock(string $productGid, callable $callback): void
+    {
+        $lock = Cache::lock('syv-product:'.$productGid, 30);
+        if (! $lock->get()) {
+            throw new \RuntimeException('This product is being updated. Try again in a moment.');
+        }
+        try {
+            $callback();
+        } finally {
+            $lock->release();
+        }
     }
 
     private function authorizeEditing(): void
@@ -1779,16 +2364,66 @@ class ShopYourVibe extends Page
         } catch (Throwable $e) {
             report($e);
             $message = $e->getMessage();
-            if ($this->loadError !== $message) {
-                $this->loadError = $message;
-                Notification::make()
-                    ->id('syv-'.md5($message))
-                    ->title('Shop Your Vibe could not complete this action')
-                    ->body($message)
-                    ->danger()
-                    ->send();
+            $previous = $this->loadError;
+            $this->rememberBlockedAction($message, $this->actionCollection);
+            if ($previous === $message || $this->controlledEditorError($message)) {
+                return;
+            }
+            Notification::make()
+                ->id('syv-'.md5($message))
+                ->title('Shop Your Vibe could not complete this action')
+                ->body($message)
+                ->danger()
+                ->send();
+        }
+    }
+
+    private function sortGid(?string $gid): string
+    {
+        if (is_string($gid) && $gid !== '') {
+            return $gid;
+        }
+
+        return is_string($this->selectedCollection) ? $this->selectedCollection : '';
+    }
+
+    private function rememberBlockedAction(string $message, ?string $gid = null): void
+    {
+        $this->loadError = $message;
+        $gid = (is_string($gid) && $gid !== '') ? $gid : (is_string($this->selectedCollection) ? $this->selectedCollection : null);
+        $draft = $this->draftId ? ShopYourVibeDraft::find($this->draftId) : null;
+        $owner = null;
+        $expires = null;
+        $title = null;
+        $hold = $this->controlledEditorError($message);
+        if ($draft && is_string($gid) && $gid !== '' && isset($draft->desired['collections'][$gid])) {
+            $scope = app(ShopYourVibeEditing::class)->viewScope($draft, ShopYourVibeEditing::sortScope($gid));
+            $owner = $scope['owner'] ?? ($draft->editing_state['owner_name'] ?? null);
+            $expires = $scope['expires_at'] ?? ($draft->editing_state['expires_at'] ?? null);
+            $title = $draft->desired['collections'][$gid]['title'] ?? $gid;
+            if (! $hold && ($scope['blocked'] ?? false)) {
+                $hold = true;
             }
         }
+        $this->lockFeedback = [
+            'message' => $message,
+            'owner' => $owner,
+            'collection' => $title,
+            'expires_at' => $expires,
+            'gid' => $gid,
+            'hold' => $hold,
+        ];
+    }
+
+    private function controlledEditorError(string $message): bool
+    {
+        foreach (['editing lock', 'another tab', 'another session', 'currently editing', 'pending changes', 'Start editing'] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function parentCacheKey(): string
@@ -2331,22 +2966,30 @@ class ShopYourVibe extends Page
         ];
     }
 
-    private function applyProductOrder(string $gid, array $ids, int $epoch, string $session = ''): bool
+    private function applyProductOrder(string $gid, array $ids, int $epoch, string $session = '', string $explicitId = ''): bool
     {
         $applied = false;
         $this->guard();
-        $this->attempt(function () use ($gid, $ids, $epoch, $session, &$applied): void {
+        $this->attempt(function () use ($gid, $ids, $epoch, $session, $explicitId, &$applied): void {
             $key = $this->orderEpochKey($gid, $session);
             try {
-                Cache::lock($this->orderLockKey($gid), 15)->block(8, function () use ($key, $gid, $ids, $epoch, &$applied): void {
+                Cache::lock($this->orderLockKey($gid), 15)->block(8, function () use ($key, $gid, $ids, $epoch, $explicitId, &$applied): void {
                     if ($this->orderEpochIsStale($key, $epoch)) {
                         return;
                     }
                     $this->rememberOrderEpoch($key, $epoch);
-                    $this->accept(app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'reorder_products', [
+                    $payload = [
                         'collection_gid' => $gid,
                         'ids' => $ids,
-                    ]));
+                    ];
+                    if ($explicitId !== '') {
+                        $payload['explicit_ids'] = [$explicitId];
+                    }
+                    $payload['scope_revision'] = $this->scopeRevisions[$gid] ?? 0;
+                    app(ShopYourVibeEditing::class)->token = $this->scopeTokens[$gid] ?? $this->editingToken;
+                    $saved = app(ShopYourVibeWorkflow::class)->edit($this->draftId, $this->revision, 'reorder_products', $payload);
+                    $this->rememberScope($gid, $saved, app(ShopYourVibeEditing::class)->token);
+                    $this->accept($saved);
                     $applied = true;
                     $this->confirmingPush = false;
                     $this->dispatch('vibe-draft-saved');
@@ -2355,7 +2998,9 @@ class ShopYourVibe extends Page
                 throw new \RuntimeException('The product order is still saving. Try again.');
             }
         });
-        $this->skipRender();
+        if (! $applied || filled($this->loadError)) {
+            $this->skipRender();
+        }
 
         return $applied && blank($this->loadError);
     }
@@ -2553,10 +3198,17 @@ class ShopYourVibe extends Page
             : ($hydrationState === 'failed' ? 'Not loaded' : 'Loading…');
 
         return compact('draft', 'parents', 'pendingDrafts', 'operationDrafts', 'card', 'collection', 'products', 'managedProduct', 'filteredParentProducts', 'assignmentAdds', 'assignmentAddDetails', 'assignmentRemovals', 'complementaryProduct', 'productMembership', 'siblingProduct', 'tagProduct', 'syvProgress', 'statusPoll', 'hydratingParent', 'parentProductIds', 'productTotal', 'productsLoaded', 'hydrationState', 'productCountLabel', 'vibeCountLabel', 'progressStage', 'progressCount', 'progressDone', 'progressTotal', 'unavailableCollectionIds') + [
-            'editing' => $draft ? app(ShopYourVibeEditing::class)->view($draft) : [],
+            'editing' => $draft ? app(ShopYourVibeEditing::class)->viewFor($draft, is_string($this->selectedCollection) ? $this->selectedCollection : null) : [],
+            'parentEditing' => $draft ? app(ShopYourVibeEditing::class)->view($draft) : [],
+            'discardScoped' => $draft && is_string($this->selectedCollection) && $this->collectionSortCanBeDiscarded($this->selectedCollection),
+            'scopeStates' => $draft ? app(ShopYourVibeEditing::class)->scopeViews($draft) : [],
+            'sorting' => app(ShopYourVibeSorting::class)->view($draft, is_string($this->selectedCollection) ? $this->selectedCollection : null),
+            'vibeSorting' => $collection ? app(ShopYourVibeSorting::class)->view($draft, $collection['gid'] ?? null) : ['highlights' => [], 'moves' => []],
+            'sortOnlyPending' => (bool) ($draft && app(ShopYourVibeWorkflow::class)->pendingExplicitSortingOnly($draft)),
+            'sortReviewers' => $this->confirmingSortGid ? $this->sortReviewers() : collect(),
             'discardSummary' => $draft && $this->confirmingDiscard ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
             'editingHistory' => $draft && $this->showEditingHistory ? ChangeLog::where('model_type', ShopYourVibeDraft::class)->where('model_id', $draft->id)->where('source', 'shop_your_vibe_discard')->latest('id')->limit(30)->get() : collect(),
-            'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->summary($draft) : [],
+            'summary' => $draft && $this->confirmingPush ? app(ShopYourVibeWorkflow::class)->otherChangesSummary($draft) : [],
         ];
     }
 

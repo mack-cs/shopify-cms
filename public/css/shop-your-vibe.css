@@ -95,6 +95,8 @@
 .syv-drag-spacer { border-radius: .6rem; outline: 2px dashed #d97706; outline-offset: -2px; background: rgba(217, 119, 6, .08); }
 .syv-product-card.syv-dragging { pointer-events: none; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
 .syv-product-card.syv-drop-target { outline: 2px solid #d97706; outline-offset: -2px; }
+.syv-product-card.syv-explicit-move { outline: 2px solid #b45309; outline-offset: -2px; }
+.syv-explicit-move-label { display: inline-block; margin-top: .35rem; font-size: .75rem; font-weight: 600; color: #b45309; }
 body.syv-drag-lock { user-select: none; cursor: grabbing; }
 .syv-tabs { position: relative; z-index: 5; }
 .syv-tabs button { cursor: pointer; }
@@ -495,3 +497,6 @@ body.syv-drag-lock { user-select: none; cursor: grabbing; }
 }
 .syv-collection-mode { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
 .syv-collection-mode label { display: flex; align-items: center; gap: .5rem; cursor: pointer; }
+.syv-lock-notice { position: fixed; top: 4.5rem; right: 1rem; z-index: 40; width: min(22rem, calc(100vw - 2rem)); max-height: 40vh; overflow: auto; border: 1px solid #f5d0a9; border-radius: .75rem; background: #fff7ed; color: #7c2d12; padding: .75rem .9rem; box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
+.syv-lock-notice p { margin: .25rem 0; font-size: .82rem; }
+.dark .syv-lock-notice { background: #431407; border-color: #9a3412; color: #ffedd5; }

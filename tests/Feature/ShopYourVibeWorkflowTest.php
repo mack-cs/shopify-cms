@@ -1112,6 +1112,7 @@ it('dismisses a missing linked collection notice and still opens the push review
         ->assertSee('Dismiss')
         ->assertSeeHtml('x-bind:disabled="!canPush()"');
 
+    $page->call('beginCollectionSorting', $gid);
     $page->call('moveProductToPosition', $gid, $moved, 1, 1)->assertHasNoErrors();
     $page->call('dismissUnavailableNotice')
         ->assertDontSee('A linked collection could not be loaded')
@@ -1125,9 +1126,8 @@ it('dismisses a missing linked collection notice and still opens the push review
         ->and($this->fake->mutations())->toBe([]);
 
     $page->call('reviewPush')
-        ->assertSet('confirmingPush', true)
-        ->assertSee('Ready to push')
-        ->assertSee('Product sorting changed');
+        ->assertSet('confirmingPush', false)
+        ->assertSee('Push Other Changes is unavailable');
 });
 
 it('dismisses a failed refresh notice without changing the draft', function () {
@@ -1155,7 +1155,7 @@ it('does not queue an unreviewed newer failed revision from a stale page', funct
     Bus::fake([PushShopYourVibe::class]);
     $gid = $this->draft->collection_gid;
     $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
-    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid)->call('beginCollectionSorting', $gid);
     $page->call('moveProductToPosition', $gid, $ids[count($ids) - 1], 1, 1)->assertHasNoErrors();
     $saved = $this->draft->fresh();
     $saved->update([
@@ -1482,7 +1482,7 @@ it('renders Filament sortable grids and saves the final drop position for cards 
     array_unshift($keys, array_pop($keys));
     $page->call('reorderCards', $keys);
     expect(array_column($this->draft->fresh()->desired['cards'], 'key'))->toBe($keys);
-    $page->call('editCard', 'gid://shopify/Metaobject/11');
+    $page->call('editCard', 'gid://shopify/Metaobject/11')->call('beginCollectionSorting', 'gid://shopify/Collection/2');
     @$html->loadHTML($page->html());
     $xpath = new DOMXPath($html);
     $productGrid = collect(iterator_to_array($xpath->query('//*[@data-order-grid]')))
@@ -1570,9 +1570,9 @@ it('sorts parent collection products locally and shows stock badges on product c
     @$html->loadHTML($page->html());
     $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
         ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
-    expect($parentGrid->hasAttribute('x-sortable'))->toBeTrue()
-        ->and($parentGrid->getAttribute('x-on:end.stop'))->toContain('saveOrder($'.'el, \'products\'')
-        ->and($page->html())->toContain('x-sortable-handle');
+    expect($parentGrid->hasAttribute('x-sortable'))->toBeFalse()
+        ->and($page->html())->toContain('Check Shopify before sorting?')
+        ->and($page->html())->toContain('Sorting stays off until you confirm');
     $this->fake->calls = [];
     $ids = ['gid://shopify/Product/102', 'gid://shopify/Product/101', 'gid://shopify/Product/103'];
     $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [
@@ -1659,6 +1659,7 @@ it('saves draft product placement locally and leaves the product draft unpublish
     $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'reorder_products', [
         'collection_gid' => 'gid://shopify/Collection/1',
         'ids' => $ids,
+        'explicit_ids' => ['draft:'.$draftProduct->id],
     ]);
 
     expect(array_column($this->draft->fresh()->desired['collections']['gid://shopify/Collection/1']['products'], 'id'))->toBe($ids)
@@ -1713,7 +1714,7 @@ it('keeps main collection products sortable when an existing draft has stale man
     $this->draft->update(['desired' => $state, 'snapshot' => $state, 'revision' => $this->draft->revision + 1]);
     $this->draft->refresh();
 
-    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1');
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')->call('beginCollectionSorting', 'gid://shopify/Collection/1');
     $html = new DOMDocument;
     @$html->loadHTML($page->html());
     $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
@@ -1743,9 +1744,14 @@ it('keeps the main collection sortable after a vibe is removed', function () {
     $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
         ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
     expect($this->draft->fresh()->desired['collections'])->toHaveKey('gid://shopify/Collection/1')
-        ->and($parentGrid->hasAttribute('x-sortable'))->toBeTrue()
+        ->and($parentGrid->hasAttribute('x-sortable'))->toBeFalse()
         ->and($page->html())->toContain('Product order — Manual sorting enabled')
-        ->and($page->html())->toContain('x-sortable-handle');
+        ->and($page->html())->toContain('Sorting stays off until you confirm');
+    $page->call('beginCollectionSorting', 'gid://shopify/Collection/1');
+    @$html->loadHTML($page->html());
+    $parentGrid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
+    expect($parentGrid->hasAttribute('x-sortable'))->toBeTrue();
 });
 
 it('mounts the product sortable grid whenever manual sorting is supported', function () {
@@ -1753,7 +1759,7 @@ it('mounts the product sortable grid whenever manual sorting is supported', func
     $this->user->assignRole(RolesEnum::Admin->value);
     $this->actingAs($this->user);
     $this->fake->collections['gid://shopify/Collection/2']['sortOrder'] = 'BEST_SELLING';
-    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')->call('editCard', 'gid://shopify/Metaobject/11');
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', 'gid://shopify/Collection/1')->call('editCard', 'gid://shopify/Metaobject/11')->call('beginCollectionSorting', 'gid://shopify/Collection/2');
     $html = new DOMDocument;
     @$html->loadHTML($page->html());
     $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
@@ -2351,13 +2357,64 @@ it('keeps the newest product order when an older reorder arrives later', functio
     $older = array_reverse($ids);
 
     $page = Livewire::test(ShopYourVibe::class);
+    $page->call('manage', $gid)->call('beginCollectionSorting', $gid);
     $this->fake->calls = [];
-    $page->call('manage', $gid);
     $page->call('reorderProducts', $gid, $newer, 2)->assertHasNoErrors();
     $page->call('reorderProducts', $gid, $older, 1)->assertHasNoErrors();
 
     expect(array_column($this->draft->fresh()->desired['collections'][$gid]['products'], 'id'))->toBe($newer)
         ->and($this->fake->calls)->toBe([]);
+});
+
+it('replaces the product grid when a pending sort is discarded', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = 'gid://shopify/Collection/1';
+    $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid)->call('beginCollectionSorting', $gid);
+    preg_match('/wire:key="(parent-products-[^"]+)"/', $page->html(), $before);
+    $reordered = $ids;
+    $moved = array_shift($reordered);
+    $reordered[] = $moved;
+    $page->call('reorderProducts', $gid, $reordered, 1)->assertHasNoErrors();
+    $this->fake->collections[$gid]['products']['nodes'] = array_reverse($this->fake->collections[$gid]['products']['nodes']);
+    $shopifyIds = array_column($this->fake->collections[$gid]['products']['nodes'], 'id');
+    $page->set('discardReason', 'Restore the previous product order')->call('discardChanges')->assertHasNoErrors();
+    preg_match('/wire:key="(parent-products-[^"]+)"/', $page->html(), $after);
+    $html = new DOMDocument;
+    @$html->loadHTML($page->html());
+    $grid = collect(iterator_to_array((new DOMXPath($html))->query('//*[@data-order-grid]')))
+        ->first(fn (DOMElement $element): bool => str_contains($element->getAttribute('wire:key'), 'parent-products-'));
+    $shown = array_map(
+        fn (DOMElement $article): string => $article->getAttribute('data-order-key'),
+        iterator_to_array((new DOMXPath($html))->query('.//*[@data-order-key]', $grid))
+    );
+
+    expect($after[1])->not->toBe($before[1])
+        ->and($after[1])->toContain((string) ChangeLog::query()->latest('id')->value('id'))
+        ->and($shown)->toBe($shopifyIds)
+        ->and(array_column($this->draft->fresh()->desired['collections'][$gid]['products'], 'id'))->toBe($shopifyIds)
+        ->and(array_column($this->draft->fresh()->snapshot['collections'][$gid]['products'], 'id'))->toBe($shopifyIds)
+        ->and($page->html())->not->toContain('data-explicit-move');
+});
+
+it('shows the sorting approval request after a product is moved', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = 'gid://shopify/Collection/1';
+    $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
+    $moved = array_shift($ids);
+    $ids[] = $moved;
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->call('beginCollectionSorting', $gid)
+        ->assertDontSee('Request Sorting Approval')
+        ->call('reorderProducts', $gid, $ids, 1, 'sorter-session', $moved)
+        ->assertSee('Request Sorting Approval')
+        ->assertSee('Explicitly moved products');
 });
 
 it('moves a product through the page position action and shows position inputs', function () {
@@ -2368,9 +2425,13 @@ it('moves a product through the page position action and shows position inputs',
     $ids = array_column($this->draft->desired['collections'][$gid]['products'], 'id');
 
     $page = Livewire::test(ShopYourVibe::class);
+    $page->call('manage', $gid);
+    $locked = new DOMDocument;
+    @$locked->loadHTML($page->html());
+    expect((new DOMXPath($locked))->query('//*[@data-position-input]')->length)->toBe(0);
+    $page->call('beginCollectionSorting', $gid);
     $this->fake->calls = [];
-    $page->call('manage', $gid)
-        ->assertSee('Position')
+    $page->assertSee('Position')
         ->assertSeeHtml('data-position-input');
     $page->call('moveProductToPosition', $gid, $ids[count($ids) - 1], 1, 1)->assertHasNoErrors();
 
@@ -2441,7 +2502,7 @@ it('returns the saved product ids when a reorder is rejected or stale', function
     $first = array_shift($newer);
     $newer[] = $first;
 
-    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid)->call('beginCollectionSorting', $gid);
     $rejected = $page->instance()->reorderProducts($gid, ['gid://shopify/Product/101'], 1);
     expect($rejected['applied'])->toBeFalse()
         ->and($rejected['ids'])->toBe($ids)
@@ -2465,7 +2526,7 @@ it('saves a reorder from a reloaded page and ignores an older reorder from that 
     $newer[] = $first;
     $reloaded = array_reverse($ids);
 
-    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $gid)->call('beginCollectionSorting', $gid);
     expect($page->html())->toContain('x-data="syvEditor()"')
         ->and($page->html())->toContain('window.syvEditor = function');
 
