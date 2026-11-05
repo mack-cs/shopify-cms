@@ -99,7 +99,7 @@ it('sends an unlisted launch to Shopify with its price inventory seo and image',
         'uvp_short_paragraph' => 'Rich colour.',
         'tags' => 'the-extraordinary-few, new-in, all-products',
         'status' => 'active',
-        'published' => 'true',
+        'published' => 'false',
         'variant_price' => 0,
         'variant_inventory_qty' => 15,
         'image_url' => 'https://cdn.example.com/amethyst.jpg',
@@ -120,12 +120,13 @@ it('sends an unlisted launch to Shopify with its price inventory seo and image',
         ->and($draft->tags)->toBe('the-extraordinary-few');
 
     $input = null;
+    $channelInput = null;
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     config()->set('services.shopify.api_version', '2026-01');
     config()->set('services.shopify.inventory_location_id', 'gid://shopify/Location/7');
 
-    Http::fake(function ($request) use (&$input, $draft) {
+    Http::fake(function ($request) use (&$input, &$channelInput, $draft) {
         $query = (string) ($request->data()['query'] ?? '');
         $variables = (array) ($request->data()['variables'] ?? []);
 
@@ -140,6 +141,20 @@ it('sends an unlisted launch to Shopify with its price inventory seo and image',
         }
         if (str_contains($query, 'query VariantsBySku')) {
             return Http::response(['data' => ['productVariants' => ['nodes' => []]]]);
+        }
+        if (str_contains($query, 'query SalesChannels')) {
+            return Http::response(['data' => ['publications' => [
+                'nodes' => [
+                    ['id' => 'gid://shopify/Publication/1'],
+                    ['id' => 'gid://shopify/Publication/2'],
+                ],
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null],
+            ]]]);
+        }
+        if (str_contains($query, 'mutation PublishUnlistedProduct')) {
+            $channelInput = $variables['input'] ?? null;
+
+            return Http::response(['data' => ['publishablePublish' => ['userErrors' => []]]]);
         }
         if (str_contains($query, 'mutation ProductSetCreate')) {
             $input = $variables['input'] ?? null;
@@ -187,7 +202,12 @@ it('sends an unlisted launch to Shopify with its price inventory seo and image',
         ->and($input['seo']['title'])->toBe('Amethyst Allure Bracelet | Leigh Avenue')
         ->and($input['files'][0]['originalSource'])->toBe('https://cdn.example.com/amethyst.jpg')
         ->and($input['files'][0]['alt'])->toBe('Amethyst Allure bracelet on a linen cloth')
-        ->and($draft->fresh()->handle)->toBe('amethyst-allure');
+        ->and($channelInput)->toBe([
+            ['publicationId' => 'gid://shopify/Publication/1'],
+            ['publicationId' => 'gid://shopify/Publication/2'],
+        ])
+        ->and($draft->fresh()->handle)->toBe('amethyst-allure')
+        ->and($draft->fresh()->published)->toBe('true');
 });
 
 it('still blocks a normal draft that has a zero price and no approvals', function (): void {
@@ -254,4 +274,77 @@ it('syncs an unlisted launch into the local product list and allows a partial up
     expect($mapStatus->invoke($updater, 'unlisted'))->toBe('UNLISTED')
         ->and($mapStatus->invoke($updater, 'active'))->toBe('ACTIVE')
         ->and($mapStatus->invoke($updater, 'draft'))->toBe('DRAFT');
+});
+
+it('updates an unlisted product already in Shopify without changing the handle or stock quantity', function (): void {
+    $draft = NewProductDraft::create([
+        'sku' => 'LABN5',
+        'title' => 'The Crystal Edition',
+        'body_html' => 'A clear bracelet.',
+        'handle' => 'the-crystal-edition',
+        'shopify_id' => 'gid://shopify/Product/505',
+        'tags' => 'the-extraordinary-few',
+        'status' => 'unlisted',
+        'variant_price' => 0,
+        'variant_inventory_qty' => 15,
+        'image_url' => 'https://cdn.example.com/crystal.jpg',
+        'unlisted_launch' => true,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]);
+
+    $input = null;
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use (&$input) {
+        $query = (string) ($request->data()['query'] ?? '');
+        $variables = (array) ($request->data()['variables'] ?? []);
+
+        if (str_contains($query, 'query ProductForUnlistedUpdate')) {
+            return Http::response(['data' => ['product' => [
+                'id' => 'gid://shopify/Product/505',
+                'handle' => 'the-crystal-edition',
+                'variants' => ['nodes' => [[
+                    'id' => 'gid://shopify/ProductVariant/505',
+                    'sku' => 'LABN5',
+                ]]],
+            ]]]);
+        }
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $input = $variables['input'] ?? null;
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => [
+                    'id' => 'gid://shopify/Product/505',
+                    'handle' => 'the-crystal-edition',
+                ],
+                'userErrors' => [],
+            ]]]);
+        }
+        if (str_contains($query, 'query SalesChannels')) {
+            return Http::response(['data' => ['publications' => [
+                'nodes' => [['id' => 'gid://shopify/Publication/1']],
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null],
+            ]]]);
+        }
+        if (str_contains($query, 'mutation PublishUnlistedProduct')) {
+            return Http::response(['data' => ['publishablePublish' => ['userErrors' => []]]]);
+        }
+
+        throw new RuntimeException($query);
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->updateUnlistedDrafts(collect([$draft]));
+
+    expect($result['updated'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($input['id'])->toBe('gid://shopify/Product/505')
+        ->and($input['status'])->toBe('UNLISTED')
+        ->and($input)->not->toHaveKey('handle')
+        ->and($input['variants'][0])->not->toHaveKey('inventoryQuantities')
+        ->and($input['variants'][0]['id'])->toBe('gid://shopify/ProductVariant/505')
+        ->and($input['files'][0]['originalSource'])->toBe('https://cdn.example.com/crystal.jpg')
+        ->and($draft->fresh()->handle)->toBe('the-crystal-edition')
+        ->and($draft->fresh()->published)->toBe('true');
 });

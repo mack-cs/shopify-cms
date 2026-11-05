@@ -134,10 +134,23 @@ final class NewProductDraftShopifyCreator
                     ];
                 }
 
-                $draft->update([
+                if (($result['publication_error'] ?? null) !== null) {
+                    $warnings[] = [
+                        'id' => $draft->id,
+                        'title' => $draft->title,
+                        'reason' => 'channels_not_published',
+                        'details' => $result['publication_error'],
+                    ];
+                }
+
+                $updates = [
                     'handle' => $result['handle'],
                     'shopify_id' => $result['id'],
-                ]);
+                ];
+                if (($result['published_to_channels'] ?? false) === true) {
+                    $updates['published'] = 'true';
+                }
+                $draft->update($updates);
                 $created++;
             } catch (\Throwable $e) {
                 $failed++;
@@ -160,6 +173,293 @@ final class NewProductDraftShopifyCreator
             'failures' => $failures,
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * @param  Collection<int, NewProductDraft>  $drafts
+     * @return array{
+     *   updated:int,
+     *   skipped_not_unlisted:int,
+     *   skipped_not_in_shopify:int,
+     *   failed:int,
+     *   failures: array<int, array{id:int|null, title:string|null, reason:string, details:string|null}>,
+     *   warnings: array<int, array{id:int|null, title:string|null, reason:string, details:string|null}>
+     * }
+     */
+    public function updateUnlistedDrafts(Collection $drafts): array
+    {
+        $updated = 0;
+        $skippedNotUnlisted = 0;
+        $skippedNotInShopify = 0;
+        $failed = 0;
+        $failures = [];
+        $warnings = [];
+
+        foreach ($drafts as $draft) {
+            if (! $draft instanceof NewProductDraft) {
+                continue;
+            }
+
+            if (! $draft->isUnlistedLaunch()) {
+                $skippedNotUnlisted++;
+                continue;
+            }
+
+            if (trim((string) ($draft->handle ?? '')) === '' && trim((string) ($draft->shopify_id ?? '')) === '') {
+                $skippedNotInShopify++;
+                continue;
+            }
+
+            try {
+                $result = $this->updateUnlistedProduct($draft);
+                if ($result['error'] !== null) {
+                    $failed++;
+                    $failures[] = [
+                        'id' => $draft->id,
+                        'title' => $draft->title,
+                        'reason' => $result['reason'] ?? 'shopify_user_error',
+                        'details' => $result['error'],
+                    ];
+                    continue;
+                }
+
+                if ($result['publication_error'] !== null) {
+                    $warnings[] = [
+                        'id' => $draft->id,
+                        'title' => $draft->title,
+                        'reason' => 'channels_not_published',
+                        'details' => $result['publication_error'],
+                    ];
+                } else {
+                    $draft->update(['published' => 'true']);
+                }
+
+                if ($result['image_missing']) {
+                    $warnings[] = [
+                        'id' => $draft->id,
+                        'title' => $draft->title,
+                        'reason' => 'image_missing',
+                        'details' => 'No image was on the draft, so no image was sent.',
+                    ];
+                }
+
+                $updated++;
+            } catch (\Throwable $e) {
+                $failed++;
+                $failures[] = [
+                    'id' => $draft->id,
+                    'title' => $draft->title,
+                    'reason' => 'exception',
+                    'details' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return [
+            'updated' => $updated,
+            'skipped_not_unlisted' => $skippedNotUnlisted,
+            'skipped_not_in_shopify' => $skippedNotInShopify,
+            'failed' => $failed,
+            'failures' => $failures,
+            'warnings' => $warnings,
+        ];
+    }
+
+    /**
+     * @return array{error:?string, reason:?string, publication_error:?string, image_missing:bool}
+     */
+    private function updateUnlistedProduct(NewProductDraft $draft): array
+    {
+        $remote = $this->existingProductForUpdate($draft);
+        if ($remote === null) {
+            return [
+                'error' => 'The Shopify product for this draft could not be found.',
+                'reason' => 'missing_shopify_product',
+                'publication_error' => null,
+                'image_missing' => false,
+            ];
+        }
+
+        $originalHandle = trim((string) ($draft->handle ?? ''));
+        $input = $this->unlistedUpdateInput($draft, $remote);
+        $data = $this->client->graphql($this->productSetMutation(false), ['input' => $input]);
+        $payload = is_array($data['productSet'] ?? null) ? $data['productSet'] : null;
+        $error = $this->userErrorMessage(
+            is_array($payload) ? (array) ($payload['userErrors'] ?? []) : [],
+            'Missing productSet payload.'
+        );
+        if (! is_array($payload)) {
+            $error = 'Missing productSet payload.';
+        }
+        if ($error !== null) {
+            return [
+                'error' => $error,
+                'reason' => 'shopify_user_error',
+                'publication_error' => null,
+                'image_missing' => false,
+            ];
+        }
+
+        $returnedHandle = trim((string) data_get($payload, 'product.handle', ''));
+        if ($originalHandle !== '' && $returnedHandle !== '' && $returnedHandle !== $originalHandle) {
+            return [
+                'error' => "Shopify handle is {$returnedHandle}; the existing handle was not changed.",
+                'reason' => 'handle_changed',
+                'publication_error' => null,
+                'image_missing' => false,
+            ];
+        }
+
+        $productId = trim((string) data_get($payload, 'product.id', $remote['id']));
+        $publicationError = $this->publishUnlistedProductToAllChannels($productId);
+
+        return [
+            'error' => null,
+            'reason' => null,
+            'publication_error' => $publicationError,
+            'image_missing' => $this->unlistedImageFile($draft) === null,
+        ];
+    }
+
+    /**
+     * @param  array{id:string, variants:array<int, array{id:string, sku:string}>}  $remote
+     * @return array<string, mixed>
+     */
+    private function unlistedUpdateInput(NewProductDraft $draft, array $remote): array
+    {
+        $input = $this->productSetInput($draft, false);
+        unset($input['productOptions'], $input['handle']);
+        $input['id'] = $remote['id'];
+        $input['status'] = 'UNLISTED';
+
+        $variantId = $this->matchingRemoteVariantId($draft, $remote['variants']);
+        if ($variantId !== null && isset($input['variants'][0]) && is_array($input['variants'][0])) {
+            $input['variants'][0]['id'] = $variantId;
+            unset($input['variants'][0]['optionValues'], $input['variants'][0]['inventoryQuantities']);
+        } else {
+            unset($input['variants']);
+        }
+
+        return $input;
+    }
+
+    /**
+     * @param  array<int, array{id:string, sku:string}>  $variants
+     */
+    private function matchingRemoteVariantId(NewProductDraft $draft, array $variants): ?string
+    {
+        $sku = trim((string) ($draft->sku ?? ''));
+        foreach ($variants as $variant) {
+            if ($sku !== '' && $this->sameSku((string) ($variant['sku'] ?? ''), $sku)) {
+                $id = trim((string) ($variant['id'] ?? ''));
+
+                return $id !== '' ? $id : null;
+            }
+        }
+
+        if (count($variants) === 1) {
+            $id = trim((string) ($variants[0]['id'] ?? ''));
+
+            return $id !== '' ? $id : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array{id:string, variants:array<int, array{id:string, sku:string}>}|null
+     */
+    private function existingProductForUpdate(NewProductDraft $draft): ?array
+    {
+        $productId = $this->shopifyProductGid($draft);
+        if ($productId !== null) {
+            $data = $this->client->graphql($this->productForUpdateQuery(), ['id' => $productId]);
+            $product = $data['product'] ?? null;
+            if (is_array($product)) {
+                return $this->remoteProduct($product);
+            }
+        }
+
+        $handle = trim((string) ($draft->handle ?? ''));
+        if ($handle === '') {
+            return null;
+        }
+
+        $data = $this->client->graphql($this->productForUpdateByHandleQuery(), ['handle' => $handle]);
+        $product = $data['productByHandle'] ?? null;
+
+        return is_array($product) ? $this->remoteProduct($product) : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $product
+     * @return array{id:string, variants:array<int, array{id:string, sku:string}>}|null
+     */
+    private function remoteProduct(array $product): ?array
+    {
+        $id = trim((string) ($product['id'] ?? ''));
+        if ($id === '') {
+            return null;
+        }
+
+        $variants = [];
+        foreach ((array) data_get($product, 'variants.nodes', []) as $node) {
+            if (! is_array($node)) {
+                continue;
+            }
+            $variantId = trim((string) ($node['id'] ?? ''));
+            if ($variantId === '') {
+                continue;
+            }
+            $variants[] = [
+                'id' => $variantId,
+                'sku' => trim((string) ($node['sku'] ?? '')),
+            ];
+        }
+
+        return ['id' => $id, 'variants' => $variants];
+    }
+
+    private function shopifyProductGid(NewProductDraft $draft): ?string
+    {
+        $id = trim((string) ($draft->shopify_id ?? ''));
+        if ($id === '') {
+            return null;
+        }
+        if (str_starts_with($id, 'gid://')) {
+            return $id;
+        }
+        if (ctype_digit($id)) {
+            return 'gid://shopify/Product/'.$id;
+        }
+
+        return $id;
+    }
+
+    private function productForUpdateQuery(): string
+    {
+        return <<<'GQL'
+query ProductForUnlistedUpdate($id: ID!) {
+  product(id: $id) {
+    id
+    handle
+    variants(first: 10) { nodes { id sku } }
+  }
+}
+GQL;
+    }
+
+    private function productForUpdateByHandleQuery(): string
+    {
+        return <<<'GQL'
+query ProductForUnlistedUpdateByHandle($handle: String!) {
+  productByHandle(handle: $handle) {
+    id
+    handle
+    variants(first: 10) { nodes { id sku } }
+  }
+}
+GQL;
     }
 
     /**
@@ -229,7 +529,7 @@ final class NewProductDraftShopifyCreator
         $this->clearManualReview($draft);
         $this->recordInitialInventory($draft);
 
-        return $this->success($product);
+        return $this->finishUnlistedLaunch($draft, $product);
     }
 
     private function recordInitialInventory(NewProductDraft $draft): void
@@ -313,7 +613,7 @@ final class NewProductDraftShopifyCreator
     /**
      * @return array<string, mixed>
      */
-    private function productSetInput(NewProductDraft $draft): array
+    private function productSetInput(NewProductDraft $draft, bool $includeInventory = true): array
     {
         $price = $this->priceForShopify($draft);
         $input = [
@@ -323,7 +623,7 @@ final class NewProductDraftShopifyCreator
                 'name' => 'Title',
                 'values' => [['name' => 'Default Title']],
             ]],
-            'variants' => [$this->variantSetInput($draft, (string) $price)],
+            'variants' => [$this->variantSetInput($draft, (string) $price, $includeInventory)],
             'metafields' => $this->metafields($draft),
         ];
 
@@ -361,7 +661,7 @@ final class NewProductDraftShopifyCreator
     /**
      * @return array<string, mixed>
      */
-    private function variantSetInput(NewProductDraft $draft, string $price): array
+    private function variantSetInput(NewProductDraft $draft, string $price, bool $includeInventory = true): array
     {
         $variant = [
             'optionValues' => [[
@@ -382,7 +682,7 @@ final class NewProductDraftShopifyCreator
             $variant['barcode'] = $sku;
             $inventoryItem['sku'] = $sku;
         }
-        if ($this->sendsInventory($draft)) {
+        if ($includeInventory && $this->sendsInventory($draft)) {
             $inventoryItem['tracked'] = true;
             $variant['inventoryQuantities'] = [[
                 'locationId' => $this->inventoryLocationId(),
@@ -502,7 +802,7 @@ final class NewProductDraftShopifyCreator
 
         $this->clearManualReview($draft);
 
-        return $this->success($product);
+        return $this->finishUnlistedLaunch($draft, $product);
     }
 
     /**
@@ -615,6 +915,108 @@ final class NewProductDraftShopifyCreator
         }
 
         return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $product
+     * @return array{id:?string, handle:?string, error:?string, media_error:?string, copy_error:?string, failure_reason:?string, publication_error:?string, published_to_channels:bool}
+     */
+    private function finishUnlistedLaunch(NewProductDraft $draft, array $product): array
+    {
+        $publicationError = null;
+        $publishedToChannels = false;
+        $productId = trim((string) ($product['id'] ?? ''));
+        if ($draft->isUnlistedLaunch() && $productId !== '' && $this->unlistedImageFile($draft) !== null) {
+            $publicationError = $this->publishUnlistedProductToAllChannels($productId);
+            $publishedToChannels = $publicationError === null;
+        }
+
+        $result = $this->success($product);
+        $result['publication_error'] = $publicationError;
+        $result['published_to_channels'] = $publishedToChannels;
+
+        return $result;
+    }
+
+    public function publishUnlistedProductToAllChannels(string $productId): ?string
+    {
+        try {
+            $publicationIds = $this->allPublicationIds();
+        } catch (\Throwable $e) {
+            return $e->getMessage();
+        }
+
+        if ($publicationIds === []) {
+            return 'Shopify did not return any sales channels to publish to.';
+        }
+
+        try {
+            $data = $this->client->graphql($this->publishToChannelsMutation(), [
+                'id' => $productId,
+                'input' => array_map(
+                    fn (string $publicationId): array => ['publicationId' => $publicationId],
+                    $publicationIds
+                ),
+            ]);
+        } catch (\Throwable $e) {
+            return $e->getMessage();
+        }
+
+        return $this->userErrorMessage(
+            (array) data_get($data, 'publishablePublish.userErrors', []),
+            'Shopify did not publish the product to every sales channel.'
+        );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function allPublicationIds(): array
+    {
+        $ids = [];
+        $after = null;
+
+        do {
+            $data = $this->client->graphql($this->salesChannelsQuery(), ['after' => $after]);
+            foreach ((array) data_get($data, 'publications.nodes', []) as $publication) {
+                if (! is_array($publication)) {
+                    continue;
+                }
+                $id = trim((string) ($publication['id'] ?? ''));
+                if ($id !== '') {
+                    $ids[] = $id;
+                }
+            }
+            $pageInfo = (array) data_get($data, 'publications.pageInfo', []);
+            $after = ($pageInfo['hasNextPage'] ?? false) === true
+                ? (trim((string) ($pageInfo['endCursor'] ?? '')) ?: null)
+                : null;
+        } while ($after !== null);
+
+        return array_values(array_unique($ids));
+    }
+
+    private function salesChannelsQuery(): string
+    {
+        return <<<'GQL'
+query SalesChannels($after: String) {
+  publications(first: 100, after: $after) {
+    nodes { id }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+GQL;
+    }
+
+    private function publishToChannelsMutation(): string
+    {
+        return <<<'GQL'
+mutation PublishUnlistedProduct($id: ID!, $input: [PublicationInput!]!) {
+  publishablePublish(id: $id, input: $input) {
+    userErrors { field message }
+  }
+}
+GQL;
     }
 
     /**

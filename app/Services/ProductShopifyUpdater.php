@@ -540,7 +540,7 @@ final class ProductShopifyUpdater
                     $scopeSource = 'explicit_full_request';
                 }
             } else {
-                if (!$this->partialApprovalService->isActiveProduct($product)) {
+                if (!$this->partialApprovalService->isActiveProduct($product) && !$this->isUnlistedLaunchProduct($product)) {
                     $skippedNotApproved++;
                     logger()->warning('Shopify product sync rejected', [
                         'origin' => 'products',
@@ -1628,6 +1628,32 @@ private function updateProduct(Product $product, array $scopes, array $coreField
             $warnings,
             $this->updateImages($product, $productId, $imageRows, $details)
         );
+        if ($this->isUnlistedLaunchProduct($product)) {
+            $publicationError = app(NewProductDraftShopifyCreator::class)->publishUnlistedProductToAllChannels($productId);
+            if ($publicationError !== null) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => $publicationError,
+                ];
+            } else {
+                $product->update(['published' => 'true']);
+                $shopifyId = trim((string) ($product->shopify_id ?? ''));
+                $handle = trim((string) ($product->handle ?? ''));
+                if ($shopifyId !== '' || $handle !== '') {
+                    NewProductDraft::query()
+                        ->where('unlisted_launch', true)
+                        ->where(function ($query) use ($shopifyId, $handle): void {
+                            if ($shopifyId !== '') {
+                                $query->orWhere('shopify_id', $shopifyId);
+                            }
+                            if ($handle !== '') {
+                                $query->orWhere('handle', $handle);
+                            }
+                        })
+                        ->update(['published' => 'true']);
+                }
+            }
+        }
     }
 
     if ($syncImages) {
@@ -6250,6 +6276,27 @@ GQL;
         }
         $trimmed = trim((string) $value);
         return $trimmed === '';
+    }
+
+    private function isUnlistedLaunchProduct(Product $product): bool
+    {
+        $shopifyId = trim((string) ($product->shopify_id ?? ''));
+        $handle = trim((string) ($product->handle ?? ''));
+        if ($shopifyId === '' && $handle === '') {
+            return false;
+        }
+
+        return NewProductDraft::query()
+            ->where('unlisted_launch', true)
+            ->where(function ($query) use ($shopifyId, $handle): void {
+                if ($shopifyId !== '') {
+                    $query->orWhere('shopify_id', $shopifyId);
+                }
+                if ($handle !== '') {
+                    $query->orWhere('handle', $handle);
+                }
+            })
+            ->exists();
     }
 
     private function isBlockedByShopifyMissingDraft(Product $product): bool

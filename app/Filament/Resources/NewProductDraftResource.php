@@ -82,6 +82,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use App\Jobs\NewProductDraftShopifyCreateJob;
+use App\Jobs\NewProductDraftShopifyUnlistedUpdateJob;
 use App\Jobs\SendNewProductDraftAssignmentEmailJob;
 use App\Jobs\SendNewProductDraftAssignmentSlackJob;
 use Illuminate\Database\Eloquent\Builder;
@@ -1619,7 +1620,7 @@ class NewProductDraftResource extends Resource
                                         ->default('false'),
                                     Forms\Components\Toggle::make('unlisted_launch')
                                         ->label('Unlisted launch')
-                                        ->helperText('Super admin only, and off by default. When on, Create in Shopify sends this product as unlisted with its tag, price (including 0), inventory, description, UVP, SEO, and image. The normal approval and complementary rules stay in place while this is off.')
+                                        ->helperText('Super admin only, and off by default. When on, Create in Shopify sends this product as unlisted with its tag, price (including 0), inventory, description, UVP, SEO, and image. If an image is included, Shopify also publishes it to every sales channel. The normal approval rules stay in place while this is off.')
                                         ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                                         ->dehydrated(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                                         ->default(false)
@@ -4699,12 +4700,12 @@ class NewProductDraftResource extends Resource
                         ->color('warning')
                         ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                         ->requiresConfirmation()
-                        ->modalDescription('Selected products that are not in Shopify yet will launch as unlisted, with their own tag and without the normal approval rules. Turn this off to put a product back on the normal launch.')
+                        ->modalDescription('Marks the selected drafts as an unlisted launch, including drafts already in Shopify. It does not send anything to Shopify.')
                         ->action(function ($records): void {
                             $enabled = 0;
                             $skipped = 0;
                             foreach ($records as $record) {
-                                if (! $record instanceof NewProductDraft || filled(trim((string) ($record->handle ?? '')))) {
+                                if (! $record instanceof NewProductDraft) {
                                     $skipped++;
                                     continue;
                                 }
@@ -4745,6 +4746,35 @@ class NewProductDraftResource extends Resource
                             self::sendNotification(Notification::make()
                                 ->title('Unlisted launch disabled')
                                 ->body("Disabled: {$disabled}.")
+                                ->success()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('updateUnlisted')
+                        ->label('Update unlisted')
+                        ->icon('heroicon-o-arrow-up-tray')
+                        ->color('warning')
+                        ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                        ->requiresConfirmation()
+                        ->modalDescription('Updates drafts that are already in Shopify. It sends the current title, description, tag, price, SEO, UVP, and image, keeps the handle unchanged, leaves the stock quantity alone, keeps the status unlisted, and publishes to every sales channel.')
+                        ->action(function ($records): void {
+                            $draftIds = $records->pluck('id')->all();
+                            if ($draftIds === []) {
+                                self::sendNotification(Notification::make()
+                                    ->title('Nothing to queue')
+                                    ->body('No drafts selected.')
+                                    ->warning()
+                                );
+
+                                return;
+                            }
+
+                            app(AsyncJobStateService::class)->markQueued(AsyncJobStateService::NEW_PRODUCT_SHOPIFY_UNLISTED_UPDATE);
+                            NewProductDraftShopifyUnlistedUpdateJob::dispatch($draftIds, (int) Auth::id());
+
+                            self::sendNotification(Notification::make()
+                                ->title('Unlisted update queued')
+                                ->body('The update has been queued for drafts already in Shopify. The handle is not changed. You will be notified when it finishes.')
                                 ->success()
                             );
                         })

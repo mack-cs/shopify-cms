@@ -11,6 +11,7 @@ class AsyncJobStateService
     public const COMPLEMENTARY_AUDIT = 'complementary_audit';
     public const COMPLEMENTARY_RECONCILIATION = 'complementary_reconciliation';
     public const NEW_PRODUCT_SHOPIFY_CREATE = 'new_product_shopify_create';
+    public const NEW_PRODUCT_SHOPIFY_UNLISTED_UPDATE = 'new_product_shopify_unlisted_update';
 
     /**
      * @return array{is_running:bool,count:int,started_at:?Carbon}

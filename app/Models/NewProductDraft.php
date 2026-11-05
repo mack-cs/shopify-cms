@@ -195,7 +195,6 @@ class NewProductDraft extends Model
 
             if ($draft->isUnlistedLaunch()) {
                 $draft->status = 'unlisted';
-                $draft->published = 'false';
                 $draft->tags = $draft->tagsForUnlistedLaunch();
             } else {
                 $draft->applyDefaultSaleTags();
