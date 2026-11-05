@@ -343,6 +343,10 @@ it('updates an unlisted product already in Shopify without changing the handle o
         ->and($input['status'])->toBe('UNLISTED')
         ->and($input)->not->toHaveKey('handle')
         ->and($input['variants'][0])->not->toHaveKey('inventoryQuantities')
+        ->and($input['variants'][0]['optionValues'])->toBe([[
+            'optionName' => 'Title',
+            'name' => 'Default Title',
+        ]])
         ->and($input['variants'][0]['id'])->toBe('gid://shopify/ProductVariant/505')
         ->and($input['files'][0]['originalSource'])->toBe('https://cdn.example.com/crystal.jpg')
         ->and($draft->fresh()->handle)->toBe('the-crystal-edition')

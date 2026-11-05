@@ -328,14 +328,14 @@ final class NewProductDraftShopifyCreator
     private function unlistedUpdateInput(NewProductDraft $draft, array $remote): array
     {
         $input = $this->productSetInput($draft, false);
-        unset($input['productOptions'], $input['handle']);
+        unset($input['handle']);
         $input['id'] = $remote['id'];
         $input['status'] = 'UNLISTED';
 
         $variantId = $this->matchingRemoteVariantId($draft, $remote['variants']);
         if ($variantId !== null && isset($input['variants'][0]) && is_array($input['variants'][0])) {
             $input['variants'][0]['id'] = $variantId;
-            unset($input['variants'][0]['optionValues'], $input['variants'][0]['inventoryQuantities']);
+            unset($input['variants'][0]['inventoryQuantities']);
         } else {
             unset($input['variants']);
         }
