@@ -81,6 +81,7 @@ class NewProductDraft extends Model
         'is_on_sale',
         'color_string',
         'status',
+        'unlisted_launch',
         'published',
         'image_path',
         'image_url',
@@ -129,6 +130,7 @@ class NewProductDraft extends Model
         'shopify_missing_detected_at' => 'datetime',
         'shopify_missing_sync_blocked' => 'boolean',
         'is_on_sale' => 'boolean',
+        'unlisted_launch' => 'boolean',
         'bundle_product_ids' => 'array',
         'bundle_component_quantities' => 'array',
         'bundle_image_urls' => 'array',
@@ -162,13 +164,15 @@ class NewProductDraft extends Model
                 $draft->variant_weight_unit = self::DEFAULT_VARIANT_WEIGHT_UNIT;
             }
 
-            $draft->tags = TagNormalizer::normalizeFromArray(
-                app(NewInTagService::class)->tagsForNewProduct(
-                    TagNormalizer::parseTokens($draft->tags),
-                    $draft->type,
-                    $draft->title
-                )
-            );
+            if (! $draft->isUnlistedLaunch()) {
+                $draft->tags = TagNormalizer::normalizeFromArray(
+                    app(NewInTagService::class)->tagsForNewProduct(
+                        TagNormalizer::parseTokens($draft->tags),
+                        $draft->type,
+                        $draft->title
+                    )
+                );
+            }
         });
 
         static::saving(function (NewProductDraft $draft): void {
@@ -189,7 +193,13 @@ class NewProductDraft extends Model
                 }
             }
 
-            $draft->applyDefaultSaleTags();
+            if ($draft->isUnlistedLaunch()) {
+                $draft->status = 'unlisted';
+                $draft->published = 'false';
+                $draft->tags = $draft->tagsForUnlistedLaunch();
+            } else {
+                $draft->applyDefaultSaleTags();
+            }
         });
     }
 
@@ -243,6 +253,27 @@ class NewProductDraft extends Model
     public function setIsOnSaleAttribute(mixed $value): void
     {
         $this->attributes['is_on_sale'] = self::booleanAttributeValue($value) ? 1 : 0;
+    }
+
+    private function tagsForUnlistedLaunch(): ?string
+    {
+        $blocked = array_merge(
+            NewInTagService::TAGS,
+            self::DEFAULT_NEW_PRODUCT_TAGS,
+            [self::LEGACY_ALL_PRODUCTS_TAG]
+        );
+        $tags = array_values(array_filter(
+            TagNormalizer::parseTokens((string) ($this->tags ?? '')),
+            function (string $tag) use ($blocked): bool {
+                if (in_array($tag, $blocked, true)) {
+                    return false;
+                }
+
+                return ! str_ends_with($tag, '-new-in');
+            }
+        ));
+
+        return TagNormalizer::normalizeFromArray($tags);
     }
 
     private function applyDefaultSaleTags(): void
@@ -493,6 +524,11 @@ class NewProductDraft extends Model
         return $this->approvalsForCurrentVersion()
             ->distinct('user_id')
             ->count('user_id');
+    }
+
+    public function isUnlistedLaunch(): bool
+    {
+        return (bool) $this->unlisted_launch;
     }
 
     public function isApprovedByTwo(): bool

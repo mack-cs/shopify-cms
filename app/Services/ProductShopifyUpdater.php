@@ -2766,6 +2766,7 @@ GQL;
         return match ($normalized) {
             'active' => 'ACTIVE',
             'archived' => 'ARCHIVED',
+            'unlisted' => 'UNLISTED',
             default => 'DRAFT',
         };
     }

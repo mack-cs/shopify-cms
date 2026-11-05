@@ -1608,6 +1608,7 @@ class NewProductDraftResource extends Resource
                                             'draft' => 'draft',
                                             'active' => 'active',
                                             'archived' => 'archived',
+                                            'unlisted' => 'unlisted',
                                         ])
                                         ->default('draft'),
                                     Select::make('published')
@@ -1616,6 +1617,13 @@ class NewProductDraftResource extends Resource
                                             'false' => 'false',
                                         ])
                                         ->default('false'),
+                                    Forms\Components\Toggle::make('unlisted_launch')
+                                        ->label('Unlisted launch')
+                                        ->helperText('Super admin only, and off by default. When on, Create in Shopify sends this product as unlisted with its tag, price (including 0), inventory, description, UVP, SEO, and image. The normal approval and complementary rules stay in place while this is off.')
+                                        ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                                        ->dehydrated(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                                        ->default(false)
+                                        ->columnSpanFull(),
                                 ])
                                 ->columnSpanFull(),
 
@@ -4293,6 +4301,36 @@ class NewProductDraftResource extends Resource
                             )
                         );
                     }),
+                Tables\Actions\Action::make('importUnlistedLaunch')
+                    ->label('Import unlisted launch')
+                    ->color('warning')
+                    ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                    ->form([
+                        Forms\Components\FileUpload::make('file')
+                            ->label('Unlisted launch CSV')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports')
+                            ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
+                            ->helperText('Imports this file as unlisted products. The tag, name, description, UVP, SEO, price, and inventory are saved. Add images on each draft, then use Create in Shopify. The normal Import CSV is unchanged.'),
+                    ])
+                    ->action(function (array $data, NewProductDraftCsvImporter $importer): void {
+                        $path = Storage::disk('local')->path($data['file']);
+                        $result = $importer->importFromPath($path, unlistedLaunch: true);
+                        $failedSkus = array_values(array_filter(
+                            $result['failed_skus'] ?? [],
+                            fn (mixed $sku): bool => is_string($sku) && trim($sku) !== ''
+                        ));
+
+                        self::sendNotification(Notification::make()
+                            ->title('Unlisted launch import complete')
+                            ->body(
+                                "Created: {$result['created']}. Updated: {$result['updated']}. SEO saved: {$result['seo_drafts_upserted']}."
+                                .($failedSkus === [] ? '' : ' Failed SKUs: '.implode(', ', $failedSkus))
+                            )
+                            ->status($failedSkus === [] ? 'success' : 'warning')
+                        );
+                    }),
                 Tables\Actions\Action::make('importSaleUpdates')
                     ->label('Import Sale Updates')
                     ->icon('heroicon-o-tag')
@@ -4655,6 +4693,62 @@ class NewProductDraftResource extends Resource
                             );
                         })
                         ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('enableUnlistedLaunch')
+                        ->label('Enable unlisted launch')
+                        ->icon('heroicon-o-eye-slash')
+                        ->color('warning')
+                        ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                        ->requiresConfirmation()
+                        ->modalDescription('Selected products that are not in Shopify yet will launch as unlisted, with their own tag and without the normal approval rules. Turn this off to put a product back on the normal launch.')
+                        ->action(function ($records): void {
+                            $enabled = 0;
+                            $skipped = 0;
+                            foreach ($records as $record) {
+                                if (! $record instanceof NewProductDraft || filled(trim((string) ($record->handle ?? '')))) {
+                                    $skipped++;
+                                    continue;
+                                }
+                                $record->update([
+                                    'unlisted_launch' => true,
+                                    'status' => 'unlisted',
+                                    'published' => 'false',
+                                ]);
+                                $enabled++;
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Unlisted launch enabled')
+                                ->body("Enabled: {$enabled}. Skipped: {$skipped}.")
+                                ->success()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('disableUnlistedLaunch')
+                        ->label('Disable unlisted launch')
+                        ->icon('heroicon-o-eye')
+                        ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
+                        ->requiresConfirmation()
+                        ->modalDescription('Turns the unlisted launch off. Products that are not in Shopify yet return to draft and the normal approval rules.')
+                        ->action(function ($records): void {
+                            $disabled = 0;
+                            foreach ($records as $record) {
+                                if (! $record instanceof NewProductDraft || ! $record->isUnlistedLaunch()) {
+                                    continue;
+                                }
+                                $record->update([
+                                    'unlisted_launch' => false,
+                                    'status' => filled(trim((string) ($record->handle ?? ''))) ? $record->status : 'draft',
+                                ]);
+                                $disabled++;
+                            }
+
+                            self::sendNotification(Notification::make()
+                                ->title('Unlisted launch disabled')
+                                ->body("Disabled: {$disabled}.")
+                                ->success()
+                            );
+                        })
+                        ->deselectRecordsAfterCompletion(),
                     BulkAction::make('mergeToProducts')
                         ->label('Create In Shopify')
                         ->icon('heroicon-o-cloud-arrow-up')
@@ -4675,7 +4769,7 @@ class NewProductDraftResource extends Resource
 
                             self::sendNotification(Notification::make()
                                 ->title('Shopify create queued')
-                                ->body('The background job has been queued. Only handle-less drafts with 2 approvals will be created. You will be notified when it finishes.')
+                                ->body('The background job has been queued. Handle-less drafts with 2 approvals are created. Unlisted launch drafts are created without those approval rules. You will be notified when it finishes.')
                                 ->success()
                             );
                         })

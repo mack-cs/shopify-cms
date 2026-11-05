@@ -8,6 +8,7 @@ use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
+use App\Models\StyleProfile;
 use App\Models\Variant;
 use Illuminate\Support\Collection;
 
@@ -106,7 +107,7 @@ final class NewProductDraftProductSync
                 continue;
             }
 
-            if (! $draft->isApprovedByTwo()) {
+            if (! $draft->isApprovedByTwo() && ! $draft->isUnlistedLaunch()) {
                 $skippedUnapproved++;
 
                 continue;
@@ -256,6 +257,24 @@ final class NewProductDraftProductSync
             'seo_deindex' => $draft->seo_deindex,
             'batch' => $draft->batch,
         ];
+
+        if ($draft->isUnlistedLaunch()) {
+            $sku = strtolower(trim((string) ($draft->sku ?? '')));
+            $profile = $sku === ''
+                ? null
+                : StyleProfile::query()
+                    ->whereRaw('LOWER(TRIM(sku)) = ?', [$sku])
+                    ->orderByDesc('id')
+                    ->first();
+            $seoTitle = trim((string) ($profile?->draft_seo_title ?? ''));
+            $seoDescription = trim((string) ($profile?->draft_seo_description ?? ''));
+            if ($seoTitle !== '') {
+                $data['seo_title'] = $seoTitle;
+            }
+            if ($seoDescription !== '') {
+                $data['seo_description'] = $seoDescription;
+            }
+        }
 
         if ($attributes === null) {
             return array_filter($data, static fn ($value) => $value !== null);

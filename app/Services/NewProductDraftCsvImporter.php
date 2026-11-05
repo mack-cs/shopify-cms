@@ -44,7 +44,7 @@ final class NewProductDraftCsvImporter
      *   pricing_batch:?string
      * }
      */
-    public function importFromPath(string $absolutePath): array
+    public function importFromPath(string $absolutePath, bool $unlistedLaunch = false): array
     {
         $csv = Reader::createFromPath($absolutePath);
         $csv->setHeaderOffset(0);
@@ -58,6 +58,7 @@ final class NewProductDraftCsvImporter
             'product shopify id' => 'shopify_id',
             'sku' => 'sku',
             'title' => 'title',
+            'name' => 'title',
             'product name' => 'title',
             'description' => 'body_html',
             'description html' => 'body_html',
@@ -116,6 +117,7 @@ final class NewProductDraftCsvImporter
             'shop your vibe tag' => 'shop_your_vibe_tags',
             'shop your vibe tags' => 'shop_your_vibe_tags',
             'siblings tag' => 'sibling_collection',
+            'uvp' => 'uvp_short_paragraph',
             'uvp short paragraph' => 'uvp_short_paragraph',
             'bead colour finish' => 'bead_colour_finish',
             'bead color finish' => 'bead_colour_finish',
@@ -217,7 +219,8 @@ final class NewProductDraftCsvImporter
             &$seoCorrections,
             &$prepopulationApplied,
             &$prepopulationUnmatched,
-            $pricingBatch
+            $pricingBatch,
+            $unlistedLaunch
         ): void {
             foreach ($csv->getRecords() as $row) {
                 $total++;
@@ -424,6 +427,10 @@ final class NewProductDraftCsvImporter
                         continue;
                     }
 
+                    if ($unlistedLaunch) {
+                        continue;
+                    }
+
                     $length = StyleProfile::trimmedLength($seoDraftData[$field]);
                     if ($length >= $rule['min'] && $length <= $rule['max']) {
                         continue;
@@ -441,6 +448,12 @@ final class NewProductDraftCsvImporter
                 )));
                 if ($priceOverrides !== []) {
                     $payload['_csv_price_overrides'] = $priceOverrides;
+                }
+
+                if ($unlistedLaunch) {
+                    $data['unlisted_launch'] = true;
+                    $data['status'] = 'unlisted';
+                    $data['published'] = 'false';
                 }
 
                 if ($draft) {

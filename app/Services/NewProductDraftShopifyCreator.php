@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\NewProductDraft;
+use App\Models\StyleProfile;
 use App\Services\Inventory\InventoryAuditContext;
 use App\Services\Inventory\InventoryAuditRecorder;
 use Illuminate\Support\Collection;
@@ -61,7 +62,9 @@ final class NewProductDraftShopifyCreator
                 continue;
             }
 
-            if (!$draft->isApprovedByTwo()) {
+            $unlistedLaunch = $draft->isUnlistedLaunch();
+
+            if (! $unlistedLaunch && ! $draft->isApprovedByTwo()) {
                 $skippedNotApproved++;
                 continue;
             }
@@ -77,23 +80,25 @@ final class NewProductDraftShopifyCreator
                 continue;
             }
 
-            if (($draft->product?->has_errors ?? false) === true) {
+            if (! $unlistedLaunch && ($draft->product?->has_errors ?? false) === true) {
                 $skippedHasErrors++;
                 continue;
             }
 
-            if (!$this->complementaryProducts->hasRequiredMinimumForDraft($draft)) {
+            if (! $unlistedLaunch && ! $this->complementaryProducts->hasRequiredMinimumForDraft($draft)) {
                 $skippedMissingComplementary++;
                 continue;
             }
 
-            if ($this->availablePrice($draft) === null) {
+            if ($this->priceForShopify($draft) === null) {
                 $skippedHasErrors++;
                 $failures[] = [
                     'id' => $draft->id,
                     'title' => $draft->title,
                     'reason' => 'invalid_price',
-                    'details' => 'A valid price greater than zero is required before a draft can be sent to Shopify.',
+                    'details' => $unlistedLaunch
+                        ? 'A price of zero or more is required before an unlisted launch can be sent to Shopify.'
+                        : 'A valid price greater than zero is required before a draft can be sent to Shopify.',
                 ];
                 continue;
             }
@@ -241,9 +246,11 @@ final class NewProductDraftShopifyCreator
             execution: app()->runningInConsole() ? 'queue' : 'web',
             userId: $draft->created_by ? (int) $draft->created_by : null,
             processName: 'Product creation',
-            explanation: 'New product inventory was initialized while the Shopify product was created. The on-hand quantity sent with creation is zero. Shopify does not return an adjustment id for this call.',
+            explanation: $this->initialOnHandQuantity($draft) === 0
+                ? 'New product inventory was initialized while the Shopify product was created. The on-hand quantity sent with creation is zero. Shopify does not return an adjustment id for this call.'
+                : 'New product inventory was initialized while the Shopify product was created. The on-hand quantity sent with creation is '.$this->initialOnHandQuantity($draft).'. Shopify does not return an adjustment id for this call.',
             inventoryState: 'on_hand',
-            quantityAfter: 0,
+            quantityAfter: $this->initialOnHandQuantity($draft),
             sku: trim((string) ($draft->sku ?? '')) ?: null,
             locationId: $this->inventoryLocationId(),
             relatedType: NewProductDraft::class,
@@ -264,6 +271,24 @@ final class NewProductDraftShopifyCreator
         }
 
         return number_format($amount, 2, '.', '');
+    }
+
+    private function priceForShopify(NewProductDraft $draft): ?string
+    {
+        if ($draft->isUnlistedLaunch()) {
+            return $this->optionalMoney($draft->variant_price);
+        }
+
+        return $this->availablePrice($draft);
+    }
+
+    private function initialOnHandQuantity(NewProductDraft $draft): int
+    {
+        if (! $draft->isUnlistedLaunch()) {
+            return 0;
+        }
+
+        return max(0, (int) ($draft->variant_inventory_qty ?? 0));
     }
 
     private function optionalMoney(mixed $raw): ?string
@@ -290,7 +315,7 @@ final class NewProductDraftShopifyCreator
      */
     private function productSetInput(NewProductDraft $draft): array
     {
-        $price = $this->availablePrice($draft);
+        $price = $this->priceForShopify($draft);
         $input = [
             'title' => $draft->title,
             'status' => $this->mapStatus($draft->status ?? 'draft'),
@@ -317,6 +342,17 @@ final class NewProductDraftShopifyCreator
         $tags = TagNormalizer::parseTokens((string) ($draft->tags ?? ''));
         if ($tags !== []) {
             $input['tags'] = $tags;
+        }
+
+        if ($draft->isUnlistedLaunch()) {
+            $seo = $this->unlistedSeoInput($draft);
+            if ($seo !== []) {
+                $input['seo'] = $seo;
+            }
+            $file = $this->unlistedImageFile($draft);
+            if ($file !== null) {
+                $input['files'] = [$file];
+            }
         }
 
         return $input;
@@ -351,7 +387,7 @@ final class NewProductDraftShopifyCreator
             $variant['inventoryQuantities'] = [[
                 'locationId' => $this->inventoryLocationId(),
                 'name' => 'on_hand',
-                'quantity' => 0,
+                'quantity' => $this->initialOnHandQuantity($draft),
             ]];
         }
         if ($inventoryItem !== []) {
@@ -501,7 +537,7 @@ final class NewProductDraftShopifyCreator
             return 'Shopify did not return the variant and inventory item ids.';
         }
 
-        $price = $this->availablePrice($draft);
+        $price = $this->priceForShopify($draft);
         if ($price === null || $this->money($variant['price'] ?? null) !== $price) {
             return 'The Shopify variant price does not match the approved price.';
         }
@@ -529,8 +565,11 @@ final class NewProductDraftShopifyCreator
 
         if ($checkQuantity) {
             $onHand = $this->onHandQuantity($variant);
-            if ($onHand !== 0) {
-                return 'The initial on-hand quantity is not zero.';
+            $expectedOnHand = $this->initialOnHandQuantity($draft);
+            if ($onHand !== $expectedOnHand) {
+                return $expectedOnHand === 0
+                    ? 'The initial on-hand quantity is not zero.'
+                    : "The initial on-hand quantity is not {$expectedOnHand}.";
             }
         }
 
@@ -947,7 +986,63 @@ GQL;
         return match ($normalized) {
             'active' => 'ACTIVE',
             'archived' => 'ARCHIVED',
+            'unlisted' => 'UNLISTED',
             default => 'DRAFT',
         };
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function unlistedSeoInput(NewProductDraft $draft): array
+    {
+        $sku = strtolower(trim((string) ($draft->sku ?? '')));
+        $profile = $sku === ''
+            ? null
+            : StyleProfile::query()
+                ->whereRaw('LOWER(TRIM(sku)) = ?', [$sku])
+                ->orderByDesc('id')
+                ->first();
+        $title = trim((string) ($profile?->draft_seo_title ?? ''));
+        $description = trim((string) ($profile?->draft_seo_description ?? ''));
+        $seo = [];
+        if ($title !== '') {
+            $seo['title'] = $title;
+        }
+        if ($description !== '') {
+            $seo['description'] = $description;
+        }
+
+        return $seo;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    private function unlistedImageFile(NewProductDraft $draft): ?array
+    {
+        $source = trim((string) ($draft->imageUrl() ?? ''));
+        if ($source === '') {
+            return null;
+        }
+        if (! str_starts_with($source, 'http://') && ! str_starts_with($source, 'https://')) {
+            $source = url($source);
+        }
+        $sku = strtolower(trim((string) ($draft->sku ?? '')));
+        $alt = $sku === ''
+            ? ''
+            : trim((string) (StyleProfile::query()
+                ->whereRaw('LOWER(TRIM(sku)) = ?', [$sku])
+                ->orderByDesc('id')
+                ->value('draft_image_alt_text') ?? ''));
+        if ($alt === '') {
+            $alt = trim((string) ($draft->title ?? ''));
+        }
+
+        return [
+            'originalSource' => $source,
+            'alt' => $alt,
+            'contentType' => 'IMAGE',
+        ];
     }
 }

@@ -150,7 +150,7 @@ class ProductPartialApprovalService
     {
         return in_array(
             strtolower(trim((string) ($product->status ?? ''))),
-            ['active', 'draft'],
+            ['active', 'draft', 'unlisted'],
             true
         );
     }
