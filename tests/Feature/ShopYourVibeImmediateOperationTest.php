@@ -334,7 +334,7 @@ it('shows the created vibe after the queued operation completes', function () {
     Bus::assertDispatched(ApplyShopYourVibeOperation::class);
 
     app(ShopYourVibeWorkflow::class)->runImmediate($draft->id, $draft->operation['attempt']);
-    $page->call('setActiveTab', 'vibes')->call('pollPush')->assertDontSee('syv-indeterminate')->assertSee('Empty');
+    $page->call('setActiveTab', 'vibes')->call('pollPush')->assertDontSee('id="syv-status-banner"', false)->assertSee('Empty');
     expect($draft->fresh()->status)->toBe('synced')
         ->and(collect($draft->fresh()->desired['cards'])->pluck('name'))->toContain('Empty');
 });

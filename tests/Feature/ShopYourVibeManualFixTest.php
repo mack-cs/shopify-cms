@@ -231,6 +231,7 @@ it('shows the sorting panel error when Approve and Publish is refused', function
     app(ShopYourVibeEditing::class)->token = $this->heldTokens[$this->main];
     $this->draft = $this->sorting->submit($this->draft->id, $this->draft->revision, $this->reviewer->id, $this->main, $revision)->fresh();
     array_pop($this->fake->collections[$this->main]['products']['nodes']);
+      $this->fake->collections[$this->main]['productsCount']['count'] = count($this->fake->collections[$this->main]['products']['nodes']);
     $before = count(array_filter($this->fake->calls, fn ($call) => str_contains($call[0], 'VibeReorderProducts')));
 
     $this->actingAs($this->reviewer);

@@ -602,7 +602,7 @@ class ShopYourVibe extends Page
         $this->guard();
         $this->attempt(function () use ($gid): void {
             $existing = ShopYourVibeDraft::query()
-                ->select(['id', 'revision', 'status', 'collection_gid', 'pending', 'desired', 'editing_state'])
+                ->select(['id', 'revision', 'status', 'collection_gid', 'pending', 'desired', 'editing_state', 'refresh_state'])
                 ->where('collection_gid', $gid)
                 ->first();
             $this->refreshingCollection = false;
@@ -626,6 +626,7 @@ class ShopYourVibe extends Page
             } else {
                 $this->accept($existing);
                 $this->loadAssignmentOverview();
+                $this->refreshingCollection = app(\App\Services\ShopYourVibeRefresh::class)->active($existing->refresh_state);
                 $loaded = ShopYourVibeWorkflow::productsAreLoaded($existing->desired, $gid);
                 if ($loaded || $existing->pending) {
                     $this->hydratingCollection = false;

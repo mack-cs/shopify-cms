@@ -68,6 +68,24 @@ function vibeLoadProducts($test): void
     $test->draft = $test->workflow->loadProducts($test->draft->id, $test->draft->revision, 'gid://shopify/Metaobject/11');
 }
 
+function assertSyvSpinnersStayDeferred($page): void
+{
+    $dom = new DOMDocument;
+    @$dom->loadHTML($page->html());
+    $nodes = (new DOMXPath($dom))->query('//*[contains(concat(" ", normalize-space(@class), " "), " syv-spinner ") or contains(concat(" ", normalize-space(@class), " "), " syv-indeterminate ")]');
+    expect($nodes)->not->toBeFalse();
+    foreach ($nodes ?: [] as $node) {
+        $deferred = false;
+        for ($ancestor = $node; $ancestor instanceof DOMElement; $ancestor = $ancestor->parentNode) {
+            if ($ancestor->hasAttribute('wire:loading') || $ancestor->hasAttribute('hidden')) {
+                $deferred = true;
+                break;
+            }
+        }
+        expect($deferred)->toBeTrue();
+    }
+}
+
 function vibePush($test): void
 {
     $test->draft = $test->workflow->queue($test->draft->id, $test->draft->revision);
@@ -864,7 +882,7 @@ it('stages product additions removals and ordering, prevents duplicates, and nev
     }
 });
 
-it('retains failed product ordering after successful membership changes and retries only unfinished work', function () {
+it('retains confirmed membership and quarantines ordering after an unconfirmed transport failure', function () {
     $gid = 'gid://shopify/Collection/2';
     vibeLoadProducts($this);
     vibeEdit($this, 'add_products', ['collection_gid' => $gid, 'ids' => ['gid://shopify/Product/104']]);
@@ -874,7 +892,7 @@ it('retains failed product ordering after successful membership changes and retr
     expect($this->draft->pending)->toBeTrue()->and($this->draft->status)->toBe('failed')->and($this->draft->progress)->toContain('Product membership confirmed: Pearl');
     $this->fake->fail = null;
     vibePush($this);
-    expect($this->draft->pending)->toBeFalse();
+    expect($this->draft->pending)->toBeTrue()->and($this->draft->remote_jobs[$gid])->toStartWith('unconfirmed:');
     expect(collect($this->fake->mutations())->filter(fn ($call) => str_contains($call[0], 'VibeAddProducts')))->toHaveCount(1);
 });
 
@@ -985,7 +1003,8 @@ it('renders the workflow and only dispatches a push after the explicit action', 
     preg_match("/^manage\\('([^']+)'\\)$/", $action, $match);
     $gid = json_decode('"'.$match[1].'"', true, flags: JSON_THROW_ON_ERROR);
     $page->call('manage', $gid)->assertSee('Necklaces')->assertSee('Vibes')
-        ->assertDontSee('Loading collection products')->assertDontSee('syv-indeterminate')->assertDispatched('vibe-editor-opened');
+        ->assertDontSee('Loading collection products')->assertDispatched('vibe-editor-opened');
+    assertSyvSpinnersStayDeferred($page);
     expect($page->html())->not->toContain('@js(');
     $this->fake->calls = [];
     $page->call('reorderCards', ['gid://shopify/Metaobject/11', 'gid://shopify/Metaobject/12'])
@@ -1050,8 +1069,8 @@ it('clears the refresh banner after Refresh from Shopify fails', function () {
         ->assertSet('refreshingCollection', false)
         ->assertSee('Could not refresh collection products')
         ->assertSee('linked collection Pearl')
-        ->assertSee('Product 101')
-        ->assertDontSee('syv-spinner');
+        ->assertSee('Product 101');
+    assertSyvSpinnersStayDeferred($page);
     expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
         ->and($page->instance()->statusSnapshot()['phase'])->toBe('loaded')
         ->and($page->instance()->statusSnapshot()['polling'])->toBeFalse();
@@ -1195,8 +1214,8 @@ it('stops a failed refresh and leaves the loaded products visible', function () 
         ->assertSee('Could not refresh collection products')
         ->assertSee('linked collection Pearl')
         ->assertSee('Product 101')
-        ->assertSee('Retry')
-        ->assertDontSee('syv-spinner');
+        ->assertSee('Retry');
+    assertSyvSpinnersStayDeferred($page);
 
     expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
         ->and($page->instance()->statusSnapshot()['polling'])->toBeFalse()
@@ -1216,7 +1235,8 @@ it('ends a refresh when the progress cache has expired', function () {
 
     $opened = Livewire::test(ShopYourVibe::class)->call('manage', $gid);
     expect($opened->instance()->refreshingCollection)->toBeFalse();
-    $opened->assertSee('Product 101')->assertDontSee('syv-spinner');
+    $opened->assertSee('Product 101');
+    assertSyvSpinnersStayDeferred($opened);
 
     Cache::forget(ShopYourVibeWorkflow::progressKey($gid));
     $page = Livewire::test(ShopYourVibe::class)
@@ -1228,11 +1248,45 @@ it('ends a refresh when the progress cache has expired', function () {
         ->assertSet('refreshingCollection', false)
         ->assertSee('Could not refresh collection products')
         ->assertSee('The refresh did not finish. Existing products were kept.')
-        ->assertSee('Product 101')
-        ->assertDontSee('syv-spinner');
+        ->assertSee('Product 101');
+    assertSyvSpinnersStayDeferred($page);
 
     expect(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0)
         ->and(Cache::get(ShopYourVibeWorkflow::progressKey($gid))['state'])->toBe('failed');
+});
+
+it('keeps the refresh card only while that refresh is still running', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $gid = $this->draft->collection_gid;
+
+    $this->draft->update(['refresh_state' => [
+        'token' => 'running-refresh',
+        'state' => 'running',
+        'expires_at' => now()->timestamp + 600,
+        'stage' => 'Loading linked collection Pearl',
+    ]]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->assertSet('refreshingCollection', true)
+        ->assertSee('Refreshing collection products')
+        ->assertSee('Please refresh your page')
+        ->assertSee('Refresh page');
+
+    $this->draft->update(['refresh_state' => [
+        'token' => 'finished-refresh',
+        'state' => 'success',
+        'expires_at' => now()->timestamp + 600,
+        'stage' => 'Loading linked collection Pearl',
+        'message' => 'Collection loaded successfully.',
+    ]]);
+
+    Livewire::test(ShopYourVibe::class)
+        ->call('manage', $gid)
+        ->assertSet('refreshingCollection', false)
+        ->assertDontSee('Please refresh your page');
 });
 
 it('renders refreshed products when the refresh job completes', function () {
@@ -1256,8 +1310,8 @@ it('renders refreshed products when the refresh job completes', function () {
         ->assertSet('refreshingCollection', false)
         ->assertSet('refreshError', null)
         ->assertSee('Refreshed Product 101')
-        ->assertDontSee('Could not refresh collection products')
-        ->assertDontSee('syv-spinner');
+        ->assertDontSee('Could not refresh collection products');
+    assertSyvSpinnersStayDeferred($page);
 
     expect($page->instance()->statusSnapshot()['polling'])->toBeFalse()
         ->and($page->instance()->statusSnapshot()['phase'])->toBe('loaded');
@@ -1280,6 +1334,60 @@ it('runs a queued Shop Your Vibe refresh against the latest draft revision', fun
     expect($fresh->pending)->toBeTrue()
         ->and($fresh->revision)->toBeGreaterThan($oldRevision)
         ->and($card['name'])->toBe('Changed before worker runs');
+});
+
+it('saves new and renamed Shopify collections when Refresh from Shopify runs', function () {
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+    $stale = ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/2')->firstOrFail();
+    ShopifyCollection::withoutEvents(fn () => $stale->forceFill([
+        'handle' => 'old-pearl', 'title' => 'Old Pearl', 'draft_title' => 'Keep this draft', 'approval_version' => 4,
+    ])->save());
+    $this->fake->collections['gid://shopify/Collection/9'] = [
+        'id' => 'gid://shopify/Collection/9',
+        'title' => 'BRACELETS GOLD AND SILVER',
+        'handle' => 'bracelets-gold-and-silver',
+        'image' => ['url' => 'https://cdn.shopify.com/collection.jpg'],
+        'updatedAt' => '2026-09-09T12:00:00Z',
+        'sortOrder' => 'MANUAL',
+        'ruleSet' => null,
+        'productsCount' => ['count' => 0],
+        'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
+    ];
+
+    (new RefreshShopYourVibeParents('shop-your-vibe-parents:test', $this->user->id))
+        ->handle(app(ShopYourVibeShopify::class));
+
+    $renamed = ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/2')->latest('id')->firstOrFail();
+    $created = ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/9')->firstOrFail();
+    expect($renamed->handle)->toBe('pearl')
+        ->and($renamed->title)->toBe('Pearl')
+        ->and($renamed->draft_title)->toBe('Keep this draft')
+        ->and($renamed->approval_version)->toBe(5)
+        ->and($renamed->sync_status)->toBe(ShopifyCollection::SYNC_STATUS_PENDING)
+        ->and($created->handle)->toBe('bracelets-gold-and-silver')
+        ->and($created->title)->toBe('BRACELETS GOLD AND SILVER')
+        ->and($created->import_id)->toBe($this->import->id);
+
+    $created->delete();
+    $this->fake->collections['gid://shopify/Collection/8'] = [
+        'id' => 'gid://shopify/Collection/8',
+        'title' => 'PASTEL LINKS',
+        'handle' => 'bracelets-pastel-links',
+        'image' => ['url' => 'https://cdn.shopify.com/collection.jpg'],
+        'updatedAt' => '2026-09-09T12:00:00Z',
+        'sortOrder' => 'MANUAL',
+        'ruleSet' => null,
+        'productsCount' => ['count' => 0],
+        'products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
+    ];
+
+    (new RefreshShopYourVibeDraft($this->draft->id, $this->draft->fresh()->revision, false, $this->user->id))
+        ->handle(app(ShopYourVibeWorkflow::class));
+
+    expect(ShopifyCollection::where('shopify_id', 'gid://shopify/Collection/8')->value('handle'))
+        ->toBe('bracelets-pastel-links');
 });
 
 it('queues the Shop Your Vibe parent collection refresh cache rebuild', function () {
@@ -1692,6 +1800,7 @@ it('preserves a prepared draft position after the product receives a Shopify gid
         fn (int $id): array => $this->fake->products['gid://shopify/Product/'.$id],
         [101, 102, 103, 104],
     );
+    $this->fake->collections['gid://shopify/Collection/1']['productsCount']['count'] = 4;
     $draftProduct->update([
         'shopify_id' => 'gid://shopify/Product/104',
         'status' => 'ACTIVE',
@@ -1814,7 +1923,8 @@ it('uses the modal for adding a vibe and retains it on a failed selection', func
     $queued = $this->draft->fresh();
     expect($queued->status)->toBe('creating')->and($queued->pending)->toBeFalse();
     app(ShopYourVibeWorkflow::class)->runImmediate($queued->id, $queued->operation['attempt']);
-    $page->call('pollPush')->assertDontSee('Creating Vibe')->assertDontSee('syv-indeterminate');
+    $page->call('pollPush')->assertDontSee('Creating Vibe');
+    assertSyvSpinnersStayDeferred($page);
     expect($this->draft->fresh()->pending)->toBeFalse()->and($this->draft->fresh()->desired['cards'])->toHaveCount(3);
     $page->call('openCollectionPicker', true)->set('selectedCollectionGid', 'gid://shopify/Collection/2')->call('closeCollectionPicker')
         ->assertSet('addingCard', false)->assertSet('addingParent', false)->assertSet('selectedCollectionGid', '');
@@ -1939,7 +2049,9 @@ it('creates and publishes a new automated vibe collection with its image only on
     vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer',
         'image' => 'gid://shopify/MediaImage/1', 'image_url' => 'https://cdn.shopify.com/image.jpg']);
     $card = $this->draft->desired['cards'][2];
-    expect($this->fake->calls)->toBe([])->and($this->workflow->summary($this->draft)['New collections to publish'])->toBe(1);
+    expect(collect($this->fake->calls)->every(fn (array $call): bool => str_contains($call[0], 'collectionByIdentifier')))->toBeTrue()
+        ->and($this->fake->calls)->not->toBeEmpty()
+        ->and($this->workflow->summary($this->draft)['New collections to publish'])->toBe(1);
     vibePush($this);
     expect($this->draft->status)->toBe('synced')->and($this->draft->last_error)->toBeNull();
     $card = $this->draft->desired['cards'][2];
@@ -1973,11 +2085,11 @@ it('clears a stale pending banner after Shopify already confirmed a completed pu
         ],
     ]);
 
-    Livewire::test(ShopYourVibe::class)
+    $page = Livewire::test(ShopYourVibe::class)
         ->call('manage', 'gid://shopify/Collection/1')
         ->call('pollPush')
-        ->assertDontSee('Loading collection products')
-        ->assertDontSee('syv-indeterminate');
+        ->assertDontSee('Loading collection products');
+    assertSyvSpinnersStayDeferred($page);
 
     expect($this->draft->fresh()->pending)->toBeFalse()
         ->and($this->draft->fresh()->status)->toBe('synced');
@@ -2025,14 +2137,41 @@ it('keeps a new collection pending when publication fails and retries without re
     expect($this->draft->status)->toBe('synced')->and($this->fake->collections)->toHaveCount(5);
 });
 
-it('rejects existing handles locally and conflicting handles in Shopify', function () {
-    expect(fn () => vibeEdit($this, 'create_collection', ['title' => 'Pearl', 'handle' => 'pearl']))->toThrow(RuntimeException::class, 'handle already exists');
+it('rejects a handle Shopify still has', function () {
+    expect(fn () => vibeEdit($this, 'create_collection', ['title' => 'Pearl', 'handle' => 'pearl']))->toThrow(RuntimeException::class, 'already used in Shopify');
     vibeEdit($this, 'create_collection', ['title' => 'Golden Summer', 'handle' => 'golden-summer']);
     $this->fake->collections['gid://shopify/Collection/4']['handle'] = 'golden-summer';
     $this->fake->calls = [];
     vibePush($this);
     expect($this->draft->status)->toBe('failed')->and($this->draft->last_error)->toContain('already used in Shopify')
         ->and($this->fake->mutations())->toBe([]);
+});
+
+it('does not block a new vibe when only the stored catalogue has the handle', function () {
+    ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+        'import_id' => $this->import->id,
+        'shopify_id' => 'gid://shopify/Collection/999',
+        'title' => 'BRACELETS GOLD AND SILVER',
+        'handle' => 'bracelets-gold-and-silver',
+    ]));
+    $state = $this->draft->desired;
+    $state['parent']['title'] = 'Bracelets';
+    $state['parent']['handle'] = 'bracelets';
+    $this->draft->update(['desired' => $state, 'snapshot' => $state, 'pending' => false, 'status' => 'synced']);
+    $this->draft->refresh();
+    Role::findOrCreate(RolesEnum::Admin->value);
+    $this->user->assignRole(RolesEnum::Admin->value);
+    $this->actingAs($this->user);
+
+    $queued = $this->workflow->queueCreateVibe($this->draft->id, $this->draft->revision, [
+        'mode' => 'new',
+        'vibe_name' => 'GOLD & SILVER',
+        'image' => 'gid://shopify/MediaImage/1',
+        'image_url' => 'https://cdn.shopify.com/image.jpg',
+    ]);
+
+    expect($queued->status)->toBe('creating')
+        ->and($queued->operation['payload']['handle'])->toBe('bracelets-gold-and-silver');
 });
 
 it('drops an unpushed new collection when its vibe is removed', function () {

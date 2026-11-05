@@ -128,7 +128,7 @@ it('queues hydration for a legacy draft that never loaded its collection', funct
         ->and(substr_count($page->html(), 'You can continue using the CMS while this runs.'))->toBe(1)
         ->and($page->html())->toContain('syv-spinner')
         ->and($page->html())->not->toContain('x-bind:hidden="statusMode !== \'loading\'"')
-        ->and(substr_count($page->html(), 'syv-indeterminate'))->toBe(1)
+        ->and(substr_count($page->html(), 'class="syv-indeterminate" data-status-indeterminate'))->toBe(1)
         ->and($page->html())->not->toContain('x-text="statusProgress"')
         ->and($page->html())->toContain('data-products-loaded="0"')
         ->and($page->html())->toContain('data-poll="1"')
@@ -156,7 +156,7 @@ it('replaces the incomplete editor with products when hydration finishes', funct
         ->assertSee('Product 101')
         ->assertSee('Manual sorting enabled')
         ->assertDontSee('Loading collection products')
-        ->assertDontSee('syv-indeterminate')
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false)
         ->assertDontSee('Collection synchronization completed successfully.');
 
     $draft = ShopYourVibeDraft::query()->where('collection_gid', 'gid://shopify/Collection/1')->first();
@@ -218,7 +218,7 @@ it('opens a confirmed empty collection without calling Shopify', function () {
         ->assertSet('hydratingCollection', false)
         ->assertSee('Products (0)')
         ->assertSee('No products belong to this Shopify collection.')
-        ->assertDontSee('syv-indeterminate')
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false)
         ->assertDontSee('Loading collection products');
 
     expect($this->fake->calls)->toBe([])
@@ -240,7 +240,7 @@ it('opens a complete collection from local products without calling Shopify', fu
         ->assertSet('hydratingCollection', false)
         ->assertSee('Products (1)')
         ->assertSee('Product 101')
-        ->assertDontSee('syv-indeterminate')
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false)
         ->assertDontSee('Loading collection products');
 
     expect($this->fake->calls)->toBe([])
@@ -289,7 +289,7 @@ it('shows a failed hydration with a retry that can queue again after the uniquen
         ->assertSee(ShopYourVibeWorkflow::HYDRATION_FAILED_MESSAGE)
         ->assertSee('Retry')
         ->assertSee('Products (Not loaded)')
-        ->assertDontSee('syv-indeterminate')
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false)
         ->assertDontSee('No products belong to this Shopify collection.')
         ->assertDontSee('Up to date with Shopify');
 
@@ -400,7 +400,7 @@ it('records a failed hydration instead of treating the collection as empty', fun
         ->call('manage', 'gid://shopify/Collection/1')
         ->assertSee("Could not load collection products")
         ->assertDontSee('No products belong to this Shopify collection.')
-        ->assertDontSee('syv-indeterminate')
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false)
         ->assertDontSee('Up to date with Shopify');
 });
 
@@ -437,7 +437,7 @@ it('does not keep a loader when products are already loaded and a progress cache
 
     expect($status['polling'])->toBeFalse()
         ->and($status['state'])->toBe('success')
-        ->and($page->html())->not->toContain('syv-indeterminate');
+        ->and($page->html())->not->toContain('class="syv-indeterminate" data-status-indeterminate');
     $page->assertSee('Products (1)')
         ->assertDontSee('Loading collection products')
         ->assertDontSee('Collection synchronization completed successfully.');
@@ -453,5 +453,5 @@ it('does not keep a loader when products are already loaded and a progress cache
     expect($again->instance()->statusSnapshot()['polling'])->toBeFalse()
         ->and(DB::table('jobs')->where('queue', 'shop-your-vibe')->count())->toBe(0);
     $again->assertDontSee('Loading collection products')
-        ->assertDontSee('syv-indeterminate');
+        ->assertDontSee('class="syv-indeterminate" data-status-indeterminate', false);
 });

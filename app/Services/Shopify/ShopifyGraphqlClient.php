@@ -17,6 +17,7 @@ final class ShopifyGraphqlClient
      */
     public function query(string $query, array $variables = []): array
     {
+        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql($query, $variables);
         $shop = $this->tokenResolver->shop();
         $token = $this->tokenResolver->token();
         $version = config('services.shopify.api_version', '2026-01');

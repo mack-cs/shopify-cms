@@ -14,7 +14,12 @@ final class InventoryAccessService
 
     public function canUpdateInventory(?Authenticatable $user): bool
     {
-        return $user?->can(PermissionEnum::InventoryUpdate->value) ?? false;
+        return $user !== null && (bool) $user->is_active && $user->can(PermissionEnum::InventoryUpdate->value);
+    }
+
+    public function authorizeInventory(?int $userId): void
+    {
+        abort_unless($this->canUpdateInventory(\App\Models\User::find($userId)), 403, 'Active inventory adjustment permission is required.');
     }
 
     public function canUpdateStatus(?Authenticatable $user): bool

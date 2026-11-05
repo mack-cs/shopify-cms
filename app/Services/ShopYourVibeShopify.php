@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Exceptions\ShopYourVibeCollectionUnavailableException;
+use App\Models\Import;
 use App\Models\ShopifyCollection;
 use App\Models\ShopYourVibeCollectionMapping;
 use Illuminate\Support\Facades\Http;
@@ -93,6 +94,27 @@ GQL, ['after' => $after]);
         return $result;
     }
 
+    /** Writes Shopify's current collection id, title, and handle into the stored catalogue. */
+    public function syncStoredCollections(?int $userId = null): void
+    {
+        $after = null;
+        do {
+            $data = $this->graphql(<<<'GQL'
+query VibeCollectionCatalogue($after: String) { collections(first: 100, after: $after) {
+  nodes { id title handle } pageInfo { hasNextPage endCursor }
+} }
+GQL, ['after' => $after]);
+            $connection = $data['collections'] ?? null;
+            if (! is_array($connection) || ! isset($connection['nodes'], $connection['pageInfo'])) {
+                throw new RuntimeException('Shopify did not return the collection catalogue. Stored collections were left unchanged.');
+            }
+            foreach ($connection['nodes'] as $node) {
+                $this->rememberCollection($node, $userId);
+            }
+            $after = $this->cursor($connection);
+        } while ($after !== null);
+    }
+
     public function parent(string $gid): array
     {
         $this->gid($gid, 'Collection');
@@ -156,12 +178,35 @@ GQL, ['query' => 'handle:'.json_encode($handle)]);
 
     public function collection(string $gid): array
     {
+        return $this->stableCollectionRead(fn () => $this->readCollection($gid));
+    }
+
+    private function stableCollectionRead(callable $read): array
+    {
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                return $read();
+            } catch (RuntimeException $error) {
+                if ($attempt >= 1 || ! str_contains($error->getMessage(), 'changed while it was being read')) {
+                    throw $error;
+                }
+            }
+        }
+    }
+
+    private function readCollection(string $gid): array
+    {
         $this->gid($gid, 'Collection');
         $retrievalStartedAt = now()->format('Y-m-d\TH:i:s.uP');
         $after = null;
         $products = [];
         $seenCursors = [];
+        $seenProducts = [];
+        $expectedCount = null;
         do {
+            if (count($seenCursors) > 1000) {
+                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'.');
+            }
             $data = $this->graphql(<<<'GQL'
 query VibeProducts($id: ID!, $after: String) { collection(id: $id) {
   id title handle sortOrder productsCount { count }
@@ -183,6 +228,7 @@ GQL, ['id' => $gid, 'after' => $after]);
                 throw new RuntimeException('Shopify collection pagination was interrupted for '.$gid.'. Existence could not be verified.');
             }
             $node = $this->collectionResponseNode($data, $gid);
+            $this->collectionCount($node, $expectedCount, $gid);
             if (! is_string($node['title'] ?? null)
                 || ! is_string($node['handle'] ?? null)
                 || ! is_string($node['sortOrder'] ?? null)
@@ -219,6 +265,7 @@ GQL, ['id' => $gid, 'after' => $after]);
                 if (! is_array(data_get($product, 'variants.nodes')) || ! array_is_list($product['variants']['nodes'])) {
                     throw new RuntimeException('Shopify returned incomplete product variants for '.$gid.'. The last confirmed state was kept.');
                 }
+                $this->uniqueCollectionProduct($seenProducts, $product['id'], $gid);
                 $products[] = $this->productCard($product);
             }
             $total = (int) data_get($node, 'productsCount.count', count($products));
@@ -233,6 +280,8 @@ GQL, ['id' => $gid, 'after' => $after]);
                 $seenCursors[$after] = true;
             }
         } while ($after !== null);
+
+        $this->completeCollectionCount($expectedCount, count($products), $gid);
 
         $tagRules = collect(data_get($node, 'ruleSet.rules', []))
             ->filter(fn ($rule) => strtoupper((string) ($rule['column'] ?? '')) === 'TAG'
@@ -256,19 +305,7 @@ GQL, ['id' => $gid, 'after' => $after]);
     public function collectionMembership(string $gid): array
     {
         $this->gid($gid, 'Collection');
-        $last = null;
-        for ($attempt = 1; $attempt <= 2; $attempt++) {
-            try {
-                return $this->readCollectionMembership($gid);
-            } catch (RuntimeException $e) {
-                if (! str_contains($e->getMessage(), 'changed while it was being read')) {
-                    throw $e;
-                }
-                $last = $e;
-            }
-        }
-
-        throw $last ?? new RuntimeException('Shopify membership for '.$gid.' could not be verified. Sorting was not started.');
+        return $this->stableCollectionRead(fn () => $this->readCollectionMembership($gid));
     }
 
     /**
@@ -309,16 +346,13 @@ GQL, ['id' => $gid, 'after' => $after]);
                 throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
             }
             $title = $node['title'];
-            $reported = data_get($node, 'productsCount.count');
+            $this->collectionCount($node, $reported, $gid);
             foreach ($node['products']['nodes'] as $product) {
                 $id = $product['id'] ?? null;
                 if (! is_array($product) || ! is_string($id) || ! preg_match('~^gid://shopify/Product/\d+$~', $id) || ! is_string($product['title'] ?? null)) {
                     throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
                 }
-                if (isset($seen[$id])) {
-                    throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read. Sorting was not started.');
-                }
-                $seen[$id] = true;
+                $this->uniqueCollectionProduct($seen, $id, $gid);
                 $products[] = ['id' => $id, 'title' => $product['title']];
             }
             $after = $this->cursor($node['products']);
@@ -331,17 +365,7 @@ GQL, ['id' => $gid, 'after' => $after]);
         } while ($after !== null);
 
         $fetched = count($products);
-        if (is_int($reported) || (is_string($reported) && ctype_digit($reported))) {
-            $reported = (int) $reported;
-            if ($reported > $fetched) {
-                throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
-            }
-            if ($reported > 0 && $fetched > $reported) {
-                throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read. Sorting was not started.');
-            }
-        } elseif ($fetched === 0 && $reported !== null && $reported !== 0) {
-            throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Sorting was not started.');
-        }
+        $this->completeCollectionCount($reported, $fetched, $gid);
 
         return [
             'gid' => $gid,
@@ -350,6 +374,33 @@ GQL, ['id' => $gid, 'after' => $after]);
             'product_count' => $fetched,
             'products' => $products,
         ];
+    }
+
+    private function collectionCount(array $node, ?int &$expected, string $gid): void
+    {
+        $count = data_get($node, 'productsCount.count');
+        if (! is_int($count) || $count < 0) {
+            throw new RuntimeException('Shopify returned a malformed product count for '.$gid.'. Changes remain pending.');
+        }
+        if ($expected !== null && $expected !== $count) {
+            throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read.');
+        }
+        $expected = $count;
+    }
+
+    private function uniqueCollectionProduct(array &$seen, string $id, string $gid): void
+    {
+        if (isset($seen[$id])) {
+            throw new RuntimeException('Shopify membership for '.$gid.' changed while it was being read. Duplicate product ID.');
+        }
+        $seen[$id] = true;
+    }
+
+    private function completeCollectionCount(?int $expected, int $fetched, string $gid): void
+    {
+        if ($expected !== $fetched) {
+            throw new RuntimeException('Shopify returned incomplete pagination for '.$gid.'. Membership changed while it was being read; changes remain pending.');
+        }
     }
 
     /** Only an explicit null in a successful, parsed response establishes unavailability. */
@@ -778,7 +829,11 @@ query VibeCollectionByHandle($handle: String!) { collectionByIdentifier(identifi
 } }
 GQL, ['handle' => $handle]);
 
-        return $data['collectionByIdentifier'] ?? null;
+        if (! array_key_exists('collectionByIdentifier', $data)) {
+            throw new RuntimeException('Shopify did not confirm whether the handle "'.$handle.'" is available. The collection was not created.');
+        }
+
+        return $data['collectionByIdentifier'];
     }
 
     public function createCollection(array $creation, ?string $imageUrl): array
@@ -947,6 +1002,54 @@ GQL, ['id' => $gid, 'moves' => $moves], 'collectionReorderProducts');
         }
 
         return $ids;
+    }
+
+    private function rememberCollection(array $node, ?int $userId): void
+    {
+        $gid = trim((string) ($node['id'] ?? ''));
+        $handle = trim((string) ($node['handle'] ?? ''));
+        $title = trim((string) ($node['title'] ?? ''));
+        if ($gid === '' || $handle === '' || $title === '' || ! preg_match('~^gid://shopify/Collection/\d+$~', $gid)) {
+            return;
+        }
+
+        $existing = ShopifyCollection::query()->where('shopify_id', $gid)->latest('id')->first();
+        if ($existing) {
+            if ($existing->handle === $handle && trim((string) $existing->title) === $title) {
+                return;
+            }
+            $existing->fill(['handle' => $handle, 'title' => $title, 'last_synced_at' => now()]);
+            if ($existing->isDirty()) {
+                $existing->save();
+            }
+
+            return;
+        }
+
+        $importId = ShopifyCollection::query()->latest('id')->value('import_id')
+            ?? Import::query()->where('filename', 'shopify-collections')->latest('id')->value('id');
+        if (! $importId) {
+            if (! $userId) {
+                throw new RuntimeException('Shopify returned a new collection, but there is no stored catalogue to add it to.');
+            }
+            $importId = Import::create([
+                'filename' => 'shopify-collections',
+                'mode' => 'overwrite',
+                'status' => 'ready',
+                'created_by' => $userId,
+                'is_current' => false,
+                'is_valid' => true,
+            ])->id;
+        }
+
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+            'import_id' => $importId,
+            'shopify_id' => $gid,
+            'handle' => $handle,
+            'title' => $title,
+            'last_synced_at' => now(),
+            'sync_status' => ShopifyCollection::SYNC_STATUS_SYNCED,
+        ]));
     }
 
     private function cursor(array $connection): ?string

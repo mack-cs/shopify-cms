@@ -68,6 +68,7 @@ it('treats drafts with handles as pending when the linked product has a pending 
     $withdrawer = User::factory()->create();
 
     $product = Product::create([
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Handled Product',
         'handle' => 'handled-draft',
         'status' => 'active',

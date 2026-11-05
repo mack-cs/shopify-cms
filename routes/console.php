@@ -1,7 +1,21 @@
 <?php
 
-Schedule::call(fn () => app(EngravedBeadRecalculation::class)->dispatchPending())
-    ->everyMinute()->name('engraved-bead-reconciliation')->withoutOverlapping();
+Schedule::call(fn () => app(\App\Services\StackSellabilityShopifyPushService::class)->retryPending())
+    ->everyFiveMinutes()->name('stack-sellability-retries')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(fn () => app(\App\Services\EngravedBeads\EngravedBeadRecalculation::class)->dispatchPending())
+    ->everyMinute()->name('engraved-bead-reconciliation')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(fn () => app(\App\Services\InventoryLevelReconciliation::class)->dispatchPending())
+    ->everyMinute()->name('inventory-level-reconciliation')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(function (): void {
+    \App\Models\ShopYourVibeDraft::where('status','pushing')->orderBy('id')->chunkById(100,function($drafts): void {
+        foreach($drafts as $draft) \Illuminate\Support\Facades\DB::transaction(function() use($draft): void {
+            app(\App\Services\ShopYourVibeEditing::class)->recoverParent(\App\Models\ShopYourVibeDraft::lockForUpdate()->findOrFail($draft->id));
+        });
+    });
+})->everyMinute()->name('syv-parent-recovery')->withoutOverlapping(2)->onOneServer();
 
 use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Jobs\ReconcileComplementaryProductsJob;

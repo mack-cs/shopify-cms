@@ -6,6 +6,7 @@ use App\Exceptions\ShopYourVibeRefreshExpiredException;
 use App\Models\ShopYourVibeDraft;
 use App\Services\AdminNotification;
 use App\Services\ShopYourVibeRefresh;
+use App\Services\ShopYourVibeShopify;
 use App\Services\ShopYourVibeWorkflow;
 use Filament\Notifications\Notification;
 use Illuminate\Bus\Queueable;
@@ -69,6 +70,7 @@ class RefreshShopYourVibeDraft implements ShouldQueue
                 return;
             }
             $workflow->trackRefreshAttempt(fn () => $refresh->heartbeat($this->draftId, $token));
+            app(ShopYourVibeShopify::class)->syncStoredCollections($this->userId);
             $workflow->trackProductProgress(function (int $done, int $total, string $gid = '', string $title = '') use ($refresh, $token, $draft): void {
                 $refresh->heartbeat($this->draftId, $token,
                     ShopYourVibeWorkflow::productProgressPayload($draft->collection_gid, $gid, $done, $total, $title) + ['stage_gid' => $gid]);
@@ -94,7 +96,7 @@ class RefreshShopYourVibeDraft implements ShouldQueue
             $workflow->trackProductProgress(null);
         }
 
-        $this->notify('Shop Your Vibe refreshed', 'Latest Shopify state has been loaded.', true);
+        $this->notify('Shop Your Vibe refreshed', 'Latest Shopify collections and this draft have been loaded.', true);
     }
 
     public function failed(Throwable $exception): void

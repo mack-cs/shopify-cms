@@ -24,7 +24,21 @@ class ProcessSupplierReceiptJob implements ShouldQueue
 
     public int $timeout = 600;
 
-    public function __construct(public readonly int $receiptId) {}
+    public function __construct(public readonly int $receiptId) { $this->onConnection('inventory-receipts')->onQueue('inventory-receipts'); }
+
+    public function onConnection($connection)
+    {
+        $this->connection = 'inventory-receipts';
+
+        return $this;
+    }
+
+    public function onQueue($queue)
+    {
+        $this->queue = 'inventory-receipts';
+
+        return $this;
+    }
 
     public function handle(ShopifyInventoryAdjustmentService $shopify, ProductInventorySyncService $inventory, SupplierOrderSummaryService $summary, ProcurementSheetSyncService $sheets): void
     {

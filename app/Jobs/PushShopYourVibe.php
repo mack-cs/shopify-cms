@@ -42,6 +42,11 @@ class PushShopYourVibe implements ShouldQueue
 
     public function failed(?Throwable $exception): void
     {
+        if (is_string($this->authorization['scope'] ?? null)) {
+            app(\App\Services\ShopYourVibeEditing::class)->failScopePush($this->draftId, $this->authorization,
+                $exception?->getMessage() ?: 'Push interrupted. Approved sorting was kept; retry to confirm Shopify.');
+            return;
+        }
         DB::transaction(function () use ($exception): void {
             $draft = ShopYourVibeDraft::lockForUpdate()->find($this->draftId);
             if (! $draft || $draft->status !== 'pushing') {
@@ -53,7 +58,10 @@ class PushShopYourVibe implements ShouldQueue
                     || $draft->revision !== ($this->authorization['revision'] ?? null))) {
                 return;
             }
-            if (Cache::has('shop-your-vibe-op:'.$draft->collection_gid)) {
+            if (ShopYourVibeWorkflow::operationRunning($draft->collection_gid)) {
+                $state = $draft->editing_state ?? [];
+                $state['push']['terminal_failure'] = ['at' => now()->toISOString(), 'error' => $exception?->getMessage()];
+                $draft->update(['editing_state' => $state]);
                 return;
             }
 

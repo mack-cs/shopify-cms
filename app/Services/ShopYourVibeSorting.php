@@ -1102,21 +1102,23 @@ class ShopYourVibeSorting
     private function queueApprovalEmail(ShopYourVibeDraft $draft, User $actor, User $reviewer, Collection $rows): ?int
     {
         $revision = (int) $draft->revision;
+        $identity = $rows->sortBy('product_key')->map(fn ($row) => [$row->collection_gid,$row->submitted_revision,$row->product_key,$reviewer->id])->values()->all();
+        $collectionGid = (string) ($rows->first()?->collection_gid ?? $draft->collection_gid);
         $notification = SyvNotification::query()->firstOrCreate(
-            ['idempotency_key' => 'sort-approval:'.$draft->id.':'.$revision],
+            ['idempotency_key' => 'sort-approval:'.$draft->id.':'.hash('sha256',json_encode($identity))],
             [
                 'type' => SyvNotification::TYPE_SORT_APPROVAL,
                 'draft_id' => $draft->id,
                 'status' => SyvNotification::PENDING,
                 'payload' => [
-                    'collection_name' => (string) ($draft->desired['collections'][$draft->collection_gid]['title']
+                    'collection_name' => (string) ($draft->desired['collections'][$collectionGid]['title']
                         ?? $draft->desired['parent']['title']
                         ?? $draft->collection_gid),
                     'submitter_name' => $actor->name,
                     'submitted_at' => now()->toIso8601String(),
                     'moved_count' => $rows->pluck('product_key')->unique()->count(),
                     'status' => SyvCollectionSortState::label(SyvCollectionSortState::AWAITING),
-                    'review_url' => url('/shop-your-vibe?collection='.rawurlencode((string) $draft->collection_gid)),
+                    'review_url' => url('/shop-your-vibe?collection='.rawurlencode($collectionGid)),
                     'reviewer_id' => $reviewer->id,
                     'collections' => $rows->map(fn (SyvCollectionSortState $row): string => (string) (
                         $draft->desired['collections'][$row->collection_gid]['title'] ?? $row->collection_gid

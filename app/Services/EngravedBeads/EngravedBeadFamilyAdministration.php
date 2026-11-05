@@ -38,6 +38,9 @@ final class EngravedBeadFamilyAdministration
     public function threshold(EngravedBeadFamilyMember $member, int $threshold, User $actor): void
     {
         $this->authorize($actor);
+        if (in_array((int) $member->required_beads, [2, 3, 4], true)) {
+            throw new \InvalidArgumentException('The '.$member->required_beads.'-bead safety buffer is ENGRAVED_BEAD_'.$member->required_beads.'_THRESHOLD. Change that environment value instead of a per-family number.');
+        }
         if ($threshold < $member->required_beads || $threshold > 1000000) {
             throw new \InvalidArgumentException('Threshold must be at least the physical bead requirement and at most 1,000,000.');
         }

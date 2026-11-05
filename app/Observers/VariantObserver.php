@@ -19,6 +19,9 @@ class VariantObserver
 
     public function updating(Variant $variant): void
     {
+        if ($variant->isDirty(['inventory_qty','current_on_hand_quantity','inventory_tracked','inventory_policy'])) {
+            $variant->inventory_write_version = (int) $variant->getRawOriginal('inventory_write_version') + 1;
+        }
         $dirty = array_keys($variant->getDirty());
         $meaningful = array_diff($dirty, ['updated_at', 'created_at']);
         if (empty($meaningful)) {
@@ -86,6 +89,8 @@ class VariantObserver
 
         return count(array_diff($meaningful, [
             'inventory_qty', 'current_on_hand_quantity', 'inventory_tracked', 'inventory_policy', 'inventory_sync_error',
+            'inventory_sync_batch_id',
+            'inventory_write_version',
         ])) === 0;
     }
 
@@ -101,6 +106,7 @@ class VariantObserver
             'inventory_last_synced_at',
             'inventory_sync_batch_id',
             'inventory_local_dirty',
+            'inventory_write_version',
             'inventory_sync_error',
         ];
 

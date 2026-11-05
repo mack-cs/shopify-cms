@@ -237,7 +237,7 @@ it('sends one approval email for the submitted revision and retries a mail failu
     expect(SyvNotification::query()->count())->toBe(1)
         ->and(DB::table('jobs')->where('queue', 'syv-notifications')->count())->toBe(1);
     $notification = SyvNotification::query()->first();
-    expect($notification->idempotency_key)->toBe('sort-approval:'.$this->draft->id.':'.$this->draft->revision)
+    expect($notification->idempotency_key)->toStartWith('sort-approval:'.$this->draft->id.':')
         ->and($notification->payload['submitter_name'])->toBe('Cait')
         ->and($notification->payload['collection_name'])->toBe('Necklaces')
         ->and($notification->payload['moved_count'])->toBe(1)

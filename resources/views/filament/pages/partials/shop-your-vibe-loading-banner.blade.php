@@ -11,7 +11,7 @@
     <progress class="syv-progress" data-status-progress value="{{ $done }}" max="{{ max(1, $total) }}" @if ($total < 1) hidden @endif></progress>
     <div class="syv-indeterminate" data-status-indeterminate @if ($total > 0) hidden @endif aria-hidden="true"></div>
     <div data-status-stale hidden>
-        <p>Loading is taking longer than expected.</p>
-        <div class="mt-3"><x-filament::button size="sm" wire:click="retryHydration" wire:loading.attr="disabled">Retry</x-filament::button></div>
+        <p>This is taking longer than expected. Please refresh your page.</p>
+        <div class="mt-3"><x-filament::button size="sm" type="button" x-on:click="window.location.reload()">Refresh page</x-filament::button></div>
     </div>
 </div>

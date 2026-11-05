@@ -47,7 +47,7 @@ it('removes the procurement exception when the quantity tag is removed and does 
 });
 
 it('shows eligible unlisted engraved beads in inventory search and procurement exports', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = beadImport($user);
@@ -68,7 +68,7 @@ it('shows eligible unlisted engraved beads in inventory search and procurement e
 });
 
 it('lets a valid unlisted engraved bead use the normal supplier order workflow', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     $variant = beadVariant(beadImport($user), 'unlisted', 'BEAD-ORDER', '2-engraved-beads');
 
     $line = app(SupplierOrderService::class)->createFromRow([
@@ -85,7 +85,7 @@ it('lets a valid unlisted engraved bead use the normal supplier order workflow',
 
 function beadImport(?User $user = null): Import
 {
-    $user ??= User::factory()->create();
+    $user ??= User::factory()->create(['is_active'=>true]);
 
     return Import::query()->create([
         'filename' => 'engraved-beads.csv',

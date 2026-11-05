@@ -681,6 +681,9 @@ final class NewProductDraftSeeder
             'label' => $this->warningLabel($field),
             'draft_value' => $this->stringifyDisplayValue($field, $draftValue),
             'shopify_value' => $this->stringifyDisplayValue($field, $shopifyValue),
+            ...($field === 'complementary_products' && $this->hasInactiveComplementaryProducts(array_merge(
+                $this->normalizedComplementaryReferenceSet($draftValue), $this->normalizedComplementaryReferenceSet($shopifyValue),
+            )) ? ['reason' => 'inactive_complementary'] : []),
         ];
     }
 

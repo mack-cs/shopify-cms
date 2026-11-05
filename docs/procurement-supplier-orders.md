@@ -12,7 +12,7 @@ On **Catalog → Inventory**, each SKU has:
 
 Adding an order requires Order ID, Quantity Ordered, and ETA. A SKU can have at most three outstanding orders because the existing Sheet contract exposes three phases. Receiving supports partial quantities and retains every receipt in the order history.
 
-Receiving never reads inventory and writes an absolute replacement. The procurement queue sends Shopify's `inventoryAdjustQuantities` mutation with a positive delta and a unique receipt reference URI. After Shopify confirms it, the job refreshes local inventory, completes/project orders, and updates the operational Sheet cells. If post-processing fails, retrying the job skips the already-successful Shopify adjustment.
+Receiving never reads inventory and writes a positive available-quantity delta. New receipts are queued on the `inventory-receipts` connection and queue, whose visibility timeout is 720 seconds. The mutation is `inventoryAdjustQuantities` with a stable `@idempotent` key derived from the receipt reference URI. After Shopify confirms it, the job refreshes local inventory, completes/project orders, and updates the operational Sheet cells. If post-processing fails, retrying the job skips the already-successful Shopify adjustment. Receipts already stored on the `procurement` queue before this routing correction still need a worker on that queue until it is empty.
 
 An adjustment whose result is ambiguous is moved to `manual_review`; it is not automatically retried, preventing accidental double receiving.
 
@@ -34,14 +34,14 @@ Order ID,SKU,Quantity Received
 PO-1001,LRB0004,20
 ```
 
-Upload only validates and stores a preview. Copy the preview ID from the notification into **Confirm Supplier Import**. Exact duplicate files resolve to the same batch, and a completed batch cannot process twice. Receipt confirmation queues work on the `procurement` queue.
+Upload only validates and stores a preview. Copy the preview ID from the notification into **Confirm Supplier Import**. Exact duplicate files resolve to the same batch, and a completed batch cannot process twice. Receipt confirmation queues work on the `inventory-receipts` queue.
 
 An Order ID may contain several SKU lines in its first order CSV. Later pending-order uploads may add new SKU lines to the same Order ID, but an Order ID cannot contain the same SKU twice. Use the receipt template—not the order template—to partially or fully fulfil an existing order.
 
 Run the worker with:
 
 ```powershell
-php artisan queue:work --queue=procurement --tries=1 --timeout=600
+php artisan queue:work inventory-receipts --queue=inventory-receipts --tries=1 --timeout=600
 ```
 
 ## Sheets ownership

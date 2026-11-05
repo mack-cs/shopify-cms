@@ -677,11 +677,11 @@ class NewProductDraft extends Model
                     $field,
                     $warning['shopify_value'] ?? null,
                 )
-                && ! static::shopifySyncWarningValuesMatch(
+                && (($warning['reason'] ?? null) === 'inactive_complementary' || ! static::shopifySyncWarningValuesMatch(
                     $field,
                     $warning['draft_value'] ?? null,
                     $warning['shopify_value'] ?? null,
-                );
+                ));
         }));
     }
 

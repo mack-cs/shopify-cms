@@ -26,7 +26,7 @@ class SendSyvSortApprovalEmailJob implements ShouldQueue
     public function handle(): void
     {
         $notification = SyvNotification::query()->find($this->notificationId);
-        if (! $notification || in_array($notification->status, [SyvNotification::SENT, SyvNotification::SUPPRESSED], true)) {
+        if (! $notification || ! in_array($notification->status, [SyvNotification::PENDING, SyvNotification::FAILED], true)) {
             return;
         }
         if (! (bool) config('shop_your_vibe.sort_approval_emails', true)) {
@@ -35,25 +35,35 @@ class SendSyvSortApprovalEmailJob implements ShouldQueue
         $reviewer = User::query()->find($notification->payload['reviewer_id'] ?? null);
         $email = trim((string) ($reviewer?->email ?? ''));
         if ($email === '') {
-            $notification->forceFill([
+            SyvNotification::whereKey($notification->id)->whereIn('status',[SyvNotification::PENDING,SyvNotification::FAILED])->update([
                 'status' => SyvNotification::FAILED,
-                'attempts' => $notification->attempts + 1,
+                'attempts' => \Illuminate\Support\Facades\DB::raw('attempts + 1'),
                 'last_error' => 'The assigned reviewer has no email address.',
-            ])->save();
+            ]);
             throw new \RuntimeException('The assigned reviewer has no email address.');
         }
+        $mail = new SyvSortApprovalMail($notification->payload ?? []);
         try {
-            Mail::to($email)->send(new SyvSortApprovalMail($notification->payload ?? []));
+            view($mail->content()->view, ['details'=>$mail->details])->render(); // Proven pre-transport failure.
+        } catch (\Throwable $exception) {
+            SyvNotification::whereKey($notification->id)->whereIn('status',[SyvNotification::PENDING,SyvNotification::FAILED])
+                ->update(['status'=>SyvNotification::FAILED,'last_error'=>$exception->getMessage(),'attempts'=>\Illuminate\Support\Facades\DB::raw('attempts + 1')]);
+            throw $exception;
+        }
+        $claimed = SyvNotification::whereKey($notification->id)->whereIn('status',[SyvNotification::PENDING,SyvNotification::FAILED])
+            ->update(['status'=>'sending','attempts'=>\Illuminate\Support\Facades\DB::raw('attempts + 1'),'updated_at'=>now()]);
+        if ($claimed !== 1) return;
+        $notification->refresh();
+        try {
+            Mail::to($email)->send($mail);
             $notification->forceFill([
                 'status' => SyvNotification::SENT,
                 'sent_at' => now(),
                 'last_error' => null,
-                'attempts' => $notification->attempts + 1,
             ])->save();
         } catch (\Throwable $exception) {
             $notification->forceFill([
-                'status' => SyvNotification::FAILED,
-                'attempts' => $notification->attempts + 1,
+                'status' => 'uncertain',
                 'last_error' => $exception->getMessage(),
             ])->save();
             throw $exception;

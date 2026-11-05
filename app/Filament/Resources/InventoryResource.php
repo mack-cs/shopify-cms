@@ -811,7 +811,7 @@ class InventoryResource extends Resource
                             ->rows(3),
                         Forms\Components\Select::make('approver_id')
                             ->label('Approver')
-                            ->options(fn (): array => User::query()->whereKeyNot(Auth::id())->orderBy('name')->pluck('name', 'id')->all())
+                            ->options(fn (): array => User::query()->where('is_active', true)->permission(\App\Enums\PermissionEnum::InventoryUpdate->value)->whereKeyNot(Auth::id())->orderBy('name')->pluck('name', 'id')->all())
                             ->searchable()
                             ->required(),
                     ])
@@ -897,12 +897,13 @@ class InventoryResource extends Resource
                     ->label('Push To Shopify')
                     ->icon('heroicon-o-cloud-arrow-up')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
-                        && app(InventoryAccessService::class)->canAccess(Auth::user()))
+                        && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                     ->requiresConfirmation()
                     ->modalHeading('Push Inventory To Shopify')
                     ->modalDescription('This will set Shopify On Hand to the staged physical count and update tracking. It does not change the product publication status.')
                     ->modalSubmitActionLabel('Confirm Push')
                     ->action(function (Variant $record): void {
+                        app(InventoryAccessService::class)->authorizeInventory(Auth::id());
                         InventorySyncJob::dispatch(
                             [$record->id],
                             'push',
@@ -966,7 +967,7 @@ class InventoryResource extends Resource
                                     ->whereIn('variant_id', $records->pluck('id')))
                                 ->pluck('id');
                             foreach ($ids as $id) {
-                                ProcessSupplierReceiptJob::dispatch((int) $id)->onQueue('procurement');
+                                ProcessSupplierReceiptJob::dispatch((int) $id);
                             }
                             Notification::make()->title('Received inventory queued')
                                 ->body("{$ids->count()} staged receipt(s) will be pushed to Shopify and recalculated.")
@@ -1154,12 +1155,13 @@ class InventoryResource extends Resource
                     BulkAction::make('pushToShopify')
                         ->label('Push To Shopify')
                         ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
-                            && app(InventoryAccessService::class)->canAccess(Auth::user()))
+                            && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                         ->requiresConfirmation()
                         ->modalHeading('Push Inventory To Shopify')
                         ->modalDescription('This will set Shopify On Hand to each staged physical count, update tracking and product status, then refresh Shopify inventory states.')
                         ->modalSubmitActionLabel('Confirm Push')
                         ->action(function (Collection $records): void {
+                            app(InventoryAccessService::class)->authorizeInventory(Auth::id());
                             InventorySyncJob::dispatch(
                                 $records->pluck('id')->map(fn ($id): int => (int) $id)->all(),
                                 'push',

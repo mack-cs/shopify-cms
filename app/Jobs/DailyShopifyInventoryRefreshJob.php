@@ -25,6 +25,7 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
     public function __construct(
         public ?int $userId = null,
     ) {
+        $this->onConnection('inventory-reconciliation')->onQueue('inventory-reconciliation');
     }
 
     public function handle(
@@ -73,6 +74,13 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
                         }
 
                         $result = $service->refreshVariants($variants, $this->userId);
+                        if ((int) ($result['failed'] ?? 0) > 0) {
+                            foreach ($variants as $variant) {
+                                if ($variant->shopify_inventory_item_id) {
+                                    app(\App\Services\InventoryLevelReconciliation::class)->record($variant->shopify_inventory_item_id);
+                                }
+                            }
+                        }
 
                         $summary['variants_refreshed'] += (int) ($result['refreshed'] ?? 0);
                         $summary['failed'] += (int) ($result['failed'] ?? 0);
@@ -87,7 +95,9 @@ class DailyShopifyInventoryRefreshJob implements ShouldQueue
                     }
                 });
 
-            $stackSummary = $stackSellabilityService->enforce($this->userId);
+            $stackSummary = $stackSellabilityService->enforce($this->userId, false, [
+                'refresh_components' => $summary['failed'] > 0,
+            ]);
             $summary['stacks_forced_unsellable'] = (int) ($stackSummary['forced_unsellable'] ?? 0);
             $summary['stacks_restored_sellable'] = (int) ($stackSummary['restored_sellable'] ?? 0);
             $stackSummary['source'] = 'Daily inventory refresh';

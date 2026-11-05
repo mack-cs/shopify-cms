@@ -47,7 +47,14 @@ it('reserves full multi-bead demand on the family source and leaves one-bead com
 
     expect(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(14)
         ->and(ShopifyStackInventoryReservation::query()->where('component_sku', 'ONE')->exists())->toBeFalse()
-        ->and(EngravedBeadOrderLine::query()->where('sku', 'ONE')->value('configuration'))->toBe('zero');
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'ONE')->value('configuration'))->toBe('zero')
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'ONE')->value('first_bead_per_unit'))->toBe(0)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'ONE')->value('additional_per_unit'))->toBe(0)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'FOUR')->value('beads'))->toBe(4)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'FOUR')->value('first_bead_per_unit'))->toBe(1)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'FOUR')->value('additional_per_unit'))->toBe(3)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'THREE')->value('first_bead_per_unit'))->toBe(1)
+        ->and(EngravedBeadOrderLine::query()->where('sku', 'THREE')->value('additional_per_unit'))->toBe(2);
 });
 
 it('consumes only the fulfilled physical quantity and keeps the rest reserved', function (): void {
@@ -232,6 +239,49 @@ it('blocks invalid configurations and unresolved inventory items without adjusti
     expect(ShopifyStackInventoryReservation::query()->count())->toBe(0)
         ->and(EngravedBeadOrderLine::query()->where('sku', 'BAD')->value('configuration'))->toBe('invalid')
         ->and(EngravedBeadOrderLine::query()->where('sku', 'UNMAPPED')->value('configuration'))->toBe('blocked');
+});
+
+it('keeps the full physical deduction when the safety buffer is raised', function (): void {
+    config(['engraved_beads.thresholds.4' => 10, 'engraved_beads.thresholds.3' => 7, 'engraved_beads.thresholds.2' => 5]);
+    $four = beadSku('FOUR', '4-engraved-beads', 9401);
+    $inventory = beadInventory();
+    $inventory->shouldReceive('moveQuantity')->once()->withArgs(
+        fn (Variant $variant, int $quantity): bool => $variant->is($four['source']) && $quantity === 8
+    )->andReturn([]);
+    beadReservationService($inventory)->process(beadOrder(8112, [
+        ['id' => 11012, 'variant_id' => 9401, 'sku' => 'FOUR', 'quantity' => 2],
+    ]));
+    $line = EngravedBeadOrderLine::query()->first();
+    expect($line->first_bead_per_unit)->toBe(1)
+        ->and($line->additional_per_unit)->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->value('total_component_quantity_required'))->toBe(8);
+});
+
+it('does not reserve when the store contract flag is off', function (): void {
+    config(['engraved_beads.store_contract_verified' => false]);
+    beadSku('FOUR', '4-engraved-beads', 9401);
+    $inventory = beadInventory();
+    $inventory->shouldReceive('moveQuantity')->never();
+    beadReservationService($inventory)->process(beadOrder(8113, [
+        ['id' => 11013, 'variant_id' => 9401, 'sku' => 'FOUR', 'quantity' => 1],
+    ]));
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(0)
+        ->and(EngravedBeadOrderLine::query()->value('configuration'))->toBe('blocked');
+});
+
+it('ignores an older order webhook after a newer one was processed', function (): void {
+    beadSku('FOUR', '4-engraved-beads', 9401);
+    $inventory = beadInventory();
+    $inventory->shouldReceive('moveQuantity')->once()->andReturn([]);
+    $service = beadReservationService($inventory);
+    $newer = beadOrder(8301, [['id' => 11001, 'variant_id' => 9401, 'quantity' => 2]], 'orders/updated', 'newer-webhook');
+    $newer->update(['shopify_updated_at' => '2026-11-04 12:00:00']);
+    $service->process($newer->fresh());
+    $older = beadOrder(8301, [['id' => 11001, 'variant_id' => 9401, 'quantity' => 1]], 'orders/updated', 'older-webhook');
+    $older->update(['shopify_updated_at' => '2026-11-04 11:00:00']);
+    $service->process($older->fresh());
+    expect($older->fresh()->error_message)->toContain('newer')
+        ->and(ShopifyStackInventoryReservation::query()->value('reserved_quantity'))->toBe(8);
 });
 
 it('does not write inventory while engraved bead inventory writes are disabled', function (): void {

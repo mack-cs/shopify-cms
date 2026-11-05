@@ -8,6 +8,17 @@ beforeEach(function () {
     config()->set(['services.shopify.shop' => 'vibe-test.myshopify.com', 'services.shopify.admin_access_token' => 'test-token']);
 });
 
+it('never retries a throttled mutation when its response contains execution evidence', function () {
+    Http::fake(['*'=>Http::response([
+        'data'=>['collectionReorderProducts'=>['job'=>['id'=>'gid://shopify/Job/99'],'userErrors'=>[]]],
+        'errors'=>[['message'=>'Throttled','extensions'=>['code'=>'THROTTLED']]],
+        'extensions'=>['cost'=>['requestedQueryCost'=>10,'actualQueryCost'=>1,'throttleStatus'=>['currentlyAvailable'=>0,'restoreRate'=>1000]]],
+    ])]);
+    expect(fn()=>app(ShopifyApiClient::class)->graphql('mutation Reorder { collectionReorderProducts { job { id } } }'))
+        ->toThrow(RuntimeException::class,'outcome is uncertain');
+    Http::assertSentCount(1);
+});
+
 it('retries a Shopify HTTP throttle and respects Retry-After', function () {
     Http::fake(['*' => Http::sequence()
         ->push(['errors' => [['message' => 'Throttled']]], 429, ['Retry-After' => '1'])

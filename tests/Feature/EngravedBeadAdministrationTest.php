@@ -28,10 +28,12 @@ it('renders members and stock in the family administration page and audits thres
     $f = sharedBeadFamily();
     Livewire::test(ListEngravedBeadFamilies::class)->assertSuccessful()->assertCanSeeTableRecords([$f['family']])
         ->mountTableAction('inspect', $f['family'])->assertSee('BEAD-50001');
-    $member = $f['family']->members()->where('required_beads', 4)->first();
-    app(EngravedBeadFamilyAdministration::class)->threshold($member, 8, $actor);
-    expect($member->fresh()->disable_threshold)->toBe(8)->and($f['family']->fresh()->recalculate_at)->not->toBeNull()
+    $member = $f['family']->members()->where('required_beads', 1)->first();
+    app(EngravedBeadFamilyAdministration::class)->threshold($member, 5, $actor);
+    $four = $f['family']->members()->where('required_beads', 4)->first();
+    expect($member->fresh()->disable_threshold)->toBe(5)->and($f['family']->fresh()->recalculate_at)->not->toBeNull()
         ->and($f['family']->audits()->where('action', 'threshold_changed')->count())->toBe(1);
+    expect(fn () => app(EngravedBeadFamilyAdministration::class)->threshold($four, 8, $actor))->toThrow(InvalidArgumentException::class);
 });
 
 it('never permits activation without store contract verification', function () {

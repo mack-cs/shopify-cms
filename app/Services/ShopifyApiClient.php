@@ -13,6 +13,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
 
     public function rest(string $method, string $path, array $payload = []): array
     {
+        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->rest($method, $path, $payload);
         $shop = config('services.shopify.shop');
         $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
@@ -46,6 +47,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
 
     public function graphql(string $query, array $variables = []): array
     {
+        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql($query, $variables);
         $shop = config('services.shopify.shop');
         $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
@@ -64,6 +66,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
         ]);
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
+            app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql($query, $variables);
             $response = Http::withHeaders([
                 'X-Shopify-Access-Token' => $token,
                 'Content-Type' => 'application/json',
@@ -75,7 +78,18 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
                     'variables' => $variablesPayload,
                 ]);
 
-            $payload = $this->discardFalseThrottleErrors($response->json() ?? []);
+            $rawPayload = $response->json() ?? [];
+            $mutation = preg_match('/^\s*mutation\b/', $query) === 1;
+            // An HTTP 429 does not prove the mutation was rejected before execution.
+            if ($mutation && $response->status() === 429) {
+                throw new \RuntimeException('Shopify mutation outcome is uncertain; automatic replay was blocked. Reconcile the recorded operation before retrying.');
+            }
+            if ($mutation
+                && $this->isThrottledResponse($response->status(),$rawPayload)
+                && (! empty($rawPayload['data']) || data_get($rawPayload,'extensions.cost.actualQueryCost') !== null)) {
+                throw new \RuntimeException('Shopify mutation outcome is uncertain; automatic replay was blocked. Reconcile the recorded operation before retrying.');
+            }
+            $payload = $this->discardFalseThrottleErrors($rawPayload);
             if ($this->isThrottledResponse($response->status(), $payload) && $attempt < 4) {
                 $delay = $this->throttleDelayMilliseconds($payload, $attempt);
                 $retryAfter = $response->header('Retry-After');

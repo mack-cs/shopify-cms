@@ -79,7 +79,12 @@ it('allows draft form data mutation without forcing required product-completenes
     expect($data['status'] ?? null)->toBeNull();
     expect($data['published'] ?? null)->toBeNull();
     expect($data['siblings_collection_name'])->toBeNull();
-    expect($data['payload'])->toBeNull();
+    expect($data['payload'])->toBe([
+        \App\Services\HeaderStore::JEWELRY_TYPE => 'handcrafted-jewellery',
+        \App\Services\HeaderStore::TARGET_GENDER => 'Unisex',
+        \App\Services\HeaderStore::AGE_GROUP => 'Universal',
+        \App\Services\HeaderStore::GOOGLE_SHOPPING_AGE_GROUP => 'adult',
+    ]);
 });
 
 it('limits sibling collection options to shared SYV sibling matches for the selected collection', function (): void {

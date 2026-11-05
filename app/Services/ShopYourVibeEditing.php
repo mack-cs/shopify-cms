@@ -64,7 +64,7 @@ class ShopYourVibeEditing
         if ($draft->status !== 'pushing' || ! empty($draft->editing_state)
             || ! $draft->pending || $draft->remote_jobs || $draft->operation || $draft->progress
             || ! $draft->updated_at || $draft->updated_at->gte(now()->subDay())
-            || Cache::has('shop-your-vibe-op:'.$draft->collection_gid)) {
+            || ShopYourVibeWorkflow::operationRunning($draft->collection_gid)) {
             return false;
         }
         $queue = config('queue.connections.shop-your-vibe');
@@ -104,6 +104,8 @@ class ShopYourVibeEditing
             $user = $this->actor();
             $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($id);
             $this->revision($draft, $revision);
+            $this->recoverParent($draft);
+            $revision = $draft->revision;
             $state = $draft->editing_state ?? [];
             if (in_array($draft->status, ['pushing', 'creating', 'deleting'], true)) {
                 throw new RuntimeException('Wait for the active Shopify operation before reacquiring this editing lock.');
@@ -409,10 +411,17 @@ class ShopYourVibeEditing
         return DB::transaction(function () use ($id, $scopeRevision, $scope) {
             $user = $this->actor();
             $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($id);
+            $this->recoverParent($draft);
             if (in_array($draft->status, ['pushing', 'deleting'], true)) {
                 throw new RuntimeException('Wait for the active Shopify operation before reacquiring this editing lock.');
             }
             $lock = $this->locks($draft)[$scope] ?? ['revision' => $scopeRevision];
+            if (($lock['status'] ?? null) === 'pushing' && ! $this->active($lock)
+                && ! $this->scopePushRunning($id, $scope)) {
+                $lock['status'] = null;
+                $lock['push'] = null;
+                $this->writeLock($draft, $scope, $lock);
+            }
             if (($lock['status'] ?? null) === 'pushing') {
                 throw new RuntimeException('Wait for the Shopify push of this collection to finish before editing it.');
             }
@@ -439,6 +448,21 @@ class ShopYourVibeEditing
 
             return $draft;
         });
+    }
+
+    /** Caller holds the draft row lock. Never infer remote completion or clear checkpoints. */
+    public function recoverParent(ShopYourVibeDraft $draft): void
+    {
+        $push = $draft->editing_state['push'] ?? null;
+        if ($draft->status !== 'pushing' || ! is_array($push) || isset($push['scope'])
+            || ShopYourVibeWorkflow::operationRunning($draft->collection_gid)
+            || (empty($push['terminal_failure']) && now()->lt($push['expires_at'] ?? now()))) return;
+        $state = $draft->editing_state;
+        $state['last_failed_push'] = $push;
+        $state['push'] = null;
+        $draft->update(['status' => 'failed', 'pending' => true, 'editing_state' => $state,
+            'revision' => $draft->revision + 1,
+            'last_error' => 'The parent worker ended or its authorization expired. Pending changes and unresolved Shopify operations were preserved; review recovery before retrying.']);
     }
 
     public function authorizeScope(ShopYourVibeDraft $draft, string $scope): void
@@ -475,6 +499,46 @@ class ShopYourVibeEditing
             'expires_at' => now()->addSeconds(self::SECONDS)->toISOString(),
             'status' => null,
         ]));
+    }
+
+    public static function scopePushLockKey(int $id, string $scope): string
+    {
+        return 'syv-scope-push:'.hash('sha256', $scope);
+    }
+
+    private function scopePushRunning(int $id, string $scope): bool
+    {
+        // Locks live in a separate store/table; Cache::has(key) cannot inspect them.
+        $probe = Cache::lock(self::scopePushLockKey($id, $scope), 900);
+        if (! $probe->get()) {
+            return true;
+        }
+        $probe->release();
+        return false;
+    }
+
+    /** A stale worker may only release its own ticket, never a replacement attempt. */
+    public function failScopePush(int $id, array $ticket, string $message, bool $running = false): void
+    {
+        DB::transaction(function () use ($id, $ticket, $message, $running): void {
+            $draft = ShopYourVibeDraft::lockForUpdate()->find($id);
+            $scope = $ticket['scope'] ?? null;
+            if (! $draft || ! is_string($scope)) {
+                return;
+            }
+            if (! $running && $this->scopePushRunning($id, $scope)) {
+                return; // Another delivery of this ticket may still be executing.
+            }
+            $lock = $draft->editing_state['locks'][$scope] ?? [];
+            if (($lock['push']['id'] ?? null) !== ($ticket['id'] ?? null)
+                || (int) ($lock['revision'] ?? -1) !== (int) ($ticket['revision'] ?? -2)) {
+                return;
+            }
+            $lock['status'] = null;
+            $lock['push'] = null;
+            $this->writeLock($draft, $scope, $lock);
+            $draft->update(['pending' => true, 'last_error' => $message]);
+        });
     }
 
     public function assertScopeRevision(ShopYourVibeDraft $draft, string $scope, int $scopeRevision, bool $adoptReturned = true): void
@@ -707,6 +771,9 @@ class ShopYourVibeEditing
 
     private function guardSortDiscard(ShopYourVibeDraft $draft, string $gid): void
     {
+        if (isset($draft->remote_jobs[$gid])) {
+            throw new RuntimeException('Confirm the outstanding Shopify reorder before discarding this collection.');
+        }
         $user = $this->actor();
         $lock = $this->locks($draft)[self::sortScope($gid)] ?? [];
         if (! isset($draft->desired['collections'][$gid]) || ! is_array($draft->desired['collections'][$gid])) {

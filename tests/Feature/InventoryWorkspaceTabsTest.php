@@ -18,10 +18,11 @@ use Livewire\Livewire;
 use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/InventoryAuthorizationFixture.php';
 
 it('reports a repeated purchase order paste without claiming to create another order', function (): void {
     config(['google_sheets.enabled' => false]);
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -49,7 +50,7 @@ it('reports a repeated purchase order paste without claiming to create another o
 
 it('accepts a supplier order for a draft shopify product', function (): void {
     config(['google_sheets.enabled' => false]);
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -72,7 +73,7 @@ it('accepts a supplier order for a draft shopify product', function (): void {
 });
 
 it('separates everyday inventory controls from supplier order controls', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
 
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     Permission::findOrCreate(PermissionEnum::InventoryStatusUpdate->value);
@@ -112,7 +113,7 @@ it('separates everyday inventory controls from supplier order controls', functio
     $line->refresh();
     $receipt = app(SupplierReceiptService::class)->create($line, 3, 'tab-grv-1', $user->id, dispatch: false);
     $order = ProcurementSupplierOrder::query()->where('order_number', 'PO-TAB-001')->firstOrFail();
-    $approver = User::factory()->create(['name' => 'Inventory Approver']);
+    $approver = inventoryAuthorizedUser(['name'=>'Inventory Approver']);
     app(InventoryAdjustmentApprovalService::class)->submit([[
         'variant' => $variant,
         'inventory_tracked' => true,
@@ -269,8 +270,8 @@ it('separates everyday inventory controls from supplier order controls', functio
 });
 
 it('submits a manual physical count as a pending approval without overwriting available', function (): void {
-    $user = User::factory()->create();
-    $approver = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
+    $approver = inventoryAuthorizedUser();
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -305,7 +306,7 @@ it('submits a manual physical count as a pending approval without overwriting av
 });
 
 it('filters the inventory table using a pasted SKU list', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -325,7 +326,7 @@ it('filters the inventory table using a pasted SKU list', function (): void {
 });
 
 it('shows and filters variants that can sell when out of stock', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -361,7 +362,7 @@ it('shows and filters variants that can sell when out of stock', function (): vo
 });
 
 it('bulk updates sell when out of stock policy from the inventory workspace', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -410,7 +411,7 @@ it('bulk updates sell when out of stock policy from the inventory workspace', fu
 });
 
 it('shows active and draft products in everyday and supplier inventory', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $import = Import::query()->create([
@@ -451,7 +452,7 @@ it('shows active and draft products in everyday and supplier inventory', functio
 });
 
 it('filters products by placed, planned, and multiple WIP order summaries', function (): void {
-    $user = User::factory()->create();
+    $user = User::factory()->create(['is_active'=>true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
 

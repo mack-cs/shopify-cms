@@ -66,6 +66,8 @@ it('deletes pending collection approval requests and logs the super admin who de
     $superAdmin = User::factory()->create();
 
     $collection = ShopifyCollection::create([
+        'shopify_id' => 'gid://shopify/Collection/7654321',
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Approval Collection',
         'handle' => 'approval-collection',
         'approval_version' => 3,

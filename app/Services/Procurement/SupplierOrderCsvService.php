@@ -248,7 +248,7 @@ final class SupplierOrderCsvService
         });
         if ($dispatchReceipts) {
             foreach (array_unique($receiptIds) as $id) {
-                ProcessSupplierReceiptJob::dispatch($id)->onQueue('procurement');
+                ProcessSupplierReceiptJob::dispatch($id);
             }
         }
         if ($batch->type === 'order') {

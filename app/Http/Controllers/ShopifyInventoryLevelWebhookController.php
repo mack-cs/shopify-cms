@@ -74,6 +74,7 @@ class ShopifyInventoryLevelWebhookController extends Controller
             trim((string) $request->header('X-Shopify-Webhook-Id')) ?: null,
         );
 
+        app(\App\Services\InventoryLevelReconciliation::class)->record($inventoryItemId);
         HandleShopifyInventoryLevelUpdatedJob::dispatch(
             $inventoryItemId,
             $payload,

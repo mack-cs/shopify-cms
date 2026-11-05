@@ -18,11 +18,12 @@ use Livewire\Livewire;
 use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/InventoryAuthorizationFixture.php';
 
 it('creates a pending single SKU inventory approval without changing Shopify', function (): void {
     Bus::fake();
-    $requester = User::factory()->create();
-    $approver = User::factory()->create();
+    $requester = inventoryAuthorizedUser();
+    $approver = inventoryAuthorizedUser();
     $variant = inventoryApprovalVariant('APPROVAL-SINGLE', 4);
 
     $request = app(InventoryAdjustmentApprovalService::class)->submit([[
@@ -41,7 +42,7 @@ it('creates a pending single SKU inventory approval without changing Shopify', f
 });
 
 it('requires a reason and approver and blocks self approval', function (): void {
-    $user = User::factory()->create();
+    $user = inventoryAuthorizedUser();
     $variant = inventoryApprovalVariant('APPROVAL-VALIDATION', 4);
 
     expect(fn () => app(InventoryAdjustmentApprovalService::class)->submit([[
@@ -49,7 +50,7 @@ it('requires a reason and approver and blocks self approval', function (): void 
         'inventory_tracked' => true,
         'on_hand_quantity' => 9,
         'reason' => '',
-    ]], $user->id, User::factory()->create()->id))->toThrow(ValidationException::class);
+    ]], $user->id, inventoryAuthorizedUser()->id))->toThrow(ValidationException::class);
 
     expect(fn () => app(InventoryAdjustmentApprovalService::class)->submit([[
         'variant' => $variant,
@@ -61,8 +62,8 @@ it('requires a reason and approver and blocks self approval', function (): void 
 
 it('approves and rejects inventory requests without duplicate requester approval', function (): void {
     Bus::fake();
-    $requester = User::factory()->create();
-    $approver = User::factory()->create();
+    $requester = inventoryAuthorizedUser();
+    $approver = inventoryAuthorizedUser();
     $variant = inventoryApprovalVariant('APPROVAL-APPROVE', 4);
     $service = app(InventoryAdjustmentApprovalService::class);
     $request = $service->submit([[
@@ -76,7 +77,8 @@ it('approves and rejects inventory requests without duplicate requester approval
 
     $approved = $service->approve($request, $approver->id);
     expect($approved->status)->toBe(InventoryAdjustmentRequest::STATUS_APPROVED)
-        ->and($variant->fresh()->current_on_hand_quantity)->toBe(12);
+        ->and($variant->fresh()->current_on_hand_quantity)->toBe(4)
+        ->and($approved->items->first()->requested_on_hand_quantity)->toBe(12);
     Bus::assertDispatched(InventorySyncJob::class);
 
     $rejectRequest = $service->submit([[
@@ -87,14 +89,14 @@ it('approves and rejects inventory requests without duplicate requester approval
     ]], $requester->id, $approver->id);
     $service->reject($rejectRequest, $approver->id, 'No evidence');
     expect($rejectRequest->fresh()->status)->toBe(InventoryAdjustmentRequest::STATUS_REJECTED)
-        ->and($variant->fresh()->current_on_hand_quantity)->toBe(12);
+        ->and($variant->fresh()->current_on_hand_quantity)->toBe(4);
 });
 
 it('shows review actions and navigation badge only for the selected inventory approver', function (): void {
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
-    $requester = User::factory()->create();
-    $approver = User::factory()->create();
-    $otherUser = User::factory()->create();
+    $requester = inventoryAuthorizedUser();
+    $approver = inventoryAuthorizedUser();
+    $otherUser = inventoryAuthorizedUser();
     $requester->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $approver->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $otherUser->givePermissionTo(PermissionEnum::InventoryUpdate->value);
@@ -121,8 +123,8 @@ it('shows review actions and navigation badge only for the selected inventory ap
 
 it('surfaces a shortcut for pending inventory approvals in the inventory workspace', function (): void {
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
-    $requester = User::factory()->create();
-    $approver = User::factory()->create();
+    $requester = inventoryAuthorizedUser();
+    $approver = inventoryAuthorizedUser();
     $approver->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     $variant = inventoryApprovalVariant('APPROVAL-SHORTCUT', 4);
     app(InventoryAdjustmentApprovalService::class)->submit([[
@@ -140,8 +142,8 @@ it('surfaces a shortcut for pending inventory approvals in the inventory workspa
 });
 
 it('creates a file approval request with SKU-level reasons', function (): void {
-    $requester = User::factory()->create();
-    $approver = User::factory()->create();
+    $requester = inventoryAuthorizedUser();
+    $approver = inventoryAuthorizedUser();
     inventoryApprovalVariant('APPROVAL-FILE-1', 1);
     inventoryApprovalVariant('APPROVAL-FILE-2', 2);
     $path = tempnam(sys_get_temp_dir(), 'inventory-approval-');
@@ -157,7 +159,7 @@ it('creates a file approval request with SKU-level reasons', function (): void {
 
 function inventoryApprovalVariant(string $sku, int $quantity): Variant
 {
-    $user = User::factory()->create();
+    $user = inventoryAuthorizedUser();
     $import = Import::query()->create(['filename' => 'inventory.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $user->id]);
     $product = Product::withoutEvents(fn (): Product => Product::query()->create([
         'import_id' => $import->id,

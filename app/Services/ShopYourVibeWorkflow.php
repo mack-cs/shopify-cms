@@ -393,7 +393,7 @@ class ShopYourVibeWorkflow
                 $draft = $this->editable($id, $revision, true);
                 app(ShopYourVibeEditing::class)->authorize($draft, $revision);
             }
-            if ($draft->remote_jobs) {
+            if ($draft->remote_jobs && ($collectionGid === null || isset($draft->remote_jobs[$collectionGid]))) {
                 throw new RuntimeException('Shopify is still processing this draft. Retry the push to confirm completion before editing.');
             }
             $state = $draft->desired;
@@ -420,10 +420,10 @@ class ShopYourVibeWorkflow
                         'image_path' => ['nullable', 'regex:~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~'],
                         'image_url' => 'nullable|url|max:4096',
                     ])->validate();
-                    if (ShopifyCollection::where('handle', $fields['handle'])->exists()
-                        || in_array($fields['handle'], array_column($state['new_collections'] ?? [], 'handle'), true)) {
+                    if (in_array($fields['handle'], array_column($state['new_collections'] ?? [], 'handle'), true)) {
                         throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
                     }
+                    $this->assertHandleFreeInShopify($fields['handle']);
                     $key = (string) Str::uuid();
                     $gid = 'new:'.$key;
                     $state['new_collections'][$key] = $fields + [
@@ -705,9 +705,6 @@ class ShopYourVibeWorkflow
             if (! empty($draft->operation)) {
                 throw new RuntimeException('A previous Vibe operation did not finish. Retry it, or refresh from Shopify before starting another.');
             }
-            if ($payload['mode'] === 'new' && ShopifyCollection::where('handle', $payload['handle'])->exists()) {
-                throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
-            }
             $attempt = (string) Str::uuid();
 
             $draft->update([
@@ -820,7 +817,10 @@ class ShopYourVibeWorkflow
         $authorization ??= auth()->check() ? ($draft->editing_state['push'] ?? null) : null;
         app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
         $this->holdOperationLock($draft);
-        $this->shopify->beforeMutation = fn () => app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+        $this->shopify->beforeMutation = function () use ($id, $authorization): void {
+            $this->assertOperationOwnership();
+            app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+        };
         try {
             $draft->refresh();
             if (! in_array($draft->status, ['creating', 'deleting'], true) || ($draft->operation['attempt'] ?? null) !== $attempt) {
@@ -919,7 +919,10 @@ class ShopYourVibeWorkflow
         }
         app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
         $this->holdOperationLock($draft);
-        $this->shopify->beforeMutation = fn () => app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+        $this->shopify->beforeMutation = function () use ($id, $authorization): void {
+            $this->assertOperationOwnership();
+            app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+        };
         try {
             $this->shopify->definition();
             $state = $draft->desired;
@@ -1082,6 +1085,7 @@ class ShopYourVibeWorkflow
                 ));
                 $remove = array_diff(array_column($current['products'], 'id'), $wantedIds);
                 foreach (array_chunk($remove, 250) as $chunk) {
+                    $this->storeRemoteJob($draft, $gid, 'unconfirmed:'.Str::uuid());
                     $job = $this->shopify->removeProducts($gid, $chunk);
                     $this->trackJob($draft, $gid, $job);
                     $current = $this->shopify->collection($gid);
@@ -1103,6 +1107,7 @@ class ShopYourVibeWorkflow
                 if ($current['sort'] === 'MANUAL') {
                     $moves = $this->moves(array_column($current['products'], 'id'), $wantedIds);
                     foreach (array_chunk($moves, 250) as $chunk) {
+                        $this->storeRemoteJob($draft, $gid, 'unconfirmed:'.Str::uuid());
                         $job = $this->shopify->reorderProducts($gid, $chunk);
                         $this->trackJob($draft, $gid, $job);
                         $current = $this->shopify->collection($gid);
@@ -1159,7 +1164,12 @@ class ShopYourVibeWorkflow
                 $draft->update(['desired' => $state, 'progress' => $progress]);
                 Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));
             }
-            $confirmed = $this->confirmedState($draft, $state, $ids, $allowedUnavailable);
+            $confirmation = $state;
+            foreach ($heldSorts as $gid => $collection) {
+                $confirmation['collections'][$gid] = $draft->snapshot['collections'][$gid];
+            }
+            $confirmed = $this->confirmedState($draft, $confirmation, $ids, $allowedUnavailable);
+            $this->assertOperationOwnership();
             $snapshot = $confirmed;
             foreach ($heldSorts as $gid => $collection) {
                 $confirmed['collections'][$gid] = $collection;
@@ -1241,10 +1251,20 @@ class ShopYourVibeWorkflow
 
     private function trackJob(ShopYourVibeDraft $draft, string $gid, string $job): void
     {
-        $jobs = $draft->remote_jobs ?? [];
-        $jobs[$gid] = $job;
-        $draft->update(['remote_jobs' => $jobs]);
+        $this->storeRemoteJob($draft, $gid, $job);
         $this->waitForJob($job);
+    }
+
+    private function storeRemoteJob(ShopYourVibeDraft $draft, string $gid, string $job): void
+    {
+        $this->assertOperationOwnership();
+        DB::transaction(function () use ($draft, $gid, $job): void {
+            $locked = ShopYourVibeDraft::lockForUpdate()->findOrFail($draft->id);
+            $jobs = $locked->remote_jobs ?? [];
+            $jobs[$gid] = $job;
+            $locked->update(['remote_jobs' => $jobs]);
+        });
+        $draft->refresh();
     }
 
     private function rememberCreatedCollection(ShopYourVibeDraft $draft, array $creation): void
@@ -1259,6 +1279,9 @@ class ShopYourVibeWorkflow
 
     protected function waitForJob(string $job): void
     {
+        if (str_starts_with($job, 'unconfirmed:')) {
+            throw new RuntimeException('The Shopify reorder response was lost. Its remote outcome must be reconciled before another reorder; approved sorting was kept.');
+        }
         for ($attempt = 0; $attempt < 10; $attempt++) {
             if ($this->shopify->jobDone($job)) {
                 return;
@@ -1270,9 +1293,16 @@ class ShopYourVibeWorkflow
 
     private function checkpointCollection(ShopYourVibeDraft $draft, array $baseline, string $gid): void
     {
-        $jobs = $draft->remote_jobs ?? [];
-        unset($jobs[$gid]);
-        $draft->update(['snapshot' => $baseline, 'remote_jobs' => $jobs]);
+        $this->assertOperationOwnership();
+        DB::transaction(function () use ($draft, $baseline, $gid): void {
+            $locked = ShopYourVibeDraft::lockForUpdate()->findOrFail($draft->id);
+            $jobs = $locked->remote_jobs ?? [];
+            unset($jobs[$gid]);
+            $snapshot = $locked->snapshot;
+            $snapshot['collections'][$gid] = $baseline['collections'][$gid];
+            $locked->update(['snapshot' => $snapshot, 'remote_jobs' => $jobs]);
+        });
+        $draft->refresh();
     }
 
     public function summary(ShopYourVibeDraft $draft): array
@@ -1557,11 +1587,26 @@ class ShopYourVibeWorkflow
         $gid = (string) $authorization['scope_gid'];
         $scope = (string) ($authorization['scope'] ?? ShopYourVibeEditing::sortScope($gid));
         $draft = ShopYourVibeDraft::findOrFail($id);
-        app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
+        $execution = Cache::lock(ShopYourVibeEditing::scopePushLockKey($id, $scope), 900);
+        if (! $execution->get()) {
+            throw new ShopYourVibeBusyException('This collection push is already running.');
+        }
         try {
+            app(ShopYourVibeEditing::class)->validateJob($id, $authorization);
+            $this->shopify->beforeMutation = fn () => app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+            $draft->refresh();
+            if (ShopYourVibeDraft::where('id', '!=', $id)->whereNotNull('remote_jobs->'.$gid)->exists()) {
+                throw new RuntimeException('Another draft has an unresolved Shopify reorder for this collection. Confirm it before publishing.');
+            }
             $desired = $draft->desired['collections'][$gid] ?? null;
             if (! is_array($desired)) {
                 throw new RuntimeException('Open this collection’s products before pushing their order.');
+            }
+            if (isset($draft->remote_jobs[$gid])) {
+                $this->waitForJob($draft->remote_jobs[$gid]);
+                $baseline = $draft->snapshot;
+                $baseline['collections'][$gid] = $this->shopify->collection($gid);
+                $this->checkpointCollection($draft, $baseline, $gid);
             }
             $current = $this->shopify->collection($gid);
             if ($this->membership($current) !== $this->membership($desired)) {
@@ -1594,7 +1639,15 @@ class ShopYourVibeWorkflow
                 $moves = $this->moves(array_column($current['products'], 'id'), $wantedIds);
                 foreach (array_chunk($moves, 250) as $chunk) {
                     if ($chunk !== []) {
-                        $this->shopify->reorderProducts($gid, $chunk);
+                        app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+                        // Persist uncertainty before the HTTP call: a lost response or killed
+                        // worker must never silently authorize a second, competing reorder.
+                        $this->storeRemoteJob($draft, $gid, 'unconfirmed:'.Str::uuid());
+                        $job = $this->shopify->reorderProducts($gid, $chunk);
+                        $this->trackJob($draft, $gid, $job);
+                        $baseline = $draft->snapshot;
+                        $baseline['collections'][$gid] = $this->shopify->collection($gid);
+                        $this->checkpointCollection($draft, $baseline, $gid);
                     }
                 }
                 $current = $this->shopify->collection($gid);
@@ -1608,35 +1661,39 @@ class ShopYourVibeWorkflow
             if ($this->collectionDifferent($current, $confirmable)) {
                 throw new RuntimeException('Product sorting was not confirmed for '.$current['title'].'.');
             }
-            $draft->refresh();
-            $state = $draft->desired;
-            $baseline = $draft->snapshot;
-            $confirmed = array_replace($desired, [
-                'sort' => $current['sort'],
-                'enable_manual' => false,
-                'product_count' => $current['product_count'] ?? count($current['products']),
-                'products' => $current['products'],
-            ]);
-            $state['collections'][$gid] = $confirmed;
-            $baseline['collections'][$gid] = $confirmed;
-            $pending = $this->different($baseline, $state);
-            app(ShopYourVibeSorting::class)->markPublished($draft, (int) ($authorization['reviewed_revision'] ?? 0), $gid);
-            app(ShopYourVibeEditing::class)->finishScopePush($draft, $scope, false);
-            $fresh = $draft->fresh() ?? $draft;
-            $editing = $fresh->editing_state;
-            $fresh->update([
-                'desired' => $state,
-                'snapshot' => $baseline,
-                'pending' => $pending,
-                'status' => $pending ? 'pending' : 'synced',
-                'last_error' => null,
-                'editing_state' => $editing,
-            ]);
+            DB::transaction(function () use ($id, $authorization, $gid, $scope, $desired, $current): void {
+                app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
+                $draft = ShopYourVibeDraft::lockForUpdate()->findOrFail($id);
+                $state = $draft->desired;
+                $baseline = $draft->snapshot;
+                $confirmed = array_replace($desired, [
+                    'sort' => $current['sort'],
+                    'enable_manual' => false,
+                    'product_count' => $current['product_count'] ?? count($current['products']),
+                    'products' => $current['products'],
+                ]);
+                $state['collections'][$gid] = $confirmed;
+                $baseline['collections'][$gid] = $confirmed;
+                $pending = $this->different($baseline, $state);
+                app(ShopYourVibeSorting::class)->markPublished($draft, (int) ($authorization['reviewed_revision'] ?? 0), $gid);
+                app(ShopYourVibeEditing::class)->finishScopePush($draft, $scope, false);
+                $fresh = $draft->fresh() ?? $draft;
+                $editing = $fresh->editing_state;
+                $fresh->update([
+                    'desired' => $state,
+                    'snapshot' => $baseline,
+                    'pending' => $pending,
+                    'status' => $pending ? 'pending' : 'synced',
+                    'last_error' => null,
+                    'editing_state' => $editing,
+                ]);
+            });
         } catch (Throwable $e) {
             report($e);
-            $fresh = ShopYourVibeDraft::find($id) ?? $draft;
-            app(ShopYourVibeEditing::class)->finishScopePush($fresh, $scope, true);
-            $fresh->update(['pending' => true, 'status' => 'pending', 'last_error' => $e->getMessage()]);
+            app(ShopYourVibeEditing::class)->failScopePush($id, $authorization, $e->getMessage(), true);
+        } finally {
+            $this->shopify->beforeMutation = null;
+            $execution->release();
         }
     }
 
@@ -1761,6 +1818,13 @@ class ShopYourVibeWorkflow
             && ! $this->different($draft->snapshot ?? [], $draft->desired ?? []);
     }
 
+    private function assertHandleFreeInShopify(string $handle): void
+    {
+        if ($this->shopify->findCollectionByHandle($handle)) {
+            throw new RuntimeException('The handle "'.$handle.'" is already used in Shopify. Choose the existing collection or a different vibe name.');
+        }
+    }
+
     private function assertImmediateAllowed(ShopYourVibeDraft $draft): void
     {
         if ($draft->pending || $this->different($draft->snapshot ?? [], $draft->desired ?? [])) {
@@ -1811,12 +1875,7 @@ class ShopYourVibeWorkflow
             'image_path' => ['nullable', 'regex:~^shop-your-vibe/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$~'],
             'image_url' => 'nullable|url|max:4096',
         ])->validate();
-        if (ShopifyCollection::where('handle', $fields['handle'])->exists()) {
-            throw new RuntimeException('This handle already exists. Choose that collection or enter a different handle.');
-        }
-        if ($this->shopify->findCollectionByHandle($fields['handle'])) {
-            throw new RuntimeException('The handle "'.$fields['handle'].'" is already used in Shopify. Choose the existing collection or a different vibe name.');
-        }
+        $this->assertHandleFreeInShopify($fields['handle']);
 
         return [
             'mode' => 'new',
@@ -2215,17 +2274,34 @@ class ShopYourVibeWorkflow
     private function holdOperationLock(ShopYourVibeDraft $draft): void
     {
         $key = 'shop-your-vibe-op:'.$draft->collection_gid;
-        $this->lockToken ??= (string) Str::uuid();
-        if (Cache::add($key, $this->lockToken, 180)) {
+        if ($this->lockToken !== null) {
+            $this->assertOperationOwnership();
             return;
         }
-        if (Cache::get($key) === $this->lockToken) {
-            Cache::put($key, $this->lockToken, 180);
+        if (Cache::has($key)) throw new ShopYourVibeBusyException('An earlier Shopify worker still holds this collection.');
+        $lock = Cache::lock($key, 900);
+        if (! $lock->get()) throw new ShopYourVibeBusyException('Another Shop Your Vibe operation is running for this collection.');
+        $this->lockToken = $lock->owner();
+        $this->operationKey = $key;
+    }
 
-            return;
+    private ?string $operationKey = null;
+
+    private function assertOperationOwnership(): void
+    {
+        if ($this->lockToken !== null && ! Cache::restoreLock($this->operationKey, $this->lockToken)->isOwnedByCurrentProcess()) {
+            throw new RuntimeException('The Shopify operation lease was lost. No further writes or checkpoints are authorized.');
         }
+    }
 
-        throw new ShopYourVibeBusyException('Another Shop Your Vibe operation is running for this collection. It will retry automatically.');
+    public static function operationRunning(string $gid): bool
+    {
+        $key = 'shop-your-vibe-op:'.$gid;
+        if (Cache::has($key)) return true;
+        $probe = Cache::lock($key, 1);
+        if (! $probe->get()) return true;
+        $probe->release();
+        return false;
     }
 
     private function releaseOperationLock(ShopYourVibeDraft $draft): void
@@ -2234,10 +2310,9 @@ class ShopYourVibeWorkflow
             return;
         }
         $key = 'shop-your-vibe-op:'.$draft->collection_gid;
-        if (Cache::get($key) === $this->lockToken) {
-            Cache::forget($key);
-        }
+        Cache::restoreLock($key, $this->lockToken)->release();
         $this->lockToken = null;
+        $this->operationKey = null;
     }
 
     /**

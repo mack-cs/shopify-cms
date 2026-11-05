@@ -35,6 +35,7 @@ final class EngravedBeadSellability
             if ($expectedVersion !== null && $expectedVersion !== (int) $family->configuration_version) {
                 return; // A replacement reconciliation uses the latest configuration.
             }
+            $startedAt = now();
             try {
                 if (ShopifyStackInventoryMovement::query()->whereHas('reservation', fn ($q) => $q->where('bead_family_id', $family->id))
                     ->where('status', '!=', ShopifyStackInventoryMovement::STATUS_COMPLETED)->exists()) {
@@ -53,7 +54,7 @@ final class EngravedBeadSellability
                 foreach ($family->members as $member) {
                     $state = $member->required_beads === 1 ? $sourceState : $this->shopify->read($member, $family->source_location_id);
                     $member->update(['last_verified_tracked' => $state['tracked'], 'last_verified_sellable' => $state['sellable']]);
-                    $disable = (new EngravedBeadAvailability)->shouldDisable($available, $member->disable_threshold);
+                    $disable = (new EngravedBeadAvailability)->shouldDisable($available, app(EngravedBeadSafetyThresholds::class)->effective($member));
                     $liveStatus = in_array($state['status'], ['ACTIVE', 'UNLISTED'], true);
                     $product = Product::query()->where('shopify_id', $member->shopify_product_id)->first();
                     if (! $liveStatus || $member->manual_disabled || ! $product?->isApprovedByTwo()) {
@@ -84,7 +85,13 @@ final class EngravedBeadSellability
                     $this->apply($family, $member, $operation);
                     $family->refresh();
                 }
-                $family->update(['last_reconciled_at' => now(), 'recalculate_at' => null, 'sync_error' => null]);
+                $family->refresh();
+                $family->last_reconciled_at = now();
+                $family->sync_error = null;
+                if ($family->recalculate_at === null || $family->recalculate_at->lte($startedAt)) {
+                    $family->recalculate_at = null;
+                }
+                $family->save();
             } catch (\Throwable $error) {
                 $family->update(['sync_error' => $error->getMessage(), 'recalculate_at' => now()]);
                 throw $error;

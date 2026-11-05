@@ -116,6 +116,7 @@ it('lets sorting start when Shopify membership matches and reads only that colle
 
 it('stops a new sorting session when Shopify membership is stale', function () {
     array_pop($this->fake->collections[$this->main]['products']['nodes']);
+    $this->fake->collections[$this->main]['productsCount']['count'] = count($this->fake->collections[$this->main]['products']['nodes']);
     $order = gateIds($this->draft, $this->main);
     $this->actingAs($this->admin);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->main)->call('startEditing');
@@ -283,6 +284,7 @@ it('inserts new Shopify products in the current Shopify order around the saved s
 
 it('drops a product Shopify removed when a stale browser sends it back', function () {
     array_pop($this->fake->collections[$this->main]['products']['nodes']);
+    $this->fake->collections[$this->main]['productsCount']['count'] = count($this->fake->collections[$this->main]['products']['nodes']);
     $this->actingAs($this->admin);
     $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->main)
         ->call('refreshMembershipPreservingSort', $this->main);
@@ -372,6 +374,7 @@ it('still refuses publication and names the membership difference without reorde
     $this->actingAs($this->reviewer);
     $this->draft = $this->sorting->approveScope($this->draft->id, $this->main, $revision)->fresh();
     array_pop($this->fake->collections[$this->main]['products']['nodes']);
+    $this->fake->collections[$this->main]['productsCount']['count'] = count($this->fake->collections[$this->main]['products']['nodes']);
     $reorders = count(array_filter($this->fake->calls, fn (array $call): bool => str_contains($call[0], 'VibeReorderProducts')));
 
     $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->main);

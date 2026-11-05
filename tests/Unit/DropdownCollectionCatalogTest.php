@@ -2,6 +2,8 @@
 
 use App\Services\DropdownCollectionCatalog;
 
+uses(Tests\TestCase::class);
+
 it('resolves vendor names from collection contexts', function (): void {
     $catalog = app(DropdownCollectionCatalog::class);
 

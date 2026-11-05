@@ -43,6 +43,7 @@ it('shows pending partial approval requests to all users while keeping individua
     $otherUser = User::factory()->create();
 
     $product = Product::create([
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Partial Approval Product',
         'handle' => 'partial-approval-product',
         'status' => 'active',
@@ -76,6 +77,7 @@ it('shows open partial approval requests to the sender as well as any-reviewer r
     $otherUser = User::factory()->create();
 
     $product = Product::create([
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Open Queue Product',
         'handle' => 'open-queue-product',
         'status' => 'active',

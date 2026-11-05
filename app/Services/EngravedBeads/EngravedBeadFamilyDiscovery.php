@@ -158,7 +158,9 @@ final class EngravedBeadFamilyDiscovery
                 if ($existing) {
                     $existing->update($member);
                 } else {
-                    $family->members()->create($member + ['disable_threshold' => $member['required_beads']]);
+                    $beads = (int) $member['required_beads'];
+                    $threshold = $beads === 1 ? $beads : app(EngravedBeadSafetyThresholds::class)->configured($beads);
+                    $family->members()->create($member + ['disable_threshold' => $threshold]);
                 }
             }
             $source = collect($group['members'])->firstWhere('required_beads', 1);

@@ -269,7 +269,8 @@ final class ProductLaunchService
                     return 'Engraved family mapping and sellability must be approved before launch.';
                 }
                 $stock = $this->inventory->currentQuantities($source, $member->family->source_location_id);
-                if ((int) $stock['available'] + (int) $member->family->automation_held_quantity <= $member->disable_threshold) {
+                $threshold = app(\App\Services\EngravedBeads\EngravedBeadSafetyThresholds::class)->effective($member);
+                if ((int) $stock['available'] + (int) $member->family->automation_held_quantity <= $threshold) {
                     return 'Shared physical bead stock is below the member launch threshold.';
                 }
             } catch (\Throwable $error) {

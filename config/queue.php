@@ -30,6 +30,23 @@ return [
     */
 
     'connections' => [
+        'inventory-events' => [
+            'driver'=>'database','connection'=>env('DB_QUEUE_CONNECTION'),'table'=>env('DB_QUEUE_TABLE','jobs'),
+            'queue'=>'inventory-events','retry_after'=>360,'after_commit'=>true,
+        ],
+        'inventory-receipts' => [
+            'driver'=>'database','connection'=>env('DB_QUEUE_CONNECTION'),'table'=>env('DB_QUEUE_TABLE','jobs'),
+            'queue'=>'inventory-receipts','retry_after'=>720,'after_commit'=>true,
+        ],
+        'inventory-reconciliation' => [
+            'driver'=>'database','connection'=>env('DB_QUEUE_CONNECTION'),'table'=>env('DB_QUEUE_TABLE','jobs'),
+            'queue'=>'inventory-reconciliation','retry_after'=>1920,'after_commit'=>true,
+        ],
+        'inventory-sync' => [
+            'driver' => 'database', 'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'), 'queue' => 'inventory-sync',
+            'retry_after' => 1920, 'after_commit' => true,
+        ],
         'product-launch' => [
             'driver' => 'database', 'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'), 'queue' => 'product-launch',
@@ -61,7 +78,8 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // Existing procurement jobs can run for 14400 seconds on this connection.
+            'retry_after' => max(14520, (int) env('DB_QUEUE_RETRY_AFTER', 14520)),
             'after_commit' => false,
         ],
 

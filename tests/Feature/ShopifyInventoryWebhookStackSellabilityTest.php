@@ -20,6 +20,63 @@ use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
 
+it('retains a failed stack disable as retryable even when the next event has no local change', function () {
+    config(['services.shopify.shop' => 'test.myshopify.com', 'services.shopify.admin_access_token' => 'test-token']);
+    $records = createInventoryWebhookStackRecords(0, false, null);
+    $summary = app(StackBundleSellabilityService::class)->enforce(null, false);
+    expect($summary['forced_unsellable'])->toBe(1);
+    $variant = $records['stack_variant']->fresh();
+    Http::fake(function ($request) use ($records, $variant) {
+        if (str_contains($request['query'], 'mutation')) {
+            return Http::response(['data'=>['inventoryItemUpdate'=>['userErrors'=>[['message'=>'Shopify disable rejected']]]]]);
+        }
+        return Http::response(['data' => ['product' => ['id' => $records['stack']->shopify_id, 'status' => 'ACTIVE',
+            'variants' => ['nodes' => [['id' => $variant->shopify_id, 'sku' => $variant->sku,
+                'inventoryItem' => ['id' => $variant->shopify_inventory_item_id, 'tracked' => false]]]]]]]);
+    });
+    $job = new InventorySyncJob([$variant->id], 'push', null, 'stack_sellability_retry');
+    expect(fn () => $job->handle(app(\App\Services\ProductInventorySyncService::class), app(\App\Services\InventoryAdjustmentApprovalService::class)))
+        ->toThrow(RuntimeException::class, 'retry');
+    expect($variant->fresh()->inventory_local_dirty)->toBeTrue();
+    $again = app(StackBundleSellabilityService::class)->enforce(null, false);
+    expect($again['changes'])->toBe([]);
+    Queue::fake();
+    app(StackSellabilityShopifyPushService::class)->retryPending();
+    Queue::assertPushed(InventorySyncJob::class, fn ($retry) => in_array($variant->id, $retry->variantIds));
+    $remoteTracked = false;
+    $remoteOnHand = 8;
+    Http::swap((new \Illuminate\Http\Client\Factory)->preventStrayRequests());
+    Http::fake(function ($request) use ($records, $variant, &$remoteTracked, &$remoteOnHand) {
+        $query = $request['query'];
+        if (str_contains($query, 'InventoryItemTrackingUpdate')) {
+            $remoteTracked = $request['variables']['tracked'];
+            return Http::response(['data' => ['inventoryItemUpdate' => ['inventoryItem'=>['id'=>$variant->shopify_inventory_item_id,'tracked'=>$remoteTracked],'userErrors' => []]]]);
+        }
+        if (str_contains($query, 'mutation InventorySetQuantities')) {
+            $remoteOnHand = $request['variables']['input']['quantities'][0]['quantity'];
+            return Http::response(['data' => ['inventorySetQuantities' => ['inventoryAdjustmentGroup'=>['createdAt'=>now()->toISOString()],'userErrors' => []]]]);
+        }
+        if (str_contains($query, 'query Locations')) {
+            return Http::response(['data' => ['locations' => ['nodes' => [['id' => 'gid://shopify/Location/1']]]]]);
+        }
+        return Http::response(['data' => ['product' => ['id' => $records['stack']->shopify_id, 'status' => 'ACTIVE',
+            'variants' => ['nodes' => [['id' => $variant->shopify_id, 'sku' => $variant->sku, 'inventoryQuantity' => $remoteOnHand,
+                'inventoryItem' => ['id' => $variant->shopify_inventory_item_id, 'tracked' => $remoteTracked,
+                    'inventoryLevels' => ['nodes' => [['location' => ['id' => 'gid://shopify/Location/1'],
+                        'quantities' => [['name' => 'on_hand', 'quantity' => $remoteOnHand], ['name' => 'available', 'quantity' => $remoteOnHand]]]]]]]]]]]]);
+    });
+    $job->handle(app(\App\Services\ProductInventorySyncService::class), app(\App\Services\InventoryAdjustmentApprovalService::class));
+    expect($remoteTracked)->toBeTrue()->and($remoteOnHand)->toBe(0)
+        ->and($variant->fresh()->inventory_local_dirty)->toBeFalse()
+        ->and($variant->fresh()->inventory_sync_error)->toBeNull();
+    Queue::fake();
+    app(StackSellabilityShopifyPushService::class)->retryPending();
+    Queue::assertNothingPushed();
+    $variant->refresh()->forceFill(['inventory_local_dirty' => true, 'inventory_sync_batch_id' => 'manual-unapproved-fixture'])->saveQuietly();
+    app(StackSellabilityShopifyPushService::class)->retryPending();
+    Queue::assertNothingPushed(); // Retry scanning must not publish unrelated/manual dirty edits.
+});
+
 it('accepts a verified Shopify inventory webhook and queues the handler', function (): void {
     Queue::fake();
     config([

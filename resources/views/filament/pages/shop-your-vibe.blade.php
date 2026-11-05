@@ -10,7 +10,7 @@
     <script>
         window.syvEditor = function () {
             return {
-        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
+        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, refreshPageTimer: null, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
         canPush() { return (this.localPending || this.$root.dataset.pending === 'true') && this.$root.dataset.sortOnly !== '1'; },
         lockNotice: { visible: false }, lockNoticeCollapsed: false,
@@ -109,7 +109,7 @@
                 this.revealLockNotice({ message: this.orderError });
             }
         },
-        destroy() { this.stopStatusTimer(); if (this.editingStatusTimer) clearInterval(this.editingStatusTimer); this.livewireOrderCleanup?.(); },
+        destroy() { this.stopStatusTimer(); this.clearRefreshPageNotice(); if (this.editingStatusTimer) clearInterval(this.editingStatusTimer); this.livewireOrderCleanup?.(); },
         stopStatusTimer() {
             if (this.statusTimer) {
                 clearInterval(this.statusTimer);
@@ -141,6 +141,8 @@
             const refreshing = this.$el.dataset.refresh === '1';
             const needsPoll = refreshing || (this.$el.dataset.poll === '1' && this.$el.dataset.productsLoaded !== '1');
             if (!needsPoll) {
+                if (this.$refs.statusBanner?.isConnected) this.showRefreshPageNotice();
+                else this.clearRefreshPageNotice();
                 if (this.$el.dataset.productsLoaded === '1') this.finishLoaded(false);
                 else this.stopStatusTimer();
                 return;
@@ -148,9 +150,27 @@
             this.wasLoading = true;
             this.statusMode = 'loading';
             this.statusStartedAt = this.statusStartedAt || Date.now();
+            this.armRefreshPageNotice();
             if (this.statusTimer) return;
             this.pollStatus();
             this.statusTimer = setInterval(() => this.pollStatus(), 2000);
+        },
+        armRefreshPageNotice() {
+            if (this.refreshPageTimer || !this.$refs.statusBanner) return;
+            const started = this.statusStartedAt || Date.now();
+            this.statusStartedAt = started;
+            const wait = Math.max(0, (2 * 60 * 1000) - (Date.now() - started));
+            this.refreshPageTimer = setTimeout(() => this.showRefreshPageNotice(), wait);
+        },
+        showRefreshPageNotice() {
+            const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
+            if (stale) stale.hidden = false;
+        },
+        clearRefreshPageNotice() {
+            if (this.refreshPageTimer) {
+                clearTimeout(this.refreshPageTimer);
+                this.refreshPageTimer = null;
+            }
         },
         applyProgress(status) {
             const banner = this.$refs.statusBanner;
@@ -186,6 +206,7 @@
         },
         finishLoaded(announce) {
             this.stopStatusTimer();
+            if (!this.$refs.statusBanner?.isConnected) this.clearRefreshPageNotice();
             this.statusMode = 'idle';
             if (announce && this.wasLoading) {
                 const count = this.$el.dataset.productCount || '';
@@ -202,16 +223,8 @@
                 this.finishLoaded(this.wasLoading);
                 return;
             }
-            if (this.statusStartedAt && Date.now() - this.statusStartedAt > 15 * 60 * 1000) {
-                this.statusMode = 'failed';
-                this.stopStatusTimer();
-                if (refreshing) {
-                    await this.$wire.expireRefresh();
-                    return;
-                }
-                const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
-                if (stale) stale.hidden = false;
-                return;
+            if (this.statusStartedAt && Date.now() - this.statusStartedAt > 2 * 60 * 1000) {
+                this.showRefreshPageNotice();
             }
             const status = await this.$wire.statusSnapshot();
             if (!status) return;
@@ -248,7 +261,7 @@
                     }
                     this.$nextTick(() => this.bindProductDrag());
                 }
-                if (this.$el.dataset.productsLoaded === '1') {
+                if (this.$el.dataset.productsLoaded === '1' && !refreshing) {
                     this.finishLoaded(true);
                 }
                 return;
@@ -264,7 +277,7 @@
                 }
                 this.$nextTick(() => this.bindProductDrag());
             }
-            if (this.$el.dataset.productsLoaded === '1') {
+            if (this.$el.dataset.productsLoaded === '1' && !refreshing) {
                 this.finishLoaded(true);
             }
         },
@@ -593,7 +606,7 @@
         x-on:vibe-editor-opened.window="formDirty = false; statusStartedAt = Date.now(); $nextTick(() => { syncHydration(); $el.scrollIntoView({ behavior: 'smooth', block: 'start' }) })"
         x-on:vibe-refresh-started.window="statusStartedAt = Date.now(); $nextTick(() => syncHydration())"
         x-on:vibe-products-ready.window="$nextTick(() => { bindProductDrag(); if ($el.dataset.productsLoaded === '1') finishLoaded(true); })"
-        x-on:livewire:navigating.window="stopStatusTimer()">
+        x-on:livewire:navigating.window="stopStatusTimer(); clearRefreshPageNotice()">
         @if ($loadError && ! ($addingCard || $addingParent || $uploadingMappings || $confirmingAdd))
             <div role="alert" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">{{ $loadError }}</div>
         @endif

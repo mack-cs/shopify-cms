@@ -18,6 +18,10 @@ class ProcessManualStockTransactionJob implements ShouldQueue
     public function __construct(public int $transactionId, public ?int $userId = null) {}
     public function handle(ManualStockTransactionService $service): void
     {
-        $service->process(ManualStockTransaction::query()->findOrFail($this->transactionId), $this->userId);
+        $record = ManualStockTransaction::query()->findOrFail($this->transactionId);
+        if (! $record->is_historical) {
+            app(\App\Services\InventoryAccessService::class)->authorizeInventory($this->userId);
+        }
+        $service->process($record, $this->userId);
     }
 }

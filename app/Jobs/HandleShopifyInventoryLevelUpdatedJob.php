@@ -28,7 +28,7 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldBeUnique, ShouldQue
         public string $inventoryItemId,
         public array $payload = [],
         public ?string $webhookId = null,
-    ) {}
+    ) { $this->onConnection('inventory-events')->onQueue('inventory-events'); }
 
     public function uniqueId(): string
     {
@@ -40,6 +40,11 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldBeUnique, ShouldQue
         StackSellabilityShopifyPushService $pushService,
         StackSellabilitySlackNotifier $slackNotifier,
     ): void {
+        $lock = \Illuminate\Support\Facades\Cache::lock('inventory-reconcile:'.$this->inventoryItemId, 360);
+        if (! $lock->get()) return; // Durable version remains pending for the scheduler.
+        try {
+        $row = \Illuminate\Support\Facades\DB::table('inventory_reconciliations')->where('inventory_item_id',$this->inventoryItemId)->first();
+        $version = $row?->version;
         app(EngravedBeadRecalculation::class)->inventoryItem($this->inventoryItemId);
         $summary = $sellabilityService->enforceForInventoryItem($this->inventoryItemId, null, [
             'refresh_components' => true,
@@ -51,5 +56,11 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldBeUnique, ShouldQue
         $summary = $pushService->queuePushForChangedStacks($summary);
 
         $slackNotifier->notifyIfChanged($summary);
+        if ($version !== null && (int) ($summary['shopify_component_refresh_failures'] ?? 0) === 0
+            && (int) ($summary['skipped_locked_stacks'] ?? 0) === 0) {
+            \Illuminate\Support\Facades\DB::table('inventory_reconciliations')->where('id',$row->id)
+                ->where('processed_version','<',$version)->update(['processed_version'=>$version,'updated_at'=>now()]);
+        }
+        } finally { $lock->release(); }
     }
 }

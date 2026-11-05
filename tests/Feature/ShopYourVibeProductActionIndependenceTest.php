@@ -364,6 +364,7 @@ it('rejects a scoped sort push when Shopify membership changed', function () {
     app(ShopYourVibeEditing::class)->token = null;
     $this->draft = app(ShopYourVibeEditing::class)->acquireScope($this->draft->id, $scopeRevision, $scope)->fresh();
     array_pop($this->fake->collections[$this->main]['products']['nodes']);
+    $this->fake->collections[$this->main]['productsCount']['count'] = count($this->fake->collections[$this->main]['products']['nodes']);
     [$queued, $ticket] = $this->workflow->queueCollection($this->draft->id, $scopeRevision, $this->main);
     $before = count(array_filter($this->fake->calls, fn ($call) => str_contains($call[0], 'VibeReorderProducts')));
     $this->workflow->push($queued->id, $ticket);

@@ -15,6 +15,7 @@ use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
+beforeEach(fn () => app()->instance(\App\Contracts\ShopifyGraphqlGateway::class, new \Tests\Support\VibeShopifyFake));
 
 /**
  * @return array<int, string>

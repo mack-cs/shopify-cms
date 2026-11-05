@@ -1,0 +1,466 @@
+LEIGH AVENUE CMS: RELEASE BLOCKER FIXES AND INDEPENDENT VERIFICATION
+4 November 2026 | feat/syv-sorting-approval-integration
+
+Recommendation: CONDITIONAL GO for the reviewed code; operational release HOLD
+remains in effect until the production prerequisites below are verified.
+No deployment or production configuration change is authorized by this report.
+
+SCOPE AND PRESERVATION
+
+Implemented the confirmed defects in
+docs/INDEPENDENT_RELEASE_RISK_VERIFICATION_2026-11-04.txt, starting with stock
+integrity and authorization. Preserved the working scoped uncertainty, two-person
+approval, receipt claim, manual deduction CAS and idempotency safeguards.
+No commits, deployment, live Shopify mutations, real mail, production database
+changes, engraved-bead activation or consumption-formula changes occurred.
+
+Before editing, retained the existing modified and untracked files plus tracked
+diff under storage/logs/release-risk-fix-baseline/. Changes were applied on top of
+that working tree. The prior audit reports remain available and unchanged.
+Protected engraved-bead implementation files, config/engraved_beads.php and
+.env.example match their starting hashes; see release-risk-preservation.txt.
+The shared variant observer gained intent-generation metadata only; physical
+bead/stack quantity calculations and activation values were not changed.
+
+VERIFICATION SUMMARY
+
+Final complete suite: 1,075 passed, 0 failed, 0 errors, 0 skipped;
+6,559 assertions, 188.70 seconds. Process exit status0 and JUnit agree.
+Final machine-readable result: storage/logs/release-risk-final.xml
+Final readable result: storage/logs/release-risk-final.txt
+
+All 18 original investigation cases were converted from diagnostic assertions
+of bad behavior into assertions of the required safe behavior. None is skipped
+or retained as an expected failure. Two additional webhook/daily recovery cases
+bring that file to 20 cases. Additional safety coverage verifies stale quantities,
+revocation, forged actors, intent generations, ambiguous mail, multiple locations
+and single/bulk inventory push UI authorization. Gateway throttling has an
+additional no-replay regression. The focused boundary/workspace runs passed.
+
+The final isolated MySQL harness passed 24 checks, using separate PHP processes,
+real InnoDB row locks, shared database cache locks, queue reservations and actual
+registered scheduled callbacks. It creates/migrates/drops a new random localhost
+database only. Relevant files:
+  tests/Support/independent-risk-mysql.php
+  storage/logs/release-risk-mysql-final.txt
+
+The existing scoped-lock/editing MySQL harnesses also passed their forced races:
+  storage/logs/release-risk-existing-concurrency.txt
+  storage/logs/release-risk-existing-editing.txt
+They retain stale-failure/replacement, expired-acquire/replacement, renewal and
+discard protections. Disposable databases were removed by their harnesses.
+
+Runtime: PHP 8.4.21 with memory_limit=1G. Laravel tests use disposable SQLite and
+fake Shopify; MySQL tests use disposable databases and fake Shopify/mail.
+No evidence in this report comes from a live inventory mutation.
+
+Source freeze manifests for the final complete suite:
+  storage/logs/release-risk-final-source-before.tsv
+  storage/logs/release-risk-final-source-after.tsv
+The manifests match exactly: no application, configuration, migration, resource
+or test source changed during the final complete suite. See
+storage/logs/release-risk-source-freeze.txt. The 20 original-file case results,
+including the 18 converted investigation cases, are recorded individually in
+storage/logs/release-risk-original-case-results.tsv; every case passed.
+
+EACH FINDING: ROOT CAUSE, CORRECTION AND VERIFIED OUTCOME
+
+1. UNKNOWN/NULL COMPONENT STOCK: FIXED, P0
+
+Root cause: generic complementary-product sellability intentionally accepts
+unknown inventory. Stack enforcement reused it and could restore a stack to
+untracked inventory when component tracking/quantity was null.
+
+Change: app/Services/StackBundleSellabilityService.php:487 adds a stack-specific
+eligibility check requiring known tracking and, for tracked components, a known
+quantity. It retains explicit untracked semantics and existing component-unit
+checks. General complementary sellability and stack consumption formulas remain
+unchanged.
+
+Original reproductions: tracking=null/quantity=null and tracking=true/quantity=null
+both now retain tracked zero stack inventory. The old automatic restoration is
+no longer reproduced. Known stock recovery and explicit untracked components
+continue through the existing tests. A failed component refresh remains a hold.
+
+2. UNCONFIRMED ASYNC REORDER: PARENT GAP FIXED, SCOPED QUARANTINE PRESERVED, P1
+
+Root cause: parent publication stored a remote job only after receiving the
+mutation response. Losing an accepted response could leave no uncertainty record;
+a matching order could then be mistaken for completed asynchronous work.
+
+Changes: app/Services/ShopYourVibeWorkflow.php:1088,1110 persists unconfirmed:<uuid>
+before parent remove/reorder requests. Known job IDs are retained and polled.
+The existing waitForJob guard still refuses unconfirmed markers. Scoped ordering
+retains its existing pre-dispatch marker and execution lock.
+
+Original reproduction: fake accepts a reorder, exposes the target order but loses
+the response while its job remains pending. Both the initial and retried parent
+stay failed/pending, the marker survives and exactly one reorder was sent. A
+matching Shopify snapshot does not clear uncertainty. Existing delayed known-job,
+dependent-chunk, revoked-permission and scoped recovery tests remain passing.
+
+Additional independently reproduced gateway defect: ShopifyApiClient itself could
+retry a THROTTLED mutation response containing execution evidence. The former
+four-attempt path was reproduced before editing; app/Services/ShopifyApiClient.php:81
+now stops rather than replaying a mutation when a throttled response contains
+data or an actual execution cost. Queries and proven pre-execution throttles
+retain their bounded retry behavior. The new fake-response regression verifies
+one request and an explicit uncertain outcome.
+
+3. PARENT CONCURRENCY/EXPIRED LEASE: FIXED, P1
+
+Root cause: a 180-second Cache::add marker could expire within an 840-second job.
+Ticket validation alone did not fence the old owner; get/put and get/forget
+renewal/release were not atomic ownership operations.
+
+Changes: app/Services/ShopYourVibeWorkflow.php:2274 uses an owner-aware 900-second
+cache lock, exceeding the 840-second job budget. A held token is checked rather
+than revived. Before-mutation hooks, remote-job persistence and collection/final
+checkpoints verify ownership. Release uses the owner token. operationRunning
+recognizes both legacy markers and current atomic locks; a short atomic probe
+works with the supported cache drivers without relying on protected APIs.
+
+MySQL reproduction after correction: workerB cannot enter workerA's live lease;
+after forced expiry/takeover, workerA's real push is rejected before another
+Shopify call. A cannot release B's lease; B can release its own lease. Existing
+scoped execution locks remain separate and effective. Shared cache and worker
+termination budgets remain mandatory production prerequisites.
+
+4. LAYOUT PUBLICATION WITH HELD SORTING: FIXED, P1
+
+Root cause: the parent deliberately skipped unpublished explicit sorts, then
+compared final Shopify state against those unsent desired orders.
+
+Change: app/Services/ShopYourVibeWorkflow.php:1167 builds a confirmation projection
+using held collections' confirmed baselines, verifies the layout and actual
+published collections, then merges the held desired orders back as pending.
+It does not publish or approve those orders.
+
+Original reproduction: card rename now succeeds remotely without a false failure.
+Draft remains pending with no error; the held desired order differs from its
+unchanged snapshot, and zero unapproved reorder calls are sent. Existing scoped
+collection isolation, membership, approval and publication cases still pass.
+
+5. TERMINAL PARENT FAILURE/ABANDONMENT: FIXED, P1
+
+Root cause: failed() returned while the dead worker's marker existed. Later marker
+expiry did not transition the ticketed pushing draft, and the narrow legacy
+discard exception correctly refused to discard it.
+
+Changes: app/Jobs/PushShopYourVibe.php:61 records terminal failure on the matching
+ticket while a lease remains. app/Services/ShopYourVibeEditing.php:454 adds
+recoverParent, called under a row lock during acquire and by the actual
+syv-parent-recovery scheduler callback. Once no worker lease exists and the ticket
+ended/expired, it increments the revision, archives the failed ticket and marks
+the parent failed/pending. Desired state, snapshots and remote checkpoints remain
+intact. It sends no Shopify request and does not expand the legacy discard escape.
+
+Original reproduction: after the dead marker expires, actual scheduled recovery
+releases the local pushing state without discarding work. MySQL checks defer
+cleanup while the lease is held, then recover the same draft with identical
+desired/snapshot values. Old tickets are fenced by the revision change.
+
+6. APPROVED BUNDLE QUANTITY: FIXED, P0
+
+Root cause: approval wrote current_on_hand_quantity, but bundle publication chose
+inventory_qty and confirmed that old target before marking the request applied.
+
+Changes: app/Services/InventoryAdjustmentApprovalService.php:93 keeps requested
+values in approval items until remote confirmation. It marks dirty intent and
+records its generation instead of replacing confirmed local quantities.
+app/Services/ProductInventorySyncService.php:219 selects the approval item's exact
+tracking/quantity target for approved batches, including bundles. Automatic
+stack sellability still uses its established separate inventory intent.
+
+Original reproduction: a bundle at four approved to nine now sends nine with
+comparison quantity four, receives valid confirmation, reads back nine and ends
+APPLIED. It cannot mark a confirmed four as completion of the requested nine.
+Approval alone leaves confirmed local on-hand at four. Manual component/stack
+consumption formulas and tracking representations were not redefined.
+
+7. INVENTORY ADJUSTMENT AUTHORIZATION/CAS/CONFIRMATION: FIXED, P0
+
+Authorization changes:
+  - app/Services/InventoryAccessService.php:15 requires an active user and
+    inventory.update; authorizeInventory resolves the current database identity.
+  - InventoryAdjustmentApprovalService checks requester/reviewer authority on
+    submit/review; authorizeBatch verifies selected distinct actors, approved
+    status, reviewed_by, permitted items and current authority at execution.
+  - app/Jobs/InventorySyncJob.php:50 reauthorizes queued pushes. Approved batches
+    require their selected reviewer; other human stock pushes require active
+    inventory authority. Automatic stack batches remain limited to bundles.
+  - InventoryAdjustmentRequestResource's review visibility rechecks inventory
+    authority. InventoryResource filters approvers and guards single/bulk push
+    visibility and dispatch actions. Service checks remain authoritative against
+    forged UI requests and permission changes after submission.
+  - Review decisions use the locked current request; a stale rejection cannot
+    undo an approval. Two distinct people are still required for corrections.
+
+Stock confirmation changes:
+  - ProductInventorySyncService compares an approved count with its original
+    on-hand snapshot, uses the selected location's quantity for CAS, supplies
+    changeFromQuantity and a stable @idempotent key, requires an adjustment group,
+    and verifies intended tracking/on-hand by readback before clearing dirty state.
+  - Tracking changes require an actual item identity/tracking confirmation.
+  - A valid group plus divergent readback is still failure, never APPLIED.
+  - New inventory_write_intents records durable pre-mutation state. A lost response,
+    malformed result, process death or divergent readback remains started and
+    blocks another batch/replay. A proven rejection can retry. Later matching
+    reads do not clear uncertainty or replace the retained pending intent.
+  - Monotonic inventory_write_version metadata fences superseded local intent;
+    confirmation checkpoints lock/recheck it. Repeated automatic sellability
+    cycles receive different identities rather than reusing an old success.
+  - Already-applied approvals return without rewriting stock received later.
+
+The durable implementation is in app/Services/InventoryWriteIntents.php and
+app/Models/InventoryWriteIntent.php. app/Observers/VariantObserver.php:20 supplies
+generation changes without changing consumption calculations. Confirmation and
+read-refresh fencing is in ProductInventorySyncService.php:618,648.
+
+Original reproductions now fail safely: status-only reviewer cannot approve via
+UI/service; missing mutation payload leaves the request unapplied and dirty;
+retry sends no second mutation. Added cases cover stale approved counts, both
+actors' revocation, forged job actor, revocation during a read, later local changes,
+matching reads after uncertainty and repeated generations. MySQL competing
+approvals create one intent/job; competing batches cannot pass an in-flight intent.
+
+Additional location reproduction: an aggregate physical count could be applied
+to one of multiple stock locations and still appear confirmed. The new guard
+at ProductInventorySyncService.php:231 refuses tracked quantity writes when
+multiple locations are present. Per-location counting is not silently invented.
+Single-location inventory remains covered by positive workflow tests.
+
+API contract checked against Shopify's official inventorySetQuantities docs:
+https://shopify.dev/docs/api/admin-graphql/latest/mutations/inventorySetQuantities
+The new writer uses changeFromQuantity and stable idempotency keys, consistent
+with the existing specialized manual writer and the configured 2026-01+ contract.
+No existing manual deduction CAS or provider idempotency was removed.
+
+8. SUPPLIER RECEIPT RETRIES: REPLACEMENT GAP FIXED; QUARANTINE PRESERVED, P0
+
+Root cause: manual_review receipts were excluded from reserved/outstanding stock.
+A new request key could re-receive the same delivery while the old delta outcome
+was still uncertain.
+
+Change: app/Services/Procurement/SupplierReceiptService.php:27 checks manual_review
+under the existing PO-line lock and blocks new receiving until reconciliation.
+Same-key return remains idempotent. ProcessSupplierReceiptJob still persists its
+conditional started_at claim before the delta and does not replay ambiguous work.
+Succeeded receipts retain postprocessing-only retry behavior.
+
+Original reproduction now rejects the second five-unit receipt against a five-unit
+order; only five units remain represented. Fake accepted-but-lost response calls
+increaseAvailable once across two handler invocations. MySQL competitors block
+on the actual receipt row; only one conditional claimant wins. A replacement key
+cannot bypass the resulting manual-review hold.
+
+9. MISSED/COALESCED INVENTORY EVENTS: FIXED GAP; DAILY FALLBACK RETAINED, P1
+
+Root cause: unique dispatch could coalesce a new event after an earlier worker
+read its stock snapshot; releasing that lock scheduled no follow-up. The earlier
+claim that no periodic recovery existed was incorrect.
+
+Changes: new app/Services/InventoryLevelReconciliation.php and its durable table
+record a monotonically increasing version before webhook dispatch. The handler
+captures a version, uses an owner-aware execution lock and advances only that
+version after successful enforcement. Newer work and failed/skipped refreshes stay
+pending. The actual minute scheduler re-dispatches durable pending items; uniqueness
+can suppress duplicate dispatch without losing intent. Daily refresh remains.
+
+Original coalescing setup now leaves a durable version and queues reconciliation.
+An added real-handler fake-read case injects a newer zero-stock event after the
+older positive snapshot: processed_version remains 1 while version becomes 2;
+scheduled recovery runs again, disables the stack and advances to 2. MySQL verifies
+the same durable coalescing/scheduled dispatch behavior across processes.
+
+Additional independently reproduced daily edge: a failed bulk component read
+could leave old positive local stock and allow the daily enforcement pass to
+restore a zero-stock stack. app/Jobs/DailyShopifyInventoryRefreshJob.php:76 now
+persists failed item reconciliation and requires fresh component verification
+when that bulk pass had failures. The new red-to-green case retains tracked zero
+and durable recovery work. Successful no-webhook daily recovery still passes.
+
+10. SCHEDULER CALLBACKS/LEASES/MULTI-SERVER: FIXED, P1
+
+Root cause: the two initial callbacks referenced names before their later imports;
+both actual callbacks failed resolution. Default 24-hour crash mutexes were
+inappropriate for short dispatch callbacks, and there was no per-tick election.
+
+Changes: routes/console.php:3-18 uses fully-qualified service names, two-minute
+overlap leases and onOneServer for the short retry/reconciliation/reaper callbacks.
+Engraved reconciliation registration was repaired without changing its internal
+write gates, eligibility, stock rules or activation values.
+
+Both original callback cases execute successfully. A dirty-stack fixture verifies
+that the actual retry callback dispatches its inventory job. The orphan mutex
+expires before the next five-minute retry. MySQL's real scheduler election excludes
+another server even after the first callback completed, while existing row/job
+locks remain the underlying mutation safeguards. Shared atomic cache is required.
+
+11. QUEUE VISIBILITY/CRASH RECOVERY: EVALUATED AND IMPROVED
+
+The claimed universal 90-second visibility was already false for reviewed database
+connections. The real issue was short urgent jobs inheriting the four-hour default
+needed by genuinely long procurement work.
+
+Changes: config/queue.php:33 introduces explicit database connections/queues:
+  inventory-events: timeout 300, visibility 360 seconds;
+  inventory-receipts: timeout 600, visibility 720 seconds;
+  inventory-reconciliation: timeout 1800, visibility 1920 seconds.
+Constructors route new webhook, receipt and daily refresh jobs accordingly.
+Existing inventory-sync 1920/1800 and SYV 960/840 budgets remain. The default database
+visibility stays at least 14520 for 14400-second procurement work.
+
+MySQL pops prove a crashed inventory event remains hidden after 301 seconds and
+is recoverable after 361 seconds, rather than after four hours. Receipt ambiguity
+still stops replay when that reservation returns. This requires workers consuming
+the new queues; constructors alone do not establish production consumption.
+Other backend defaults and old serialized jobs are covered by rollout conditions.
+
+12. APPROVAL NOTIFICATIONS: FIXED
+
+Root cause: creation dedup keyed only by parent revision, although scoped edits
+advanced independent revisions. Delivery also sent before atomically claiming
+the notification, so overlapping workers could both send.
+
+Changes: app/Services/ShopYourVibeSorting.php:1102 keys approval intent by sorted
+scope/product/submitted-revision/reviewer identity and uses the relevant collection
+in its payload/link. app/Jobs/SendSyvSortApprovalEmailJob.php:45 validates rendering
+before transport, atomically claims sending and increments attempts, and sends
+once. A transport-uncertain outcome is held; it is not blindly retried. Known
+pre-transport failures can retry. Conditional failure updates cannot overwrite
+another worker's sending/sent state.
+
+Original two-scope reproduction creates two notifications. Nested-handler and real
+MySQL overlapping workers send one message. Existing rendering-failure retry and
+single-submission audit tests remain passing. An added transport-loss case sends
+once, retains uncertain status and does not send on redelivery. This is safe
+deduplication, not an assertion of exactly-once behavior from the external provider.
+
+13. MANUAL STOCK AUTHORIZATION: FIXED, P0
+
+Root cause: panel eligibility and transaction status were used without checking
+stock-adjustment authority. Worker/service boundaries added no actor check.
+
+Changes: ManualStockTransactionResource's view/create/edit/delete and process
+actions require inventory authority. The view action reauthorizes before dispatch.
+ManualStockTransactionService's prepare/process paths and actual deduction loop
+check current authority, as does ProcessManualStockTransactionJob. Background
+prepare receives the authorized job actor explicitly. Historical no-write
+processing remains distinct; stock writes cannot inherit authorization from a
+record's creator alone.
+
+Original reproduction now uses a genuinely prepared one-unit stock impact:
+unprivileged staff receive UI 403, direct service/job calls are denied, no job is
+queued and fake decreaseOnHand is never invoked. Confirmed quantity remains four.
+Authorized manual preflight, component expansion, historical mode, idempotent
+completed rows and CAS deduction tests still pass. Two-person correction approval
+was not weakened or replaced by manual-stock permission.
+
+NEW SCHEMA AND DEPLOYMENT PREREQUISITES
+
+The code introduces two migrations, tested on SQLite and disposable MySQL:
+  database/migrations/2026_11_04_200000_create_inventory_write_intents.php
+    inventory_write_intents plus variants.inventory_write_version;
+  database/migrations/2026_11_04_201000_create_inventory_reconciliations.php
+    per-item durable version/processed_version reconciliation state.
+These were NOT applied to production. Rollout must back up, apply these migrations
+and coordinate workers before new code consumes the schema. Do not run old workers
+against a partially switched lock/intent protocol.
+
+The release remains HOLD until an operator verifies all of the following:
+
+1. Shared locks: every scheduler/SYV/inventory server uses the same supported
+   atomic database/Redis cache and namespace. A per-host file/array cache is
+   unacceptable for multi-server exclusion. Verify scheduler health and timing.
+
+2. Queue consumers: configure and verify workers for inventory-events,
+   inventory-receipts and inventory-reconciliation as well as inventory-sync,
+   shop-your-vibe, syv-notifications and existing launch/ledger/default queues.
+   Worker termination/restart and supervisor stop budgets must respect declared
+   job timeouts and stay below reservation visibility. Do not lower the long
+   default lease to accelerate short-job recovery.
+   If default long jobs use Redis/Beanstalk/SQS instead of the reviewed database
+   connection, verify their visibility explicitly: a 90-second default cannot
+   protect a 14400-second job. The new database routes do not configure that backend.
+
+3. Coordinated transition: drain/stop old writers before starting new ones. New
+   atomic locks recognize legacy markers but cannot retrofit fencing into an
+   old binary after its short marker expires. Old serialized queued jobs retain
+   their previous routing; inspect/drain them deliberately. Do not shorten
+   reservations or automatically replay uncertain stock mutations to clear a queue.
+
+4. Legacy pending data: inventory approvals already queued before this change lack
+   the new verified generation metadata. They are not silently grandfathered into
+   a write. Inventory API credentials/actor permission checks also intentionally
+   reject unauthenticated legacy human stock pushes. Review original approval,
+   prior execution/audit and current stock before a selected reviewer queues new
+   work. Keep all pending records; do not fabricate confirmation or discard them.
+
+5. Uncertain outcomes: review inventory_write_intents status started, receipt
+   manual_review/started markers, parent unconfirmed remote jobs, expired tickets
+   and notification sending/uncertain records. These remain deliberate holds.
+   Reconcile against provider job/adjustment/message evidence and recorded
+   references. A matching quantity/order or elapsed time alone is insufficient
+   evidence of a specific earlier asynchronous operation completing. Do not delete
+   or reimport affected records as a workaround; do not clear a started marker and
+   retry a delta. No automated uncertainty-clearing command was introduced.
+
+6. Stock location contract: verify the configured location and actual catalog
+   location distribution. Tracked absolute counts spanning multiple locations
+   are now held for location-specific review. The patch does not invent an
+   allocation formula. If production needs those writes, this release is NO-GO
+   until a separately approved per-location workflow is implemented and verified.
+
+7. Permissions: ensure legitimate requesters/reviewers/operators are active and
+   have inventory.update through the intended role/direct permission. Status-only
+   staff must remain unable to approve/push stock. Recheck selected reviewers and
+   production access before requeueing held legacy work.
+
+8. Engraved beads: retain existing inventory-write and store-contract gates OFF.
+   Eligibility being enabled is not permission to mutate inventory. Verify cached
+   configuration and worker versions during a later authorized rollout, but do not
+   activate writes as part of this release. Actual bead stock-pool, location,
+   reservation and checkout activation validation remains a separate task.
+
+TEST TRIAGE AND INTERPRETATION
+
+Positive fixtures now explicitly create active authorized inventory staff instead
+of relying on permissions without loaded active state. Fake successful mutations
+return real-shaped confirmations; an empty userErrors array alone is no longer
+enough. Approval tests now assert that the requested quantity is retained on its
+item while confirmed local stock remains unchanged until successful publication.
+
+One old parent-ordering test expected automatic retry after a generic transport
+exception. It now asserts preserved confirmed membership and quarantined ordering;
+that old expectation contradicted the required uncertainty safeguard. Known job
+poll/retry paths and known rejected inventory mutation retries remain covered.
+Notification tests check scope identity and distinguish render failure from an
+uncertain transport outcome. These changes correct test contracts rather than
+skipping failing workflows or weakening mutation confirmation.
+
+Useful evidence beyond the final complete suite:
+  storage/logs/release-risk-boundaries-final.txt
+  storage/logs/release-risk-inventory-ui-final.txt
+  storage/logs/release-risk-throttle-before.txt
+  storage/logs/release-risk-locations-before.txt
+  storage/logs/release-risk-daily-read-before.txt
+The three before logs document newly reproduced failures before their fixes.
+The final complete suite contains every later-added case, including the daily
+failed-read and single/bulk push permission tests. Earlier intermediate runs are
+retained for diagnosis; release-risk-final.xml is the authoritative complete run.
+
+FINAL DECISION
+
+All documented confirmed code blockers have corrections and regression evidence.
+Scoped quarantine, receipt atomic claims, two-person approval, manual idempotency
+and CAS remain effective in the tests and forced MySQL interleavings. The additional
+gateway replay, aggregate-location and stale daily-read paths were reproduced and
+closed as part of independent verification.
+
+This is CONDITIONAL GO for code review and an authorized controlled rollout only.
+It is not an unconditional production GO. No production host, cached configuration,
+supervisor topology, legacy queue contents or real stock-location contract was
+inspected. The operational prerequisites above are unresolved until an authorized
+operator supplies evidence. Until then, the release remains HOLD. Any failed
+prerequisite or required unsupported multi-location stock flow makes it NO-GO.

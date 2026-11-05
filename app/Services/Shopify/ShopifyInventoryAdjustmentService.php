@@ -176,18 +176,22 @@ GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceD
             'referenceDocumentUri' => $referenceUri,
         ]);
 
-        $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri): array {
+        $idempotencyKey = hash('sha256', 'inventory-adjust:'.$referenceUri);
+        $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri, $idempotencyKey): array {
             $data = $this->client->graphql(<<<'GRAPHQL'
-mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!) {
-  inventoryAdjustQuantities(input: $input) {
+mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
     inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
     userErrors { field message }
   }
 }
-GRAPHQL, ['input' => [
-                'name' => 'available', 'reason' => 'received', 'referenceDocumentUri' => $referenceUri,
-                'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => $quantity]],
-            ]]);
+GRAPHQL, [
+                'input' => [
+                    'name' => 'available', 'reason' => 'received', 'referenceDocumentUri' => $referenceUri,
+                    'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => $quantity]],
+                ],
+                'idempotencyKey' => $idempotencyKey,
+            ]);
             $errors = data_get($data, 'inventoryAdjustQuantities.userErrors', []);
             if ($errors !== []) {
                 throw new \RuntimeException('Shopify inventory adjustment failed: '.collect($errors)->pluck('message')->implode('; '));

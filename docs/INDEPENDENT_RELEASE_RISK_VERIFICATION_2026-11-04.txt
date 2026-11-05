@@ -1,0 +1,610 @@
+LEIGH AVENUE CMS: INDEPENDENT RELEASE RISK VERIFICATION
+4 November 2026 | feat/syv-sorting-approval-integration
+Investigation only. RELEASE DECISION: HOLD.
+
+EVIDENCE AND LIMITS
+
+Reviewed the current working tree, including the previously reported blocker
+fixes, rather than assuming that their earlier green tests established safety.
+No application fixes, deployment, commit, live Shopify requests, live inventory
+changes or real notification deliveries were performed. Existing uncommitted
+changes were retained. Added only investigation tests, a disposable MySQL harness
+and this report. SHA-256 manifests before/after agree for app, config, routes,
+resources and database files:
+  storage/logs/independent-risk-source-before.tsv
+  storage/logs/independent-risk-source-after.tsv
+
+PHP 8.4.21, memory_limit=1G. Final targeted run: 119 passed, 0 failed,
+792 assertions, including 18 new investigation cases. Evidence:
+  tests/Feature/IndependentReleaseRiskVerificationTest.php
+  storage/logs/independent-risk-targeted.txt
+  storage/logs/independent-risk-targeted.xml
+The diagnostic tests deliberately assert observed defective behavior. A passing
+diagnostic proves the reproduction; it does NOT prove the application is safe.
+The complete application suite was not rerun in this investigation.
+
+MySQL evidence uses separate PHP processes, InnoDB transactions, database cache
+and real queue reservations in a fresh random localhost-only database. The
+harness creates/migrates/drops only its validated syv_risk_isolated_<random>
+database. Shopify and mail are fake; real external HTTP is blocked:
+  tests/Support/independent-risk-mysql.php
+  storage/logs/independent-risk-mysql.txt
+Cache expiry and queue reservation ages are forced in the disposable database;
+tests do not wait 180 seconds, four hours or a day to exercise those boundaries.
+The final MySQL run completed successfully with 13 checks. Commands for the new
+evidence, from the repository root in PowerShell (using the installed PHP path):
+  & 'C:\Users\shona\.config\herd\bin\php84\php.exe' -d memory_limit=1G vendor/bin/pest tests/Feature/IndependentReleaseRiskVerificationTest.php
+  $env:SYV_RUN_ISOLATED_MYSQL='1'
+  & 'C:\Users\shona\.config\herd\bin\php84\php.exe' -d memory_limit=1G tests/Support/independent-risk-mysql.php
+
+No production host, deployed revision, supervisor configuration, queue consumers,
+live feature flags or historical data were inspected. Therefore "production
+active" below means an existing, ungated production workflow in this tree,
+not proof that this exact revision is deployed or that a real incident occurred.
+Stack and general inventory workflows are existing functionality. Legacy parent
+sorting data and multi-server topology require production read-only verification.
+
+CLASSIFICATION OVERVIEW
+
+1  Null component stock       Confirmed defect; blocks existing inventory release.
+2  Async reorder recovery    Scoped behavior intentional; parent defect confirmed.
+3  Parent operation lease    Confirmed concurrency defect; blocks parent publication.
+4  Layout with held sorting  Confirmed partial-publication/false-failure defect.
+5  Parent failed/abandoned   Confirmed terminal-attempt recovery defect.
+6  Bundle approved quantity  Confirmed wrong outbound target and false applied state.
+7  Adjustment controls      Confirmed permission and response-confirmation defects;
+                            compare protection absent in generic writer.
+8  Receipt delta retry      Same-receipt quarantine intentional and effective;
+                            replacement receipt under uncertainty is defective.
+9  Missed inventory event   "No recovery" is false; daily recovery works. A newer
+                            coalesced event can still be lost until reconciliation.
+10 Scheduler                Confirmed callback resolution failure; crash lease is
+                            24 hours; per-tick multi-server exclusion is absent.
+11 Queue visibility         Premature-redelivery claim false for reviewed database
+                            connections; delayed crash recovery is real. Other
+                            drivers/runtime topology remain unproven risks.
+12 Approval notifications   Confirmed scope-key collision and concurrent duplication.
+13 Manual stock permission  Confirmed unauthorized staff mutation dispatch.
+
+1. UNKNOWN OR NULL COMPONENT INVENTORY ALLOWING STACK SELLABILITY
+
+Classification: CONFIRMED DEFECT. Existing production-capable stack inventory.
+Locations: app/Services/ProductSellabilityService.php:38-45;
+app/Services/StackBundleSellabilityService.php:335-357,460-505,696-708;
+app/Services/ProductInventorySyncService.php:284-310.
+
+Path: stack enforcement loads components -> firstComponentIssue -> general local
+sellability -> isVariantSellable. Both unknown tracking and a tracked variant
+with unknown quantity return true. The required-component-quantity check also
+skips a null quantity. With no other component issue, restoreSellable changes the
+stack to untracked inventory, clears its finite quantity and marks it dirty for
+Shopify publication. This is how ordinary available stacks are represented;
+that representation itself is not established as defective by this finding.
+
+Safeguards: missing products, inactive products, known zero/insufficient quantities
+and failed Shopify refreshes are checked. Enforcement has a per-draft cache lock.
+None turns a successful read containing unknown inventory into known component
+availability. Generic refresh can persist missing tracked/quantity fields as null.
+
+Reproduction: create a stack currently tracked at zero with an associated active
+component; set component quantity null with (a) tracking null, (b) tracking true;
+run the real enforceForAffectedStacks. Both cases restore the stack to untracked
+inventory and mark it dirty. Two diagnostic cases passed. No stack accounting
+or product tracking code was changed to obtain this result.
+
+Impact: a stack can become purchasable without evidence that its physical
+components exist. Deployment blocker: YES.
+Smallest correction: require known adequate inventory for tracked/unknown
+physical stack components at the stack eligibility boundary. Preserve explicitly
+untracked component semantics and the existing component consumption model;
+do not globally change complementary-product eligibility without separate tests.
+Keep a refresh failure or incomplete read unresolved and retry/reconcile it.
+Coverage: existing ShopifyInventoryWebhookStackSellabilityTest covers known
+zero, known recovery, status changes, and persistent failed pushes. It did not
+cover these null states. New diagnostic: "null component stock" datasets.
+
+2. UNCONFIRMED SHOPIFY ASYNCHRONOUS REORDER RECOVERY
+
+Classification: INTENTIONAL SAFETY for scoped publication; CONFIRMED DEFECT in
+the parent/legacy path. Locations: app/Services/ShopYourVibeWorkflow.php:932,1103-1104,
+1239-1285,1570-1681, especially 1630-1632.
+
+Scoped path persists an unconfirmed:<uuid> marker BEFORE dispatch, replaces it
+with a returned job ID, waits for that job, and checkpoints the confirmed state.
+A lost response retains the uncertainty marker. Retrying it does not reorder
+again and cannot mark sorting published. A matching order snapshot is not used
+to clear that marker. This is correct fail-closed behavior, not a retry defect.
+The missing automatic escape for an unknown job is an operational reconciliation
+requirement; automatically replaying it would make safety worse.
+
+Parent path still calls reorderProducts before trackJob persists the ID. A
+response lost after acceptance leaves no durable uncertainty record. The next
+parent attempt can infer success from matching products/order without checking
+the accepted asynchronous operation. If the visible order is still old, the
+same missing marker also leaves a replay window; the diagnostic demonstrates
+the premature-completion variant, not a second live mutation.
+
+Reproduction: seed a persisted legacy collection order without explicit scoped
+sort rows, make an authorized layout edit, queue parent publication; fake an
+accepted asynchronous reorder whose current snapshot matches the target but
+whose response is lost and whose operation is still pending. First push fails
+with no remote_jobs entry. A newly queued parent push ends synced without any
+job-status poll while the fake still records the operation as pending. Passed.
+This fixture establishes the accepted legacy path, not how many such drafts
+exist in production. New explicit sort submissions normally use scoped publish.
+
+Impact: parent recovery can finalize or later overwrite work while an unknown
+operation remains in flight. Deployment blocker: YES for the accepted parent
+path unless it is explicitly excluded and persisted legacy data is verified.
+Smallest correction: persist uncertainty before every parent asynchronous
+mutation too; retain known job IDs and require their completion. Add a deliberate
+operator reconciliation path for unknown outcomes. Neither elapsed time nor a
+matching snapshot alone proves completion. Do not automatically replay.
+Coverage: ScopedPublicationRecoveryTest's four cases passed, including dependent
+chunks, lost response, killed worker and revoked permission. New parent diagnostic
+exposes the uncovered boundary.
+
+3. PARENT SHOP YOUR VIBE CONCURRENCY AND OPERATION-LOCK EXPIRY
+
+Classification: CONFIRMED DEFECT. Existing parent layout/publication workflow.
+Locations: app/Services/ShopYourVibeWorkflow.php:918-919,1066,1135,2259-2287;
+app/Services/ShopYourVibeEditing.php:300-350; app/Jobs/PushShopYourVibe.php:20-22.
+
+Path: parent push validates its ticket, takes a 180-second Cache::add operation
+marker, and installs a before-mutation ticket validation hook. It refreshes the
+marker at a few phase boundaries. The job timeout and authorization lease are
+840 seconds. Long reads, batches or a slow API call can cross the 180-second
+marker expiry before the next phase renewal. Another delivery can then acquire
+the marker while the old ticket remains authorized. The mutation hook checks
+ticket/actor/revision/expiry, but not current operation-lock ownership.
+
+MySQL reproduction: acquire the actual parent's cache marker, expire its row,
+start another PHP worker which acquires and holds a replacement marker; validate
+the old ticket and invoke a fake Shopify mutation through the actual mutation
+authorization hook while that second worker is alive. The old worker is still
+authorized. This isolates fencing; it does not claim that a second worker already
+completed a whole publication before the first.
+
+Renewal and release additionally use separate get/put and get/forget operations;
+their ownership-check race is visible in code but was not separately forced.
+The 900-second scoped execution lock is a different safeguard and does not cover
+the parent path. A shared cache is necessary, but does not fix lease loss.
+
+Impact: overlapping parent workers may issue conflicting writes and checkpoints.
+Deployment blocker: YES for parent publication.
+Smallest correction: use an owner-aware atomic lease sized/renewed for the actual
+execution budget; check/fence its current owner immediately before mutation and
+checkpointing; release only by owner. Preserve ticket/permission checks as well.
+Coverage: existing scoped recovery/collection-isolation tests pass. New MySQL
+interleaving demonstrates the parent gap using the real cache and auth hook.
+
+4. LAYOUT PUBLICATION WITH ANOTHER COLLECTION'S UNPUBLISHED SORTING
+
+Classification: CONFIRMED DEFECT, but NOT an approval bypass.
+Locations: app/Services/ShopYourVibeWorkflow.php:960-964,1159-1170,1190-1236.
+
+Parent preflight deliberately holds collections with unpublished explicit sorts
+and does not send their product mutations. Layout/metaobject writes proceed.
+The final confirmedState nevertheless compares those collections with their
+unsent desired order. It throws before the later held-sort snapshot merge can
+preserve that pending work.
+
+Reproduction: stage an explicit reverse order in the main collection; make a
+valid card rename under layout ownership; queue/push the parent. The fake Shopify
+parent contains the renamed card, no reorder mutation was sent, and the CMS draft
+ends failed with "not confirmed the requested products or sorting". Passed.
+
+Impact: ordinary independent layout publication partially succeeds remotely but
+reports failure and leaves misleading pending/retry state. No unapproved sort
+was published. Deployment blocker: YES for the promised independent layout flow.
+Smallest correction: build the final confirmation projection using the held
+collection's confirmed baseline, then merge its desired order back as pending.
+Continue strictly verifying every collection actually published.
+Coverage: ShopYourVibeCollectionIsolationTest passes for scoped publication and
+editing isolation, but did not push a layout while a separate sort was held.
+New "layout publication followed by false failure" diagnostic covers that case.
+
+5. PARENT PUSH TIMEOUT AND ABANDONED-STATE RECOVERY
+
+Classification: CONFIRMED DEFECT in terminal-attempt cleanup; uncertainty
+protection itself is intentional. Locations: app/Jobs/PushShopYourVibe.php:43-74;
+app/Services/ShopYourVibeEditing.php:54-79,360 onward.
+
+Parent failed() takes the draft row lock and checks ticket identity/revision.
+It then returns if any operation marker exists, including the dead worker's own
+unexpired marker. Cache expiry later performs no database transition. Normal
+editing/discard is blocked by status pushing. abandonedLegacyPush intentionally
+accepts only an old, unowned, checkpoint-free legacy flag with empty editing_state
+and no queued work; a normal ticketed failed push cannot use that escape hatch.
+
+Reproduction: create the matching ticketed parent in pushing state; leave its
+worker marker alive; invoke the terminal failure callback; advance 181 seconds.
+The marker is gone but the draft is still pushing. Passed. A final attempt killed
+soon after a marker renewal, followed by failed(), is a realistic trigger. An
+earlier failed attempt may later redeliver and eventually clean up, so "every
+timeout permanently sticks" would be an overstatement.
+
+Impact: parent workspace can remain unusable after the final worker exits.
+Deployment blocker: YES for reliable parent recovery.
+Smallest correction: record owner-aware terminal failure/recovery intent and
+reconcile it once the worker is fenced out. Keep known jobs/checkpoints and all
+desired changes. Do not treat a missing marker as proof of Shopify completion
+or discard an uncertain mutation to make the UI editable.
+Coverage: scoped killed-worker and revoked-permission recovery passes; it does
+not cover this parent branch. New parent failure callback diagnostic does.
+
+6. BUNDLE INVENTORY APPROVAL QUANTITY PROPAGATION
+
+Classification: CONFIRMED DEFECT. Existing inventory approval and bundle paths.
+Locations: app/Services/InventoryAdjustmentApprovalService.php:84-100;
+app/Services/ProductInventorySyncService.php:205-224; app/Jobs/InventorySyncJob.php:75-79;
+app/Services/InventoryAdjustmentApprovalService.php:147-162.
+
+Approval locks the request and variant, writes requested quantity into
+current_on_hand_quantity and marks the variant dirty, leaving inventory_qty
+unchanged. Generic inventory sync chooses inventory_qty for bundles, whereas
+ordinary variants use current_on_hand_quantity. Its bundle confirmation compares
+against that same old inventory_qty, so it can confirm the wrong target. The
+successful job then marks the approval applied.
+
+Reproduction: bundle at four, request nine, distinct selected approver approves;
+run the real InventorySyncJob handler with Shopify confirming four. Outbound
+quantity is four, requested item remains nine, request ends applied. Passed.
+This is not evidence that stack physical-component accounting should change.
+
+Impact: an approved correction can silently do nothing or apply the wrong bundle
+quantity while the audit claims success. Deployment blocker: YES.
+Smallest correction: carry an explicit approved target/intent into the inventory
+job, distinguish it from automatic stack sellability intent, and confirm that
+exact target. Alternatively reject unsupported manual bundle corrections before
+approval. Do not reinterpret all stack quantities or change tracking globally.
+Coverage: existing approval tests check local approval state; existing on-hand
+tests use non-bundles. New diagnostic follows approval through the queued handler.
+
+7. ADJUSTMENT PERMISSIONS, COMPARE QUANTITIES AND RESPONSE CONFIRMATION
+
+Classification: CONFIRMED permission and false-success defects; generic compare
+protection is absent. Locations: app/Services/InventoryAccessService.php:10-23;
+app/Filament/Resources/InventoryResource.php:812-828; app/Filament/Resources/InventoryAdjustmentRequestResource.php:100-114;
+app/Services/InventoryAdjustmentApprovalService.php:18-100;
+app/Services/ProductInventorySyncService.php:395-409,435-505,284-310,535 onward.
+
+Authorization: request creation UI checks inventory.update, but its approver list
+includes all other users. Review resource access accepts inventory.update OR
+inventory_status.update. Its approve action checks selected reviewer identity,
+pending status and requester separation, without checking inventory.update.
+The service also omits that permission check. Two distinct people are still
+required; the problem is that the second need not have stock-adjustment authority.
+
+UI reproduction: select a user with only inventory_status.update as approver;
+authenticate as that user; call the real table approve action. Request becomes
+approved and stock work is dispatched. Passed. This is a staff authorization
+gap, not anonymous access or a demonstrated way for the requester to self-approve.
+
+Mutation path: generic inventorySetQuantities sets ignoreCompareQuantity=true,
+does not supply an expected quantity, and treats missing userErrors as no errors.
+It does not require the adjustment payload/group. Non-bundle readback refreshes
+local state but does not require it to match the requested quantity.
+Reproduction: local desired nine, fake set response {data: []}, subsequent Shopify
+read still four. Result failed=0, dirty flag clears, local on-hand becomes four.
+The captured mutation has ignoreCompareQuantity=true and target nine. Passed.
+
+A legitimate receipt or another correction after request/approval can also be
+overwritten by a stale absolute-count job or retry because no expected quantity
+is checked. The unsafe request shape is reproduced; an actual external Shopify
+concurrent overwrite was not performed. Whether physical-count corrections may
+deliberately override intervening stock needs an explicit business rule, not an
+assumption that the saved original quantity already supplies CAS protection.
+
+Contrast: app/Services/Shopify/ShopifyInventoryAdjustmentService.php:139-154,548-563 uses an idempotent
+manual deduction mutation, changeFromQuantity and strict group confirmation.
+The existing manual-stock CAS tests pass. It is incorrect to describe every
+inventory writer as lacking compare-and-swap or confirmation.
+
+Impact: unauthorized staff approval; false audit success; exposure to lost stock
+updates. Deployment blocker: YES for authorization and false-success behavior.
+Smallest correction: enforce active inventory authority in UI AND service/job
+boundaries, filter/recheck approvers, retain distinct requester/approver rules;
+require a valid mutation confirmation and intended readback; attach the expected
+quantity/version to the approved intent and stop for review on conflict. Never
+blindly replay an ambiguous mutation or weaken two-person approval.
+Coverage: existing approval identity/separation tests and normal response tests
+pass; new UI and missing-payload/divergent-readback diagnostics expose omissions.
+
+8. SUPPLIER RECEIPT DELTA IDEMPOTENCY AND AMBIGUOUS RETRIES
+
+Classification: same-receipt fail-closed retry is INTENTIONAL and effective;
+replacement receipt while uncertainty remains is a CONFIRMED DEFECT.
+Locations: app/Jobs/ProcessSupplierReceiptJob.php:31-85;
+app/Services/Procurement/SupplierReceiptService.php:23-29,170-176,195;
+app/Models/ProcurementSupplierOrderLine.php:24-34;
+app/Services/Shopify/ShopifyInventoryAdjustmentService.php:158-204.
+
+Path: receipt creation deduplicates its request key and locks the PO line for
+quantity reservation. Processing conditionally persists started_at before the
+delta call. Only one claimant wins. If the response is lost after acceptance,
+the row becomes manual_review; redelivery sees started_at and does not send the
+delta again. A succeeded receipt skips the delta during postprocessing retries.
+The receipt delta lacks a provider idempotency directive, but that fact alone
+does not establish automatic double receiving with this claim/quarantine guard.
+
+Tests: direct handler with fake increaseAvailable throwing after acceptance is
+called twice; the fake receives increaseAvailable exactly once and the receipt
+stays manual_review. Passed. Real MySQL competing conditional claims block on
+the receipt row and, after the first commits its marker, the other updates zero
+rows. One claimant wins. No real stock was received.
+
+Separate failure: manual_review is excluded from reserved quantities. The line's
+displayed outstanding quantity also subtracts only succeeded receipts. A user or
+CSV can submit a new key for the same physical delivery while the old delta may
+already have applied. Reproduction: PO for five; receipt five with started marker
+and manual_review; create another five with a new key. Both rows exist, total
+receipt quantity ten against an order for five. Passed. This is not automatic
+replay of the same receipt, but it bypasses the uncertainty quarantine by renewal.
+
+Impact: double receiving and inflated purchasable stock. Deployment blocker: YES
+for replacement receiving while an outcome is unresolved.
+Smallest correction: reserve uncertain quantities or block new receipts for the
+affected line until deliberate reconciliation. Preserve same-key deduplication,
+atomic claim and postprocessing-only retry. Never clear started_at and replay
+the delta merely because the quantity looks plausible. Provider idempotency, if
+added, requires verified API support and a stable immutable receipt key.
+Coverage: ProcurementSupplierOrderWorkflowTest covers same-key and over-receipt
+validation; new handler quarantine and replacement-key tests plus MySQL claim
+test cover the important distinction.
+
+9. MISSED INVENTORY-LEVEL WEBHOOK RECOVERY
+
+Classification: "there is no recovery" is a FALSE POSITIVE. A coalesced-event
+gap is a CONFIRMED DEFECT; its delay is bounded by successful reconciliation,
+not guaranteed to be a permanent divergence.
+Locations: app/Http/Controllers/ShopifyInventoryLevelWebhookController.php:76-88;
+app/Jobs/HandleShopifyInventoryLevelUpdatedJob.php:18-59;
+app/Jobs/DailyShopifyInventoryRefreshJob.php:47-101; routes/console.php:796-801;
+app/Services/StackSellabilityShopifyPushService.php:10-19.
+
+Valid webhooks are recorded and dispatch a unique job keyed only by item ID.
+The job refreshes current Shopify component truth and enforces affected stacks.
+Unique TTL is 60 seconds; job timeout is 300 seconds. A second event arriving
+after the first worker read inventory but before its unique lock releases can
+be rejected as a duplicate. There is no event-version/drain-again transition in
+this handler; recording the payload is not itself a replay/reconciliation worker.
+
+Tests: two item jobs with different webhook IDs/quantities share one unique lock;
+the newer one cannot acquire it. This also reproduces across separate workers
+using MySQL cache. Releasing the old lock does not dispatch the rejected event.
+The precise stock timing (remote change after read) is a constructed scenario;
+the lock suppression and absence of a follow-up are directly established.
+
+Recovery exists: scheduled 04:00 DailyShopifyInventoryRefreshJob reads inventory
+workspace products, enforces stacks and queues changed stack pushes. New test
+starts with a locally sellable stack and receives no webhook; fake daily Shopify
+reads show its component at zero. The real daily handler disables the stack and
+queues inventory publication. Passed. Five-minute retryPending only retries
+already-marked dirty stack intent; it cannot discover an entirely missed change.
+
+Impact: stacks can remain available after their components reach zero until a
+later event or successful daily reconciliation. In nominal scheduling this can
+approach a day; queue/scheduler failures can extend it. Deployment blocker: YES
+for the demonstrated dropped-change window in an inventory-reactive workflow;
+the allegation of absent periodic recovery should not be used as the reason.
+Smallest correction: persist per-item dirty/version intent and re-read/drain it
+after the running worker if a newer event arrived. Add bounded incremental stock
+reconciliation; retain the daily fallback. Do not replay uncertain stock writes.
+Coverage: existing webhook HMAC, refresh/enforcement, restoration and push-retry
+tests pass. New coalescing and no-webhook daily recovery tests establish both sides.
+
+10. SCHEDULER LOCK EXPIRY AND MULTI-SERVER EXECUTION
+
+Classification: CONFIRMED callback defect, confirmed crash-recovery delay and
+per-tick duplication capability; actual multi-server deployment is UNPROVEN.
+Locations: routes/console.php:3-7,28,45;
+vendor/laravel/framework/src/Illuminate/Console/Scheduling/ManagesAttributes.php:145;
+Scheduling/Event.php:146; Scheduling/CallbackEvent.php:138;
+app/Services/StackSellabilityShopifyPushService.php:10-19.
+
+Additional verified defect: the two initial callbacks reference short class names
+before their later use declarations. At those lexical locations PHP resolves
+unqualified StackSellabilityShopifyPushService and EngravedBeadRecalculation,
+not their App Services names. Executing the ACTUAL registered callbacks throws
+BindingResolutionException for both names. Two diagnostic datasets passed.
+MySQL scheduler execution reproduces the same stack callback exception. It is
+independent of lease expiry or server count and prevents scheduled stack retries.
+
+withoutOverlapping() also uses its default 1440-minute mutex lease. Normal callback
+completion/failure releases it; a hard scheduler process death can leave it for
+24 hours. New time-travel test shows a five-minute retry skipped after 301 seconds,
+and expiry after a day. MySQL checks verify the actual 24-hour mutex row and that
+a competing scheduler respects it. This is excessive suppression after a crash,
+not premature expiry of this short scheduling callback.
+
+Neither callback uses onOneServer. Shared withoutOverlapping blocks concurrent
+execution, but releases after completion. MySQL parent/worker scheduling runs
+show two sequential entries into the same callback in one tick. Both executions
+currently fail on the name-resolution defect. Job uniqueness/dirty-state checks
+can limit duplicate downstream work after that defect is corrected, so two
+callbacks do not by themselves establish two Shopify mutations. Independent
+per-server cache stores would add risk; production cache topology is unverified.
+
+Impact: five-minute automatic stack retry is currently broken. After callback
+repair, a crash can suppress it for a day; multi-server scheduling can duplicate
+dispatch attempts. Deployment blocker: YES for the active stack callback error.
+The engraved callback error is additionally an activation blocker for that feature.
+Smallest correction: fully qualify or import classes before registration; use a
+lease appropriate to measured callback duration with margin; use onOneServer on
+a shared atomic store if the production schedule runs on multiple hosts. Retain
+job-level idempotency and inspect scheduling health. Do not simply remove locks.
+Coverage: older tests exercised retryPending directly, not callback invocation.
+New actual-callback, expiry and MySQL scheduling tests expose this difference.
+
+11. QUEUE VISIBILITY AND LONG-RUNNING JOB RECOVERY
+
+Classification: premature-redelivery allegation is a FALSE POSITIVE for the
+reviewed database connections; default short-job crash delay is CONFIRMED
+behavior; non-database deployment settings remain UNPROVEN RISK.
+Locations: config/queue.php:33-70,78,98;
+app/Jobs/InventorySyncJob.php:24-40; app/Jobs/PushShopYourVibe.php:20-22;
+app/Jobs/HandleShopifyInventoryLevelUpdatedJob.php:22-24;
+app/Jobs/ProcessSupplierReceiptJob.php:24-26; app/Jobs/DailyShopifyInventoryRefreshJob.php:26.
+
+Current explicit database visibility values are inventory-sync 1920 > timeout1800,
+Shop Your Vibe 960 >840, product launch 1020, ledger480. Default database visibility
+is at least14520, accommodating a declared14400-second procurement job. Thus the
+old generic claim that all jobs become visible again after90 seconds does not
+describe these current database paths. Inventory jobs also have bounded retries,
+backoff and a much longer unique lease; uniqueness is not a substitute for safe
+mutation recovery but is an additional dispatch safeguard.
+
+Tradeoff: webhook300, receipt600 and daily refresh1800 jobs inherit the default
+database connection. If a worker dies, the reservation can remain unavailable
+for14520 seconds (4 hours2 minutes), even for the short urgent webhook job.
+MySQL test reserves a harmless job and simulates301 seconds since its reservation:
+another worker cannot pop it. At14521 seconds it can. Passed. This is deliberate
+visibility protection with poor recovery granularity, not concurrent double pop.
+
+Redis/Beanstalk defaults remain90 unless overridden; SQS visibility is external.
+Whether these are used, and actual worker timeouts/consumer queues, was not
+verified. A missing consumer is not established from application code alone.
+
+Impact: slow stock convergence after a worker crash; possible premature redelivery
+only if an unverified alternative backend/runtime is configured incorrectly.
+Deployment blocker: not a separate proven duplicate-execution blocker for the
+database configuration. Fast inventory recovery needs an operational SLA and
+queue topology verification before claiming timely protection.
+Smallest correction: give short urgent inventory/reconciliation jobs a dedicated
+connection/visibility budget exceeding their timeout; retain the long default
+budget for genuinely long jobs. Verify supervisors consume all explicit queues,
+use a shared cache and terminate before visibility expires. Do not reduce the
+global lease to fix short jobs and reintroduce overlapping long workers.
+Coverage: new MySQL crash-visibility test; existing scoped recovery and failed
+stack-push tests verify separate state/retry safeguards.
+
+12. APPROVAL NOTIFICATION DEDUPLICATION
+
+Classification: CONFIRMED DEFECTS, normally non-blocking notification reliability.
+Locations: app/Services/ShopYourVibeSorting.php:554-613,1102-1138;
+app/Services/ShopYourVibeWorkflow.php:606-608;
+app/Jobs/SendSyvSortApprovalEmailJob.php:24-59.
+
+Creation firstOrCreate uses sort-approval:<draft>:<parent revision>. Scoped edits
+advance their scope revision without advancing that parent revision. Therefore
+submitting two different collections on the same parent revision can reuse one
+notification and suppress the second email, retaining the first reviewer/payload.
+Reproduction: sort/submit main and linked collection independently at scope
+revision1, with a permitted distinct reviewer. Both rows await review, but only
+one notification exists. Passed. Keying only the parent revision is insufficient
+even though same-key creation is deduplicated.
+
+Delivery checks sent/suppressed, sends mail, then saves sent. There is no atomic
+claim or worker lock. Two handlers can both see pending and send. A nested
+handler test reproduces two deliveries; real MySQL overlapping processes also
+record two fake mail deliveries. A provider accepting mail followed by a process
+death before sent persists is a separate classic ambiguous-send window, not
+tested with a real email provider. Local locking alone cannot guarantee exactly
+once delivery across that boundary.
+
+Impact: missing approval prompts, duplicate prompts and misleading delivery
+attempt counters. The underlying approval rows remain reviewable; approval is
+not bypassed. Deployment blocker: NO by itself unless email is the only accepted
+review routing mechanism. It should be corrected before relying on email workflow.
+Smallest correction: key notification intent by collection/scope plus submitted
+revision and appropriate reviewer/approval identity; atomically claim delivery
+with an owner-aware lease. Use provider idempotency if available and verified;
+otherwise reconcile uncertain sends rather than promising exactly once.
+Coverage: existing sorting approval tests cover submission/review states; new
+two-collection collision and duplicate-delivery diagnostics cover these gaps.
+
+13. MANUAL STOCK ADJUSTMENT AUTHORIZATION
+
+Classification: CONFIRMED DEFECT. Existing manual-stock production-capable flow.
+Locations: app/Filament/Resources/ManualStockTransactionResource.php:18 onward,86-90,122;
+app/Filament/Resources/ManualStockTransactionResource/Pages/ViewManualStockTransaction.php:16-27;
+app/Jobs/ProcessManualStockTransactionJob.php:13 onward;
+app/Services/ManualStockTransactionService.php:22,86 onward; app/Models/User.php:canAccessPanel.
+
+An active staff user with an allowed company email can enter the panel. This
+resource has no stock-permission policy gate; process/retry actions restrict
+status, but not inventory authority. The job/service do not add an actor
+permission check. Confirmation UI asks for intent, not authorization.
+
+Reproduction: create an active @leighavenue.co.za staff user with zero permissions
+and a valid prepared process_inventory transaction with a one-unit impact.
+Authenticate and call the real view
+page's retryInventory action. ProcessManualStockTransactionJob is dispatched and
+the record becomes queued. Then execute the actual job/service with fake Shopify:
+decreaseOnHand is invoked once, the transaction completes, and the confirmed
+local on-hand quantity changes from four to three. Passed. No live deduction
+occurred; the fake proves that the worker does not add the missing authorization.
+This establishes an authenticated staff escalation, not an anonymous exploit.
+
+Existing safeguards still matter: manual service previews component quantities,
+preflights stock, uses immutable impact/idempotency keys and a compare-and-swap
+deduction, and completed rows are protected from replay. Historical mode makes
+no Shopify inventory mutation. These do not authorize an otherwise unprivileged
+actor to initiate process_inventory work.
+
+Impact: staff without stock-adjustment permission can trigger physical stock
+deductions and bypass the intended stock access boundary. Deployment blocker: YES.
+Smallest correction: explicit resource/action permission checks plus service/job
+actor reauthorization before mutation, while retaining compare protection and
+idempotency. Route any correction requiring approval through the existing
+two-person process; do not weaken its requester/approver separation. Whether all
+manual deductions require a new two-person workflow is a business-policy question,
+not something established solely by the absence of a policy class.
+Coverage: ManualStockTransactionServiceTest's stock, historical, replay and CAS
+tests pass; new Livewire UI diagnostic covers the missing permission boundary.
+
+PRODUCTION INVENTORY VS FUTURE ENGRAVED-BEAD ACTIVATION
+
+The existing inventory defects in1,6,7,8,9,10(stack scheduler),13 do not depend on
+engraved-bead activation. They must not be deferred as future bead work.
+
+Current config/engraved_beads.php:8-11 and .env.example:2-4 distinguish eligibility
+from inventory writes: eligibility defaults true, inventory_writes_enabled false,
+store_contract_verified false. Recalculation writesAllowed and the shared mutation
+guard require all three gates. "The entire feature defaults disabled" would be
+an incorrect interpretation of this tree. The write path is gated off; the actual
+deployed cached configuration and worker revision still need verification.
+ReleaseBlockerSafetyTest passed for guarded mutation forms/identities, including
+legacy generic writers. Reads and procurement eligibility are permitted behavior.
+No flags were changed in this investigation.
+
+Future activation requirements are separate: repair the engraved scheduler
+callback; prove the store's real location/channel/checkout and reservation contract;
+verify recovery scheduling/queue consumers and missed order/inventory behavior;
+test concurrency and uncertainty recovery for the active bead workflow; then
+obtain deliberate activation approval. Existing default recovery settings are
+not proof of live execution while write gates are off. This report does not
+authorize engraved-bead writes or attempt that activation validation.
+
+RELEASE DECISION AND CONFIRMED BLOCKERS IN PRIORITY ORDER
+
+HOLD the proposed release. Existing safeguards invalidate several broad claims,
+but the current working tree still contains reproducible defects in ordinary
+stock authorization, approved quantities, receipt uncertainty and publication.
+The previous full-suite result does not cover these newly reproduced scenarios.
+
+Priority0/stock integrity and access:
+  1. Close unauthorized manual stock dispatch and underprivileged inventory
+     approval (13 and7); preserve two-person approval.
+  2. Prevent unknown component stock from enabling stacks (1).
+  3. Propagate and verify the approved bundle target; reject missing adjustment
+     confirmation and divergent readback (6 and7).
+  4. Prevent replacement receiving while an earlier delta is uncertain (8).
+
+Priority1/recovery and publication:
+  5. Repair the active stack scheduler callback and close lost/coalesced inventory
+     event recovery gaps (10 and9); verify short-job crash recovery requirements.
+  6. Fence parent workers after operation-lock expiry (3).
+  7. Preserve parent async uncertainty instead of inferring completion from a
+     matching snapshot; verify legacy draft exposure (2).
+  8. Correct final layout confirmation for deliberately held sorts (4).
+  9. Recover terminal failed ticketed parent pushes without clearing uncertainty (5).
+
+Notification scope/delivery deduplication (12), scheduler crash-lease sizing and
+conditional per-tick multi-server coordination (10), and dedicated fast queue
+recovery (11) are additional prioritized follow-ups. Their actual operational
+severity depends on review routing, topology and recovery SLA; they are not
+evidence that the working two-person/scoped uncertainty guards should be removed.
+
+Investigation stopped here. No fixes were implemented.

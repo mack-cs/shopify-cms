@@ -13,6 +13,8 @@ use App\Services\HeaderStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/ImportedComplementaryShopifyFake.php';
+beforeEach(fn () => fakeImportedComplementaryShopify());
 
 it('records complementary audit results with last checked time and no shopify sync dependency', function (): void {
     $user = User::factory()->create();

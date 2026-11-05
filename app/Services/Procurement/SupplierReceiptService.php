@@ -24,6 +24,9 @@ final class SupplierReceiptService
             $existing = ProcurementSupplierReceipt::query()->where('idempotency_key', $idempotencyKey)->first();
             if ($existing) return $existing;
             $locked = ProcurementSupplierOrderLine::query()->with('order')->lockForUpdate()->findOrFail($line->id);
+            if ($locked->receipts()->where('status', 'manual_review')->exists()) {
+                throw ValidationException::withMessages(['quantity_received' => 'An earlier receipt has an uncertain Shopify outcome. Reconcile it before receiving more stock.']);
+            }
             $reserved = (int) $locked->receipts()->whereIn('status', ['pending', 'processing', 'succeeded'])->sum('quantity_received');
             $outstanding = (int) $locked->quantity_ordered - $reserved;
             if ((int) $quantity > $outstanding) throw ValidationException::withMessages(['quantity_received' => "Only {$outstanding} unit(s) remain outstanding."]);
@@ -59,7 +62,7 @@ final class SupplierReceiptService
                 ] : null,
             ]);
         });
-        if ($dispatch && $receipt->wasRecentlyCreated) ProcessSupplierReceiptJob::dispatch($receipt->id)->onQueue('procurement');
+        if ($dispatch && $receipt->wasRecentlyCreated) ProcessSupplierReceiptJob::dispatch($receipt->id);
         return $receipt;
     }
 

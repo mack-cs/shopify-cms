@@ -13,8 +13,6 @@ use Filament\Resources\Resource;
 use Filament\Tables\Actions\Action;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
-use Illuminate\Support\Facades\DB;
-
 final class EngravedBeadFamilyResource extends Resource
 {
     protected static ?string $model = EngravedBeadFamily::class;
@@ -70,17 +68,29 @@ final class EngravedBeadFamilyResource extends Resource
             Action::make('inspect')->label('Members, stock and history')
                 ->modalContent(fn (EngravedBeadFamily $record) => view('filament.engraved-bead-family', ['family' => $record]))
                 ->modalSubmitAction(false)->modalCancelActionLabel('Close'),
-            Action::make('thresholds')->form(array_map(fn ($q) => TextInput::make('threshold_'.$q)
-                ->label($q.' bead disable threshold')->numeric()->integer()->minValue($q)->maxValue(1000000)->required()
-                ->default(fn (EngravedBeadFamily $record) => $record->members()->where('required_beads', $q)->value('disable_threshold') ?? $q), [1, 2, 3, 4]))
+            Action::make('thresholds')->form(array_map(function (int $q) {
+                $fromEnvironment = $q !== 1;
+
+                return TextInput::make('threshold_'.$q)
+                    ->label($q.' bead disable threshold')
+                    ->numeric()->integer()->minValue($fromEnvironment ? 0 : $q)->maxValue(1000000)
+                    ->required(! $fromEnvironment)
+                    ->disabled($fromEnvironment)
+                    ->dehydrated(! $fromEnvironment)
+                    ->helperText($fromEnvironment
+                        ? 'Set ENGRAVED_BEAD_'.$q.'_THRESHOLD, refresh cached configuration, and restart queue workers. This does not change beads consumed by a purchase.'
+                        : 'The tracked 1-bead product keeps this stored safety buffer.')
+                    ->default(fn (EngravedBeadFamily $record) => $fromEnvironment
+                        ? app(\App\Services\EngravedBeads\EngravedBeadSafetyThresholds::class)->configured($q)
+                        : ($record->members()->where('required_beads', $q)->value('disable_threshold') ?? $q));
+            }, [1, 2, 3, 4]))
                 ->visible(fn (EngravedBeadFamily $record) => $record->members()->count() === 4)
                 ->action(function (EngravedBeadFamily $record, array $data): void {
-                    DB::transaction(function () use ($record, $data): void {
-                        foreach ($record->members as $member) {
-                            app(EngravedBeadFamilyAdministration::class)->threshold($member, (int) $data['threshold_'.$member->required_beads], auth()->user());
-                        }
-                    });
-                    Notification::make()->title('Thresholds saved; recalculation requested')->success()->send();
+                    $member = $record->members->firstWhere('required_beads', 1);
+                    if ($member !== null) {
+                        app(EngravedBeadFamilyAdministration::class)->threshold($member, (int) $data['threshold_1'], auth()->user());
+                    }
+                    Notification::make()->title('1-bead threshold saved. Multi-bead buffers follow the environment settings.')->success()->send();
                 }),
             Action::make('activate')->label('Approve activation')->requiresConfirmation()
                 ->visible(fn (EngravedBeadFamily $record) => $record->status === 'pending_validation' && $record->validation_errors === [])

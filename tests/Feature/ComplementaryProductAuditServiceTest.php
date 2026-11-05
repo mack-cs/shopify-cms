@@ -14,6 +14,8 @@ use App\Services\HeaderStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/ImportedComplementaryShopifyFake.php';
+beforeEach(fn () => fakeImportedComplementaryShopify());
 
 it('flags shopify complementary products when a live shopify ref is invalid and chooses a valid local backup', function (): void {
     $user = User::factory()->create();
@@ -132,7 +134,7 @@ it('matches draft filters using local and live complementary status', function (
         ->and($service->draftIdsMatchingShopifyStatus('flagged'))->toContain($draft->id);
 });
 
-it('treats fewer live shopify complementary products as healthy when they already exist locally', function (): void {
+it('flags fewer live complementary products than the required three even when they exist locally', function (): void {
     $user = User::factory()->create();
     $import = Import::create([
         'filename' => 'shopify-products',
@@ -187,7 +189,7 @@ it('treats fewer live shopify complementary products as healthy when they alread
     expect($analysis['shopify_total'])->toBe(2)
         ->and($analysis['shopify_eligible'])->toBe(2)
         ->and($analysis['shopify_missing_local_ids'])->toBe([])
-        ->and($analysis['shopify_good'])->toBeTrue();
+        ->and($analysis['shopify_good'])->toBeFalse();
 });
 
 it('flags shopify complementary products when a live shopify ref is missing from the local list', function (): void {

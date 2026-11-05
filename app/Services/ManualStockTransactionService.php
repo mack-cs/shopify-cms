@@ -19,8 +19,11 @@ class ManualStockTransactionService
 {
     public function __construct(private readonly ShopifyInventoryAdjustmentService $inventory) {}
 
-    public function prepare(ManualStockTransaction $transaction): ManualStockTransaction
+    public function prepare(ManualStockTransaction $transaction, ?int $userId = null): ManualStockTransaction
     {
+        if (! $transaction->is_historical) {
+            app(InventoryAccessService::class)->authorizeInventory($userId ?? auth()->id());
+        }
         if ($transaction->impacts()->where('status', 'completed')->exists()) {
             throw new RuntimeException('This transaction has already changed inventory and cannot be rebuilt.');
         }
@@ -85,7 +88,10 @@ class ManualStockTransactionService
 
     public function process(ManualStockTransaction $transaction, ?int $userId = null): ManualStockTransaction
     {
-        if ($transaction->impacts()->doesntExist()) $transaction = $this->prepare($transaction);
+        if (! $transaction->is_historical) {
+            app(InventoryAccessService::class)->authorizeInventory($userId ?? auth()->id());
+        }
+        if ($transaction->impacts()->doesntExist()) $transaction = $this->prepare($transaction, $userId);
         $transaction = DB::transaction(function () use ($transaction, $userId): ManualStockTransaction {
             $locked = ManualStockTransaction::query()->lockForUpdate()->findOrFail($transaction->id);
             if ($locked->status === 'completed') return $locked;
@@ -108,6 +114,7 @@ class ManualStockTransactionService
         $pending = $transaction->impacts()->with('variant.product')->where('status', '!=', 'completed')->get();
         $short = [];
         foreach ($pending as $impact) {
+            app(InventoryAccessService::class)->authorizeInventory($userId ?? auth()->id());
             $live = $this->inventory->currentQuantities($impact->variant, $impact->shopify_location_id);
             $impact->update(array_filter([
                 'available_before' => $impact->attempts === 0 ? $live['available'] : null,
@@ -123,6 +130,7 @@ class ManualStockTransactionService
 
         foreach ($pending as $impact) {
             try {
+                app(InventoryAccessService::class)->authorizeInventory($userId ?? auth()->id());
                 $impact->increment('attempts');
                 $impact->update(['status' => 'processing', 'error_message' => null]);
                 $response = $this->inventory->decreaseOnHand($impact->variant, $impact->quantity_required,

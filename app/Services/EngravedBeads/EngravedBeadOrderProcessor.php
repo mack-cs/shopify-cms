@@ -11,8 +11,9 @@ use App\Services\Shopify\StackInventoryMovementService;
 use Closure;
 
 /**
- * Multi-bead members reserve their FULL physical demand against the approved source.
- * Shopify alone commits the tracked one-bead member.
+ * A multi-bead sale records one first bead and the remaining beads separately.
+ * Shopify receives one adjustment for the total on the tracked 1-bead source.
+ * A 1-bead sale is left to Shopify and is not reserved again.
  */
 final class EngravedBeadOrderProcessor
 {
@@ -274,7 +275,8 @@ final class EngravedBeadOrderProcessor
             'variant_id' => $variant?->id,
             'sku' => trim((string) ($variant?->sku ?: ($lineItem['sku'] ?? ''))) ?: null,
             'beads' => $configuration->beads(),
-            'additional_per_unit' => ($configuration->beads() ?? 0) > 1 ? $configuration->beads() : 0,
+            'first_bead_per_unit' => ($configuration->beads() ?? 0) > 1 ? 1 : 0,
+            'additional_per_unit' => $configuration->additionalPerUnit(),
             'ordered_quantity' => $orderedQuantity,
             'stock_pool' => null,
             'shopify_inventory_item_id' => $variant?->shopify_inventory_item_id,
@@ -333,6 +335,8 @@ final class EngravedBeadOrderProcessor
 
     private function writesEnabled(): bool
     {
-        return $this->enabled() && (bool) config('engraved_beads.inventory_writes_enabled', false);
+        return $this->enabled()
+            && (bool) config('engraved_beads.inventory_writes_enabled', false)
+            && (bool) config('engraved_beads.store_contract_verified', false);
     }
 }
