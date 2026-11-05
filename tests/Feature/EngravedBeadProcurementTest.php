@@ -14,6 +14,7 @@ use Livewire\Livewire;
 use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/EngravedBeadFamilyFixture.php';
 
 it('includes only unlisted products with exactly one engraved bead quantity tag in procurement', function (): void {
     $import = beadImport();
@@ -67,12 +68,13 @@ it('shows eligible unlisted engraved beads in inventory search and procurement e
         ->assertSee('Unlisted — Procurement Eligible');
 });
 
-it('lets a valid unlisted engraved bead use the normal supplier order workflow', function (): void {
+it('lets an approved unlisted tracked one-bead source use the normal supplier order workflow', function (): void {
     $user = User::factory()->create(['is_active'=>true]);
-    $variant = beadVariant(beadImport($user), 'unlisted', 'BEAD-ORDER', '2-engraved-beads');
+    $fixture = sharedBeadFamily('procurement-order-bead-family', 75000, true);
+    $variant = $fixture['members'][1]['variant'];
 
     $line = app(SupplierOrderService::class)->createFromRow([
-        'sku' => 'BEAD-ORDER',
+        'sku' => $variant->sku,
         'order_id' => 'PO-BEAD',
         'quantity_ordered' => 4,
         'eta' => '01/12/2026',

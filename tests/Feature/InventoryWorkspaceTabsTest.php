@@ -38,6 +38,7 @@ it('reports a repeated purchase order paste without claiming to create another o
     Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
         ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->callMountedAction()
         ->assertNotified('Purchase order created');
 
     Livewire::test(ListInventories::class)
@@ -66,6 +67,7 @@ it('accepts a supplier order for a draft shopify product', function (): void {
     Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
         ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->callMountedAction()
         ->assertNotified('Purchase order created');
 
     expect($variant->supplierOrderLines()->count())->toBe(1)
@@ -91,6 +93,7 @@ it('separates everyday inventory controls from supplier order controls', functio
     $product = Product::query()->create([
         'import_id' => $import->id,
         'handle' => 'inventory-tabs-product',
+        'shopify_id' => 'gid://shopify/Product/9101',
         'title' => 'Inventory Tabs Product',
         'vendor' => 'Report Supplier',
         'status' => 'active',
@@ -98,6 +101,8 @@ it('separates everyday inventory controls from supplier order controls', functio
     $variant = Variant::query()->create([
         'product_id' => $product->id,
         'sku' => 'TAB-001',
+        'shopify_id' => 'gid://shopify/ProductVariant/9101',
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/9101',
         'inventory_qty' => 12,
         'current_available_quantity' => 12,
         'current_committed_quantity' => 2,

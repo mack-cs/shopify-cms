@@ -31,6 +31,7 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->scoped(\App\Services\ShopYourVibeEditing::class);
+        $this->app->scoped(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class);
         $this->app->bind(ShopifyGraphqlGateway::class, ShopifyApiClient::class);
         $this->app->scoped(StackInventoryAuditService::class);
     }

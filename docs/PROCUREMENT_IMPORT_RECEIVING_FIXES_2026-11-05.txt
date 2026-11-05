@@ -1,0 +1,247 @@
+LEIGH AVENUE CMS - PROCUREMENT IMPORT AND RECEIVING FIXES
+Date: 2026-11-05
+Branch: feat/syv-sorting-approval-integration
+Scope: attached procurement import/receiving request. No broad release audit.
+
+RESULT
+
+Implemented shared upload/paste review, explicit partial acceptance, rejected-row
+downloads, transactional receipt capacity validation, truthful receiving status,
+mapped-draft resolution, and a narrowly authorized approved 1-bead receipt path.
+The overall release HOLD is unchanged. This is implementation evidence for
+independent verification, not production approval.
+
+Existing business-contract limit retained: a family must already be approved and
+active under the existing source contract. New family activation remains blocked
+while ENGRAVED_BEAD_STORE_CONTRACT_VERIFIED=false. Draft bead-source activation
+is also outside that contract. No activation workaround was introduced.
+
+ORIGINAL FAILURES AND CORRECTED BEHAVIOR
+
+1. Mixed order batch: valid FIX-1 and invalid SKU/quantity.
+   Before: confirm rejected the mixed batch; no partial-acceptance API existed.
+   Initial regression failed with unsupported acceptValidRows argument.
+   Now: preview persists no purchase order. Confirmation without explicit partial
+   consent fails. Explicit consent saves exactly the valid line; invalid raw
+   values, original row number and all explanations remain downloadable.
+
+2. Receipt batch: two quantities of 3 against an order of 5.
+   Before: preview incorrectly marked both rows valid (valid_count=2).
+   Now: upload and paste mark both rows rejected with the combined quantity and
+   the actual available balance. Pending/processing receipts reserve capacity.
+   A manual_review receipt quarantines further receiving for that order line.
+
+3. Draft not created/synchronized in Shopify.
+   Before: rejected without the necessary Shopify mapping explanation.
+   Now: preview rejects before staging/mutation and explains that Shopify product,
+   variant and inventory-item mappings must be synchronized before receiving.
+   Purchase-order planning for an unmapped ordinary CMS draft remains possible.
+
+4. Approved tracked 1-bead receipt, active and unlisted source variants.
+   An additional before-change job reproduction used the real HTTP guard with
+   fake Shopify. Both variants failed with "Engraved bead Shopify mutations are
+   disabled until both inventory-write and store-contract flags are enabled."
+   No mutation reached fake HTTP. This established the actual guard conflict;
+   the initial missing authorizePush-method failures alone were not sufficient.
+   Now: the approved, explicitly authorized source receives exactly one delta,
+   with both automation flags false. Duplicate job delivery does not send another
+   delta. Generic GraphQL, additional mutations and REST writes remain blocked.
+
+Before evidence:
+  storage/logs/procurement-fixes-before.txt (5 red acceptance cases)
+  storage/logs/procurement-bead-receiving-before.txt (2 real guard failures)
+
+IMPORT EXECUTION AND TRANSACTIONS
+
+SupplierImportPreview parses both transports and retains raw values, headings,
+original row identifiers and blank-row positions. Validation explanations are
+shared. Duplicate order/SKU rows identify the earlier row. Existing PO/SKU rows
+name the actual order and SKU, say "already recorded", promise no quantity
+overwrite, and direct amendments to the existing authorized Amend Order Line
+action. Unrelated valid rows can be explicitly accepted.
+
+Filament upload/paste actions now validate then open Review Supplier Import.
+Valid/rejected tables contain every row, including errors after row 10. Mixed
+batches require a consent checkbox. Receipt confirmation stages only; the user
+must separately authorize Push Received To Shopify. Rejected downloads require
+an active inventory-authorized user, contain original cells (including extra
+malformed columns), Original Row, and Error Reason. Correction exports omit
+previously accepted rows; corrected files can be re-uploaded. Existing completed
+file hashes and row idempotency keys remain in use.
+
+Confirmation locks the batch, affected existing orders and order lines, then
+revalidates before writing. Accepted rows persist together in one transaction.
+If validity/reasons changed after preview, only the revised preview commits;
+the user must review again and no accepted business rows are saved in that call.
+Receipt quantities are summed per order/SKU before staging. The existing line
+lock and service-level capacity check remain a second enforcement boundary.
+
+Confirmed outstanding = ordered minus succeeded receipts. Staged is pending plus
+processing; uncertain is manual_review. Available to receive subtracts staged
+from confirmed outstanding, and is zero while an uncertain receipt exists. WIP
+and confirmed-inventory formulas were not changed.
+
+RECEIVING ELIGIBILITY AND AUTHORIZATION
+
+A. Published tracked 1-bead: allowed only if the existing approved source contract
+   validates the family, current IDs/SKU/tracking/location and mapping/version.
+B. Unlisted tracked 1-bead: same conditions; unlisted status alone is not rejection.
+C. Eligible mapped ordinary draft: resolves to its unique synchronized variant
+   and product/variant/item IDs. A CMS draft's Shopify product ID constrains the
+   match when present. Binding occurs only at accepted staging, not preview.
+   Draft/unpublished status is preserved. Existing unique-SKU linking when a
+   previously unmapped draft later gains a synchronized variant is retained.
+D. Unmapped draft: actionable rejection before any Shopify mutation.
+
+All receiving requires a non-stack product, supported product status, all three
+Shopify identities, and tracked=true. 2/3/4-bead members cannot become independent
+receiving sources, even through the direct supplier-order service. The source
+contract is reused, not replaced by tags or a new business approval mechanism.
+
+Explicit push approval records actor, quantity, product/variant/item/location,
+and approved-source mapping hash/version on the receipt. Current inventory
+permission is rechecked in the worker. Mapping/location/quantity drift invalidates
+the authorization. A bead job without this authorization cannot use the exception.
+The worker refreshes bead inventory before attempting the delta; missing/false
+tracking blocks it before recording a started Shopify attempt.
+
+SupplierReceiptMutationAuthorization is scoped and cleared in finally. It permits
+only the exact existing supplier-receipt GraphQL mutation and exact one-change
+payload: name=available, reason=received, approved item/location/positive receipt
+quantity, receipt reference and stable idempotency key. The receipt must have its
+durable processing/start marker. Changing any identity, amount, reference, key,
+or query does not pass the guard. There is no REST or generic mutation exemption.
+
+The pre-existing atomic attempt claim, dedicated inventory-receipts queue,
+single-attempt mutation behavior, response acknowledgement and ambiguous-outcome
+quarantine remain intact. Uncertain mutations are never automatically replayed.
+Only Shopify adjustment-group confirmation sets succeeded. inventory_after starts
+null and is populated from a confirmed refresh, not a predicted local addition.
+If post-receipt refresh/summary work fails, the receipt stays succeeded with the
+"Received in Shopify; stock summary needs updating" label. A retry does the
+post-processing without another stock delta.
+
+UNCHANGED SAFETY CONTRACT AND SPECIFIC LIMIT
+
+app/Services/EngravedBeads/EngravedBeadFamilyAdministration.php:17-35 requires
+pending_validation, valid membership/tracking/SKU/location, and the store-contract
+flag before activation. Its exact rejection is:
+  "Store location, sellability, checkout and API contract verification is required
+   before activation."
+app/Services/EngravedBeads/EngravedBeadProcurementContract.php:17 onward requires
+active family, activated_at, approved_by, current valid four-member mapping, tracked
+source and source product status active/unlisted. A newly unapproved family or a
+draft bead source therefore remains blocked. This specific activation/status
+extension was stopped, not bypassed. Ordinary mapped draft receiving works.
+
+No changes to consumption formulas, family activation, reservation accounting,
+automatic sellability, inventory approval rules, or either automation flag.
+No .env, config, production data or activation record was changed. Tests simulate
+previously approved families only in disposable databases.
+
+TEST EVIDENCE
+
+New regression file:
+  tests/Feature/ProcurementImportReceivingFixesTest.php
+  29 passed, 158 assertions, 11.85 seconds.
+  storage/logs/procurement-new-final.txt and .xml
+  Covers mixed acceptance, all 15 rejected UI rows, explicit UI consent, secured
+  correction download, original values, existing identities, corrected re-upload,
+  shared parsing/row numbering, combined capacity, concurrent-state revalidation,
+  partial staging, all six status labels, mapped/unmapped drafts, active/unlisted
+  approved sources, duplicate source job delivery, multi-bead protection, disabled
+  flags, unapproved families, absent/revoked authorization, payload/REST boundaries,
+  unknown/false Shopify tracking, uncertain receipt quarantine, and real fake-HTTP
+  confirmation followed by refresh failure and post-processing-only recovery.
+
+Complete Laravel suite at implementation checkpoint:
+  1131 passed, 6826 assertions, 287.02 seconds.
+  storage/logs/procurement-full-suite.txt and .xml
+  This run precedes the final three additional tracking/recovery cases and final
+  small UI capacity-label/filter edits. The final relevant regression run below
+  covers those changes and all affected tests; counts are not added together.
+
+Final relevant regression suite:
+  321 passed, 2010 assertions, 118.83 seconds.
+  storage/logs/procurement-regression-final.txt and .xml
+  Includes every Procurement/EngravedBead test, InventoryAdjustmentApprovalWorkflow,
+  InventoryWorkspaceTabs, CursorIndependentVerification, IndependentReleaseRisk-
+  Verification, ReleaseBlockerSafety and ManualStockTransactionService tests.
+  The three previously closed inventory defects were not modified or reopened;
+  their existing independent regressions are included unchanged.
+
+Disposable MySQL two-process tests:
+  tests/Support/procurement-import-mysql.php
+  storage/logs/procurement-import-mysql.txt
+  Three forced lock overlaps passed: changed receipt capacity, two confirmations
+  of the same receipt batch, two confirmations of the same purchase-order batch.
+  Verified waiting worker, explicit re-review, no over-staging, exactly one saved
+  receipt/order line, and confirmed-versus-staged quantities. No HTTP was sent.
+  Random localhost-only database migrated and dropped; no application DB changed.
+
+Old tests updated deliberately:
+  InventoryWorkspaceTabsTest: paste now needs the review confirmation; a receiving
+  fixture now has the Shopify mappings required by the positive receiving case.
+  ProcurementSupplierOrderWorkflowTest: assert useful actual SKU/order messages;
+  preview no longer persists draft binding, which is asserted after confirmation.
+  EngravedBeadProcurementTest: the positive supplier workflow fixture is an already
+  approved tracked 1-bead source, rather than an independent 2-bead stock source.
+  Separate negative tests enforce the multi-bead and unapproved-source boundaries.
+
+EXACT FILES CHANGED / ADDED FOR THIS TASK
+
+Imports and review:
+  app/Services/Procurement/SupplierImportPreview.php (new)
+  app/Services/Procurement/SupplierOrderCsvService.php
+  app/Filament/Resources/InventoryResource/Pages/ListInventories.php
+  app/Http/Controllers/SupplierImportRejectedRowsController.php (new)
+  resources/views/filament/inventory/supplier-import-preview.blade.php (new)
+  routes/web.php
+Receiving and authorization:
+  app/Services/Procurement/SupplierReceivingEligibility.php (new)
+  app/Services/Procurement/SupplierReceiptMutationAuthorization.php (new)
+  app/Services/Procurement/SupplierOrderService.php
+  app/Services/Procurement/SupplierReceiptService.php
+  app/Jobs/ProcessSupplierReceiptJob.php
+  app/Services/Shopify/ShopifyInventoryAdjustmentService.php
+  app/Services/EngravedBeads/EngravedBeadMutationGuard.php
+  app/Providers/AppServiceProvider.php
+  database/migrations/2026_11_05_100000_add_supplier_receiving_authorization.php (new)
+Quantities and display:
+  app/Models/ProcurementSupplierOrderLine.php
+  app/Models/ProcurementSupplierReceipt.php
+  app/Filament/Resources/InventoryResource.php
+  resources/views/filament/inventory/supplier-orders.blade.php
+  resources/views/filament/inventory/grv-report.blade.php
+Tests:
+  tests/Feature/ProcurementImportReceivingFixesTest.php (new)
+  tests/Support/procurement-import-mysql.php (new)
+  tests/Feature/ProcurementSupplierOrderWorkflowTest.php
+  tests/Feature/InventoryWorkspaceTabsTest.php
+  tests/Feature/EngravedBeadProcurementTest.php
+Report:
+  docs/PROCUREMENT_IMPORT_RECEIVING_FIXES_2026-11-05.txt (new)
+
+REPRODUCIBLE COMMANDS (PowerShell, from repository root)
+
+$php = 'C:\Users\shona\.config\herd\bin\php84\php.exe'
+& $php -d memory_limit=1G vendor/bin/pest tests/Feature/ProcurementImportReceivingFixesTest.php
+& $php -d memory_limit=1G vendor/bin/pest
+$files = @(rg --files tests/Feature | Where-Object { $_ -match '(Procurement|EngravedBead|InventoryAdjustmentApproval|InventoryWorkspaceTabs|CursorIndependentVerification|IndependentReleaseRiskVerification|ReleaseBlockerSafety|ManualStockTransactionService)' })
+& $php -d memory_limit=1G vendor/bin/pest @files
+$env:SYV_RUN_ISOLATED_MYSQL='1'
+& $php -d memory_limit=1G -d allow_url_fopen=0 -d disable_functions=curl_exec,fsockopen,stream_socket_client tests/Support/procurement-import-mysql.php
+
+REMAINING STAGING / DEPLOYMENT STEPS (NOT PERFORMED)
+
+Independent review of this diff and evidence; apply the new nullable authorization
+column migration in staging before using push approval; restart staging workers
+with the reviewed code; verify upload/paste review and download in a browser with
+representative authorized users; verify source mappings and the configured receipt
+location against the approved contract. Retain both bead automation flags false.
+Uncertain historical receipts still need the existing reconciliation workflow;
+they must not be bulk-replayed or marked confirmed from a matching snapshot alone.
+Any eventual production deployment requires a separate release decision.
+
+No live Shopify calls/mutations, commits, deployments, production configuration
+changes, or resets/discards of existing working changes were performed.

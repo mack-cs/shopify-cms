@@ -44,7 +44,7 @@ class ListInventories extends ListRecords
         $orders = collect($batch->preview_rows)->pluck('order_id')->filter()->unique()->implode(', ');
         Notification::make()
             ->title('Purchase order already captured')
-            ->body("These exact rows were processed previously for order(s): {$orders}. No new order lines were created. Check the existing orders in Supplier Orders.")
+            ->body("The accepted rows were already recorded for order(s): {$orders}. No new order lines were created. {$batch->invalid_count} rejected row(s) remain not saved; use Review Supplier Import to download and correct them.")
             ->warning()
             ->persistent()
             ->send();
@@ -56,182 +56,41 @@ class ListInventories extends ListRecords
     {
         return [
             Actions\ActionGroup::make([
-            Actions\Action::make('previewSupplierOrdersCsv')
-                ->label('Upload Supplier Orders')->icon('heroicon-o-truck')->color('info')
-                ->modalWidth(MaxWidth::Medium)
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('Upload the selected-order CSV after filling in Order ID, Quantity Ordered, and ETA. Valid rows are saved immediately; invalid rows are rejected.')
-                ->form([FileUpload::make('file')->label('Supplier orders CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])])
-                ->action(function (array $data, SupplierOrderCsvService $csv): void {
+                $this->supplierInputAction('previewSupplierOrdersCsv','Upload Supplier Orders','order',false),
+                $this->supplierInputAction('previewSupplierReceiptsCsv','Upload Receipts','receipt',false),
+            ])->label('Upload Files')->icon('heroicon-o-arrow-up-tray')->button()
+                ->visible(fn():bool=>$this->activeTab==='orders' && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())),
+            $this->supplierInputAction('pasteSupplierOrder','Paste Purchase Order','order',true),
+            $this->supplierInputAction('pasteSupplierReceipts','Paste Received Orders','receipt',true),
+            Actions\Action::make('reviewSupplierImport')->label('Review Supplier Import')
+                ->visible(fn():bool=>$this->activeTab==='orders' && $this->supplierImportBatchUuid!==null && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+                ->modalWidth(MaxWidth::SevenExtraLarge)
+                ->modalHeading(fn():string=>$this->supplierBatch()->type==='order'?'Review Purchase Order Rows':'Review Receipt Rows')
+                ->modalContent(fn()=>view('filament.inventory.supplier-import-preview',['batch'=>$this->supplierBatch(),'warnings'=>app(SupplierOrderCsvService::class)->outOfSequenceWarnings($this->supplierBatch())]))
+                ->modalSubmitAction(fn(Actions\StaticAction $action)=>$this->supplierBatch()->status==='completed'?false:$action)
+                ->modalSubmitActionLabel(fn():string=>$this->supplierBatch()->type==='order'?'Save valid order rows':'Stage valid receipt rows')
+                ->form(function():array {
+                    $batch=$this->supplierBatch(); $warnings=app(SupplierOrderCsvService::class)->outOfSequenceWarnings($batch);
+                    return [
+                        \Filament\Forms\Components\Checkbox::make('accept_valid_rows')->label('I reviewed the rejected rows. Save only valid rows; leave rejected rows not saved.')
+                            ->visible($batch->invalid_count>0)->required($batch->invalid_count>0)->accepted(),
+                        \Filament\Forms\Components\Checkbox::make('confirm_out_of_sequence')->label('I confirm receiving against the later purchase order')
+                            ->visible($warnings->isNotEmpty())->required($warnings->isNotEmpty())->accepted(),
+                        Textarea::make('out_of_sequence_reason')->label('Reason for receiving the later order')->visible($warnings->isNotEmpty())->required($warnings->isNotEmpty()),
+                    ];
+                })
+                ->action(function(array $data,SupplierOrderCsvService $csv,Actions\Action $action):void {
+                    app(InventoryAccessService::class)->authorizeInventory(Auth::id());
                     try {
-                        $path = Storage::disk('local')->path((string) $data['file']);
-                        $batch = $csv->preview($path, 'order', Auth::id(), basename((string) $data['file']));
-                        if ($this->notifyPreviouslyCapturedOrder($batch)) {
-                            return;
-                        }
-                        if ($batch->invalid_count > 0) {
-                            Notification::make()->title('Order upload needs corrections')->body($this->supplierPreviewBody($batch))->warning()->persistent()->send();
-
-                            return;
-                        }
-                        $csv->confirm($batch->uuid, Auth::id());
-                        Notification::make()->title('Supplier orders uploaded')
-                            ->body("{$batch->valid_count} row(s) saved. Use Review Upload → Latest Orders Upload to check them.")
-                            ->success()->send();
-                    } catch (Throwable $e) {
-                        Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
+                        $batch=$csv->confirm($this->supplierBatch()->uuid,Auth::id(),dispatchReceipts:false,
+                            outOfSequenceReason:(string)($data['out_of_sequence_reason']??''),acceptValidRows:(bool)($data['accept_valid_rows']??false));
+                        Notification::make()->title($batch->type==='order'?'Purchase order created':'Received quantities staged')
+                            ->body($batch->valid_count.' valid row(s) saved; '.$batch->invalid_count.' rejected row(s) not saved. '.($batch->type==='receipt'?'Waiting to be pushed: review and use Push Received To Shopify.':''))->success()->persistent()->send();
+                    } catch(\Illuminate\Validation\ValidationException $e) {
+                        Notification::make()->title('Review required before saving')->body($e->getMessage())->warning()->persistent()->send();
+                        $action->halt();
                     }
-                }),
-            Actions\Action::make('previewSupplierReceiptsCsv')
-                ->label('Upload Receipts')->icon('heroicon-o-inbox-arrow-down')->color('success')
-                ->modalWidth(MaxWidth::Medium)
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('Upload received quantities. Valid rows are staged for review and will not change Shopify until selected and pushed.')
-                ->form([
-                    FileUpload::make('file')->label('Supplier receipts CSV')->required()->disk('local')->directory('imports/procurement')->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel']),
-                    \Filament\Forms\Components\Checkbox::make('confirm_out_of_sequence')
-                        ->label('Confirm any out-of-sequence receipt warnings'),
-                    Textarea::make('out_of_sequence_reason')
-                        ->label('Out-of-sequence reason')
-                        ->rows(3)
-                        ->helperText('Required when the receipt is for a later ETA while an earlier order for the same SKU is still pending.'),
-                ])
-                ->action(function (array $data, SupplierOrderCsvService $csv): void {
-                    try {
-                        $path = Storage::disk('local')->path((string) $data['file']);
-                        $batch = $csv->preview($path, 'receipt', Auth::id(), basename((string) $data['file']));
-                        if ($batch->invalid_count > 0) {
-                            Notification::make()->title('Received-order upload needs corrections')->body($this->supplierPreviewBody($batch))->warning()->persistent()->send();
-
-                            return;
-                        }
-                        $warnings = $csv->outOfSequenceWarnings($batch);
-                        if ($warnings->isNotEmpty()
-                            && (! (bool) ($data['confirm_out_of_sequence'] ?? false) || blank($data['out_of_sequence_reason'] ?? null))) {
-                            Notification::make()
-                                ->title('Out-of-sequence receipt confirmation required')
-                                ->body($this->outOfSequenceWarningBody($warnings))
-                                ->warning()
-                                ->persistent()
-                                ->send();
-
-                            return;
-                        }
-                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false, outOfSequenceReason: (string) ($data['out_of_sequence_reason'] ?? ''));
-                        Notification::make()->title('Received quantities staged')
-                            ->body("{$batch->valid_count} row(s) are awaiting review. Filter by Awaiting Shopify Push, select approved rows, then use Push Received To Shopify.")
-                            ->success()->persistent()->send();
-                    } catch (Throwable $e) {
-                        Notification::make()->title('Preview failed')->body($e->getMessage())->danger()->send();
-                    }
-                }),
-            ])->label('Upload Files')->icon('heroicon-o-arrow-up-tray')->color('info')->button()
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())),
-            Actions\Action::make('pasteSupplierOrder')
-                ->label('Paste Purchase Order')->icon('heroicon-o-clipboard-document-list')->color('warning')
-                ->modalWidth(MaxWidth::FiveExtraLarge)
-                ->modalSubmitActionLabel('Validate & Create Orders')
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('Paste tab-separated rows copied from Google Sheets or Excel using: Item (optional), SKU, Quantity Ordered, Order ID and ETA Date. SKU identifies the existing CMS product; product name and vendor are never changed. Item is only a row reference and is not saved.')
-                ->form([
-                    Textarea::make('pasted_rows')
-                        ->label('Purchase-order rows')
-                        ->helperText("Item\tSKU\tQuantity Ordered\tOrder ID\tETA Date")
-                        ->rows(12)
-                        ->required(),
-                ])
-                ->action(function (array $data, SupplierOrderCsvService $csv): void {
-                    try {
-                        $batch = $csv->previewPastedOrder((string) $data['pasted_rows'], Auth::id());
-                        if ($this->notifyPreviouslyCapturedOrder($batch)) {
-                            return;
-                        }
-
-                        if ($batch->invalid_count > 0) {
-                            Notification::make()
-                                ->title('Purchase order needs corrections')
-                                ->body($this->supplierPreviewBody($batch))
-                                ->warning()
-                                ->persistent()
-                                ->send();
-
-                            return;
-                        }
-
-                        $csv->confirm($batch->uuid, Auth::id());
-                        Notification::make()
-                            ->title('Purchase order created')
-                            ->body("{$batch->valid_count} order line(s) validated and saved successfully.")
-                            ->success()
-                            ->send();
-                    } catch (Throwable $e) {
-                        Notification::make()->title('Purchase order was not created')->body($e->getMessage())->danger()->persistent()->send();
-                    }
-                }),
-            Actions\Action::make('pasteSupplierReceipts')
-                ->label('Paste Received Orders')->icon('heroicon-o-clipboard-document-check')->color('success')
-                ->modalWidth(MaxWidth::FiveExtraLarge)
-                ->modalSubmitActionLabel('Validate & Stage Receipts')
-                ->visible(fn (): bool => $this->activeTab === 'orders'
-                    && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
-                ->modalDescription('Paste tab-separated rows copied from Google Sheets or Excel using this receipt shape: Order ID, SKU, Quantity Received. The rows are validated first and will not update Shopify until you review and push them.')
-                ->form([
-                    Textarea::make('pasted_rows')
-                        ->label('Received-order rows')
-                        ->helperText("Order ID\tSKU\tQuantity Received")
-                        ->rows(12)
-                        ->required(),
-                    \Filament\Forms\Components\Checkbox::make('confirm_out_of_sequence')
-                        ->label('Confirm any out-of-sequence receipt warnings'),
-                    Textarea::make('out_of_sequence_reason')
-                        ->label('Out-of-sequence reason')
-                        ->rows(3)
-                        ->helperText('Required when the receipt is for a later ETA while an earlier order for the same SKU is still pending.'),
-                ])
-                ->action(function (array $data, SupplierOrderCsvService $csv): void {
-                    try {
-                        $batch = $csv->previewPastedReceipt((string) $data['pasted_rows'], Auth::id());
-
-                        if ($batch->invalid_count > 0) {
-                            Notification::make()
-                                ->title('Received orders need corrections')
-                                ->body($this->supplierPreviewBody($batch))
-                                ->warning()
-                                ->persistent()
-                                ->send();
-
-                            return;
-                        }
-
-                        $warnings = $csv->outOfSequenceWarnings($batch);
-                        if ($warnings->isNotEmpty()
-                            && (! (bool) ($data['confirm_out_of_sequence'] ?? false) || blank($data['out_of_sequence_reason'] ?? null))) {
-                            Notification::make()
-                                ->title('Out-of-sequence receipt confirmation required')
-                                ->body($this->outOfSequenceWarningBody($warnings))
-                                ->warning()
-                                ->persistent()
-                                ->send();
-
-                            return;
-                        }
-
-                        $csv->confirm($batch->uuid, Auth::id(), dispatchReceipts: false, outOfSequenceReason: (string) ($data['out_of_sequence_reason'] ?? ''));
-                        Notification::make()
-                            ->title('Received quantities staged')
-                            ->body("{$batch->valid_count} row(s) are awaiting review. Filter by Awaiting Shopify Push, select approved rows, then use Push Received To Shopify.")
-                            ->success()
-                            ->persistent()
-                            ->send();
-                    } catch (Throwable $e) {
-                        Notification::make()->title('Received quantities were not staged')->body($e->getMessage())->danger()->persistent()->send();
-                    }
-                }),
-            Actions\Action::make('recalculateProcurement')
+                }),            Actions\Action::make('recalculateProcurement')
                 ->label('Recalculate Procurement')
                 ->icon('heroicon-o-calculator')
                 ->color('danger')
@@ -401,25 +260,36 @@ class ListInventories extends ListRecords
         };
     }
 
-    private function supplierPreviewBody(ProcurementSupplierImportBatch $batch): string
+    public ?string $supplierImportBatchUuid = null;
+
+    private function supplierBatch(): ProcurementSupplierImportBatch
     {
-        $lines = collect($batch->preview_rows)->take(10)->map(function (array $row) use ($batch): string {
-            $quantity = $row[$batch->type === 'order' ? 'quantity_ordered' : 'quantity_received'] ?? '';
-            $eta = $batch->type === 'order' ? ' · ETA '.($row['eta'] ?? '') : '';
-            $errors = (array) data_get($batch->errors, (string) ($row['_row'] ?? ''), []);
-            $result = $errors === [] ? 'VALID' : 'INVALID: '.implode('; ', $errors);
-
-            return "Row {$row['_row']}: ".($row['sku'] ?? '').' · '.($row['order_id'] ?? '')." · Qty {$quantity}{$eta} · {$result}";
-        })->implode("\n");
-        $next = $batch->invalid_count > 0
-            ? ($batch->type === 'order'
-                ? 'Correct the invalid rows and try again. No orders were created.'
-                : 'Correct the invalid rows and try again. No receipts were staged.')
-            : 'All rows are ready.';
-
-        return "{$batch->valid_count} valid, {$batch->invalid_count} invalid.\n{$lines}\n{$next}";
+        return ProcurementSupplierImportBatch::where('uuid',$this->supplierImportBatchUuid)->firstOrFail();
     }
 
+    private function supplierInputAction(string $name,string $label,string $type,bool $paste): Actions\Action
+    {
+        return Actions\Action::make($name)->label($label)->icon($paste?'heroicon-o-clipboard-document-list':'heroicon-o-arrow-up-tray')
+            ->visible(fn():bool=>$this->activeTab==='orders' && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
+            ->modalWidth($paste?MaxWidth::FiveExtraLarge:MaxWidth::Medium)
+            ->modalSubmitActionLabel('Validate & Review')
+            ->modalDescription($type==='order'?'Review purchase order rows before saving. Existing quantities are never overwritten.':'Review receipt rows before staging. Staging does not update Shopify inventory.')
+            ->form($paste?[Textarea::make('pasted_rows')->label('Spreadsheet rows')->rows(12)->required()
+                ->helperText($type==='order'?"Item (optional)\tSKU\tQuantity Ordered\tOrder ID\tETA Date":"Order ID\tSKU\tQuantity Received")]
+                :[FileUpload::make('file')->label('CSV file')->disk('local')->directory('supplier-imports')->acceptedFileTypes(['text/csv','text/plain','application/vnd.ms-excel'])->required()])
+            ->action(function(array $data,SupplierOrderCsvService $csv) use($type,$paste):void {
+                app(InventoryAccessService::class)->authorizeInventory(Auth::id());
+                try {
+                    $batch=$paste?($type==='order'?$csv->previewPastedOrder((string)$data['pasted_rows'],Auth::id()):$csv->previewPastedReceipt((string)$data['pasted_rows'],Auth::id()))
+                        :$csv->preview(Storage::disk('local')->path((string)$data['file']),$type,Auth::id(),basename((string)$data['file']));
+                    $this->supplierImportBatchUuid=$batch->uuid;
+                    if($type==='order' && $this->notifyPreviouslyCapturedOrder($batch)) return;
+                    $this->replaceMountedAction('reviewSupplierImport');
+                } catch(\Illuminate\Validation\ValidationException $e) {
+                    Notification::make()->title('Rows could not be reviewed')->body($e->getMessage())->warning()->persistent()->send();
+                }
+            });
+    }
     private function outOfSequenceWarningBody(\Illuminate\Support\Collection $warnings): string
     {
         $lines = $warnings->take(10)->map(function (array $warning): string {

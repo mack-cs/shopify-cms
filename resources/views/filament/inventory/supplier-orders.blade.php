@@ -3,7 +3,8 @@
         <div class="rounded-lg border border-gray-200 p-4 dark:border-gray-700">
             <div class="font-semibold">{{ $line->order?->order_number ?: 'Legacy order (ID not supplied)' }}</div>
             <div class="mt-1 text-gray-600 dark:text-gray-300">
-                Ordered {{ $line->quantity_ordered }} - Received {{ $line->quantity_received }} - Outstanding {{ $line->quantity_outstanding }}
+                Ordered {{ $line->quantity_ordered }} - Received in Shopify {{ $line->quantity_received }} - Confirmed outstanding {{ $line->quantity_outstanding }}
+                - Staged {{ $line->quantity_staged }} - Needs reconciliation {{ $line->quantity_uncertain }} - Available to receive {{ $line->quantity_available_to_receive }}
                 - ETA {{ $line->eta_date?->format('d/m/Y') ?: 'not supplied' }} - {{ ucfirst($line->status) }}
             </div>
             @if($line->receipts->isNotEmpty())
@@ -12,8 +13,8 @@
                         <div>
                             {{ $receipt->received_at?->format('d/m/Y H:i') ?? $receipt->created_at?->format('d/m/Y H:i') }}
                             - {{ $receipt->grv_number ?? 'GRV pending' }}
-                            - {{ $receipt->quantity_received }} received
-                            - {{ str_replace('_', ' ', ucfirst($receipt->status)) }}
+                            - {{ $receipt->quantity_received }} units
+                            - {{ $receipt->receiving_status_label }}
                         </div>
                     @endforeach
                 </div>

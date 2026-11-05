@@ -11,6 +11,14 @@ use App\Services\Inventory\InventoryAuditRecorder;
 
 class ShopifyInventoryAdjustmentService
 {
+    public const SUPPLIER_RECEIPT_MUTATION = <<<'GRAPHQL'
+mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
+    userErrors { field message }
+  }
+}
+GRAPHQL;
     public function __construct(
         private readonly ShopifyGraphqlGateway $client,
         private readonly ?InventoryAuditRecorder $audits = null,
@@ -178,14 +186,7 @@ GRAPHQL, ['input' => ['name' => 'on_hand', 'reason' => 'correction', 'referenceD
 
         $idempotencyKey = hash('sha256', 'inventory-adjust:'.$referenceUri);
         $this->audited($context, function () use ($inventoryItemId, $locationId, $quantity, $referenceUri, $idempotencyKey): array {
-            $data = $this->client->graphql(<<<'GRAPHQL'
-mutation ReceiveProcurementStock($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
-  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
-    inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
-    userErrors { field message }
-  }
-}
-GRAPHQL, [
+            $data = $this->client->graphql(self::SUPPLIER_RECEIPT_MUTATION, [
                 'input' => [
                     'name' => 'available', 'reason' => 'received', 'referenceDocumentUri' => $referenceUri,
                     'changes' => [['inventoryItemId' => $inventoryItemId, 'locationId' => $locationId, 'delta' => $quantity]],

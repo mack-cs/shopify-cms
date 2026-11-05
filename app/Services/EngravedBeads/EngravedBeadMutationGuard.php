@@ -16,6 +16,7 @@ final class EngravedBeadMutationGuard
         if (! preg_match('/\bmutation\b/', $query)) {
             return;
         }
+        if (app(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class)->permits($query,$variables)) return;
         $this->check($variables, $query);
     }
 

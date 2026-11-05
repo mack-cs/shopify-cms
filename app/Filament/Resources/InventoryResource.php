@@ -283,11 +283,11 @@ class InventoryResource extends Resource
                     ->placeholder('-')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
                 TextColumn::make('grv_report_received_at')
-                    ->label('Receipt Date')
+                    ->label('Recorded Date')
                     ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? ($record->received_at ?? $record->created_at)?->format('d/m/Y H:i') : null)
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
                 TextColumn::make('grv_report_received_by')
-                    ->label('Received By')
+                    ->label('Recorded By')
                     ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierReceipt ? $record->createdBy?->name : null)
                     ->placeholder('-')
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
@@ -683,13 +683,13 @@ class InventoryResource extends Resource
                     ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'orders'
                         && $record instanceof Variant
                         && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
-                        && $record->supplierOrderLines->where('status', 'open')->contains(fn ($line) => $line->quantity_outstanding > 0))
+                        && $record->supplierOrderLines->where('status', 'open')->contains(fn ($line) => $line->quantity_available_to_receive > 0))
                     ->form([
                         Forms\Components\Select::make('line_id')->label('Supplier Order')->required()
                             ->live()
                             ->options(fn (Variant $record): array => $record->supplierOrderLines->where('status', 'open')
-                                ->filter(fn ($line) => $line->quantity_outstanding > 0)
-                                ->mapWithKeys(fn ($line): array => [$line->id => (($line->order?->order_number ?: 'Legacy order').' — '.$line->quantity_outstanding.' outstanding')])->all()),
+                                ->filter(fn ($line) => $line->quantity_available_to_receive > 0)
+                                ->mapWithKeys(fn ($line): array => [$line->id => (($line->order?->order_number ?: 'Legacy order').' — '.$line->quantity_outstanding.' confirmed outstanding; '.$line->quantity_staged.' staged; '.$line->quantity_available_to_receive.' available to receive')])->all()),
                         Forms\Components\TextInput::make('quantity_received')->label('Quantity Received')->integer()->minValue(1)->required(),
                         Forms\Components\Placeholder::make('out_of_sequence_warning')
                             ->label('Out-of-sequence warning')
@@ -967,7 +967,7 @@ class InventoryResource extends Resource
                                     ->whereIn('variant_id', $records->pluck('id')))
                                 ->pluck('id');
                             foreach ($ids as $id) {
-                                ProcessSupplierReceiptJob::dispatch((int) $id);
+                                app(SupplierReceiptService::class)->authorizePush(ProcurementSupplierReceipt::findOrFail((int)$id),(int)Auth::id());
                             }
                             Notification::make()->title('Received inventory queued')
                                 ->body("{$ids->count()} staged receipt(s) will be pushed to Shopify and recalculated.")

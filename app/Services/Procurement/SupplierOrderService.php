@@ -24,6 +24,7 @@ final class SupplierOrderService
         if ($variant->product?->is_bundle === true) {
             throw ValidationException::withMessages(['sku' => 'Stack products cannot be added to procurement orders.']);
         }
+        if (app(SupplierReceivingEligibility::class)->isBead($variant)) app(SupplierReceivingEligibility::class)->assertVariant($variant);
 
         $orderNumber = trim($orderNumber);
         if ($orderNumber === '') {
@@ -139,7 +140,7 @@ final class SupplierOrderService
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
         $matches = Variant::query()->active()
             ->whereHas('product', fn ($query) => $query->procurementOrderEligible())
-            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product:id,shopify_id,handle')->get();
+            ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product')->get();
         $drafts = NewProductDraft::query()
             ->whereIn(DB::raw('LOWER(TRIM(COALESCE(status, "")))'), ['active', 'draft'])
             ->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])

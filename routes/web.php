@@ -17,6 +17,9 @@ Route::get('/inventory/supplier-orders/{order}/export', SupplierOrderReportExpor
     ->middleware(['auth'])
     ->name('inventory.supplier-orders.export');
 
+Route::get('/inventory/supplier-imports/{batch}/rejected', \App\Http\Controllers\SupplierImportRejectedRowsController::class)
+    ->middleware(['auth'])->name('inventory.supplier-imports.rejected');
+
 Route::post('/webhooks/shopify/inventory-levels-update', ShopifyInventoryLevelWebhookController::class)
     ->withoutMiddleware([ValidateCsrfToken::class])
     ->name('webhooks.shopify.inventory-levels-update');

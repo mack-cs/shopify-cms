@@ -24,6 +24,7 @@ final class SupplierReceiptService
             $existing = ProcurementSupplierReceipt::query()->where('idempotency_key', $idempotencyKey)->first();
             if ($existing) return $existing;
             $locked = ProcurementSupplierOrderLine::query()->with('order')->lockForUpdate()->findOrFail($line->id);
+            app(SupplierReceivingEligibility::class)->variantForLine($locked, persist:true);
             if ($locked->receipts()->where('status', 'manual_review')->exists()) {
                 throw ValidationException::withMessages(['quantity_received' => 'An earlier receipt has an uncertain Shopify outcome. Reconcile it before receiving more stock.']);
             }
@@ -41,7 +42,7 @@ final class SupplierReceiptService
                 'uuid' => $uuid, 'grv_number' => $grvNumber ?? $this->nextGrvNumber(), 'supplier_order_line_id' => $locked->id,
                 'quantity_received' => (int) $quantity, 'received_at' => now(),
                 'inventory_before' => $inventoryBefore,
-                'inventory_after' => is_numeric($inventoryBefore) ? ((int) $inventoryBefore + (int) $quantity) : null,
+                'inventory_after' => null,
                 'idempotency_key' => $idempotencyKey,
                 'source' => $source, 'import_batch_id' => $batchId, 'status' => 'pending',
                 'post_process_status' => 'pending', 'shopify_reference_uri' => "logistics://shopify-editor/procurement-receipt/{$uuid}",
@@ -62,7 +63,31 @@ final class SupplierReceiptService
                 ] : null,
             ]);
         });
-        if ($dispatch && $receipt->wasRecentlyCreated) ProcessSupplierReceiptJob::dispatch($receipt->id);
+        if ($dispatch && $receipt->wasRecentlyCreated) {
+            if($userId!==null) $this->authorizePush($receipt,$userId);
+            else ProcessSupplierReceiptJob::dispatch($receipt->id);
+        }
+        return $receipt;
+    }
+
+    public function authorizePush(ProcurementSupplierReceipt $receipt, int $actorId, bool $dispatch=true): ProcurementSupplierReceipt
+    {
+        app(\App\Services\InventoryAccessService::class)->authorizeInventory($actorId);
+        $receipt=DB::transaction(function() use($receipt,$actorId) {
+            $locked=ProcurementSupplierReceipt::lockForUpdate()->findOrFail($receipt->id);
+            if($locked->status!=='pending' || $locked->shopify_adjustment_started_at!==null) throw ValidationException::withMessages(['receipt'=>'Only waiting receipts without an uncertain Shopify attempt can be approved for sending.']);
+            $locked->load('line.variant.product','line.draft');
+            $variant=app(SupplierReceivingEligibility::class)->variantForLine($locked->line,persist:true);
+            $location=app(\App\Services\Shopify\ShopifyInventoryAdjustmentService::class)->resolveLocationId($variant);
+            $source=app(SupplierReceivingEligibility::class)->isBead($variant)?app(SupplierReceivingEligibility::class)->approvedSource($variant):null;
+            if($source && $source['source_location_id']!==$location) throw ValidationException::withMessages(['receipt'=>'The receiving location does not match the approved 1-bead source location.']);
+            $locked->update(['receiving_authorization'=>['actor_id'=>$actorId,'authorized_at'=>now()->toISOString(),
+                'product_id'=>$variant->product->shopify_id,'variant_id'=>$variant->shopify_id,'inventory_item_id'=>$variant->shopify_inventory_item_id,
+                'location_id'=>$location,'quantity'=>$locked->quantity_received,'mapping_hash'=>$source['mapping_hash']??null,
+                'configuration_version'=>$source['configuration_version']??null]]);
+            return $locked;
+        });
+        if($dispatch) ProcessSupplierReceiptJob::dispatch($receipt->id);
         return $receipt;
     }
 
