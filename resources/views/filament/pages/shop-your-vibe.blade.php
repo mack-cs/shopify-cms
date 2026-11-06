@@ -10,10 +10,106 @@
     <script>
         window.syvEditor = function () {
             return {
-        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
+        formDirty: false, savingOrder: false, localPending: false, productQuery: '', orderEpoch: 0, orderSession: (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)), orderError: '', persistChain: Promise.resolve(), statusTimer: null, statusMode: 'idle', wasLoading: false, renderingProducts: false, statusStartedAt: 0, refreshPageTimer: null, loadNotice: false, loadNoticeText: '', loadNoticeTimer: null, productDrag: null,
         pending() { return this.formDirty || this.localPending || this.$el.dataset.pending === 'true'; },
-        canPush() { return this.localPending || this.$root.dataset.pending === 'true'; },
-        destroy() { this.stopStatusTimer(); },
+        canPush() { return (this.localPending || this.$root.dataset.pending === 'true') && this.$root.dataset.sortOnly !== '1'; },
+        lockNotice: { visible: false }, lockNoticeCollapsed: false,
+        revealLockNotice(detail) {
+            if (!detail || !detail.message) return;
+            const key = (detail.gid || '') + '|' + detail.message;
+            if (this.lockNotice && this.lockNotice.visible && this.lockNotice.key === key) {
+                this.lockNotice.expiresAt = detail.expiresAt || this.lockNotice.expiresAt;
+                return;
+            }
+            this.lockNotice = Object.assign({ visible: true, key: key }, detail);
+            this.lockNoticeCollapsed = false;
+        },
+        lastEditingSignal: 0,
+        editingState: {}, editingStatusTimer: null,
+        livewireOrderCleanup: null,
+        alignPropertyKeys(values, reference) {
+            // Livewire 3.8.1 treats object key order changes as a whole-object
+            // replacement, even at the component root (an invalid empty path).
+            // Align only root key order; preserve every value and signed snapshot.
+            return Object.fromEntries([...new Set([...Object.keys(reference), ...Object.keys(values)])]
+                .filter(key => Object.prototype.hasOwnProperty.call(values, key))
+                .map(key => [key, values[key]]));
+        },
+        protectLivewirePropertyOrder(component, livewire) {
+            const align = this.alignPropertyKeys.bind(this);
+            const merge = component.mergeNewSnapshot;
+            component.mergeNewSnapshot = function (snapshot, ...args) {
+                this.canonical = align(this.canonical, JSON.parse(snapshot).data);
+                return merge.call(this, snapshot, ...args);
+            };
+            const unhook = livewire.hook('commit.prepare', ({ component: target }) => {
+                if (target === component) target.canonical = align(target.canonical, target.ephemeral);
+            });
+            return () => { unhook(); component.mergeNewSnapshot = merge; };
+        },
+        scopeState(gid) {
+            if (gid && this.scopeStates && this.scopeStates[gid]) return this.scopeStates[gid];
+            return this.editingState || {};
+        },
+        scopeBlocked(gid) {
+            const state = this.scopeState(gid);
+            return !!state.blocked || (!!state.owner && !state.active);
+        },
+        pageBlocked() {
+            return !!this.editingState.parent_blocked;
+        },
+        async pollEditingState() {
+            if (document.hidden || !this.$el.dataset.collection) return !this.scopeBlocked();
+            try {
+                const state = await this.$wire.editingStatus();
+                if (state && typeof state === 'object') {
+                    this.editingState = state;
+                    if (state.scopes) this.scopeStates = state.scopes;
+                    const blockedScope = Object.values(state.scopes || {}).find((scope) => scope && (scope.blocked || (scope.owner && !scope.active)));
+                    if (!blockedScope && this.lockNotice.visible && this.lockNotice.expiresAt) this.lockNotice.visible = false;
+                    if (state.returned && !this.productDrag && state.orders) {
+                        Object.entries(state.orders).forEach(([gid, ids]) => this.applySavedOrder(null, gid, ids));
+                    }
+                }
+            } catch (error) { /* Read failure never renews a lease. */ }
+            this.scheduleEditingPoll();
+            return !this.scopeBlocked();
+        },
+        scheduleEditingPoll() {
+            if (this.editingStatusTimer) clearInterval(this.editingStatusTimer);
+            if (!this.$el?.dataset.collection) return;
+            const wait = this.scopeBlocked() ? 3000 : 30000;
+            this.editingStatusTimer = setInterval(() => this.pollEditingState(), wait);
+        },
+        editingBlockedMessage(gid) {
+            const state = gid ? this.scopeState(gid) : this.editingState;
+            const owner = state?.owner;
+            const collection = state?.title || 'this collection';
+            const message = owner
+                ? owner + ' is editing ' + collection + '. Sorting is blocked until that lock expires. Product actions stay available.'
+                : 'Sorting is blocked for ' + collection + '. Product actions stay available.';
+            this.revealLockNotice({ message: message, gid: gid || '', owner: owner || '', collection: collection, expiresAt: state?.expires_at || '' });
+            return message;
+        },
+        async editingActivity(event) {
+            if (!event.isTrusted || document.hidden || this.$el.dataset.editingMine !== '1' || Date.now() - this.lastEditingSignal < 30000) return;
+            this.lastEditingSignal = Date.now();
+            try {
+                const state = await this.$wire.editingHeartbeat();
+                if (state && state.blocked) {
+                    this.$el.dataset.editingMine = '0';
+                    this.orderError = state.message || 'Editing lock expired or changed. Reload and reacquire it before saving.';
+                    this.revealLockNotice(state);
+                    return;
+                }
+                if (state && state.expires_at) { this.editingState = state; this.$dispatch('syv-lock-renewed', state); }
+            } catch (error) {
+                this.$el.dataset.editingMine = '0';
+                this.orderError = 'Editing lock expired or changed. Reload and reacquire it before saving.';
+                this.revealLockNotice({ message: this.orderError });
+            }
+        },
+        destroy() { this.stopStatusTimer(); this.clearRefreshPageNotice(); if (this.editingStatusTimer) clearInterval(this.editingStatusTimer); this.livewireOrderCleanup?.(); },
         stopStatusTimer() {
             if (this.statusTimer) {
                 clearInterval(this.statusTimer);
@@ -21,6 +117,9 @@
             }
         },
         initStatus() {
+            this.editingState = JSON.parse(this.$el.dataset.editingStatus || '{}');
+            this.scopeStates = JSON.parse(this.$el.dataset.scopeStates || '{}');
+            this.scheduleEditingPoll();
             this.$watch('productQuery', () => {
                 this.$el.querySelectorAll('[data-order-type=products]').forEach((grid) => {
                     grid.sortable?.option('disabled', true);
@@ -28,6 +127,7 @@
             });
             this.syncHydration();
             if (window.Livewire?.hook) {
+                this.livewireOrderCleanup = this.protectLivewirePropertyOrder(this.$wire.__instance, window.Livewire);
                 Livewire.hook('commit', ({ succeed }) => {
                     succeed(() => {
                         if (!this.$el?.isConnected) return;
@@ -41,6 +141,8 @@
             const refreshing = this.$el.dataset.refresh === '1';
             const needsPoll = refreshing || (this.$el.dataset.poll === '1' && this.$el.dataset.productsLoaded !== '1');
             if (!needsPoll) {
+                if (this.$refs.statusBanner?.isConnected) this.showRefreshPageNotice();
+                else this.clearRefreshPageNotice();
                 if (this.$el.dataset.productsLoaded === '1') this.finishLoaded(false);
                 else this.stopStatusTimer();
                 return;
@@ -48,9 +150,27 @@
             this.wasLoading = true;
             this.statusMode = 'loading';
             this.statusStartedAt = this.statusStartedAt || Date.now();
+            this.armRefreshPageNotice();
             if (this.statusTimer) return;
             this.pollStatus();
             this.statusTimer = setInterval(() => this.pollStatus(), 2000);
+        },
+        armRefreshPageNotice() {
+            if (this.refreshPageTimer || !this.$refs.statusBanner) return;
+            const started = this.statusStartedAt || Date.now();
+            this.statusStartedAt = started;
+            const wait = Math.max(0, (2 * 60 * 1000) - (Date.now() - started));
+            this.refreshPageTimer = setTimeout(() => this.showRefreshPageNotice(), wait);
+        },
+        showRefreshPageNotice() {
+            const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
+            if (stale) stale.hidden = false;
+        },
+        clearRefreshPageNotice() {
+            if (this.refreshPageTimer) {
+                clearTimeout(this.refreshPageTimer);
+                this.refreshPageTimer = null;
+            }
         },
         applyProgress(status) {
             const banner = this.$refs.statusBanner;
@@ -86,6 +206,7 @@
         },
         finishLoaded(announce) {
             this.stopStatusTimer();
+            if (!this.$refs.statusBanner?.isConnected) this.clearRefreshPageNotice();
             this.statusMode = 'idle';
             if (announce && this.wasLoading) {
                 const count = this.$el.dataset.productCount || '';
@@ -102,16 +223,8 @@
                 this.finishLoaded(this.wasLoading);
                 return;
             }
-            if (this.statusStartedAt && Date.now() - this.statusStartedAt > 15 * 60 * 1000) {
-                this.statusMode = 'failed';
-                this.stopStatusTimer();
-                if (refreshing) {
-                    await this.$wire.expireRefresh();
-                    return;
-                }
-                const stale = this.$refs.statusBanner?.querySelector('[data-status-stale]');
-                if (stale) stale.hidden = false;
-                return;
+            if (this.statusStartedAt && Date.now() - this.statusStartedAt > 2 * 60 * 1000) {
+                this.showRefreshPageNotice();
             }
             const status = await this.$wire.statusSnapshot();
             if (!status) return;
@@ -148,7 +261,7 @@
                     }
                     this.$nextTick(() => this.bindProductDrag());
                 }
-                if (this.$el.dataset.productsLoaded === '1') {
+                if (this.$el.dataset.productsLoaded === '1' && !refreshing) {
                     this.finishLoaded(true);
                 }
                 return;
@@ -164,7 +277,7 @@
                 }
                 this.$nextTick(() => this.bindProductDrag());
             }
-            if (this.$el.dataset.productsLoaded === '1') {
+            if (this.$el.dataset.productsLoaded === '1' && !refreshing) {
                 this.finishLoaded(true);
             }
         },
@@ -186,10 +299,25 @@
                 grid.addEventListener('pointerdown', (event) => this.startProductDrag(event, grid), { signal: controller.signal });
             });
         },
-        startProductDrag(event, grid) {
+        async startProductDrag(event, grid) {
             if (this.productDrag || (event.button !== undefined && event.button !== 0) || this.productQuery.trim() !== '') return;
             const handle = event.target.closest('[x-sortable-handle]');
-            if (!handle || handle.disabled || !grid.contains(handle) || grid.closest('fieldset')?.disabled) return;
+            if (!handle || handle.disabled || !grid.contains(handle)) return;
+            if (grid.closest('fieldset')?.disabled || this.scopeBlocked(grid.dataset.orderGid)) {
+                const pointerId = event.pointerId;
+                let released = false;
+                const release = (pointer) => { if (pointer.pointerId === pointerId) released = true; };
+                document.addEventListener('pointerup', release);
+                document.addEventListener('pointercancel', release);
+                const open = await this.pollEditingState();
+                document.removeEventListener('pointerup', release);
+                document.removeEventListener('pointercancel', release);
+                if (!open || this.scopeBlocked(grid.dataset.orderGid)) {
+                    this.orderError = this.editingBlockedMessage(grid.dataset.orderGid);
+                    return;
+                }
+                if (released || !handle.isConnected) return;
+            }
             const card = handle.closest('[data-order-key]');
             const cards = Array.from(grid.querySelectorAll(':scope > [data-order-key]'));
             const from = cards.indexOf(card);
@@ -294,7 +422,7 @@
             if (drag.index > drag.from) target.after(drag.card);
             else target.before(drag.card);
             drag.spacer.remove();
-            this.saveOrder(drag.grid, 'products', drag.grid.dataset.orderGid);
+            this.saveOrder(drag.grid, 'products', drag.grid.dataset.orderGid, null, drag.card?.dataset?.orderKey);
         },
         renumber(grid) {
             grid.querySelectorAll(':scope > [data-order-key]').forEach((el, index) => {
@@ -321,38 +449,54 @@
             current.style.display = display;
             this.renumber(current);
         },
-        queueProductOrder(grid, gid) {
+        queueProductOrder(grid, gid, explicitKey = null) {
             if (this.productQuery.trim() !== '') return;
             const epoch = ++this.orderEpoch;
-            this.persistChain = this.persistChain.then(async () => {
+            this.persistChain = this.persistChain.catch(() => {}).then(async () => {
                 if (epoch !== this.orderEpoch) return;
                 const order = Array.from(grid.querySelectorAll(':scope > [data-order-key]')).map((el) => el.dataset.orderKey).filter(Boolean);
                 this.savingOrder = true;
                 this.orderError = '';
                 try {
-                    const result = await this.$wire.reorderProducts(gid, order, epoch, this.orderSession);
+                    const result = await this.$wire.reorderProducts(gid, order, epoch, this.orderSession, explicitKey || '');
                     if (epoch !== this.orderEpoch) return;
                     if (result?.ids) this.applySavedOrder(grid, gid, result.ids);
+                    if (result?.applied && explicitKey) {
+                        const moved = grid.querySelector(':scope > [data-order-key="' + CSS.escape(explicitKey) + '"]');
+                        moved?.classList.add('syv-explicit-move');
+                    }
                     if (result?.applied) {
                         this.localPending = true;
                         this.$el.dataset.pending = 'true';
-                    } else if ((result?.ids || []).join('|') !== order.join('|')) {
-                        this.orderError = 'The product order was not saved. The list matches the saved draft.';
+                    } else if (result?.message || (result?.ids || []).join('|') !== order.join('|')) {
+                        this.orderError = result?.message || 'The product order was not saved. The list matches the saved draft.';
+                        this.revealLockNotice({ message: this.orderError, gid: gid, owner: this.scopeState(gid).owner, collection: this.scopeState(gid).title, expiresAt: this.scopeState(gid).expires_at });
                     }
                 } catch (error) {
                     if (epoch !== this.orderEpoch) return;
-                    const ids = await this.$wire.savedProductOrder(gid);
-                    if (epoch === this.orderEpoch) this.applySavedOrder(grid, gid, ids);
+                    try {
+                        const ids = await this.$wire.savedProductOrder(gid);
+                        if (epoch === this.orderEpoch) this.applySavedOrder(grid, gid, ids);
+                    } catch (ignored) { /* A failed read must not block the next save. */ }
                     this.orderError = 'The product order was not saved. The list matches the saved draft.';
+                    this.revealLockNotice({ message: this.orderError, gid: gid, collection: this.scopeState(gid).title });
                 } finally {
                     if (epoch === this.orderEpoch) this.savingOrder = false;
                 }
             });
         },
-        commitPosition(input) {
+        async commitPosition(input) {
             const card = input.closest('[data-order-key]');
             const grid = input.closest('[data-order-grid]');
-            if (!card || !grid || grid.closest('fieldset')?.disabled) return;
+            if (!card || !grid) return;
+            if (grid.closest('fieldset')?.disabled || this.scopeBlocked(grid.dataset.orderGid)) {
+                const open = await this.pollEditingState();
+                if (!open || this.scopeBlocked(grid.dataset.orderGid)) {
+                    this.orderError = this.editingBlockedMessage(grid.dataset.orderGid);
+                    this.renumber(grid);
+                    return;
+                }
+            }
             if (this.productQuery.trim() !== '') {
                 this.orderError = 'Clear the product search before changing positions.';
                 this.renumber(grid);
@@ -373,9 +517,9 @@
             if (from < to) cards[to].after(card);
             else cards[to].before(card);
             this.renumber(grid);
-            this.queueProductOrder(grid, grid.dataset.orderGid);
+            this.queueProductOrder(grid, grid.dataset.orderGid, card.dataset.orderKey);
         },
-        saveOrder(grid, type, gid = null, ids = null) {
+        saveOrder(grid, type, gid = null, ids = null, explicitKey = null) {
             if (grid.closest('fieldset')?.disabled) return;
             if (type === 'cards') {
                 if (this.savingOrder) return;
@@ -394,7 +538,7 @@
             }
             if (this.productQuery.trim() !== '') return;
             this.renumber(grid);
-            this.queueProductOrder(grid, gid);
+            this.queueProductOrder(grid, gid, explicitKey);
         },
         move(element, type, key, direction, gid = null) {
             const grid = element.closest('[data-order-grid]');
@@ -408,6 +552,13 @@
         };
     </script>
     <div x-data="syvEditor()"
+        data-editing-mine="{{ ($editing['active'] ?? false) && ($editing['mine'] ?? false) ? '1' : '0' }}"
+        data-editing-status="{{ json_encode(array_diff_key($editing, ['changes' => true]) + ['pending' => $draft?->pending ?? false, 'revision' => $draft?->revision ?? 0, 'parent_blocked' => ($parentEditing['blocked'] ?? false) || (! ($parentEditing['active'] ?? false) && ! empty($parentEditing['owner']))]) }}"
+        data-scope-states="{{ json_encode($scopeStates ?? []) }}"
+        x-on:keydown.capture="editingActivity($event)"
+        x-on:pointerdown.capture="editingActivity($event)"
+        x-on:vibe-editing-acquired.window="$el.dataset.editingMine = '1'"
+        x-on:vibe-editing-state.window="editingState = $event.detail.state"
         data-pending="{{ $draft?->pending ? 'true' : 'false' }}"
         data-saved-pending="{{ $draft?->pending ? '1' : '0' }}"
         data-poll="{{ !empty($statusPoll) ? '1' : '0' }}"
@@ -415,17 +566,47 @@
         data-refresh="{{ !empty($refreshingCollection) ? '1' : '0' }}"
         data-product-count="{{ $productsLoaded ? $productTotal : '' }}"
         data-collection="{{ $draft?->collection_gid ?? ($selectedCollection ?? '') }}"
+        data-sort-only="{{ !empty($sortOnlyPending) ? '1' : '0' }}"
         data-hydration="{{ $hydrationState ?? '' }}"
         x-init="initStatus()"
+        x-on:syv-action-blocked.window="revealLockNotice($event.detail)"
         x-on:vibe-form-saved.window="formDirty = false; localPending = false"
         x-on:vibe-draft-saved.window="formDirty = false; localPending = true; $el.dataset.pending = 'true'"
         x-on:beforeunload.window="if (pending()) { $event.preventDefault(); $event.returnValue = ''; }"
         x-on:click.window.capture="if (pending() && $event.target.closest('a[href]') && !$event.target.closest('a[href]').getAttribute('href').startsWith('#') && !confirm('You have changes that have not been pushed to Shopify. Leave anyway?')) { $event.preventDefault(); $event.stopImmediatePropagation(); }"
-        class="syv-workflow space-y-6"
+        class="syv-workflow space-y-6">
+        <aside class="syv-lock-notice" data-lock-notice role="status" x-show="lockNotice.visible" x-cloak>
+            <div class="flex items-start justify-between gap-3">
+                <p class="font-semibold" x-text="lockNotice.message || 'Sorting is blocked.'"></p>
+                <span class="flex gap-2">
+                    <button type="button" class="text-xs underline" x-on:click="lockNoticeCollapsed = !lockNoticeCollapsed" x-text="lockNoticeCollapsed ? 'Expand' : 'Collapse'"></button>
+                    <button type="button" class="text-xs underline" x-on:click="lockNotice.visible = false">Dismiss</button>
+                </span>
+            </div>
+            <div x-show="!lockNoticeCollapsed">
+                <p x-show="lockNotice.collection">Collection: <span x-text="lockNotice.collection"></span></p>
+                <p x-show="lockNotice.owner">Lock owner: <span x-text="lockNotice.owner"></span></p>
+                <p>Sorting is blocked. Product assignments, tags, membership and other product actions stay available.</p>
+                <p x-show="lockNotice.expiresAt" x-data="{ clock: Date.now(), timer: null, init() { this.timer = setInterval(() => this.clock = Date.now(), 1000); }, destroy() { clearInterval(this.timer); } }" x-text="'Lock remaining: ' + Math.max(0, Math.ceil((Date.parse(lockNotice.expiresAt) - clock) / 1000)) + ' seconds'"></p>
+            </div>
+        </aside>
+        @if (!empty($lockFeedback['message']))
+            <aside class="syv-lock-notice" data-lock-notice-server role="status">
+                <p class="font-semibold">{{ $lockFeedback['message'] }}</p>
+                @if (!empty($lockFeedback['collection']))<p>Collection: {{ $lockFeedback['collection'] }}</p>@endif
+                @if (!empty($lockFeedback['owner']))<p>Lock owner: {{ $lockFeedback['owner'] }}</p>@endif
+                @if (!empty($lockFeedback['hold']))
+                    <p>Sorting is blocked. Product assignments, tags, membership and other product actions stay available.</p>
+                @endif
+                @if (!empty($lockFeedback['expires_at']))<p data-lock-expires="{{ $lockFeedback['expires_at'] }}">Lock remaining until {{ $lockFeedback['expires_at'] }}.</p>@endif
+                <button type="button" wire:click="dismissLockNotice">Dismiss</button>
+            </aside>
+        @endif
+        <div class="syv-workflow-body space-y-6"
         x-on:vibe-editor-opened.window="formDirty = false; statusStartedAt = Date.now(); $nextTick(() => { syncHydration(); $el.scrollIntoView({ behavior: 'smooth', block: 'start' }) })"
         x-on:vibe-refresh-started.window="statusStartedAt = Date.now(); $nextTick(() => syncHydration())"
         x-on:vibe-products-ready.window="$nextTick(() => { bindProductDrag(); if ($el.dataset.productsLoaded === '1') finishLoaded(true); })"
-        x-on:livewire:navigating.window="stopStatusTimer()">
+        x-on:livewire:navigating.window="stopStatusTimer(); clearRefreshPageNotice()">
         @if ($loadError && ! ($addingCard || $addingParent || $uploadingMappings || $confirmingAdd))
             <div role="alert" class="rounded-xl border border-danger-300 bg-danger-50 p-4 text-danger-800 dark:bg-danger-950 dark:text-danger-200">{{ $loadError }}</div>
         @endif
@@ -511,6 +692,67 @@
                 </div>
                 <x-filament::button color="gray" wire:click="back" wire:confirm="You may have changes that have not been pushed to Shopify. Leave this editor? Saved drafts will be kept.">Back to collections</x-filament::button>
             </div>
+            <div wire:loading wire:target="approveAndPublishSorting" class="syv-load" role="status" aria-live="polite" data-sort-publish-progress>
+                <div class="syv-load-heading">
+                    <span class="syv-spinner" aria-hidden="true"></span>
+                    <strong>Publishing sorting to Shopify</strong>
+                </div>
+                <p class="syv-load-copy">Reading this collection and saving the approved order. This stays here until Shopify confirms it, then the page says Done.</p>
+                <div class="syv-indeterminate" aria-hidden="true"></div>
+            </div>
+            <div wire:loading wire:target="beginCollectionSorting" class="syv-load" role="status" aria-live="polite" data-sort-check-progress>
+                <div class="syv-load-heading">
+                    <span class="syv-spinner" aria-hidden="true"></span>
+                    <strong>Checking this collection on Shopify</strong>
+                </div>
+                <p class="syv-load-copy">Loading the current product list. Sorting stays off until this finishes.</p>
+                <div class="syv-indeterminate" aria-hidden="true"></div>
+            </div>
+            <div wire:loading wire:target="discardChanges" class="syv-load" role="status" aria-live="polite" data-sort-discard-progress>
+                <div class="syv-load-heading">
+                    <span class="syv-spinner" aria-hidden="true"></span>
+                    <strong>Loading the current Shopify order</strong>
+                </div>
+                <p class="syv-load-copy">Replacing the saved order with the order Shopify has now.</p>
+                <div class="syv-indeterminate" aria-hidden="true"></div>
+            </div>
+            @if (collect($sorting['moves'] ?? [])->isEmpty() && collect($sorting['published_moves'] ?? [])->isNotEmpty())
+                <div x-data="{ publishDetails: false }" data-sort-publish-done>
+                    <div class="syv-load syv-load-success" role="status">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <div class="syv-load-heading">
+                                    <span class="syv-load-check" aria-hidden="true">✓</span>
+                                    <strong>Done. Sorting published to Shopify — {{ $draft->desired['collections'][$draft->collection_gid]['title'] ?? $draft->desired['parent']['title'] }}</strong>
+                                </div>
+                                <p class="syv-load-copy">Approved and published{{ !empty($sorting['published_at']) ? ' at '.$sorting['published_at'] : '' }}. Shopify now has this order.</p>
+                            </div>
+                            <button type="button" class="shrink-0 rounded-lg border border-success-300 bg-white px-3 py-1.5 text-sm font-medium text-success-800" x-on:click="publishDetails = !publishDetails" x-text="publishDetails ? 'Dismiss' : 'Read more'">Read more</button>
+                        </div>
+                    </div>
+                    <section x-show="publishDetails" x-cloak class="syv-load syv-load-success mt-2" data-sort-publish-details role="region" aria-label="Published sorting details">
+                        <p class="syv-load-copy">{{ collect($sorting['published_moves'])->count() }} {{ collect($sorting['published_moves'])->count() === 1 ? 'product was' : 'products were' }} moved.</p>
+                        <table class="mt-3 w-full text-left text-xs">
+                            <thead>
+                                <tr>
+                                    <th class="py-1 pr-2">Product</th>
+                                    <th class="py-1 pr-2">From</th>
+                                    <th class="py-1">To</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach ($sorting['published_moves'] as $move)
+                                    <tr>
+                                        <td class="py-1 pr-2">{{ $move['product_name'] }}</td>
+                                        <td class="py-1 pr-2">{{ $move['from'] }}</td>
+                                        <td class="py-1">{{ $move['to'] }}</td>
+                                    </tr>
+                                @endforeach
+                            </tbody>
+                        </table>
+                    </section>
+                </div>
+            @endif
             <div class="syv-tabs flex w-fit rounded-xl border border-gray-200 p-1 dark:border-gray-700" role="tablist" aria-label="Collection content">
                 <button type="button" wire:key="syv-tab-products" wire:click="setActiveTab('products')" role="tab" aria-selected="{{ $activeTab === 'products' ? 'true' : 'false' }}"
                     class="rounded-lg px-4 py-2 text-sm font-medium {{ $activeTab === 'products' ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300' }}">
@@ -521,7 +763,7 @@
                     Shop Your Vibes ({{ $vibeCountLabel }})
                 </button>
             </div>
-            @if (filled($draft->desired['unavailable_collections'] ?? null))
+            @if (! $unavailableNoticeDismissed && filled($draft->desired['unavailable_collections'] ?? null))
                 <div role="status" class="syv-load syv-load-failed">
                     <strong>A linked collection could not be loaded</strong>
                     @foreach ($draft->desired['unavailable_collections'] as $missing)
@@ -537,6 +779,8 @@
                 Pending field edits - not pushed to Shopify. Save the card to keep these edits in your draft.
             </div>
             @php($operationBusy = in_array($draft->status, ['creating', 'deleting', 'pushing'], true))
+            @include('filament.pages.partials.shop-your-vibe-editing')
+            <fieldset @disabled(($parentEditing['blocked'] ?? false) || (! ($parentEditing['active'] ?? false) && !empty($parentEditing['owner'] ?? null))) x-bind:disabled="pageBlocked()" class="space-y-6 min-w-0">
             @php($operationFailed = $draft->status === 'failed' && ! $draft->pending && ! empty($draft->operation))
             @php($hydrationFailed = ! $productsLoaded && ($syvProgress['state'] ?? null) === 'failed')
             @php($hydrationLoading = ! $productsLoaded && ! $hydrationFailed && ! $draft->pending && ! $operationBusy)
@@ -614,17 +858,20 @@
                     @if ($draft->status === 'pushing')
                         <x-filament::button wire:click="retryPush" wire:loading.attr="disabled" wire:target="retryPush">Retry / Check Push</x-filament::button>
                     @else
-                        <button type="button" wire:click="reviewPush" x-bind:disabled="!canPush()" class="fi-btn relative inline-grid grid-flow-col items-center justify-center gap-1.5 rounded-lg bg-custom-600 px-3 py-2 text-sm font-semibold text-white shadow-sm outline-none transition duration-75 hover:bg-custom-500 focus-visible:ring-2 focus-visible:ring-custom-500/50 disabled:pointer-events-none disabled:opacity-70" style="--c-400:var(--primary-400);--c-500:var(--primary-500);--c-600:var(--primary-600);">Push Changes to Shopify</button>
+                        <button type="button" wire:click="reviewPush" x-bind:disabled="!canPush()" @disabled(!empty($sortOnlyPending)) class="fi-btn relative inline-grid grid-flow-col items-center justify-center gap-1.5 rounded-lg bg-custom-600 px-3 py-2 text-sm font-semibold text-white shadow-sm outline-none transition duration-75 hover:bg-custom-500 focus-visible:ring-2 focus-visible:ring-custom-500/50 disabled:pointer-events-none disabled:opacity-70" style="--c-400:var(--primary-400);--c-500:var(--primary-500);--c-600:var(--primary-600);">Push Other Changes</button>
                     @endif
-                    <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Discard your pending draft and reload the confirmed state from Shopify? This will not undo changes already pushed." wire:loading.attr="disabled">Discard Changes</x-filament::button>
-                    <x-filament::button color="gray" wire:click="refreshDraft(true)" wire:confirm="Refresh from Shopify? Any pending draft or unsaved field edits will be discarded." wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
+                    @if (!empty($sortOnlyPending) || filled($otherPushNote ?? null))
+                        <p data-other-push-note class="w-full text-sm text-gray-600">{{ $otherPushNote ?: 'Push Other Changes is unavailable. This draft only has product sorting, and each collection publishes its own sorting.' }}</p>
+                    @endif
+                    <x-filament::button color="gray" wire:click="reviewDiscard" wire:loading.attr="disabled">Discard Changes</x-filament::button>
+                    <x-filament::button color="gray" wire:click="refreshDraft" wire:loading.attr="disabled">Refresh from Shopify</x-filament::button>
                 </div>
                 @if ($confirmingPush)
                     <x-filament::section heading="Ready to push">
                         <dl class="space-y-2">@foreach ($summary as $label => $value)<div class="flex justify-between gap-4"><dt>{{ $label }}</dt><dd>{{ $value }}</dd></div>@endforeach</dl>
                         <div class="syv-push-scope">
                             <p><strong>Preview layout:</strong> Card names, images, links and card order update the preview only.</p>
-                            <p><strong>Linked collections:</strong> Product additions, removals and sorting update the actual Shopify collections and can affect the live storefront.</p>
+                            <p><strong>Linked collections:</strong> Product additions and removals update the actual Shopify collections and can affect the live storefront. Product sorting is not included, including approved sorting and older sorting approvals.</p>
                             <p><strong>Vibe assignments:</strong> Automated-collection membership tags are confirmed and applied separately when an assignment is saved.</p>
                             @if (!empty($draft->desired['new_collections']))<p><strong>New collections:</strong> These will be created with their handles and images and published to the live Online Store.</p>@endif
                             @if (!empty($draft->desired['delete_cards']))
@@ -636,7 +883,7 @@
                                 <ul>@foreach ($draft->desired['delete_collections'] as $deletion)<li>{{ $deletion['title'] }} - /collections/{{ $deletion['handle'] }}</li>@endforeach</ul>
                             @endif
                         </div>
-                        <x-filament::button wire:click="pushChanges" x-bind:disabled="formDirty" wire:loading.attr="disabled">Push Changes</x-filament::button>
+                        <x-filament::button wire:click="pushChanges" x-bind:disabled="formDirty" wire:loading.attr="disabled">Push Other Changes</x-filament::button>
                         <x-filament::button color="gray" wire:click="$set('confirmingPush', false)">Cancel</x-filament::button>
                     </x-filament::section>
                 @endif
@@ -652,10 +899,16 @@
                     @php($parentSort = $parentCollection['sort'] ?? null)
                     @php($parentManualSupported = $parentCollection && (($parentCollection['manual_supported'] ?? true) !== false || $parentSort !== 'UNSUPPORTED'))
                     @php($parentCanSort = $draft->status !== 'pushing' && $parentManualSupported)
+                    @php($parentSortingOpen = $parentCanSort && ! empty($sortingUnlocked[$draft->collection_gid]))
                     <div class="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-900">
                         @if ($parentCanSort)
                             <p class="font-semibold text-gray-900 dark:text-white">Product order — {{ $parentSort === 'MANUAL' ? 'Manual sorting enabled' : 'Manual sorting will be requested' }}</p>
-                            <p class="mt-1 text-xs text-gray-500">Drag products or enter a position number to reorder. Changes are saved to the draft.</p>
+                            @if ($parentSortingOpen)
+                                <p class="mt-1 text-xs text-gray-500">Drag products or enter a position number to reorder. Changes are saved to the draft.</p>
+                            @else
+                                <p class="mt-1 text-xs text-gray-500">Sorting stays off until you confirm a fresh product list from Shopify. The check reads this collection and does not change Shopify.</p>
+                                <x-filament::button type="button" size="sm" color="gray" class="mt-3" wire:click="askToStartSorting({{ \Illuminate\Support\Js::from($draft->collection_gid) }})">Start sorting</x-filament::button>
+                            @endif
                             @if ($parentSort !== 'MANUAL')
                                 <p class="mt-1 text-xs text-gray-500">Pushing changes will ask Shopify to use manual sorting for this collection.</p>
                             @endif
@@ -673,16 +926,19 @@
                             <p class="mt-1 text-xs text-gray-500">Shopify reports this collection as not manually sortable, so products cannot be reordered here.</p>
                         @endif
                     </div>
+                    @include('filament.pages.partials.shop-your-vibe-sorting', ['sortGid' => $draft->collection_gid, 'sortTitle' => $parentCollection['title'] ?? ($draft->desired['parent']['title'] ?? $draft->collection_gid), 'sortEditing' => $scopeStates[$draft->collection_gid] ?? $editing])
+                    @include('filament.pages.partials.shop-your-vibe-membership', ['sortGid' => $draft->collection_gid, 'sortTitle' => $parentCollection['title'] ?? ($draft->desired['parent']['title'] ?? $draft->collection_gid)])
                     @php($confirmedParentProductsVersion = md5((string) ($draft->desired['collections'][$draft->collection_gid]['retrieval_started_at'] ?? $draft->refreshed_at)))
-                    @if ($productsLoaded && $parentCanSort)
+                    @php($discardedProductGrid = $editing['last_discard_id'] ?? 0)
+                    @if ($productsLoaded && $parentSortingOpen)
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}"
+                        wire:key="parent-products-{{ $draft->id }}-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}-{{ $discardedProductGrid }}-sorting"
                         wire:ignore
                         x-sortable data-sortable-animation-duration="0"
-                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }})">
+                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($draft->collection_gid) }}, null, $event.item?.dataset?.orderKey)">
                     @elseif ($productsLoaded)
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
-                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}"
+                        wire:key="parent-products-{{ $draft->id }}-fixed-{{ $productMembership }}-{{ $confirmedParentProductsVersion }}-{{ $discardedProductGrid }}-locked"
                         wire:ignore>
                     @else
                     <div data-order-grid data-order-type="products" data-order-gid="{{ $draft->collection_gid }}" class="syv-card-grid syv-product-grid"
@@ -690,13 +946,20 @@
                     @endif
                         @if (count($filteredParentProducts) > 0)
                         @foreach ($filteredParentProducts as $product)
-                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($product['title'].' '.($product['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $parentCanSort, 'title' => $product['title'], 'position' => $loop->iteration, 'max' => $loop->count])
+                            @php($parentMoved = $sorting['highlights'][$draft->collection_gid.'|'.$product['id']] ?? null)
+                                        <article wire:key="parent-product-{{ md5($product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($product['title'].' '.($product['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700{{ $parentMoved ? ' syv-explicit-move' : '' }}">
+                                @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $parentSortingOpen, 'title' => $product['title'], 'position' => $loop->iteration, 'max' => $loop->count])
                                 <div class="syv-product-image-wrap">
                                     @if ($product['image'])<img src="{{ $product['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
                                     @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $product])
                                 </div>
                                 <h4 class="mt-2 font-medium">{{ $product['title'] }}</h4>
+                                @if ($parentMoved)
+                                    <span data-explicit-move class="syv-explicit-move-label">Moved · {{ $parentMoved['status'] }}</span>
+                                @endif
+                                @if ($parentCanSort)
+                                    <button type="button" class="mt-1 text-xs text-gray-600 underline" wire:click="markProductReviewed({{ \Illuminate\Support\Js::from($draft->collection_gid) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Mark reviewed</button>
+                                @endif
                                 <p class="text-xs text-gray-500">SKU: {{ $product['sku'] ?: 'No SKU' }}</p>
                                 @if (!empty($product['is_prelaunch_draft']))
                                     <div class="my-3 rounded-md border border-warning-200 bg-warning-50 p-2 text-xs text-warning-900 dark:border-warning-700 dark:bg-warning-950 dark:text-warning-100">
@@ -801,7 +1064,7 @@
                                 @php($vibeCollection = $draft->desired['collections'][$vibe['collection_gid'] ?? ''] ?? null)
                                 @php($fallbackHandle = $vibeCollection['handle'] ?? basename((string) parse_url($vibe['link'] ?? '', PHP_URL_PATH)))
                                 @php($fallbackTag = $vibeCollection['detected_membership_tag'] ?? null)
-                                @php($fallbackProductCount = $vibeCollection ? (($vibeCollection['product_count'] ?? null) ?? count($vibeCollection['products'] ?? [])) : null)
+                                @php($fallbackProductCount = $vibeCollection ? (isset($vibeCollection['products']) ? count(\App\Services\ShopYourVibeVisibleProducts::visible($vibeCollection['products'])) : ($vibeCollection['product_count'] ?? null)) : null)
                                 @if ($vibeMapping || $fallbackHandle || $fallbackTag || $fallbackProductCount !== null)
                                     <dl class="space-y-1 text-xs text-gray-500">
                                         <div><dt class="inline font-semibold">Handle:</dt> <dd class="inline">{{ $vibeMapping['collection_handle'] ?? $fallbackHandle }}</dd></div>
@@ -823,7 +1086,9 @@
                 </div>
                 @if ($card)
                     <x-filament::section :heading="$card['name']">
-                        <div class="grid gap-4 md:grid-cols-2">
+                        <div x-data="{ configOpen: false }" data-vibe-config>
+                            <button type="button" class="text-sm font-semibold underline" x-on:click="configOpen = !configOpen" x-text="configOpen ? 'Hide vibe settings' : 'Show vibe settings'">Show vibe settings</button>
+                            <div x-show="configOpen" x-cloak class="mt-4 grid gap-4 md:grid-cols-2">
                             <label class="space-y-1"><span>Name</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.name" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
                             <label class="space-y-1"><span>Link</span><x-filament::input.wrapper><x-filament::input wire:model="cardForm.link" :disabled="str_starts_with($card['collection_gid'] ?? '', 'new:')" x-on:input="formDirty = true" /></x-filament::input.wrapper></label>
                             <div>
@@ -852,6 +1117,7 @@
                             @endif
                         </div>
                         <x-filament::button class="mt-4" wire:click="saveCard" wire:loading.attr="disabled">Save card and mapping</x-filament::button>
+                        </div>
                         @if ($choosingImage)
                             <div class="mt-4 space-y-4 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
                                 <div class="flex gap-3"><x-filament::input.wrapper><x-filament::input wire:model="imageSearch" placeholder="Search image filenames" aria-label="Search image filenames" /></x-filament::input.wrapper><x-filament::button wire:click="findImages">Search images</x-filament::button><x-filament::button color="gray" wire:click="$set('choosingImage', false)">Cancel</x-filament::button></div>
@@ -883,30 +1149,44 @@
                                 @else
                                     <p class="syv-membership-note">Remove takes a product out of this linked Shopify collection when you push changes. It does not delete the product. This can also affect the live storefront.</p>
                                 @endif
+                                @include('filament.pages.partials.shop-your-vibe-sorting', ['sorting' => $vibeSorting, 'sortGid' => $collection['gid'], 'sortTitle' => $collection['title'], 'sortEditing' => $scopeStates[$collection['gid']] ?? []])
+                                @include('filament.pages.partials.shop-your-vibe-membership', ['sortGid' => $collection['gid'], 'sortTitle' => $collection['title']])
                                 @php($canSort = $draft->status !== 'pushing' && $collectionManualSupported)
+                                @php($vibeSortingOpen = $canSort && ! empty($sortingUnlocked[$collection['gid']]))
+                                @if ($canSort && ! $vibeSortingOpen)
+                                    <x-filament::button type="button" size="sm" color="gray" wire:click="askToStartSorting({{ \Illuminate\Support\Js::from($collection['gid']) }})">Start sorting</x-filament::button>
+                                    <p class="mt-1 text-xs text-gray-500">Sorting stays off until you confirm a fresh product list from Shopify.</p>
+                                @endif
                                 @php($vibeProductMembership = md5(implode('|', array_column($collection['products'], 'id'))))
                                 @php($confirmedVibeProductsVersion = md5((string) ($collection['retrieval_started_at'] ?? $draft->refreshed_at)))
-                                @if ($canSort)
+                                @if ($vibeSortingOpen)
                                 <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-sortable-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}-{{ $editing['last_discard_id'] ?? 0 }}-sorting"
                                         wire:ignore
                                         x-sortable data-sortable-animation-duration="0"
-                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }})">
+                                        x-on:end.stop="if ($event.oldIndex !== $event.newIndex && productQuery.trim() === '') saveOrder($el, 'products', {{ \Illuminate\Support\Js::from($collection['gid']) }}, null, $event.item?.dataset?.orderKey)">
                                 @else
                                 <div data-order-grid data-order-type="products" data-order-gid="{{ $collection['gid'] }}" class="syv-card-grid syv-product-grid"
-                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}"
+                                    wire:key="vibe-products-{{ md5($collection['gid']) }}-fixed-{{ $vibeProductMembership }}-{{ $confirmedVibeProductsVersion }}-{{ $editing['last_discard_id'] ?? 0 }}-locked"
                                     wire:ignore>
                                 @endif
                                     @foreach ($collection['products'] as $product)
                                         @php($displayProduct = $product)
                                         @php($inParentCollection = isset($parentProductIds[$product['id']]))
-                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($displayProduct['title'].' '.($displayProduct['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700">
-                                            @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $canSort, 'title' => $displayProduct['title'], 'position' => $loop->iteration, 'max' => $loop->count])
+                                        @php($vibeMoved = ($vibeSorting['highlights'] ?? [])[$collection['gid'].'|'.$product['id']] ?? null)
+                                        <article wire:key="vibe-product-{{ md5($collection['gid'].'|'.$product['id']) }}" data-order-key="{{ $product['id'] }}" data-search="{{ mb_strtolower($displayProduct['title'].' '.($displayProduct['sku'] ?? '')) }}" x-show="cardVisible($el)" x-sortable-item="{{ md5($product['id']) }}" class="syv-product-card rounded-lg border border-gray-200 p-3 dark:border-gray-700{{ $vibeMoved ? ' syv-explicit-move' : '' }}">
+                                            @include('filament.pages.partials.shop-your-vibe-card-tools', ['canSort' => $vibeSortingOpen, 'title' => $displayProduct['title'], 'position' => $loop->iteration, 'max' => $loop->count])
                                             <div class="syv-product-image-wrap">
                                                 @if ($displayProduct['image'])<img src="{{ $displayProduct['image'] }}" alt="" draggable="false" class="syv-product-image" loading="lazy">@endif
                                                 @include('filament.pages.partials.shop-your-vibe-product-badges', ['product' => $displayProduct])
                                             </div>
                                             <h4 class="mt-2 font-medium">{{ $displayProduct['title'] }}</h4>
+                                            @if ($vibeMoved)
+                                                <span data-explicit-move class="syv-explicit-move-label">Moved · {{ $vibeMoved['status'] }}</span>
+                                            @endif
+                                            @if ($canSort)
+                                                <button type="button" class="mt-1 text-xs text-gray-600 underline" wire:click="markProductReviewed({{ \Illuminate\Support\Js::from($collection['gid']) }}, {{ \Illuminate\Support\Js::from($product['id']) }})">Mark reviewed</button>
+                                            @endif
                                             <p class="text-xs text-gray-500">SKU: {{ $displayProduct['sku'] ?: 'No SKU' }}</p>
                                             @if (!empty($displayProduct['is_prelaunch_draft']))
                                                 <div class="my-3 rounded-md border border-warning-200 bg-warning-50 p-2 text-xs text-warning-900 dark:border-warning-700 dark:bg-warning-950 dark:text-warning-100">
@@ -1000,6 +1280,7 @@
                 </div>
                 @endif
             </div>
+            </fieldset>
         @endif
 
         <x-filament::modal id="shop-your-vibe-collections" width="3xl"
@@ -1030,6 +1311,18 @@
                     <x-filament::button wire:click="confirmCollectionSelection" wire:loading.attr="disabled" :disabled="blank($selectedCollectionGid)">{{ $addingCard ? 'Add Vibe' : 'Continue' }}</x-filament::button>
                 @endif
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'shop-your-vibe-collections' })">Cancel</x-filament::button>
+            </x-slot>
+        </x-filament::modal>
+
+        <x-filament::modal id="confirm-start-sorting" width="lg" heading="Check Shopify before sorting?">
+            @php($sortingConfirmTitle = $draft?->desired['collections'][$sortingConfirmGid]['title'] ?? 'this collection')
+            <p>Starting sorting for <strong>{{ $sortingConfirmTitle }}</strong> needs a fresh product list from Shopify. The editor reads the products currently in this collection and compares them with the saved list. Shopify is not changed. Dragging and position changes stay off until that check finishes.</p>
+            <x-slot name="footer">
+                <x-filament::button color="gray" wire:click="cancelStartSorting">Cancel</x-filament::button>
+                <x-filament::button wire:click="beginCollectionSorting({{ \Illuminate\Support\Js::from($sortingConfirmGid ?? '') }})" wire:loading.attr="disabled" wire:target="beginCollectionSorting">
+                    <span wire:loading.remove wire:target="beginCollectionSorting">Check Shopify and start sorting</span>
+                    <span wire:loading wire:target="beginCollectionSorting">Checking Shopify membership…</span>
+                </x-filament::button>
             </x-slot>
         </x-filament::modal>
 
@@ -1249,6 +1542,7 @@
                 <x-filament::button color="gray" x-on:click="$dispatch('close-modal', { id: 'bulk-vibe-mappings' })">Cancel</x-filament::button>
             </x-slot>
         </x-filament::modal>
+    </div>
     </div>
     <script>
         window.syvVibeSeparator = /[\s\-–—:\/|]+/;

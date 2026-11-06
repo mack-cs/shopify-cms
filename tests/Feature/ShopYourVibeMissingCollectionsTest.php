@@ -294,7 +294,7 @@ it('F2 does not infer real product membership from a local draft tag', function 
         ->and($this->fake->mutations())->toBe([]);
 });
 
-it('F2 a refresh job retains missing-target edits until verified retrieval completes', function () {
+it('F2 pending missing-target edits cannot be discarded by a queued refresh', function () {
     $gid = 'gid://shopify/Collection/2';
     $this->draft = $this->workflow->edit($this->draft->id, $this->draft->revision, 'remove_product', ['collection_gid' => $gid, 'product_gid' => 'gid://shopify/Product/101']);
     $user = User::firstOrFail();
@@ -305,8 +305,10 @@ it('F2 a refresh job retains missing-target edits until verified retrieval compl
     Livewire::test(ShopYourVibe::class)->call('manage', $this->draft->collection_gid)->call('refreshDraft', true);
     expect($this->draft->fresh()->pending)->toBeTrue();
     unset($this->fake->collections[$gid]);
-    (new RefreshShopYourVibeDraft($this->draft->id, $this->draft->revision, true))->handle($this->workflow);
-    expect($this->draft->fresh()->pending)->toBeTrue()->and($this->mapping->fresh()->is_active)->toBeFalse();
+    expect(fn () => (new RefreshShopYourVibeDraft($this->draft->id, $this->draft->revision, true))->handle($this->workflow))
+        ->toThrow(RuntimeException::class, 'audited discard');
+    // No verified lookup took place, so no deletion is inferred.
+    expect($this->draft->fresh()->pending)->toBeTrue()->and($this->mapping->fresh()->is_active)->toBeTrue();
 });
 
 it('F2 background operation readback also deactivates newly discovered missing mappings', function () {

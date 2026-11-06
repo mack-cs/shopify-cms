@@ -485,6 +485,13 @@ final class StackBundleSellabilityService
 
             $required = (int) ($requiredQuantities[$componentId] ?? 1);
             $variant = $this->primaryVariant($component);
+            if ($variant instanceof Variant && ($variant->inventory_tracked === null
+                || ($variant->inventory_tracked !== false && $variant->inventory_qty === null)
+                || (is_string($variant->inventory_sync_error) && str_starts_with($variant->inventory_sync_error, 'Incomplete Shopify inventory read')))) {
+                $payload = $this->componentPayload($component);
+                $payload['reason'] = 'Component inventory is unknown; Shopify confirmation is required';
+                return $payload;
+            }
             if (
                 $required > 1
                 && $variant instanceof Variant
@@ -687,6 +694,7 @@ final class StackBundleSellabilityService
         InventoryOperationContext::run(function () use ($variant): void {
             $variant->inventory_tracked = true;
             $variant->inventory_qty = 0;
+            $variant->inventory_sync_batch_id = 'stack_sellability_pending';
             $variant->inventory_sync_error = null;
             $variant->save();
         });
@@ -702,6 +710,7 @@ final class StackBundleSellabilityService
         InventoryOperationContext::run(function () use ($variant): void {
             $variant->inventory_tracked = false;
             $variant->inventory_qty = null;
+            $variant->inventory_sync_batch_id = 'stack_sellability_pending';
             $variant->inventory_sync_error = null;
             $variant->save();
         });

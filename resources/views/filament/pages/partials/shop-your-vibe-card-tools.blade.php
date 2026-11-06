@@ -10,9 +10,9 @@
                 <circle cx="10" cy="11.5" r="1.15" fill="currentColor"></circle>
             </svg>
         </button>
+        <label class="syv-position">
+            <span>Position</span>
+            <input type="number" inputmode="numeric" min="1" max="{{ $max }}" value="{{ $position }}" data-position-input x-on:keydown.enter.prevent="commitPosition($event.target)" x-on:change="commitPosition($event.target)" aria-label="Position of {{ $title }}">
+        </label>
     @endif
-    <label class="syv-position">
-        <span>Position</span>
-        <input type="number" inputmode="numeric" min="1" max="{{ $max }}" value="{{ $position }}" data-position-input x-on:keydown.enter.prevent="commitPosition($event.target)" x-on:change="commitPosition($event.target)" aria-label="Position of {{ $title }}">
-    </label>
 </div>

@@ -24,7 +24,10 @@ final class ProcessShopifyStackFulfillmentJob implements ShouldBeUnique, ShouldQ
     /** @var array<int, int> */
     public array $backoff = [30, 120, 600, 1800];
 
-    public function __construct(public readonly int $fulfillmentId) {}
+    public function __construct(public readonly int $fulfillmentId)
+    {
+        $this->onConnection('inventory-ledger')->onQueue('inventory-ledger');
+    }
 
     public function uniqueId(): string
     {

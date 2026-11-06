@@ -2,20 +2,21 @@
 
 uses(\Illuminate\Foundation\Testing\RefreshDatabase::class);
 
-test('registration screen can be rendered', function () {
-    $response = $this->get(route('register'));
-
-    $response->assertStatus(200);
+test('public registration is disabled for this staff CMS', function () {
+    expect(\Laravel\Fortify\Features::enabled(\Laravel\Fortify\Features::registration()))->toBeFalse();
+    expect(\Illuminate\Support\Facades\Route::has('register'))->toBeFalse();
+    $this->get('/register')->assertNotFound();
 });
 
-test('new users can register', function () {
-    $response = $this->post(route('register.store'), [
+test('anonymous users cannot create staff accounts through registration', function () {
+    $response = $this->post('/register', [
         'name' => 'Test User',
         'email' => 'test@example.com',
         'password' => 'password',
         'password_confirmation' => 'password',
     ]);
 
-    $this->assertAuthenticated();
-    $response->assertRedirect(route('dashboard', absolute: false));
+    $response->assertNotFound();
+    $this->assertGuest();
+    $this->assertDatabaseMissing('users', ['email' => 'test@example.com']);
 });

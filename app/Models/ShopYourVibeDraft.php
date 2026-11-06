@@ -11,6 +11,8 @@ class ShopYourVibeDraft extends Model
     protected $attributes = ['revision' => 0, 'pending' => false, 'status' => 'synced'];
 
     protected $casts = [
+        'refresh_state' => 'array',
+        'editing_state' => 'array',
         'snapshot' => 'array',
         'desired' => 'array',
         'progress' => 'array',

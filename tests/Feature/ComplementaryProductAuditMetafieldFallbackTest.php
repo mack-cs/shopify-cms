@@ -11,6 +11,8 @@ use App\Services\HeaderStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/ImportedComplementaryShopifyFake.php';
+beforeEach(fn () => fakeImportedComplementaryShopify());
 
 it('falls back to imported complementary metafields when the row column is blank', function (): void {
     $user = User::factory()->create();

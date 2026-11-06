@@ -29,4 +29,11 @@ class ProcurementSupplierOrderLine extends Model
     {
         return max(0, (int) $this->quantity_ordered - $this->quantity_received);
     }
+
+    public function getQuantityStagedAttribute(): int { return (int) $this->receipts()->whereIn('status',['pending','processing'])->sum('quantity_received'); }
+    public function getQuantityUncertainAttribute(): int { return (int) $this->receipts()->where('status','manual_review')->sum('quantity_received'); }
+    public function getQuantityAvailableToReceiveAttribute(): int
+    {
+        return $this->quantity_uncertain>0 ? 0 : max(0,$this->quantity_outstanding-$this->quantity_staged);
+    }
 }

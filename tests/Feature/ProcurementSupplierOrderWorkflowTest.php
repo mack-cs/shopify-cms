@@ -527,7 +527,7 @@ it('rejects supplier orders for active stack rows', function (): void {
 
     expect($batch->valid_count)->toBe(0)
         ->and($batch->invalid_count)->toBe(1)
-        ->and($batch->errors['2'][0])->toContain('SKU must match exactly one')
+        ->and($batch->errors['2'][0])->toContain('LRBU08', 'one eligible non-stack product or draft')
         ->and(ProcurementSupplierOrderLine::query()->where('sku', 'LRBU08')->exists())->toBeFalse();
 });
 
@@ -576,7 +576,11 @@ it('attaches an order captured before the product was active once the variant ex
 
     expect($receipt->valid_count)->toBe(1)
         ->and($receipt->invalid_count)->toBe(0)
-        ->and($line->fresh()->variant_id)->toBe($variant->id)
+        ->and($line->fresh()->variant_id)->toBeNull();
+
+    $csv->confirm($receipt->uuid, dispatchReceipts: false);
+
+    expect($line->fresh()->variant_id)->toBe($variant->id)
         ->and($variant->procurementIncomingStock()->value('total_quantity_on_order'))->toBe(10)
         ->and($variant->procurementIncomingStock()->value('number_of_wip_orders'))->toBe(1);
 });
@@ -594,7 +598,7 @@ it('rejects supplier orders when a sku matches both a draft and an active produc
 
     expect($batch->valid_count)->toBe(0)
         ->and($batch->invalid_count)->toBe(1)
-        ->and($batch->errors['2'][0])->toContain('SKU must match exactly one');
+        ->and($batch->errors['2'][0])->toContain('AMBIG-DRAFT-1', 'one eligible non-stack product or draft');
 });
 
 it('treats an active variant and its mirrored draft as one supplier-order SKU', function (): void {
@@ -683,7 +687,7 @@ it('rejects invalid pasted received orders without staging any receipts', functi
 
     expect($batch->valid_count)->toBe(0)
         ->and($batch->invalid_count)->toBe(1)
-        ->and($batch->errors['2'])->toContain('quantity exceeds the outstanding order quantity')
+        ->and(implode(' ', $batch->errors['2']))->toContain('Quantity exceeds the outstanding order quantity')
         ->and(ProcurementSupplierReceipt::query()->count())->toBe(0);
 });
 
@@ -825,7 +829,7 @@ it('rejects duplicate Order ID and SKU lines within one pending-order CSV', func
 
     expect($preview->valid_count)->toBe(1)
         ->and($preview->invalid_count)->toBe(1)
-        ->and(data_get($preview->errors, '3.0'))->toContain('duplicated within this CSV');
+        ->and(data_get($preview->errors, '3.0'))->toContain('duplicated within this batch');
 });
 
 it('allows a later pending-order upload to add a new SKU to an existing Order ID', function (): void {
@@ -862,7 +866,7 @@ it('rejects adding a SKU that already exists on the same Order ID', function ():
 
     expect($preview->valid_count)->toBe(0)
         ->and($preview->invalid_count)->toBe(1)
-        ->and(data_get($preview->errors, '2.0'))->toContain('Order ID already contains this SKU');
+        ->and(data_get($preview->errors, '2.0'))->toContain('PO-SAME-SKU', 'already contains SKU DUP-SAME-SKU', 'already recorded');
 });
 
 it('rechecks existing Order ID SKU membership during confirmation to close the preview race window', function (): void {

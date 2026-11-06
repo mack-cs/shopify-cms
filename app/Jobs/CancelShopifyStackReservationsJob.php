@@ -21,7 +21,10 @@ final class CancelShopifyStackReservationsJob implements ShouldQueue
     public int $timeout = 300;
 
     /** @param array<int, int> $reservationIds */
-    public function __construct(public array $reservationIds, public ?int $userId = null) {}
+    public function __construct(public array $reservationIds, public ?int $userId = null)
+    {
+        $this->onConnection('inventory-ledger')->onQueue('inventory-ledger');
+    }
 
     public function handle(StackOrderReservationService $service): void
     {

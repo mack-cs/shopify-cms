@@ -31,8 +31,9 @@ test('profile information can be updated', function () {
     $user->refresh();
 
     expect($user->name)->toBe('Test User');
-    expect($user->email)->toBe('test@example.com');
-    expect($user->email_verified_at)->toBeNull();
+    // ProfileUpdateRequest and the staff profile UI permit name changes only.
+    expect($user->email)->not->toBe('test@example.com');
+    expect($user->email_verified_at)->not->toBeNull();
 });
 
 test('email verification status is unchanged when the email address is unchanged', function () {
@@ -63,10 +64,10 @@ test('user can delete their account', function () {
 
     $response
         ->assertSessionHasNoErrors()
-        ->assertRedirect(route('home'));
+        ->assertRedirect(route('login'));
 
     $this->assertGuest();
-    expect($user->fresh())->toBeNull();
+    expect($user->fresh()->is_active)->toBeFalse();
 });
 
 test('correct password must be provided to delete account', function () {

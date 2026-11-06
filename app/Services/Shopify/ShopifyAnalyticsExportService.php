@@ -12,18 +12,21 @@ use App\Models\ShopifyOrderItem;
 use App\Models\ShopifyOrderTransaction;
 use App\Models\SkuDailyDemand;
 use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\EngravedBeads\EngravedBeadProcurementContract;
+use App\Services\SalePercentageCalculator;
 use App\Services\SaleTagService;
 use Illuminate\Support\Carbon;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class ShopifyAnalyticsExportService
 {
-    public function __construct(private readonly SaleTagService $saleTagService)
-    {
-    }
+    public function __construct(private readonly SaleTagService $saleTagService) {}
 
     public function mlProductsCsv(): StreamedResponse
     {
+        $beadSources = collect(app(EngravedBeadProcurementContract::class)->export()['families'])->keyBy('source_variant_id');
+
         return $this->csvResponse(
             'shopify_products_current.csv',
             [
@@ -44,15 +47,22 @@ final class ShopifyAnalyticsExportService
                 'Variant Title',
                 'Vendor',
                 'Product Type',
+                'Tags',
+                'Inventory Item ID',
             ],
-            function ($handle): void {
+            function ($handle) use ($beadSources): void {
                 Variant::query()
                     ->with('product')
                     ->active()
                     ->orderBy('id')
-                    ->chunkById(1000, function ($variants) use ($handle): void {
+                    ->chunkById(1000, function ($variants) use ($handle, $beadSources): void {
                         foreach ($variants as $variant) {
                             if (! $variant->product) {
+                                continue;
+                            }
+                            $isBead = EngravedBeadConfiguration::fromProduct($variant->product)->participating()
+                                || str_contains((string) $variant->product->tags, '-bead-family');
+                            if ($isBead && ! $beadSources->has($variant->shopify_id)) {
                                 continue;
                             }
 
@@ -78,6 +88,8 @@ final class ShopifyAnalyticsExportService
                                     ->implode(' / '),
                                 $variant->product->vendor,
                                 $variant->product->type,
+                                $variant->product->tags,
+                                $variant->shopify_inventory_item_id,
                             ]);
                         }
                     });
@@ -555,7 +567,7 @@ final class ShopifyAnalyticsExportService
 
     private function discountPercentage(mixed $salePrice, mixed $compareAtPrice): ?string
     {
-        return app(\App\Services\SalePercentageCalculator::class)->formatted($salePrice, $compareAtPrice);
+        return app(SalePercentageCalculator::class)->formatted($salePrice, $compareAtPrice);
     }
 
     private function activeProductLabel(mixed $status): string

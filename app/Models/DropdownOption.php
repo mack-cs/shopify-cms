@@ -112,6 +112,8 @@ class DropdownOption extends Model
             $value = preg_replace('/<\s*br\s*\/?>/iu', "\n", $value) ?? $value;
             $value = preg_replace('/<\s*\/\s*li\s*>/iu', "\n", $value) ?? $value;
             $value = strip_tags($value);
+            // Shopify also serializes separate bullets on one line using HTML spaces.
+            $value = preg_replace('/\s+[\x{2022}\x{00B7}]\s*/u', "\n", $value) ?? $value;
             $lines = preg_split('/\R/u', $value) ?: [$value];
             $lines = array_map(
                 static fn (string $line): string => preg_replace('/^\s*[\x{2022}\x{00B7}\-*]+\s*/u', '', $line) ?? $line,

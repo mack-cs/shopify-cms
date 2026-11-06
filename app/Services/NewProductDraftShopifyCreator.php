@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\NewProductDraft;
 use App\Models\StyleProfile;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
 use App\Services\Inventory\InventoryAuditContext;
 use App\Services\Inventory\InventoryAuditRecorder;
 use Illuminate\Support\Collection;
@@ -53,12 +54,13 @@ final class NewProductDraftShopifyCreator
         $warnings = [];
 
         foreach ($drafts as $draft) {
-            if (!$draft instanceof NewProductDraft) {
+            if (! $draft instanceof NewProductDraft) {
                 continue;
             }
 
             if ($draft->handle) {
                 $skippedHasHandle++;
+
                 continue;
             }
 
@@ -66,6 +68,7 @@ final class NewProductDraftShopifyCreator
 
             if (! $unlistedLaunch && ! $draft->isApprovedByTwo()) {
                 $skippedNotApproved++;
+
                 continue;
             }
 
@@ -77,16 +80,19 @@ final class NewProductDraftShopifyCreator
                     'reason' => 'missing_title',
                     'details' => 'A title is required before a draft can be sent to Shopify.',
                 ];
+
                 continue;
             }
 
             if (! $unlistedLaunch && ($draft->product?->has_errors ?? false) === true) {
                 $skippedHasErrors++;
+
                 continue;
             }
 
             if (! $unlistedLaunch && ! $this->complementaryProducts->hasRequiredMinimumForDraft($draft)) {
                 $skippedMissingComplementary++;
+
                 continue;
             }
 
@@ -100,12 +106,13 @@ final class NewProductDraftShopifyCreator
                         ? 'A price of zero or more is required before an unlisted launch can be sent to Shopify.'
                         : 'A valid price greater than zero is required before a draft can be sent to Shopify.',
                 ];
+
                 continue;
             }
 
             try {
                 $result = $this->createProduct($draft);
-                if (!$result['handle'] || !$result['id'] || $result['error']) {
+                if (! $result['handle'] || ! $result['id'] || $result['error']) {
                     $failed++;
                     $failures[] = [
                         'id' => $draft->id,
@@ -113,6 +120,7 @@ final class NewProductDraftShopifyCreator
                         'reason' => $result['failure_reason'] ?? 'shopify_user_error',
                         'details' => $result['error'],
                     ];
+
                     continue;
                 }
 
@@ -618,7 +626,8 @@ GQL;
         $price = $this->priceForShopify($draft);
         $input = [
             'title' => $draft->title,
-            'status' => $this->mapStatus($draft->status ?? 'draft'),
+            'status' => EngravedBeadConfiguration::fromTags($draft->tags)->participating()
+                ? 'DRAFT' : $this->mapStatus($draft->status ?? 'draft'),
             'productOptions' => [[
                 'name' => 'Title',
                 'values' => [['name' => 'Default Title']],
@@ -1385,6 +1394,7 @@ GQL;
     private function mapStatus(string $status): string
     {
         $normalized = strtolower(trim($status));
+
         return match ($normalized) {
             'active' => 'ACTIVE',
             'archived' => 'ARCHIVED',

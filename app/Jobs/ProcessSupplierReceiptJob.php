@@ -24,7 +24,21 @@ class ProcessSupplierReceiptJob implements ShouldQueue
 
     public int $timeout = 600;
 
-    public function __construct(public readonly int $receiptId) {}
+    public function __construct(public readonly int $receiptId) { $this->onConnection('inventory-receipts')->onQueue('inventory-receipts'); }
+
+    public function onConnection($connection)
+    {
+        $this->connection = 'inventory-receipts';
+
+        return $this;
+    }
+
+    public function onQueue($queue)
+    {
+        $this->queue = 'inventory-receipts';
+
+        return $this;
+    }
 
     public function handle(ShopifyInventoryAdjustmentService $shopify, ProductInventorySyncService $inventory, SupplierOrderSummaryService $summary, ProcurementSheetSyncService $sheets): void
     {
@@ -41,7 +55,15 @@ class ProcessSupplierReceiptJob implements ShouldQueue
                 return;
             }
             try {
+                app(\App\Services\Procurement\SupplierReceivingEligibility::class)->variantForLine($receipt->line,persist:true);
+                $receipt->load('line.variant.product');
+                if (app(\App\Services\Procurement\SupplierReceivingEligibility::class)->isBead($receipt->line->variant)) {
+                    $read=$inventory->refreshVariants(collect([$receipt->line->variant]),$receipt->created_by);
+                    if(($read['failed']??0)>0) throw new \RuntimeException('The tracked 1-bead source could not be verified in Shopify. '.implode('; ',$read['failures']??[]));
+                    $receipt->load('line.variant.product');
+                }
                 $locationId = $shopify->resolveLocationId($receipt->line->variant);
+                app(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class)->validate($receipt,$locationId);
             } catch (\Throwable $exception) {
                 $receipt->update(['status' => 'pending', 'error' => $exception->getMessage()]);
                 throw $exception;
@@ -53,7 +75,7 @@ class ProcessSupplierReceiptJob implements ShouldQueue
             }
             $receipt->refresh()->load('line.variant');
             try {
-                $shopify->increaseAvailable(
+                app(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class)->run($receipt,$locationId,fn()=>$shopify->increaseAvailable(
                     $receipt->line->variant,
                     $receipt->quantity_received,
                     $receipt->shopify_reference_uri,
@@ -77,7 +99,7 @@ class ProcessSupplierReceiptJob implements ShouldQueue
                         relatedType: ProcurementSupplierReceipt::class,
                         relatedId: (int) $receipt->id,
                     ),
-                );
+                ));
                 $receipt->update(['status' => 'succeeded', 'shopify_adjusted_at' => now()]);
             } catch (\Throwable $e) {
                 $receipt->update(['status' => 'manual_review', 'error' => $e->getMessage()]);
@@ -102,6 +124,7 @@ class ProcessSupplierReceiptJob implements ShouldQueue
             if (($result['failed'] ?? 0) > 0) {
                 throw new \RuntimeException(implode('; ', $result['failures'] ?? ['Shopify refresh failed.']));
             }
+            $receipt->update(['inventory_after'=>$line->variant->fresh()->current_available_quantity]);
             // A receipt transfers quantity from WIP into Shopify inventory. Refresh
             // Shopify first so the recommendation never sees the WIP reduction
             // without the corresponding increase in actual inventory.

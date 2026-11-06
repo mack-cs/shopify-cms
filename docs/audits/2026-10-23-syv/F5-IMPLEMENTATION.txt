@@ -1,0 +1,159 @@
+F5: Prevent duplicate Shop Your Vibe refresh jobs
+Implementation review, 24 October 2026
+Branch: feat/syv-concurrent-updated-blocker
+
+Scope and safety
+Implemented F5 only. No deployment, Git push, Shopify mutation, production
+record update, queue clearing, or production migration was performed.
+The initial working tree was clean. Existing branch work, including archived
+product visibility and F1-F4/F7, was preserved.
+
+1. Root cause
+ShopYourVibe::refreshDraft() called releaseUniqueLock() before every dispatch.
+That forcibly removed the collection's queued/running refresh exclusion.
+Duplicate workers shared a progress key and could overwrite each other's state.
+Laravel's existing ShouldBeUnique mechanism was insufficient as the sole fix:
+it does not provide durable attempt status, a claim on execution, or a fencing
+token checked atomically with catalogue publication. A uniqueness lease expiring
+while an old worker resumes also needs explicit stale-result rejection.
+
+2. Files and methods
+- app/Services/ShopYourVibeRefresh.php (new): request(), start(), heartbeat(),
+  assertCurrent(), finish(), status(), cache(), lockedDraft(). Owns durable claims,
+  execution admission, expiry, token checks, and committed progress publication.
+- app/Jobs/RefreshShopYourVibeDraft.php: constructor, handle(), failed(), notify().
+  Replaces forced unique locks with token-bearing attempts and one-time start.
+  Legacy tokenless payloads may claim only an idle, unchanged collection.
+- app/Filament/Pages/ShopYourVibe.php: refreshDraft(), beginProductHydration(),
+  pollPush(), statusSnapshot(). Deduplicates requests, shows the already-refreshing
+  message, restores progress from durable state, and exposes expiration as failure.
+  Forced hydration retries no longer release uniqueness locks or replace live
+  queued/running progress. Hydration's existing unique-job mechanism remains.
+- app/Services/ShopYourVibeShopify.php: graphql(), refreshGuard. Checks attempt
+  ownership before and after a complete Shopify read, including client retries.
+- app/Services/ShopYourVibeWorkflow.php: trackRefreshAttempt(), refresh(). Checks
+  the token under the draft row lock before publishing; success is recorded in
+  the same transaction as snapshot/catalogue publication. Expiry at the end of
+  publication rolls back the transaction rather than claiming success.
+- app/Models/ShopYourVibeDraft.php: refresh_state array cast.
+- app/Exceptions/ShopYourVibeRefreshExpiredException.php: stale-attempt signal.
+- database/migrations/2026_10_24_000001_add_refresh_state_to_shop_your_vibe_drafts.php:
+  one nullable JSON column. This is necessary to keep refresh coordination separate
+  from F4 ownership, push checkpoints, and evictable cache progress. No new table.
+- tests/Feature/ShopYourVibeRefreshTest.php: F5 regression and concurrency tests.
+- tests/Support/SyvRefreshRaceWorker.php: independent PHP process test fixture.
+- tests/Feature/ShopYourVibeWorkflowTest.php: existing failure-banner fixture now
+  records a failure on its durable attempt instead of modifying cache alone.
+
+3. Deduplication and locking
+collection_gid already has a unique index on shop_your_vibe_drafts. Each collection
+therefore has exactly one durable refresh slot. Requests lock that row, return an
+existing live queued/running operation, or create a new UUID-token attempt.
+MySQL-style row locking uses SELECT FOR UPDATE. SQLite first reserves the writer
+using a no-op UPDATE, since SQLite ignores FOR UPDATE. No network retrieval runs
+under these coordination transactions. Different collection requests/read phases
+can proceed independently. The existing short catalogue-publication serialization
+from F7 is preserved.
+
+The configured dedicated database queue has retry_after=960 and after_commit=true.
+When it shares the application connection, claim and queue insert occur in one
+transaction using beforeCommit(). A queue-insert failure rolls back the claim.
+For a separately configured queue backend, dispatch waits for commit; a dispatch
+exception records failure. A crash in that external-backend dispatch gap is
+recovered by queued-attempt expiry, without releasing another worker's lock.
+
+Execution atomically transitions queued -> running once. Duplicate deliveries,
+completed attempts, and jobs carrying old tokens return before Shopify reads.
+There is no refresh forceRelease(), and Laravel no longer owns a refresh unique
+lock that an older job's cleanup could release underneath a new attempt.
+
+4. Failure, crash, and expiry recovery
+- Queued lease: 960 seconds. A job delayed beyond this may not execute; Retry
+  creates a new token. Its old queue row can remain and later exit harmlessly.
+- Running hard deadline: 900 seconds, longer than the existing 840-second worker
+  timeout and shorter than the 960-second queue reservation. Heartbeat timestamps
+  and progress update before/after remote reads and after product pages, but do
+  not extend the hard deadline indefinitely.
+- API/validation/publication exceptions leave confirmed data unchanged and mark
+  only the owning token failed (or skipped when newer local work exists).
+- Normal timeout failed() callbacks mark their attempt failed. An abrupt crash
+  without callbacks is detected on status polling or the next request by expiry.
+- Success, failure, and skipped states admit a new request immediately. Expired
+  states admit replacement without manually deleting cache, Redis, or DB locks.
+- Old progress/failure callbacks cannot finish a newer token. Cache callbacks run
+  after commit and reread the latest attempt under the row lock. Cache eviction
+  does not remove deduplication or fencing, and active status can be restored.
+- Token + deadline + revision checks at publication prevent late results from
+  overwriting newer confirmed data. A second final check protects expiry during
+  publication itself. Pending changes and F4 editing-owner checks remain intact;
+  refresh never renews, releases, or replaces the 14-minute editing lock.
+
+5. Automated validation
+All Shopify access uses fake gateways; concurrency workers use a temporary SQLite
+database. Production records and real Shopify are not used.
+Coverage includes repeated Livewire clicks, real queue rows, separate users,
+queued/running deduplication, independent collection slots, duplicate delivery,
+completion/new refresh, API failure/retry, failed enqueue rollback, actual
+database-job execution, timeout failure callbacks, expired queue/crash recovery,
+late failure callbacks, stale in-flight reads, stale publication without progress
+callbacks, pending changes, editing ownership, and simultaneous PHP processes.
+
+Final combined result: 258 tests passed, 1,592 assertions, 58.89 seconds.
+The run included ShopYourVibeRefreshTest, ShopYourVibeWorkflowTest,
+ShopYourVibeEditingTest, ShopYourVibeMissingCollectionsTest,
+ShopYourVibeSourcePrecedenceTest, ShopYourVibeDraftHydrationTest,
+ShopYourVibePerformanceTest, and ShopYourVibePushConfirmationTest.
+Command prefix: php -d memory_limit=512M vendor/bin/pest --compact
+followed by the eight tests/Feature/<name>.php paths above.
+The new F5 file contains 13 passing cases, including the two-process race.
+The existing failure-banner fixture was updated for durable status; its original
+assertions about failure visibility, retained products, and stopped polling remain.
+git diff --check also passed. Manual browser testing has not been performed.
+
+6. Remaining risks and operational prerequisites
+- The migration is supplied but has not been applied to production. A later
+  approved release must install the column before the new application/worker code.
+- Production database/cache/Supervisor configuration was not accessed or verified.
+  Keep the documented worker timeout (840s) below the running lease (900s), and
+  the queue retry_after above it (960s). A changed timeout requires revisiting
+  these bounds. Jobs taking longer than the bound must retry, not publish late.
+- Simultaneous-process testing used SQLite, not a live production MySQL/Redis
+  environment. A staging test on the deployed infrastructure is still needed.
+- An already in-flight read cannot be recalled from Shopify if a process is
+  suspended beyond its deadline. Under the configured worker timeout it should
+  be terminated first; if it resumes, its returned data is rejected and it cannot
+  continue to the next guarded read or publish. No exactly-once HTTP claim is made.
+- Existing F6 long-push locking is outside F5 and was not changed.
+- Browser checks below have not been performed against production.
+
+7. Manual browser verification (isolated local/staging environment only)
+Use a fake/test Shopify gateway or an approved non-production store, an isolated
+database/cache/queue, this migration, and a dedicated test worker. Do not use the
+production queue or press Push Changes to Shopify.
+
+a) Pause the isolated worker. Open one collection and click Refresh repeatedly,
+   also from a second authorized user's browser. Expect one refresh queue row,
+   one token, unchanged queued progress, and "This collection is already
+   refreshing." for repeats. No Shopify retrieval occurs before the worker runs.
+b) Resume the worker with a delayed fake response. Repeat Refresh while running.
+   Expect no extra refresh job, the same token, and progress continuing rather
+   than restarting. On completion expect the grid to update automatically and
+   the loading banner to stop. A subsequent Refresh should create a new token.
+c) Open a different collection in another tab and refresh it. Expect independent
+   queued/running state for each collection; one must not reset the other's progress.
+d) Make a fake linked-collection read fail. Expect a failure banner, previous
+   confirmed products retained, and no success notification. Fix the fake and
+   click Retry. Expect one new token and successful completion without lock clearing.
+e) In the isolated environment terminate a running test worker without allowing
+   its failed callback. After the 900-second running deadline, poll or retry.
+   Expect an expiry/failure message and one new attempt. Resume/replay the stale
+   job: expect no publication and no change to the new attempt's status.
+f) Queue a refresh, then acquire the editing lock and save a local pending edit
+   before running the job. Expect skipped refresh, pending content and owner/lock
+   unchanged. Another user's active editing lock must still block publication.
+g) Repeat the existing missing-collection, planned-placement, pending-revision,
+   and fresh-catalogue checks from F1-F4/F7. Expect unavailable targets to remain
+   unavailable, planned placements to stay separate, stale approvals blocked,
+   and historical unavailable data unable to replace fresh confirmed catalogue data.
+
+Stop after F5 for review. No deployment or Shopify push is authorized by this report.

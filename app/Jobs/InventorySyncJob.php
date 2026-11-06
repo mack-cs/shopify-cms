@@ -14,11 +14,24 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Collection;
 
-class InventorySyncJob implements ShouldQueue
+class InventorySyncJob implements ShouldQueue, \Illuminate\Contracts\Queue\ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 1800;
+
+    public int $tries = 5;
+
+    public int $uniqueFor = 20000;
+
+    public array $backoff = [60, 120, 300, 900];
+
+    public function uniqueId(): string
+    {
+        $ids = $this->variantIds;
+        sort($ids);
+        return $this->mode.':'.$this->syncBatchId.':'.hash('sha256', json_encode($ids));
+    }
 
     /**
      * @param array<int, int> $variantIds
@@ -29,10 +42,19 @@ class InventorySyncJob implements ShouldQueue
         public ?int $userId = null,
         public ?string $syncBatchId = null,
     ) {
+        $this->onConnection('inventory-sync')->onQueue('inventory-sync');
     }
 
     public function handle(ProductInventorySyncService $service, InventoryAdjustmentApprovalService $approvals): void
     {
+        if ($this->mode === 'push' && ! str_starts_with((string) $this->syncBatchId, 'stack_sellability_')) {
+            if (str_starts_with((string) $this->syncBatchId, 'inventory_approval_')) {
+                $request = $approvals->authorizeBatch($this->syncBatchId, $this->variantIds, $this->userId);
+                if ($request->status === \App\Models\InventoryAdjustmentRequest::STATUS_APPLIED) return;
+            } else {
+                app(\App\Services\InventoryAccessService::class)->authorizeInventory($this->userId);
+            }
+        }
         $variants = Variant::query()
             ->whereIn('id', array_values(array_unique(array_map('intval', $this->variantIds))))
             ->get();
@@ -41,9 +63,22 @@ class InventorySyncJob implements ShouldQueue
             return;
         }
 
+        // Legacy serialized automatic pushes did not persist their retry intent locally.
+        if ($this->mode === 'push' && str_starts_with((string) $this->syncBatchId, 'stack_sellability_')) {
+            foreach ($variants as $variant) {
+                if ($variant->inventory_local_dirty && $variant->product?->is_bundle) {
+                    $variant->forceFill(['inventory_sync_batch_id' => 'stack_sellability_pending'])->saveQuietly();
+                }
+            }
+        }
+
         $result = $this->mode === 'refresh'
             ? $service->refreshVariants($variants, $this->userId)
             : $service->syncVariants($variants, $this->userId, $this->syncBatchId);
+
+        if ($this->mode !== 'refresh' && ($result['failed'] ?? 0) > 0) {
+            throw new \RuntimeException('Inventory push remains unconfirmed; retry required. '.implode('; ', $result['failures'] ?? []));
+        }
 
         if ($this->mode !== 'refresh' && $this->syncBatchId !== null) {
             $approvals->markAppliedBySyncBatch(

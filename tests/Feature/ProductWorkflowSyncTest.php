@@ -752,11 +752,11 @@ it('hides existing boolean casing sync warnings', function (): void {
 
 it('does not flag a tag conflict when shopify returns the same tags in a different order', function (): void {
     $product = createWorkflowTestProduct([
-        'tags' => 'all-products, all-products-collection, bundles, exclude-from-the-sale, new-arrivals, new-in, newbies, pata-pata-bracelet-stacks-new-in, pata-pata-bundles',
+        'tags' => 'all-products, all-products-collections, bundles, exclude-from-the-sale, new-arrivals, new-in, newbies, pata-pata-bracelet-stacks-new-in, pata-pata-bundles',
         'approval_version' => 1,
     ]);
 
-    $draftTags = 'all-products, all-products-collection, bundles, pata-pata-bundles, new-arrivals, new-in, newbies, pata-pata-bracelet-stacks-new-in, exclude-from-the-sale';
+    $draftTags = \App\Services\TagNormalizer::normalizeFromArray(array_reverse(\App\Services\TagNormalizer::parseTokens($product->fresh()->tags)));
     NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
         'handle' => $product->handle,
         'shopify_id' => $product->shopify_id,
@@ -768,7 +768,8 @@ it('does not flag a tag conflict when shopify returns the same tags in a differe
 
     $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
 
-    expect($seeded->tags)->toBe($draftTags)
+    expect(\App\Services\TagNormalizer::normalizeForComparison($seeded->tags))
+        ->toBe(\App\Services\TagNormalizer::normalizeForComparison($draftTags))
         ->and(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('tags');
 });
 

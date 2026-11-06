@@ -60,7 +60,8 @@ final class ShopifyFulfillmentWebhookController extends Controller
             ],
         );
 
-        if (! $fulfillment->wasRecentlyCreated && $fulfillment->processing_status === ShopifyFulfillment::STATUS_COMPLETED) {
+        if (! $fulfillment->wasRecentlyCreated && $fulfillment->processing_status === ShopifyFulfillment::STATUS_COMPLETED
+            && strtolower(trim((string) ($payload['status'] ?? ''))) === strtolower((string) $fulfillment->shopify_status)) {
             return response()->json(['status' => 'duplicate'], 200);
         }
 

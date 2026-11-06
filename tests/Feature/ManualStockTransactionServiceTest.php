@@ -13,6 +13,8 @@ use App\Contracts\ShopifyGraphqlGateway;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/InventoryAuthorizationFixture.php';
+beforeEach(function () { $this->actingAs(inventoryAuthorizedUser()); });
 
 function manualStockProduct(Import $import, string $title, string $sku, int $remoteId): Product
 {
@@ -34,7 +36,7 @@ function historicalTransaction(array $lines): ManualStockTransaction
 function manualStockImport(string $filename): Import
 {
     return Import::create(['filename' => $filename, 'mode' => 'overwrite', 'status' => 'ready', 'is_current' => true,
-        'is_valid' => true, 'created_by' => User::factory()->create()->id]);
+        'is_valid' => true, 'created_by' => inventoryAuthorizedUser()->id]);
 }
 
 it('records historical transactions without calling Shopify', function (): void {
@@ -131,7 +133,7 @@ it('records a Shopify failure per impact without marking the transaction complet
 });
 
 it('renders the manual stock transaction detail page with component source arrays', function (): void {
-    $user = User::factory()->create();
+    $user = inventoryAuthorizedUser();
     $product = manualStockProduct(manualStockImport('manual-view'), 'View Product', 'VIEW1', 701);
     $service = new ManualStockTransactionService(Mockery::mock(ShopifyInventoryAdjustmentService::class));
     $transaction = $service->process($service->prepare(historicalTransaction([[$product, 2]])), $user->id);

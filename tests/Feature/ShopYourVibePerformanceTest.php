@@ -105,6 +105,18 @@ it('measures shop your vibe collection opening', function () {
             'refreshed_at' => now(),
         ]);
 
+        $fake->collections[$gid] = [
+            'id' => $gid,
+            'title' => 'Performance',
+            'handle' => 'performance',
+            'sortOrder' => 'MANUAL',
+            'ruleSet' => null,
+            'productsCount' => ['count' => $count],
+            'products' => [
+                'nodes' => array_map(fn (array $product): array => ['id' => $product['id'], 'title' => $product['title']], $products),
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null],
+            ],
+        ];
         $page = Livewire::test(ShopYourVibe::class);
         $fake->calls = [];
         $queries = 0;
@@ -124,6 +136,8 @@ it('measures shop your vibe collection opening', function () {
             $state[$property->getName()] = $property->getValue($page->instance());
         }
 
+        $page->call('beginCollectionSorting', $gid);
+        $fake->calls = [];
         $ids = array_column($products, 'id');
         $rotated = $ids;
         $movedId = array_shift($rotated);
@@ -131,6 +145,7 @@ it('measures shop your vibe collection opening', function () {
         $reorderStarted = microtime(true);
         $page->call('reorderProducts', $gid, $rotated, 1)->assertHasNoErrors();
         $reorderMs = (int) round((microtime(true) - $reorderStarted) * 1000);
+        $reorderHtmlBytes = strlen($page->html());
         $reorderSnapshotBytes = strlen(json_encode($page->snapshot));
         $positionStarted = microtime(true);
         $page->call('moveProductToPosition', $gid, $movedId, 1, 2)->assertHasNoErrors();
@@ -148,6 +163,7 @@ it('measures shop your vibe collection opening', function () {
             'public_state_bytes' => strlen(json_encode($state)),
             'html_bytes' => strlen($html),
             'reorder_ms' => $reorderMs,
+            'reorder_html_bytes' => $reorderHtmlBytes,
             'reorder_snapshot_bytes' => $reorderSnapshotBytes,
             'position_ms' => $positionMs,
             'stored_first' => $stored[0] ?? null,

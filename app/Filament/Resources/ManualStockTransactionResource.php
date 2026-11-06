@@ -21,6 +21,14 @@ use Illuminate\Support\Facades\Auth;
 
 class ManualStockTransactionResource extends Resource
 {
+    public static function canViewAny(): bool
+    {
+        return app(\App\Services\InventoryAccessService::class)->canUpdateInventory(Auth::user());
+    }
+
+    public static function canCreate(): bool { return static::canViewAny(); }
+    public static function canEdit($record): bool { return static::canViewAny(); }
+    public static function canView($record): bool { return static::canViewAny(); }
     protected static ?string $model = ManualStockTransaction::class;
     protected static ?string $navigationGroup = 'Inventory';
     protected static ?string $navigationLabel = 'Manual / Direct Orders';
@@ -86,8 +94,8 @@ class ManualStockTransactionResource extends Resource
             Tables\Actions\Action::make('process')->label(fn ($record) => $record->is_historical ? 'Complete historical record' : 'Confirm & deduct in Shopify')
                 ->icon('heroicon-o-check-circle')->color('danger')->requiresConfirmation()
                 ->modalDescription(fn ($record) => $record->is_historical ? 'This records the transaction only. Shopify inventory will not change.' : 'This immediately deducts the shown physical component quantities from Shopify On Hand inventory. It does not create a Shopify order.')
-                ->visible(fn ($record) => in_array($record->status, ['ready','failed','partially_failed'], true))
-                ->action(function ($record): void { ProcessManualStockTransactionJob::dispatch($record->id, Auth::id()); $record->update(['status' => 'queued']); Notification::make()->title('Inventory update queued')->success()->send(); }),
+                ->visible(fn ($record) => static::canViewAny() && in_array($record->status, ['ready','failed','partially_failed'], true))
+                ->action(function ($record): void { app(\App\Services\InventoryAccessService::class)->authorizeInventory(Auth::id()); ProcessManualStockTransactionJob::dispatch($record->id, Auth::id()); $record->update(['status' => 'queued']); Notification::make()->title('Inventory update queued')->success()->send(); }),
         ])->recordUrl(fn ($record) => self::getUrl('view', ['record' => $record]));
     }
 
@@ -119,6 +127,6 @@ class ManualStockTransactionResource extends Resource
         ]);
     }
 
-    public static function canDelete($record): bool { return $record->status === 'draft'; }
+    public static function canDelete($record): bool { return static::canViewAny() && $record->status === 'draft'; }
     public static function getPages(): array { return ['index' => Pages\ListManualStockTransactions::route('/'), 'create' => Pages\CreateManualStockTransaction::route('/create'), 'edit' => Pages\EditManualStockTransaction::route('/{record}/edit'), 'view' => Pages\ViewManualStockTransaction::route('/{record}')]; }
 }

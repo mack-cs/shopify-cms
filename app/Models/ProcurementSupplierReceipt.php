@@ -10,6 +10,7 @@ class ProcurementSupplierReceipt extends Model
 {
     protected $guarded = [];
     protected $casts = [
+        'receiving_authorization'=>'array',
         'quantity_received' => 'integer', 'received_at' => 'datetime',
         'inventory_before' => 'integer', 'inventory_after' => 'integer',
         'shopify_adjustment_started_at' => 'datetime',
@@ -33,4 +34,15 @@ class ProcurementSupplierReceipt extends Model
         );
     }
     public function createdBy(): BelongsTo { return $this->belongsTo(User::class, 'created_by'); }
+
+    public function getReceivingStatusLabelAttribute(): string
+    {
+        return match($this->status) {
+            'pending'=>'Waiting to be pushed',
+            'processing'=>'Sending to Shopify',
+            'succeeded'=>$this->post_process_status==='failed'?'Received in Shopify; stock summary needs updating':'Received in Shopify',
+            'manual_review'=>'Needs reconciliation',
+            default=>'Not saved',
+        };
+    }
 }

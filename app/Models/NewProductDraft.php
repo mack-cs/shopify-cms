@@ -200,6 +200,13 @@ class NewProductDraft extends Model
                 $draft->applyDefaultSaleTags();
             }
         });
+
+        static::saved(function (NewProductDraft $draft): void {
+            if (! $draft->wasRecentlyCreated && ! $draft->wasChanged('tags')) {
+                return;
+            }
+            app(\App\Services\ProductTagProvenanceService::class)->syncDraft($draft);
+        });
     }
 
     public function getGoogleProductCategoryAttribute($value): ?string
@@ -705,11 +712,11 @@ class NewProductDraft extends Model
                     $field,
                     $warning['shopify_value'] ?? null,
                 )
-                && ! static::shopifySyncWarningValuesMatch(
+                && (($warning['reason'] ?? null) === 'inactive_complementary' || ! static::shopifySyncWarningValuesMatch(
                     $field,
                     $warning['draft_value'] ?? null,
                     $warning['shopify_value'] ?? null,
-                );
+                ));
         }));
     }
 

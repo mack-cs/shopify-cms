@@ -33,6 +33,15 @@ final class ProductInventorySyncService
      */
     public function syncVariants(Collection $variants, ?int $userId = null, ?string $syncBatchId = null): array
     {
+        if (str_starts_with((string) $syncBatchId, 'inventory_approval_')) {
+            app(InventoryAdjustmentApprovalService::class)->authorizeBatch($syncBatchId, $variants->pluck('id')->all(), $userId);
+        } elseif (str_starts_with((string) $syncBatchId, 'stack_sellability_')) {
+            abort_if($variants->contains(fn ($v) => ! $v->product?->is_bundle), 403, 'Automatic sellability only authorizes stacks.');
+        } else {
+            app(InventoryAccessService::class)->authorizeInventory($userId);
+            abort_if(InventoryAdjustmentRequestItem::whereIn('variant_id',$variants->pluck('id'))
+                ->whereHas('request',fn($q)=>$q->whereIn('status',[\App\Models\InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL,\App\Models\InventoryAdjustmentRequest::STATUS_APPROVED]))->exists(),403,'Use the approved inventory request job for these items.');
+        }
         $synced = 0;
         $failed = 0;
         $warnings = [];
@@ -103,6 +112,7 @@ final class ProductInventorySyncService
                 $refreshed += $group->count();
             } catch (\Throwable $e) {
                 $failed += $group->count();
+                $this->preserveInventoryAfterIncompleteRead($group, $e);
                 foreach ($group as $variant) {
                     if ($variant instanceof Variant) {
                         $failures[] = "Variant {$variant->id}: {$e->getMessage()}";
@@ -144,6 +154,8 @@ final class ProductInventorySyncService
                 'failures' => [],
             ];
         } catch (\Throwable $e) {
+            $this->preserveInventoryAfterIncompleteRead($variants, $e);
+
             return [
                 'synced' => 0,
                 'refreshed' => 0,
@@ -160,6 +172,10 @@ final class ProductInventorySyncService
      */
     private function syncProductVariants(Product $product, Collection $variants, ?string $syncBatchId, ?int $userId, array &$warnings): void
     {
+        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql('mutation InventoryPreflight',
+            ['productId' => $product->shopify_id, 'variants' => $variants->map(fn ($variant) => [
+                'id' => $variant->shopify_id, 'inventoryItemId' => $variant->shopify_inventory_item_id,
+            ])->all()]);
         $details = $this->shopifyProductInventoryDetails($product);
         $productId = trim((string) ($details['id'] ?? ''));
         if ($productId === '') {
@@ -172,8 +188,12 @@ final class ProductInventorySyncService
 
         $variantsToSync = $variants
             ->filter(fn ($variant): bool => $variant instanceof Variant)
-            ->filter(fn (Variant $variant): bool => $this->shouldPushVariantInventory($variant))
+            ->filter(fn (Variant $variant): bool => $this->shouldPushVariantInventory($variant, $syncBatchId))
             ->values();
+        if (str_starts_with((string) $syncBatchId, 'inventory_approval_')
+            && $variantsToSync->count() !== $variants->filter(fn ($variant): bool => $variant instanceof Variant)->count()) {
+            throw new \RuntimeException('Approved inventory correction was not published. Shopify was not updated.');
+        }
 
         $skippedUnknown = $variants->count() - $variantsToSync->count();
         if ($skippedUnknown > 0) {
@@ -195,20 +215,7 @@ final class ProductInventorySyncService
                 throw new \RuntimeException("Missing Shopify inventory item for SKU '{$variant->sku}'.");
             }
 
-            $this->updateShopifyInventoryTracking($inventoryItemId, $variant->inventory_tracked);
-            $this->updateShopifyInventoryPolicy($productId, (string) ($remoteVariant['id'] ?? ''), $variant->inventory_policy);
-
-            if ($variant->inventory_tracked !== false) {
-                $this->updateShopifyOnHandQuantity(
-                    $inventoryItemId,
-                    (int) ($variant->current_on_hand_quantity ?? $variant->inventory_qty ?? 0),
-                    (string) ($remoteVariant['id'] ?? ''),
-                    $variant,
-                    $userId,
-                    $syncBatchId,
-                );
-            }
-
+            $this->writeConfirmedInventory($product, $variant, $remoteVariant, $syncBatchId, $userId);
             $this->markInventorySynced($variant, $syncBatchId);
         }
 
@@ -216,8 +223,102 @@ final class ProductInventorySyncService
         $this->refreshProductVariants($product->fresh(), $variants, $userId);
     }
 
-    private function shouldPushVariantInventory(Variant $variant): bool
+    private function writeConfirmedInventory(Product $product, Variant $variant, array $remote, ?string $batch, ?int $actor): void
     {
+        $item = $batch === null ? null : InventoryAdjustmentRequestItem::where('variant_id', $variant->id)
+            ->whereHas('request', fn ($q) => $q->where('sync_batch_id', $batch))->first();
+        if ($item && (int) data_get($item->shopify_update_result,'write_version',-1) !== (int) $variant->inventory_write_version) {
+            throw new \RuntimeException('A newer inventory intent superseded this approval. Review before dispatching stock.');
+        }
+        $tracked = $item ? $item->requested_inventory_tracked : $variant->inventory_tracked;
+        if ($tracked === null) throw new \RuntimeException('Unknown inventory tracking cannot authorize a write.');
+        $target = $item ? $item->requested_on_hand_quantity
+            : ($product->is_bundle ? $variant->inventory_qty : ($variant->current_on_hand_quantity ?? $variant->inventory_qty));
+        if ($tracked && $target === null) throw new \RuntimeException('Unknown on-hand quantity cannot authorize a write.');
+        if ($tracked && $this->inventoryLocationCount($remote) > 1) {
+            throw new \RuntimeException('This physical count covers multiple inventory locations. A location-specific review is required; no aggregate quantity was written.');
+        }
+        $location = $this->firstLocationId();
+        $payload = ['tracked' => $tracked, 'target' => $target, 'location' => $location];
+        if (\App\Models\InventoryWriteIntent::where('intent_key',app(InventoryWriteIntents::class)->key($variant,$payload,$batch))->where('status','confirmed')->exists()) {
+            app(InventoryWriteIntents::class)->claim($variant,$payload,$batch);
+            if (data_get($remote, 'inventoryItem.tracked') !== $tracked
+                || ($tracked && $this->locationOnHand($remote, $location) !== (int) $target)) {
+                throw new \RuntimeException('Shopify has not confirmed the intended inventory state. Reconciliation is required.');
+            }
+            return;
+        }
+        $expected = $this->locationOnHand($remote, $location);
+        if ($item && $item->original_inventory_tracked && $item->original_on_hand_quantity !== $expected) {
+            throw new \RuntimeException('Shopify stock changed since this count was requested. Review a new adjustment; no write was sent.');
+        }
+        $intent = app(InventoryWriteIntents::class)->claim($variant, $payload, $batch);
+        if ($intent->status === 'confirmed') return;
+        $authorize = function () use ($batch, $variant, $actor): void {
+            if ((int) Variant::whereKey($variant->id)->value('inventory_write_version') !== (int) $variant->inventory_write_version) {
+                throw new \RuntimeException('Inventory intent changed while Shopify was being read. No new mutation is authorized.');
+            }
+            if (str_starts_with((string) $batch, 'inventory_approval_')) {
+                app(InventoryAdjustmentApprovalService::class)->authorizeBatch($batch,[$variant->id],$actor);
+            } elseif (! str_starts_with((string) $batch, 'stack_sellability_')) {
+                app(InventoryAccessService::class)->authorizeInventory($actor);
+            }
+        };
+        $mutationStarted = false;
+        try {
+            $inventoryItem = (string) data_get($remote, 'inventoryItem.id');
+            if (data_get($remote, 'inventoryItem.tracked') !== $tracked) {
+                $authorize();
+                $mutationStarted = true;
+                $this->updateShopifyInventoryTracking($inventoryItem, $tracked);
+                if ($tracked) {
+                    $remote = $this->matchRemoteVariant($variant, collect(data_get($this->shopifyProductInventoryDetails($product), 'variants.nodes', []))) ?? [];
+                    $expected = $this->locationOnHand($remote, $location);
+                }
+            }
+            $authorize();
+            if (in_array($variant->inventory_policy,['deny','continue'],true)) $mutationStarted = true;
+            $this->updateShopifyInventoryPolicy($product->shopify_id, (string) ($remote['id'] ?? ''), $variant->inventory_policy);
+            if ($tracked) {
+                $previouslyUntracked = $item && $item->original_inventory_tracked === false;
+                if ($expected === null && ! $previouslyUntracked) {
+                    throw new \RuntimeException('Shopify on-hand comparison quantity is unavailable.');
+                }
+                $authorize();
+                $mutationStarted = true;
+                $this->updateShopifyOnHandQuantity($inventoryItem, (int) $target, (string) ($remote['id'] ?? ''), $variant, $actor, $batch, $expected, $intent->intent_key);
+            }
+            $confirmed = $this->matchRemoteVariant($variant, collect(data_get($this->shopifyProductInventoryDetails($product), 'variants.nodes', [])));
+            if ($confirmed === null || data_get($confirmed, 'inventoryItem.tracked') !== $tracked
+                || ($tracked && $this->locationOnHand($confirmed, $location) !== (int) $target)) {
+                throw new \RuntimeException('Shopify has not confirmed the intended inventory state. Reconciliation is required.');
+            }
+            $intent->update(['status' => 'confirmed']);
+        } catch (\Throwable $e) {
+            // Explicit Shopify rejection is a known non-application. Transport/malformed
+            // responses and divergent readback remain started and must never be replayed.
+            $intent->update(['status' => ! $mutationStarted || $e instanceof \App\Exceptions\InventoryMutationRejectedException ? 'rejected' : 'started', 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
+    private function locationOnHand(array $remote, ?string $location): ?int
+    {
+        foreach ((array) data_get($remote, 'inventoryItem.inventoryLevels.nodes', []) as $level) {
+            if (data_get($level, 'location.id') !== $location) continue;
+            foreach ($level['quantities'] ?? [] as $quantity) {
+                if (($quantity['name'] ?? '') === 'on_hand') return $this->normalizeRemoteInventoryQuantity($quantity['quantity'] ?? null);
+            }
+        }
+        return null;
+    }
+
+    private function shouldPushVariantInventory(Variant $variant, ?string $syncBatchId = null): bool
+    {
+        if ($this->approvedCorrectionPending($variant, $syncBatchId)) {
+            return true;
+        }
+
         if ($variant->inventory_local_dirty) {
             return true;
         }
@@ -233,12 +334,128 @@ final class ProductInventorySyncService
         return $variant->inventory_qty !== null;
     }
 
+    private function approvedCorrectionPending(Variant $variant, ?string $syncBatchId): bool
+    {
+        if (! str_starts_with((string) $syncBatchId, 'inventory_approval_')) {
+            return false;
+        }
+
+        return InventoryAdjustmentRequestItem::query()
+            ->where('variant_id', $variant->id)
+            ->whereHas('request', fn ($query) => $query
+                ->where('sync_batch_id', $syncBatchId)
+                ->where('status', \App\Models\InventoryAdjustmentRequest::STATUS_APPROVED))
+            ->exists();
+    }
+
+    private function approvedCorrectionAwaitingConfirmation(Variant $variant): bool
+    {
+        $items = InventoryAdjustmentRequestItem::query()
+            ->where('variant_id', $variant->id)
+            ->whereHas('request', fn ($query) => $query->where('status', \App\Models\InventoryAdjustmentRequest::STATUS_APPROVED))
+            ->get();
+
+        foreach ($items as $item) {
+            $confirmed = \App\Models\InventoryWriteIntent::query()
+                ->where('variant_id', $variant->id)
+                ->where('status', 'confirmed')
+                ->get()
+                ->contains(function (\App\Models\InventoryWriteIntent $intent) use ($item): bool {
+                    $payload = is_array($intent->payload) ? $intent->payload : [];
+                    if ((bool) ($payload['tracked'] ?? false) !== (bool) $item->requested_inventory_tracked) {
+                        return false;
+                    }
+                    if ($item->requested_inventory_tracked !== true) {
+                        return true;
+                    }
+
+                    return (int) ($payload['target'] ?? -1) === (int) $item->requested_on_hand_quantity;
+                });
+            if (! $confirmed) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param Collection<int, Variant> $variants
+     */
+    private function assertInventoryRefreshComplete(array $details, Collection $variants): void
+    {
+        if (! is_array(data_get($details, 'variants'))) {
+            throw new \RuntimeException('Incomplete Shopify inventory read: product inventory payload is missing.');
+        }
+        if (data_get($details, 'variants.pageInfo.hasNextPage') === true) {
+            throw new \RuntimeException('Incomplete Shopify inventory read: variant pagination is incomplete.');
+        }
+
+        $remoteVariants = collect(data_get($details, 'variants.nodes', []))
+            ->filter(fn ($node): bool => is_array($node))
+            ->values();
+        foreach ($variants as $variant) {
+            if (! $variant instanceof Variant) {
+                continue;
+            }
+            $this->assertRemoteInventoryReadComplete($variant, $this->matchRemoteVariant($variant, $remoteVariants));
+        }
+    }
+
+    private function assertRemoteInventoryReadComplete(Variant $variant, ?array $remote): void
+    {
+        if (! is_array($remote)) {
+            throw new \RuntimeException("Incomplete Shopify inventory read: expected variant {$variant->sku} was not returned.");
+        }
+        $item = data_get($remote, 'inventoryItem');
+        if (! is_array($item) || trim((string) ($item['id'] ?? '')) === '') {
+            throw new \RuntimeException("Incomplete Shopify inventory read: inventory item for {$variant->sku} is missing.");
+        }
+        if (data_get($item, 'inventoryLevels.pageInfo.hasNextPage') === true) {
+            throw new \RuntimeException('Incomplete Shopify inventory read: inventory level pagination is incomplete.');
+        }
+        if (! array_key_exists('tracked', $item) || $item['tracked'] === null) {
+            throw new \RuntimeException("Incomplete Shopify inventory read: tracking status for {$variant->sku} is missing.");
+        }
+        if ($item['tracked'] === true) {
+            $available = $this->inventoryQuantities($remote)['available']
+                ?? $this->normalizeRemoteInventoryQuantity(data_get($remote, 'inventoryQuantity'));
+            if ($available === null) {
+                throw new \RuntimeException("Incomplete Shopify inventory read: stock quantity for {$variant->sku} is missing.");
+            }
+        }
+    }
+
+    /**
+     * @param Collection<int, mixed> $variants
+     */
+    private function preserveInventoryAfterIncompleteRead(Collection $variants, \Throwable $exception): void
+    {
+        $message = $exception->getMessage();
+        if (! str_starts_with($message, 'Incomplete Shopify inventory read')) {
+            $message = 'Incomplete Shopify inventory read: '.$message;
+        }
+
+        foreach ($variants as $variant) {
+            if (! $variant instanceof Variant) {
+                continue;
+            }
+            if ($variant->shopify_inventory_item_id) {
+                app(InventoryLevelReconciliation::class)->record((string) $variant->shopify_inventory_item_id);
+            }
+            Variant::withoutEvents(function () use ($variant, $message): void {
+                $variant->forceFill(['inventory_sync_error' => $message])->save();
+            });
+        }
+    }
+
     /**
      * @param Collection<int, Variant> $variants
      */
     private function refreshProductVariants(Product $product, Collection $variants, ?int $userId): void
     {
         $details = $this->shopifyProductInventoryDetails($product);
+        $this->assertInventoryRefreshComplete($details, $variants);
         $remoteStatus = strtolower(trim((string) ($details['status'] ?? '')));
         $remoteCreatedAt = trim((string) ($details['createdAt'] ?? ''));
 
@@ -267,7 +484,7 @@ final class ProductInventorySyncService
 
                 $remoteVariant = $this->matchRemoteVariant($variant, $remoteVariants);
                 if ($remoteVariant === null) {
-                    continue;
+                    throw new \RuntimeException("Incomplete Shopify inventory read: expected variant {$variant->sku} was not returned.");
                 }
 
                 $tracked = data_get($remoteVariant, 'inventoryItem.tracked');
@@ -393,7 +610,11 @@ final class ProductInventorySyncService
 
         $errors = data_get($data, 'inventoryItemUpdate.userErrors', []);
         if (is_array($errors) && !empty($errors)) {
-            throw new \RuntimeException($this->formatUserErrors($errors, 'inventoryItemUpdate'));
+            throw new \App\Exceptions\InventoryMutationRejectedException($this->formatUserErrors($errors, 'inventoryItemUpdate'));
+        }
+        if (data_get($data, 'inventoryItemUpdate.inventoryItem.id') !== $inventoryItemId
+            || data_get($data, 'inventoryItemUpdate.inventoryItem.tracked') !== $tracked) {
+            throw new \RuntimeException('Shopify did not confirm inventory tracking.');
         }
     }
 
@@ -420,7 +641,7 @@ final class ProductInventorySyncService
         }
     }
 
-    private function updateShopifyOnHandQuantity(string $inventoryItemId, int $quantity, string $variantId, ?Variant $variant = null, ?int $userId = null, ?string $syncBatchId = null): void
+    private function updateShopifyOnHandQuantity(string $inventoryItemId, int $quantity, string $variantId, ?Variant $variant = null, ?int $userId = null, ?string $syncBatchId = null, ?int $expected = null, ?string $idempotencyKey = null): void
     {
         $locationId = $this->firstLocationId();
         if ($locationId === null) {
@@ -469,14 +690,15 @@ final class ProductInventorySyncService
                 'input' => [
                     'name' => 'on_hand',
                     'reason' => 'correction',
-                    'ignoreCompareQuantity' => true,
                     'referenceDocumentUri' => 'logistics://shopify-editor/inventory/' . rawurlencode($variantId),
                     'quantities' => [[
                         'inventoryItemId' => $inventoryItemId,
                         'locationId' => $locationId,
                         'quantity' => $quantity,
+                        ...($expected === null ? [] : ['changeFromQuantity' => $expected]),
                     ]],
                 ],
+                'idempotencyKey' => $idempotencyKey,
             ]);
         } catch (\Throwable $exception) {
             app(InventoryAuditRecorder::class)->failed($context, $exception->getMessage());
@@ -489,6 +711,13 @@ final class ProductInventorySyncService
             $message = $this->formatUserErrors($errors, 'inventorySetQuantities');
             app(InventoryAuditRecorder::class)->failed($context, $message);
 
+            throw new \App\Exceptions\InventoryMutationRejectedException($message);
+        }
+
+        if (! is_array(data_get($data, 'inventorySetQuantities.inventoryAdjustmentGroup'))
+            || ! data_get($data, 'inventorySetQuantities.inventoryAdjustmentGroup.createdAt')) {
+            $message = 'Shopify did not confirm the inventory adjustment; automatic replay is blocked.';
+            app(InventoryAuditRecorder::class)->failed($context,$message);
             throw new \RuntimeException($message);
         }
 
@@ -522,14 +751,19 @@ final class ProductInventorySyncService
 
     private function markInventorySynced(Variant $variant, ?string $syncBatchId): void
     {
-        Variant::withoutEvents(function () use ($variant, $syncBatchId): void {
-            $variant->forceFill([
+        \Illuminate\Support\Facades\DB::transaction(function () use ($variant, $syncBatchId): void {
+            $locked = Variant::lockForUpdate()->findOrFail($variant->id);
+            if ((int) $locked->inventory_write_version !== (int) $variant->inventory_write_version) {
+                throw new \RuntimeException('A newer inventory intent was retained after the previous Shopify operation.');
+            }
+            $locked->forceFill([
                 'inventory_local_dirty' => false,
                 'inventory_sync_error' => null,
                 'inventory_pushed_at' => now(),
                 'inventory_sync_batch_id' => $syncBatchId,
-            ])->save();
+            ])->saveQuietly();
         });
+        $variant->refresh();
     }
 
     private function markInventorySyncFailed(Variant $variant, string $message): void
@@ -547,6 +781,22 @@ final class ProductInventorySyncService
      */
     private function applyRemoteVariantRefresh(Variant $variant, array $updates, ?int $userId = null, ?Product $product = null): void
     {
+        \Illuminate\Support\Facades\DB::transaction(function () use ($variant, $updates, $userId, $product): void {
+        $latest = Variant::lockForUpdate()->findOrFail($variant->id);
+        if ((int) $latest->inventory_write_version !== (int) $variant->inventory_write_version) {
+            unset($updates['inventory_tracked'],$updates['inventory_qty'],$updates['current_on_hand_quantity'],$updates['inventory_policy']);
+            $updates['inventory_local_dirty'] = $latest->inventory_local_dirty;
+            $updates['inventory_sync_error'] = $latest->inventory_sync_error;
+        }
+        $variant->setRawAttributes($latest->getAttributes(),true);
+        if (\App\Models\InventoryWriteIntent::where('variant_id',$variant->id)->where('status','started')->exists()) {
+            $updates['inventory_local_dirty'] = true;
+            $updates['inventory_sync_error'] = 'An inventory mutation has an uncertain outcome. Operator reconciliation is required.';
+            unset($updates['inventory_tracked'],$updates['inventory_qty'],$updates['current_on_hand_quantity']);
+        }
+        if ($this->approvedCorrectionAwaitingConfirmation($variant)) {
+            $updates['inventory_local_dirty'] = true;
+        }
         $changes = [];
         foreach ($updates as $field => $value) {
             $original = $variant->getAttribute($field);
@@ -579,6 +829,7 @@ final class ProductInventorySyncService
                 'new_value' => $this->stringifyValue($change['new']),
             ]);
         }
+        });
     }
 
     private function normalizeRemoteInventoryQuantity(mixed $value): ?int
@@ -686,6 +937,7 @@ query ProductInventoryById($id: ID!) {
     status
     createdAt
     variants(first: 250) {
+      pageInfo { hasNextPage }
       nodes {
         id
         sku
@@ -698,6 +950,7 @@ query ProductInventoryById($id: ID!) {
           id
           tracked
           inventoryLevels(first: 250) {
+            pageInfo { hasNextPage }
             nodes {
               location { id }
               quantities(names: ["available", "committed", "on_hand"]) { name quantity }
@@ -720,6 +973,7 @@ query ProductInventoryByHandle($handle: String!) {
     status
     createdAt
     variants(first: 250) {
+      pageInfo { hasNextPage }
       nodes {
         id
         sku
@@ -732,6 +986,7 @@ query ProductInventoryByHandle($handle: String!) {
           id
           tracked
           inventoryLevels(first: 250) {
+            pageInfo { hasNextPage }
             nodes {
               location { id }
               quantities(names: ["available", "committed", "on_hand"]) { name quantity }
@@ -771,8 +1026,9 @@ GQL;
     private function inventorySetMutation(): string
     {
         return <<<'GQL'
-mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-  inventorySetQuantities(input: $input) {
+mutation InventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+  inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
     userErrors { field message code }
   }
 }

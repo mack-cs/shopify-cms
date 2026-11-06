@@ -1024,6 +1024,14 @@ class ProductResource extends Resource
                 ->trueColor('warning')
                 ->falseColor('success')
                 ->toggleable(),
+            TextColumn::make('engraved_bead_configuration')
+                ->label('Engraved beads')
+                ->state(fn (Product $record): string => \App\Services\EngravedBeads\EngravedBeadConfiguration::fromProduct($record)->label())
+                ->placeholder('-')
+                ->badge()
+                ->color(fn (Product $record): string => $record->engraved_bead_configuration === 'invalid' ? 'danger' : 'info')
+                ->wrap()
+                ->toggleable(),
             TextColumn::make('handle')
                 ->searchable(query: function (Builder $query, string $search): Builder {
                     return $query->where('handle', 'like', "%{$search}%")
@@ -2183,6 +2191,45 @@ class ProductResource extends Resource
                         );
                     })
                     ->deselectRecordsAfterCompletion(),
+                BulkAction::make('launchOnShopify')
+                    ->label('Launch Products on Shopify')
+                    ->icon('heroicon-o-rocket-launch')
+                    ->color('success')
+                    ->visible(fn (): bool => (bool) config('product_launch.enabled', true)
+                        && (Auth::user()?->can(\App\Enums\PermissionEnum::ShopifyPushProducts->value) ?? false))
+                    ->modalHeading('Launch products on Shopify')
+                    ->modalDescription('Approval does not publish a product. Launch sets ACTIVE status and the sales channels you select, and it applies approved inventory only when Shopify stock still matches the CMS.')
+                    ->modalWidth('6xl')
+                    ->form(function ($livewire): array {
+                        $records = $livewire->getSelectedTableRecords();
+
+                        return [
+                            Placeholder::make('launch_review')
+                                ->label('Review')
+                                ->content(new HtmlString(self::launchPreviewHtml($records))),
+                            CheckboxList::make('publication_ids')
+                                ->label('Sales channels')
+                                ->options(self::launchPublicationOptions())
+                                ->required()
+                                ->columns(1)
+                                ->helperText('ACTIVE status and publication are confirmed separately. A product is not reported as launched until Shopify confirms both.'),
+                        ];
+                    })
+                    ->action(function (Collection $records, array $data) {
+                        $run = app(\App\Services\Shopify\ProductLaunchService::class)->queue(
+                            $records,
+                            (array) ($data['publication_ids'] ?? []),
+                            Auth::id() ? (int) Auth::id() : null,
+                        );
+
+                        self::sendNotification(Notification::make()
+                            ->title('Launch queued')
+                            ->body('Shopify has not confirmed the launch yet. Open the launch result to watch each product finish or fail.')
+                            ->info());
+
+                        return redirect(\App\Filament\Pages\ProductLaunchResult::getUrl().'?run='.$run->id);
+                    })
+                    ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkApplyApprovedHandles')
                     ->label('Apply Approved URLs')
                     ->icon('heroicon-o-link')
@@ -3177,6 +3224,68 @@ class ProductResource extends Resource
 
         return self::previewLabelList('Will request approval for', $labels, false)
             ?? 'Choose at least one valid field.';
+    }
+
+    /** @param Collection<int, Product> $records */
+    private static function launchPreviewHtml(Collection $records): string
+    {
+        $rows = '';
+        foreach ($records as $product) {
+            if (! $product instanceof Product) {
+                continue;
+            }
+            $product->loadMissing('variants');
+            $variant = $product->variants->count() === 1 ? $product->variants->first() : null;
+            $stack = $product->isStackProduct();
+            $validation = 'Ready';
+            if (! $product->isApprovedByTwo()) {
+                $validation = 'Blocked: not approved';
+            } elseif ($product->has_errors) {
+                $validation = 'Blocked: product errors';
+            } elseif (! $variant instanceof Variant || trim((string) $variant->sku) === '') {
+                $validation = 'Blocked: SKU mapping';
+            } elseif (! $stack && $variant->inventory_tracked === true && $variant->inventory_qty === null) {
+                $validation = 'Blocked: no approved inventory';
+            }
+            $rows .= '<tr>'
+                .'<td>'.e((string) $product->title).'<br><span style="color:#6b7280;">'.e((string) ($variant?->sku ?: 'No SKU')).'</span></td>'
+                .'<td>'.e((string) ($product->status ?: 'unknown')).'</td>'
+                .'<td>active</td>'
+                .'<td>'.($stack ? 'Untracked' : ($variant?->inventory_tracked === true ? 'Tracked' : 'Untracked')).'</td>'
+                .'<td>'.e($stack ? '—' : (string) ($variant?->current_on_hand_quantity ?? $variant?->inventory_qty ?? '—')).'</td>'
+                .'<td>'.e($stack ? 'Not assigned' : (string) ($variant?->inventory_qty ?? '—')).'</td>'
+                .'<td>'.e($validation).'</td>'
+                .'</tr>';
+        }
+        if ($rows === '') {
+            $rows = '<tr><td colspan="7">No products selected.</td></tr>';
+        }
+
+        return '<div style="overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">'
+            .'<thead><tr>'
+            .'<th style="text-align:left;padding:6px;">Product</th>'
+            .'<th style="text-align:left;padding:6px;">Current status</th>'
+            .'<th style="text-align:left;padding:6px;">New status</th>'
+            .'<th style="text-align:left;padding:6px;">Inventory tracking</th>'
+            .'<th style="text-align:left;padding:6px;">Current inventory</th>'
+            .'<th style="text-align:left;padding:6px;">Proposed inventory</th>'
+            .'<th style="text-align:left;padding:6px;">Validation</th>'
+            .'</tr></thead><tbody>'.$rows.'</tbody></table>'
+            .'<p style="margin-top:8px;color:#6b7280;">Sales channels are the ones selected below. Shopify inventory is compared again before any stock is written. Blocked products are skipped and the others continue.</p></div>';
+    }
+
+    /** @return array<string, string> */
+    private static function launchPublicationOptions(): array
+    {
+        $options = [];
+        foreach ((array) config('product_launch.publications', []) as $id) {
+            $id = trim((string) $id);
+            if ($id !== '') {
+                $options[$id] = $id;
+            }
+        }
+
+        return $options;
     }
 
     private static function bulkSyncPreviewHtml(): string

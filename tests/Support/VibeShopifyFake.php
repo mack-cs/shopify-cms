@@ -9,6 +9,8 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
 {
     public array $calls = [];
 
+    public bool $failProductReorder = false;
+
     public array $references = ['gid://shopify/Metaobject/12', 'gid://shopify/Metaobject/11'];
 
     public array $cards = [];
@@ -38,6 +40,9 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
     public array $files = [];
 
     public string $fileStatus = 'READY';
+
+    /** @var array<string, array<string, mixed>|null>|null */
+    public ?array $membershipPages = null;
 
     public function __construct()
     {
@@ -175,6 +180,10 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
                 ['key' => 'link', 'type' => ['name' => 'url']],
             ]]];
         }
+        if (str_contains($query, 'query VibeCollectionCatalogue')) {
+            return ['collections' => ['nodes' => array_values($this->collections),
+                'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
+        }
         if (str_contains($query, 'query VibeParents')) {
             return ['collections' => ['nodes' => array_map(fn ($collection) => array_replace($collection, ['metafield' => $this->metafield($collection['id'])]), array_values($this->collections)),
                 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]];
@@ -191,6 +200,29 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
         }
         if (str_contains($query, 'query VibeCollectionMapping')) {
             return ['collection' => $this->collections[$variables['id']] ?? null];
+        }
+        if (str_contains($query, 'query VibeMembership')) {
+            $id = $variables['id'] ?? '';
+            $after = $variables['after'] ?? null;
+            $afterKey = $after === null ? '' : (string) $after;
+            if (is_array($this->membershipPages)) {
+                return ['collection' => $this->membershipPages[$afterKey] ?? null];
+            }
+            $collection = $this->collections[$id] ?? null;
+            if (! is_array($collection) || $after !== null) {
+                return ['collection' => $after !== null ? null : $collection];
+            }
+            $nodes = array_map(
+                fn (array $product): array => ['id' => $product['id'], 'title' => $product['title']],
+                $collection['products']['nodes'] ?? []
+            );
+
+            return ['collection' => [
+                'id' => $collection['id'],
+                'title' => $collection['title'],
+                'productsCount' => ['count' => count($nodes)],
+                'products' => ['nodes' => $nodes, 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]],
+            ]];
         }
         if (str_contains($query, 'query VibeProducts')) {
             return ['collection' => $this->collections[$variables['id']] ?? null];
@@ -255,16 +287,21 @@ class VibeShopifyFake implements ShopifyGraphqlGateway
             foreach ($variables['ids'] as $id) {
                 $this->collections[$variables['id']]['products']['nodes'][] = $this->product((int) basename($id));
             }
+            $this->collections[$variables['id']]['productsCount']['count'] = count($this->collections[$variables['id']]['products']['nodes']);
 
             return ['collectionAddProducts' => ['collection' => ['id' => $variables['id']], 'userErrors' => []]];
         }
         if (str_contains($query, 'mutation VibeRemoveProducts')) {
             $this->collections[$variables['id']]['products']['nodes'] = array_values(array_filter(
                 $this->collections[$variables['id']]['products']['nodes'], fn ($product) => ! in_array($product['id'], $variables['ids'], true)));
+            $this->collections[$variables['id']]['productsCount']['count'] = count($this->collections[$variables['id']]['products']['nodes']);
 
             return ['collectionRemoveProducts' => ['job' => ['id' => 'gid://shopify/Job/remove'], 'userErrors' => []]];
         }
         if (str_contains($query, 'mutation VibeReorderProducts')) {
+            if ($this->failProductReorder) {
+                throw new RuntimeException('Shopify rejected the reorder.');
+            }
             $products = $this->collections[$variables['id']]['products']['nodes'];
             foreach ($variables['moves'] as $move) {
                 $index = array_search($move['id'], array_column($products, 'id'), true);

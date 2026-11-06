@@ -3,6 +3,7 @@
 namespace Tests;
 
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Illuminate\Support\Facades\Http;
 
 abstract class TestCase extends BaseTestCase
 {
@@ -25,7 +26,7 @@ abstract class TestCase extends BaseTestCase
 
         if ($connection !== 'sqlite' || $database !== ':memory:') {
             throw new \RuntimeException(
-                "Refusing to run tests against configured database [{$connection}:{$database}]. " .
+                "Refusing to run tests against configured database [{$connection}:{$database}]. ".
                 'The application must resolve to sqlite::memory: before RefreshDatabase starts.'
             );
         }
@@ -41,11 +42,12 @@ abstract class TestCase extends BaseTestCase
 
         if ($appEnv !== 'testing' || $dbConnection !== 'sqlite' || $dbDatabase !== ':memory:') {
             throw new \RuntimeException(
-                'Refusing to run tests unless APP_ENV=testing, DB_CONNECTION=sqlite, and DB_DATABASE=:memory:. ' .
+                'Refusing to run tests unless APP_ENV=testing, DB_CONNECTION=sqlite, and DB_DATABASE=:memory:. '.
                 'This prevents RefreshDatabase from wiping a local or production database.'
             );
         }
 
         parent::setUp();
+        Http::preventStrayRequests();
     }
 }

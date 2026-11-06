@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
+require_once __DIR__.'/../Support/InventoryAuthorizationFixture.php';
 
 it('sets on hand and refreshes Shopify available committed and on hand quantities', function (): void {
     config()->set('services.shopify.shop', 'test-shop.myshopify.com');
@@ -80,7 +81,7 @@ it('sets on hand and refreshes Shopify available committed and on hand quantitie
         if (str_contains($query, 'mutation InventorySetQuantities')) {
             $setInput = $variables['input'] ?? null;
 
-            return Http::response(['data' => ['inventorySetQuantities' => ['userErrors' => []]]]);
+            return Http::response(['data' => ['inventorySetQuantities' => ['inventoryAdjustmentGroup' => ['createdAt' => now()->toISOString()], 'userErrors' => []]]]);
         }
         if (str_contains($query, 'mutation ProductStatusUpdate')) {
             return Http::response(['data' => ['productUpdate' => ['userErrors' => []]]]);
@@ -89,10 +90,10 @@ it('sets on hand and refreshes Shopify available committed and on hand quantitie
         throw new RuntimeException('Unexpected Shopify GraphQL request.');
     });
 
-    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]));
+    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]), inventoryAuthorizedUser()->id);
 
     expect($result['failed'])->toBe(0)
-        ->and($productReads)->toBe(2)
+        ->and($productReads)->toBe(3)
         ->and($setInput)->toMatchArray([
             'name' => 'on_hand',
             'reason' => 'correction',
@@ -100,6 +101,7 @@ it('sets on hand and refreshes Shopify available committed and on hand quantitie
                 'inventoryItemId' => 'gid://shopify/InventoryItem/9001',
                 'locationId' => 'gid://shopify/Location/1',
                 'quantity' => 10,
+                'changeFromQuantity' => 10,
             ]],
         ]);
 
@@ -212,13 +214,13 @@ it('updates a draft product on hand without changing its draft status', function
         if (str_contains($query, 'mutation InventorySetQuantities')) {
             $setInput = $variables['input'] ?? null;
 
-            return Http::response(['data' => ['inventorySetQuantities' => ['userErrors' => []]]]);
+            return Http::response(['data' => ['inventorySetQuantities' => ['inventoryAdjustmentGroup' => ['createdAt' => now()->toISOString()], 'userErrors' => []]]]);
         }
 
         throw new RuntimeException('Unexpected Shopify GraphQL request.');
     });
 
-    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]));
+    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]), inventoryAuthorizedUser()->id);
 
     expect($result['failed'])->toBe(0)
         ->and($statusMutations)->toBe(0)
@@ -274,7 +276,7 @@ it('does not update inventory when the sku matches more than one shopify variant
         ]]]);
     });
 
-    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]));
+    $result = app(ProductInventorySyncService::class)->syncVariants(collect([$variant]), inventoryAuthorizedUser()->id);
 
     expect($result['failed'])->toBe(1)
         ->and($result['failures'][0])->toContain('Unable to resolve Shopify variant');

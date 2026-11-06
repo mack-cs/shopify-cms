@@ -1,0 +1,550 @@
+FINAL PRE-DEPLOYMENT AUDIT — LEIGH AVENUE CMS
+4 November 2026 | Independent review of final working tree
+
+Scope and evidence
+Branch: feat/syv-sorting-approval-integration
+HEAD: a80f0004fa71f02fe8c496dd6d81264b11118414 plus pre-existing uncommitted changes.
+Application code was not edited. Audit-only tests and harnesses were added.
+No deployment, commit, live Shopify mutation, production inventory change, flag activation,
+or deletion of historical application data was performed. MySQL harnesses created and
+removed only their own randomly named, localhost-only disposable databases.
+
+This is a release review, not certification of an inspected production installation.
+No production shell, Supervisor status, cron execution history, database backup or
+production database query plans were available/verified. The inspected .env is LOCAL,
+not production. Do not interpret its values as evidence of production settings.
+The user's successful two-user manual SYV workflow test remains valid evidence of
+the ordinary workflow. No new authenticated browser session was attempted here;
+browser heap growth, actual network response sizes and live integration were not measured.
+
+DECISION: NO-GO for this working tree as a final production release. Concrete failures
+are listed below. Do not activate engraved beads. Product configuration incompleteness
+alone is NOT a reason to reject safely disabled code; the generic write bypass is.
+
+A. CRITICAL RELEASE BLOCKERS
+
+A1. Expired scoped push tickets leave a stale 'pushing' hold.
+Evidence: app/Services/ShopYourVibeWorkflow.php:1552 (pushScopedSort),
+app/Services/ShopYourVibeEditing.php:300 (validateJob) and :407 (acquireScope),
+app/Jobs/PushShopYourVibe.php:43 (failed).
+Mechanism: queueCollection sets the collection lock status to pushing, while the
+draft's overall status remains pending. pushScopedSort validates its ticket BEFORE
+entering its try/catch. A ticket queued longer than its 840-second editing lease
+throws at that validation. The job failure callback only handles overall draft
+status 'pushing', so it returns without clearing this scoped hold. acquireScope
+rejects a pushing scope before considering lease expiry. Permission revocation or
+an initial validation failure can take the same path; process death needs review too.
+Reproduction: FinalPredeploymentAuditTest, third test: queued a second scoped sort,
+advanced time 841 seconds, invoked job handle and failed callback; lock stayed
+pushing and reacquisition threw. No Shopify write was needed for this failure.
+Impact: normal backlog, worker downtime or a deploy can strand ordinary editing/retry.
+An explicit audited discard may be an escape, but it discards the pending order;
+that is not a recovery that preserves approved work. No automatic recovery was found.
+Smallest proposed fix: handle validation failure inside scoped cleanup; implement a
+ticket-ID/revision-fenced scoped failed callback, preserving checkpoints and pending
+work. Do not clear another attempt's lock. Test expiry, timeout, process restart,
+revoked user and concurrent replacement ticket, including MySQL interleavings.
+
+A2. Scoped sorting bypasses durable asynchronous reorder confirmation.
+Evidence: ShopYourVibeWorkflow.php:1549-1637, specifically the reorder loop near :1590.
+ShopYourVibeShopify.php:927 returns Shopify's job ID. The scoped caller discards it,
+unlike the generic workflow's trackJob/waitForJob/checkpointCollection path.
+Mechanism: it sends chunks of up to 250 moves without checkpointing or waiting for
+each returned async job. An immediate read can show an old or intermediate order.
+The catch releases the scoped pushing hold without preserving remote job IDs.
+Retrying or making another sort can therefore overlap an earlier accepted reorder.
+A delayed earlier job can change order after a later operation's readback.
+Reproduction: third audit test uses the installed stateful fake with jobDone=false;
+the scoped push reports synced, makes zero VibeJob queries and has no remote_jobs.
+This isolates the missing confirmation; the fake applies changes immediately, so
+it does NOT prove that a real delayed job completed. The race mechanism follows
+from the discarded job IDs and the ability to retry/edit with no remote checkpoint.
+Impact: stale jobs can alter the published order after apparent completion, and
+large multi-chunk sorts have no confirmed execution ordering.
+Smallest proposed fix: persist scoped job IDs before waiting, confirm each job,
+resume unresolved jobs on retry, and block conflicting edits until remote completion
+and final exact order verification. Retain collection isolation. Add delayed/out-of-
+order job tests and lost-response tests. Recheck authorization before new mutations;
+the scoped path also lacks the generic path's beforeMutation validation callback.
+
+A3. Both engraved flags do NOT guard generic CMS inventory mutations.
+Evidence: ProductInventorySyncService.php:161-216, :376, :423;
+InventorySyncJob.php:43; BulkInventoryTrackingService.php:33.
+Mechanism: generic inventory sync never checks bead participation or either flag.
+A local dirty bead variant goes through inventoryItemUpdate and, when tracked,
+absolute on-hand writes, independently of the specialized engraved write guard.
+Reproduction: second audit test creates an inactive discovered engraved family,
+sets both flags false, and invokes the normal inventory sync service for a dirty
+member. An HTTP fake records an inventoryItemUpdate mutation. No live call occurs.
+Impact: ordinary manual inventory/queued inventory sync can change bead tracking
+before activation despite the required disabled-state guarantee. A flag rollback
+does not reliably stop all writers. The existence of specialized guards is insufficient.
+Smallest proposed fix: enforce the disabled bead rule at generic Shopify mutation
+boundaries, using product/variant participation plus mapped-family membership, while
+preserving ordinary stack/component inventory. Inventory corrections that operations
+intend to allow need an explicit, separately authorized policy; flags currently do
+not provide the absolute protection requested. Cover old queued payloads and bulk,
+manual, receipt, product update and launch writers. Do not modify the 28 live products.
+
+A4. Full collection reads accept incomplete snapshots.
+Evidence: ShopYourVibeShopify.php:179-269 (collection), contrasted with :299-374
+(readCollectionMembership); ShopYourVibeWorkflow.php:1190 (confirmedState).
+Mechanism: the full reader validates fields/cursors, but does not compare unique
+product IDs and fetched count against productsCount at completion. It accepts
+duplicates or a terminal response with fewer products than reported. This reader
+feeds open/refresh and publication readback, not just display metadata.
+Reproduction: first audit test supplies one valid product, productsCount=3 and
+hasNextPage=false. collection() returns product_count=3 and a one-product array
+instead of failing. The membership-only reader's stronger protections do not
+protect these separate callers.
+Impact: partial Shopify data can become a stored snapshot or publication evidence;
+missing products can be treated as absent. This violates the explicit completeness
+requirement and weakens stale snapshot/deleted-product handling.
+Smallest proposed fix: share strict pagination/count/uniqueness checks across both
+readers; reject conflicting counts, malformed counts and duplicate IDs, boundedly
+retry reads changed in flight, and retain the last confirmed snapshot on failure.
+Test truncated terminal pages, changing membership, duplicate IDs and page boundaries.
+
+B. HIGH-PRIORITY RISKS OVER 30–90 DAYS
+
+B1. Stack remote sellability failure can outlive the triggering event.
+Code-inspection finding: StackBundleSellabilityService.php:363-400 updates local
+unsellability before a remote push; :375-382 returns early when local state is
+already unsellable. StackSellabilityShopifyPushService queues only summary changes.
+ProductInventorySyncService catches product failures and returns failed counts;
+InventorySyncJob treats that as a completed queue job rather than throwing/releasing.
+Thus a failed remote disable may leave Shopify sellable while the CMS is disabled,
+and a repeated identical event may have no change to enqueue. Dirty/error fields
+detect the failure, but are not a durable retry consumer. This is a concrete failure
+chain from code; a dedicated end-to-end failed-disable replay test was not run.
+Required before relying on unattended inventory safety: demonstrate recovery on a
+staging fake/delayed gateway, and add durable retry of unconfirmed remote state,
+not just local transitions. Do not change component accounting without that test.
+
+B2. Default queue reservation is shorter than inventory jobs.
+config/queue.php: database retry_after defaults to 90 seconds. InventorySyncJob has
+timeout=1800; HandleShopifyInventoryLevelUpdatedJob has timeout=300 and no explicit
+connection, so it remains on the default backend. README.md:163 documents a default
+worker timeout of 1800. Unless overridden, a second worker can reserve a still-running
+job after 90 seconds. Unique dispatch does not extend a reserved job's visibility.
+Separate inventory-ledger jobs have timeout=300/retry_after=480; SYV has 840/960;
+product-launch has 900/1020. Those pairs are sensible, but do not fix default jobs.
+Production override and workers remain unverified. Set visibility above the actual
+longest default job timeout, or isolate these jobs on an appropriate connection.
+An explicit PHP job timeout overrides a lower generic worker default.
+
+B3. Required consumers and scheduler are not verified in production.
+Required: shop-your-vibe, inventory-ledger, product-launch, syv-notifications on the
+database connection, plus existing default/procurement/other application queues.
+SendSyvSortApprovalEmailJob explicitly targets database/syv-notifications. A default
+worker does not consume that queue automatically. Missing consumers strand jobs;
+there is no production evidence of worker count, priority, memory, restart or alerting.
+Do not infer workers exist from config names. Inventory's generic sync/webhook work
+still shares the default queue with other work, despite ledger/SYV isolation.
+
+B4. Data and logs grow without a demonstrated retention program.
+Append-growing tables: shopify_stack_order_events (full payload per webhook),
+shopify_stack_inventory_movements, reservation ledgers, inventory audit entries and
+operations, inventory snapshots, syv_collection_sort_events, syv_notifications,
+change_logs, job_batches and failed_jobs. Completed queue jobs are deleted; failed
+jobs remain. No scheduled pruning/archival for these ledgers was found in console
+schedules. queue clearing is an explicit destructive command, not retention.
+ShopifyApiClient logs every outgoing query and all variables at INFO (:202); this
+can include customer/order details in general API calls. Default logging stacks a
+single file; daily rotation exists but is not the default. The local .env uses single.
+Disk growth and query latency become 30–90 day concerns. Define storage alerts,
+rotation/redaction and archival with an owner. Preserve audit/idempotency records;
+never indiscriminately prune an active or uncertain inventory movement.
+Capacity math: E daily events become approximately 90E event rows, plus line/component
+movements, audits and snapshots. No measured production E or row size was available,
+so no invented 90-day GB forecast is provided.
+
+B5. Recovery coverage is incomplete.
+Stack stale reservations have a daily email detector, not automatic release:
+StackReservationStaleAlertService.php:send. shopify:reconcile-stack-reservations is
+a manual command; it is not scheduled in the reviewed console file. Ordinary
+stack failed/pending events do not get the engraved-specific every-minute replay.
+The engraved recovery scans at most 100 recently updated orders, only the first
+50 line items, clamps history to six hours, starts at 30 minutes after cache loss,
+and skips any order with ANY existing event. It cannot recover all missed updates,
+old outages, large orders or a missed cancellation on an already recorded order.
+These limits affect future bead activation; with flags false this reader does not run.
+Use durable cursors, complete line pagination and update-version identities before
+claiming comprehensive missed-webhook recovery. Alerts alone are detection.
+
+B6. Large audits and replay queries are not bounded throughout.
+StackReservationFulfillmentAuditService.php:33 loads all leftover reservations and
+builds a full report/order list in memory. EngravedBeadRecalculation.php:62 loads
+all historical events for blocked orders before unique(order_id); leftover-order
+lists are plucked wholesale. Family discovery scans the catalogue and builds group
+arrays. At growing volume these increase runtime/memory and overlap scheduler windows.
+Indexes exist for basic identities/statuses, but production EXPLAIN/cardinality and
+peak-memory evidence is missing. Batch and keyset-page where evidence justifies it.
+
+B7. Approval ownership persists beyond lock expiry by design.
+This protects unpublished work, but an assigned reviewer who is disabled/deleted or
+unavailable can leave work awaiting that identity. JSON review/lock owner IDs are
+not foreign keys; sort-row reviewer IDs are nullOnDelete. Explicit operational
+reassignment/recovery needs verification. Do not auto-publish or discard at expiry.
+
+B8. API version lifecycle crosses the review horizon.
+Local/example/default API version is 2026-01. A 90-day review from 4 November crosses
+January 2027. Shopify supports stable versions for at least a year and can fall
+forward retired versions. Inventory mutation contracts change across this boundary.
+Some ledger/launch mutations use @idempotent; generic inventorySetQuantities does
+not. Raising the version globally is not a safe substitute for contract testing.
+Verify actual production version and response headers; run a read-only schema check
+and mocked/staging contracts for every used mutation before choosing the next version.
+Official references:
+https://shopify.dev/docs/api/usage/versioning
+https://shopify.dev/changelog/posts/making-idempotency-mandatory-for-inventory-adjustments-and-refund-mutations
+
+C. MEDIUM-PRIORITY IMPROVEMENTS AND PERFORMANCE
+
+Classification: the measured grid cost is an IMPORTANT POST-RELEASE IMPROVEMENT,
+not itself a demonstrated production blocker. Opening and rendering remain usable
+locally, with small Livewire state. It is not evidence of browser heap stability.
+
+Measured by the existing ShopYourVibePerformanceTest in the first full run:
+Products | open ms | open queries | open HTML bytes | reorder ms | reorder HTML bytes | position ms
+100      | 204     | 17           | 649856          | 27         | 760204             | 197
+250      | 319     | 17           | 1362012         | 257        | 1363187            | 246
+500      | 525     | 17           | 2548312         | 508        | 2549494            | 772
+500-product public state: 2603 bytes; reorder snapshot: 3838 bytes.
+No Shopify calls during measured sorting. Stored first product matched intended order.
+These are local PHP/SQLite/Livewire test measurements with a Shopify fake, not browser
+HTTP wire sizes or production latency. The test's shopify_calls counter is reset after
+beginCollectionSorting, so it does not measure membership verification network cost.
+
+Why it grows: reorderProducts and moveProductToPosition accept and render the entire
+page/grid; render output is roughly linear in product count (about 4.7 KB per extra
+product between 250 and 500), not public Livewire state size. At 500 products, 100
+full reorders imply about 255 MB of generated uncompressed HTML before JSON overhead,
+compression and other requests. That is a calculation, not a measured wire transfer.
+The query count is for opening, not each reorder. Multiple users multiply rendering
+CPU/bandwidth; sibling scopes still serialize brief updates on a shared draft row.
+Sorting itself is database-only and does not enqueue a Shopify job per drag.
+
+Do not apply an unconditional skipRender optimization. The Request Sorting Approval
+control and approval status depend on server-rendered state. A safe follow-up splits
+the product grid from the toolbar/status and updates ordering plus explicit highlights
+without suppressing approval controls. Test drag, numeric position, submit, return,
+reviewer adjustment, approval and publication together.
+
+Polling: editing heartbeats and unchanged status paths use skipRender. Client status
+polling uses intervals; hidden/idle activity does not renew locks. Timer cleanup and
+Livewire hook cleanup exist; drag listeners are removed on normal completion. A
+browser heap/DOM listener profile over repeated navigate/drag/unmount cycles is still
+needed. No memory leak was measured or ruled out. Notification and error rendering
+also need an authenticated browser smoke test after fixes.
+
+Other improvements: redact variable payload logging; per-queue age/failed-job dashboards;
+scheduled backup verification; production-like load tests; MySQL composite-index EXPLAIN
+for reservation/event lookups; safer retained-schema rollback documentation; explicit
+reviewer reassignment with audit trail. These should not become broad refactors.
+
+D. VERIFIED SAFEGUARDS AND LIMITS
+
+SYV lifecycle:
+- Opening preserves existing draft state. Membership-only reads paginate and reject
+  missing/repeated cursors, malformed nodes and duplicate IDs. They retry detected
+  changing membership once. Full-reader exception: A4.
+- Explicit sorting is stored locally with actor, from/to positions and sort events.
+  Changes invalidate unpublished approval. Sorting does not mutate Shopify per drag.
+- Scoped row locks/revisions and token hashes protect concurrent edits. Different
+  collection scopes can coexist. Published holds are cleared for another editing cycle.
+- Submission rejects self-review and requires an active permitted reviewer. Returned
+  changes retain original sorter ownership and feedback; reviewer adjustments are logged.
+- Approve/request-changes actions check assigned reviewer and revision. Generic layout
+  pushes hold back collections with explicit unpublished sorting; the null-gid early
+  return in assertPushAllowed is not alone an approval bypass. Scoped pushes gate approval.
+- Scoped push re-reads membership and invalidates approval if it changed. Readback compares
+  actual Shopify order with intended real product IDs. Local draft IDs are filtered from
+  remote ordering. Async and full-reader exceptions: A2/A4.
+- Generic workflow checkpoints remote jobs, waits for completion, and retains pending
+  changes after error. Creation tokens recover lost collection-create responses;
+  parent metafield compare digests reject concurrent layout conflicts.
+- Confirmed missing collections are tombstoned; uncertain/malformed lookup is not deletion.
+  Tests cover sticky deletion, missing targets, stale refreshes and deleted products.
+- Refresh has durable token fencing, revision checks and hard queued/running deadlines
+  960/900 seconds around an 840-second worker. Expired refresh cannot publish over a
+  newer attempt. Background callbacks clear their per-operation refresh/progress guards.
+- Editing lease is 840 seconds. Idle/hidden tab polling does not keep it alive forever.
+  Pending ownership intentionally survives expiry. Scoped publication exception: A1.
+
+Inventory/webhooks:
+- Orders/create, updated and cancelled validate HMAC in production and require webhook
+  IDs. Unique webhook IDs deduplicate ingestion. Inventory HMAC verification cannot be
+  disabled outside local/testing by setting the verify flag false.
+- Order reservations serialize per order and physical pool. Unique business event and
+  movement idempotency keys prevent ordinary duplicate processing. Movement quantities
+  and identities are persisted before calls; failures do not increment confirmed counters.
+- Live order fulfillment/cancellation state is checked; strictly older completed order
+  events suppress stale updates. This is not proof for every equal-timestamp permutation.
+- Ledger jobs use bounded retries/backoff and a longer visibility window. Tests cover
+  concurrent/double events, cancellation, fulfillment, restock and remote/local failure.
+  The bead multi-process tests use SQLite plus a remote JSON fake, not MySQL/Shopify.
+- Stack sellability tests and normal inventory suites pass, with limitations B1/B2/B5.
+  Do not infer zero oversell risk from happy-path tests or a stale-reservation email.
+- API GraphQL errors and non-success HTTP responses throw; throttle retries are bounded
+  and respect Retry-After. Specialized SYV mutation payloads require userErrors presence.
+  REST uses a separate path without equivalent explicit retry/throttle handling.
+- Generic inventory sync accepts an empty mutation payload where it only checks for
+  nonempty userErrors, and absolute writes use ignoreCompareQuantity=true. Do not treat
+  generic audit 'succeeded' as an inventory readback guarantee or quantity CAS.
+
+Inactive engraved beads:
+- .env.example explicitly leaves both required flags false; config defaults are false.
+  Local env omits these flags, so defaults apply absent a cache override. Production
+  resolved configuration was not read. Do not activate anything based on this audit.
+- Specialized order/refund, movement, sellability and fulfillment reconciliation paths
+  check both flags. Specialized sellability checks before network access and mutation.
+  Scheduled reconciliation returns before remote work if writes are disallowed.
+  Retry jobs go through the guarded services. ProductLaunchService blocks participating
+  bead products through EngravedBeadWriteGuard. Generic writer exception: A3.
+- Thresholds 2/3/4 are configurable via ENGRAVED_BEAD_2_THRESHOLD=2,
+  ENGRAVED_BEAD_3_THRESHOLD=3, ENGRAVED_BEAD_4_THRESHOLD=4. They control disable buffers;
+  physical demand comes from beads/additional_per_unit/first_bead_per_unit, not threshold.
+- Threshold alignment can update LOCAL family configuration/audits while flags are false;
+  it does not contact Shopify. Thus 'disabled' does not mean zero local metadata writes.
+- Specialized guard also requires a supported inventory contract version (>=2026-04).
+  Family activation validates four members, source tracking, identities/SKUs/location,
+  store-contract verification and explicit approval/cutover. Current product configuration
+  incompleteness is an activation issue, not by itself a deployment blocker.
+
+Database/security:
+- Recent migrations are additive on up; main ledger/SYV business identities are unique.
+  Sort state/events/memberships have foreign keys and relevant identity/status indexes.
+  Nullable user references preserve records after user deletion; JSON ownership needs B7.
+- Both MySQL disposable harnesses apply the current migrations successfully. This proves
+  clean-schema migration compatibility, not timing/locking/backfill safety on populated
+  production tables. No production-sized migration or EXPLAIN was run.
+- October 26 migration chunks product backfill by 200 and saveQuietly avoids observer
+  remote writes. November 4 adds first_bead_per_unit with default zero: existing populated
+  historical rows need reconciliation before bead activation; no historical repair ran.
+- Up-migrations are not destructive; down-migrations drop audit/ledger/approval tables or
+  counters. A simple schema rollback is not safe after operational use.
+- SYV page/actions call guards; services reload active permitted actors. Normal browser
+  sessions use Laravel authentication/CSRF; webhook endpoints use HMAC instead. TestCase
+  forces sqlite::memory: before RefreshDatabase and prevents stray HTTP requests.
+  No live endpoint penetration test, production secret scan or dependency CVE audit ran.
+
+Time-horizon coverage summary (P=prevented, D=detected, N=not adequately covered):
+Risk / horizon                                  Assessment
+Ordinary expired editing lease / idle tab        P; pending ownership remains intentional
+Expired scoped publication / restart backlog    N; A1
+Duplicate async scoped reorder / many sessions  N; A2
+Partial membership-only pagination              P; full-reader N (A4)
+Stale refresh publication / worker restart      P by durable token + revision fencing
+Failed remote SYV publication                   P normally; A2/A4 exceptions
+Unreleased stack reservation after fulfillment D by daily alert; manual recovery
+Duplicate order webhook / thousands             P by unique ID and ledger keys
+Out-of-order order updates                      P for strictly older completed timestamps;
+                                                equal timestamps/all omissions unproven
+Missed webhook                                 D/manual stack; partial future bead reader
+Database/log growth / 30, 60, 90 days           N retention; D only where externally monitored
+Failed-job accumulation / 30–90 days            Stored, no verified automatic alert/retention
+Stuck approval / reviewer gone                 N explicit reassignment evidence
+Large-grid browser memory / hundreds sessions  Unmeasured; client cleanup inspected
+Inventory writes with bead flags false         P specialized paths; N generic (A3)
+
+E. TEST RESULTS AND REPRODUCIBILITY
+
+First complete run: PHP 8.4.21, memory_limit=1G, Pest, enforced in-memory SQLite,
+mocked Shopify; 1006 tests = 962 passed, 44 failed, 0 skipped; 5895 assertions;
+224.08 seconds. This is not a green regression suite.
+Command: php -d memory_limit=1G vendor/bin/pest --log-junit storage/logs/final-predeploy-junit.xml
+Final-tree rerun and exact per-test manifest are recorded in the adjacent evidence files
+listed below. The final verification addendum records its counts after completion.
+
+First-run selected suite counts (parameterized cases included):
+SYV Workflow 128/128; Editing 39/39; SortingApproval 13/13; MembershipGate 14/14;
+CollectionIsolation 4/4; ReviewerAssignment 3/3; PushConfirmation 19/19;
+MissingCollections 28/28; ProductActionIndependence 15/15; Performance 1/1;
+Refresh 12 passed/1 failed; DraftHydration 7 passed/7 failed;
+ImmediateOperation 20 passed/1 failed. Exact failures are in the failure manifest.
+StackInventoryReservation 29/29; InventoryWebhookStackSellability 12/12;
+ProductLaunch 8/8; ProcurementIncomingStockAndSheets 49/49;
+ProcurementSupplierOrderWorkflow 38/38; ProcurementPrediction 10/10;
+ShopifySyncPipeline 8/8; ShopifySyncGuard 4/4.
+Engraved Administration 4/4; Concurrency 2/2 (SQLite); Configuration 11/11;
+ForecastingContract 12/12; Procurement 4/4; Reservation 20/20; Sellability 23/23;
+SharedEngravedBeadFamily 21/21. Several exercise enabled flags in fakes; these are
+not all disabled-state tests and are not approval to enable production.
+
+Failure triage:
+- 7 hydration and 1 immediate-operation failures include rendered-text/loader assertions.
+  The hydration shell test expects one loading indicator and sees four; another sees
+  syv-indeterminate markup after load. Some markup is hidden by client state, so server
+  HTML assertions alone do not prove a visible stuck loader. Browser verification needed.
+- Refresh F5 worker test expects the entire jobs table empty and sees one. Notifications
+  are queued separately, so nonempty jobs alone does not prove refresh failure. Inspect
+  queue-specific job state rather than dropping this regression check.
+- Other failures include missing auth/verification/registration routes or expectations,
+  collection fixtures without required import_id, dropdown/catalogue normalization,
+  complementary expectations, product workflow/approval expectations and HTTP requests
+  blocked by Http::preventStrayRequests in form-option rendering. The failed request
+  was intercepted, not a live Shopify write. No baseline rerun establishes these are
+  pre-existing; this report does not waive all 44 as unrelated.
+
+Audit diagnostics: 3 passing tests, 9 assertions, proving FOUR defects, not safeguards:
+truncated full reader; disabled generic bead mutation; missing scoped job confirmation;
+expired scoped-ticket hold. File: tests/Feature/FinalPredeploymentAuditTest.php.
+Its approval-row fixture isolates publication internals, not an authorization bypass.
+
+MySQL 8.4 localhost disposable tests:
+- syv-membership-mysql.php: PASS; competing add waited on locked draft and kept reorder.
+  It also applies all current migrations to its disposable database.
+- Original syv-editing-mysql.php: FAILED because minimal harness schema omitted new
+  syv_collection_sort_states. No conclusion about production locking from that failure.
+- Audit copy final-audit-editing-mysql.php with full current migrations: PASS; both
+  forced two-process renewal/discard interleavings; pending state/audit commit checked.
+  Initial audit copy had UTF-8 BOM output corrupting worker JSON; corrected and rerun.
+- These are three forced interleavings across two scenarios, not comprehensive MySQL
+  inventory/fulfillment/approval-load concurrency coverage. That coverage remains open.
+
+Node client tests:
+- syv-livewire-properties.cjs: PASS; uses installed Livewire diff/snapshot merge,
+  protects property ordering, retains input, updates new values, isolates components.
+- Original editing-client harness: FAILED because VM lacked setInterval after the
+  client gained adaptive polling. Audit copy supplies inert timers: PASS for trusted
+  activity, heartbeat throttling, hidden tabs, idle polling and viewer isolation.
+  This is a VM harness, not a real browser or memory/performance test.
+
+Evidence (repository-relative; logs may be gitignored):
+storage/logs/final-predeploy-junit.xml              first complete run, every test
+storage/logs/final-predeploy-tests.txt              first full console output + metrics
+storage/logs/final-predeploy-failures.txt           first-run failures with messages
+storage/logs/final-predeploy-final-junit.xml        final-tree rerun, every test
+storage/logs/final-predeploy-final-tests.txt        final-tree console output
+storage/logs/final-predeploy-test-manifest.tsv      final exact PASS/FAIL/SKIP names
+storage/logs/final-predeploy-reproductions.txt      audit diagnostics
+storage/logs/final-predeploy-mysql-membership.txt   MySQL membership result
+storage/logs/final-predeploy-mysql-editing.txt      original outdated harness failure
+storage/logs/final-predeploy-mysql-editing-current-schema.txt  passing current schema
+storage/logs/final-predeploy-client.txt             original Node outcomes
+storage/logs/final-predeploy-client-current.txt     corrected timer-fixture outcome
+
+F. DEPLOYMENT AND ROLLBACK CHECKLIST — NOT EXECUTED
+
+Before deployment:
+1. Resolve A1–A4 with small reviewed changes and repeat targeted/final regression tests.
+   Demonstrate remote stack disable failure recovery (B1). Triage every remaining failed
+   test with a named owner and either correction or a documented, evidence-based waiver.
+2. On the real host, record release identifier, resolved configuration and active queue
+   commands without printing credentials. Verify both bead flags resolve FALSE after
+   config caching. Preserve thresholds 2/3/4 and existing stack processing.
+3. Confirm a restorable timestamped database backup and rehearse restore. Verify storage
+   capacity and migration runtime/locking on a populated production-like MySQL copy.
+   Review the actual pending migration list, not only clean-schema success.
+4. Record Supervisor/systemd process counts, queue connection/name, timeout, memory,
+   retry/backoff, stopwaitsecs and autorestart. Ensure stopwaitsecs exceeds longest
+   job. Use bounded worker memory and process lifetime. Fix default visibility B2.
+5. Provision independent consumers, examples subject to final deployment review:
+   php artisan queue:work shop-your-vibe --queue=shop-your-vibe --timeout=840 --tries=1
+   php artisan queue:work inventory-ledger --queue=inventory-ledger --timeout=300
+   php artisan queue:work product-launch --queue=product-launch --timeout=900
+   php artisan queue:work database --queue=syv-notifications
+   Keep existing default/procurement consumers with their required reservation windows.
+   Job-level tries can override worker defaults. Verify actual commands, not examples.
+6. Verify shared atomic cache/locks across web and workers, durable queue DB, shared
+   upload storage and synchronized clocks. Check cron runs schedule:run every minute
+   (or supervised schedule:work) as the intended user, with error reporting.
+7. Inspect queue ages, failed jobs, unfinished movements and scoped holds read-only.
+   Resolve uncertain Shopify outcomes before replay. Verify subscribed webhook topics,
+   secret/HMAC behavior and read/write scopes without sending live test mutations.
+8. Confirm API version contracts and future upgrade owner (B8), log rotation/redaction,
+   per-queue lag alerts, scheduler heartbeat, disk and stale-reservation notifications.
+
+During an approved future deployment:
+9. Drain/stop old consumers and prevent old writers from running across incompatible
+   schema/config changes. Do not just deploy while old inventory workers remain alive.
+   Pause new writes if needed under the deployment operator's approved process.
+10. Release code/dependencies, apply reviewed migrations (php artisan migrate --force),
+    rebuild assets/config/routes/views as appropriate, including php artisan config:cache.
+    Keep schema/audit ledgers. Never run migrate:fresh on an application database.
+11. Restart ALL long-lived workers (php artisan queue:restart plus verified supervisor
+    replacement), and PHP/web processes if required by the hosting setup. queue:restart
+    alone is not proof of replacement; check start times and release/config identifiers.
+
+Immediately after deployment:
+12. Read-only health/login/admin page checks. Open representative populated/empty/deleted
+    SYV collections, check membership/loading/approval controls and two-user isolation.
+    Run end-to-end publication only against an explicitly approved staging/test target;
+    this audit does not authorize mutations to live Shopify.
+13. Confirm scheduler heartbeat, each queue consumption, no inventory starvation, and
+    notification delivery independently of sorting. Check failures and oldest job age.
+14. Verify both resolved bead flags still false in web AND workers. Read-only compare
+    existing stack/component quantities, outstanding reservations and remote sellability.
+    Confirm no unauthorized bead tracking/publication changes; investigate discrepancies.
+15. Review at 1 hour/24 hours/7 days, then 30/60/90 days: queue lag/errors, stale approvals,
+    orphaned identities, reservation backlog, database/log growth and API deprecations.
+
+Rollback:
+- Stop incompatible/new writers and drain/inspect pending jobs before code rollback.
+  Keep both bead flags false, rebuild cached config and verify new worker processes.
+- Keep additive tables/columns and all movement identities, counters, checkpoints and
+  audits. Do not run destructive down-migrations over an operational ledger.
+- Shopify writes, consumed/reserved inventory, published order and completed migrations
+  are not undone by a code revert. Reconcile uncertain remote effects before any replay
+  or compensation. Do not restore an old DB snapshot while Shopify keeps newer state
+  without a separate reconciliation plan. Old queued payload compatibility must be checked.
+- Backup availability and actual restore readiness remain UNVERIFIED, not assumed.
+
+Future engraved activation prerequisites (separate release):
+- Close generic mutation bypass A3 and all active-inventory recovery gaps; verify stack
+  safety with bead components, MySQL concurrency and retained idempotency after retries.
+- Read-only validate all 28 live products, four-member family mappings, unique SKUs/GIDs,
+  source stock/location, per-member tracking/zero independent stock and approval state.
+  Do not repair live configuration as part of this audit.
+- Verify checkout inventory policy/oversell constraints, Online Store/channel behavior,
+  multi-location fulfillment/refund semantics, API contract/version and complete pagination.
+- Reconcile historical blocked/fulfilled/cancelled/refunded orders and first_bead_per_unit
+  defaults against an explicitly approved cutover. Test outage recovery beyond six hours.
+- Review configurable buffers separately from physical quantities, manual overrides,
+  notification/queue monitoring, rollback/compensation and reconciliation dry-run.
+- Obtain explicit activation authorization in that separate change. This audit grants none.
+
+G. SEPARATE RELEASE DECISIONS
+
+Shop Your Vibe: NO-GO. A1 stranded scoped holds, A2 untracked async jobs and A4 partial
+snapshot acceptance prevent reliable unattended use even though normal manual use passed.
+
+Existing stack inventory: CONDITIONAL GO for its independently reviewed existing
+functionality, not certification of this combined release. Normal stack tests pass,
+but B1 failed-disable recovery, default visibility, real consumers/scheduler and MySQL
+inventory concurrency require evidence. Preserve it; do not disable stack processing
+or rewrite accounting based solely on this review.
+
+Engraved code with flags disabled: NO-GO under the requested all-writers-off guarantee
+until A3 closes. Specialized automatic paths are guarded; generic manual/queued inventory
+writers are not. Incomplete live bead configuration alone is not the blocker.
+
+Overall CMS deployment: NO-GO for the audited final tree. Resolve concrete A findings,
+triage failed regressions and complete production operational gates before reassessment.
+Lack of production access is recorded as uncertainty, not an invented code defect.
+
+Future live engraved activation: NO-GO. Not authorized, not store-contract verified;
+generic writer, complete recovery, historical cutover and integration prerequisites remain.
+
+Stop here for review. No implementation fixes have been silently applied.
+
+FINAL VERIFICATION ADDENDUM
+Final working-tree complete run: 1009 tests, 965 PASS, 44 FAIL, 0 SKIP;
+5904 assertions; 174.78 seconds. The same 44 tests failed as in the first run.
+The additional three tests are the diagnostic reproductions above. No application
+code changed between full runs. PHP/Pest returned a failing suite exit status.
+PowerShell also formats diagnostic STDERR as NativeCommandError; the individual
+Pest result lines and JUnit manifest distinguish diagnostic output from failed tests.
+Exact final names/statuses: storage/logs/final-predeploy-test-manifest.tsv.
+Compact final failures: storage/logs/final-predeploy-final-failures.txt.
+Full failure assertions/stacks: storage/logs/final-predeploy-final-junit.xml.
+
+Final-run performance confirmation:
+Products | open ms | queries | reorder ms | reorder HTML bytes | numeric-position ms
+100      | 149     | 17      | 21         | 760201             | 122
+250      | 217     | 17      | 202        | 1363197            | 208
+500      | 333     | 17      | 335        | 2549483            | 355
+500-product public state stayed 2603 bytes; reorder snapshot 3837 bytes.
+No browser memory, production concurrency/load, backup availability or real Shopify
+integration claim is made by these measurements. Release decisions remain unchanged.

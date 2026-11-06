@@ -2,12 +2,17 @@
 
 namespace App\Services\Shopify;
 
+use App\Models\EngravedBeadFamilyMember;
+use App\Models\EngravedBeadOrderLine;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyStackInventoryMovement;
 use App\Models\ShopifyStackInventoryReservation;
 use App\Models\ShopifyStackOrderEvent;
 use App\Models\Variant;
+use App\Services\EngravedBeads\EngravedBeadConfiguration;
+use App\Services\EngravedBeads\EngravedBeadOrderProcessor;
+use App\Services\EngravedBeads\EngravedBeadStockPool;
 use Illuminate\Support\Facades\Cache;
 
 final class StackOrderReservationService
@@ -17,12 +22,13 @@ final class StackOrderReservationService
         private readonly StackInventoryMovementService $movements,
         private readonly StackOrderLineMapper $lines,
         private readonly StackOrderFulfillmentInspector $fulfillment,
+        private ?EngravedBeadOrderProcessor $engravedBeads = null,
     ) {}
 
     /** @return array{stack_lines:int,reserved:int,released:int} */
     public function process(ShopifyStackOrderEvent $event): array
     {
-        $lock = Cache::lock('stack-order-inventory:'.$event->shopify_order_id, 300);
+        $lock = Cache::lock('stack-order-inventory:'.$event->shopify_order_id, 420);
         if (! $lock->get()) {
             throw new \RuntimeException('Stack order inventory is already being processed; retrying.');
         }
@@ -38,7 +44,12 @@ final class StackOrderReservationService
     private function processLocked(ShopifyStackOrderEvent $event): array
     {
         if ($event->status === ShopifyStackOrderEvent::STATUS_COMPLETED) {
-            return ['stack_lines' => 0, 'reserved' => 0, 'released' => 0];
+            $deferred = EngravedBeadOrderLine::query()->where('shopify_order_id', $event->shopify_order_id)
+                ->where('configuration', EngravedBeadOrderLine::CONFIGURATION_BLOCKED)->exists();
+            if (! $deferred || ! config('engraved_beads.inventory_writes_enabled', false)
+                || ! config('engraved_beads.store_contract_verified', false)) {
+                return ['stack_lines' => 0, 'reserved' => 0, 'released' => 0];
+            }
         }
         if ($event->shopify_updated_at !== null && ShopifyStackOrderEvent::query()
             ->where('shopify_order_id', $event->shopify_order_id)
@@ -68,9 +79,40 @@ final class StackOrderReservationService
             if (! $live['known']) {
                 throw new \RuntimeException('Live Shopify order status could not be confirmed; no component stock was reserved.');
             }
-            if ($live['fulfilled'] && ! $live['cancelled']) {
+            if ($live['fulfilled'] && ! $live['cancelled'] && $event->topic !== 'orders/cancelled') {
                 $skipNote = 'Skipped reservation because live Shopify shows this order as fulfilled.';
+                $this->beads()->recordHistoricalSkip($event);
+                foreach ((array) data_get($event->payload, 'line_items', []) as $lineItem) {
+                    if (! is_array($lineItem)) {
+                        continue;
+                    }
+                    $variant = $this->findVariant($lineItem['variant_id'] ?? null);
+                    $member = $variant ? app(EngravedBeadStockPool::class)->member($variant) : null;
+                    $created = $this->lines->orderCreatedAt((array) $event->payload);
+                    $draft = $variant ? $this->findStackDraft($variant, $lineItem) : null;
+                    $beadStack = false;
+                    if ($draft && $created !== null) {
+                        $componentIds = array_keys($this->componentConfiguration($draft));
+                        $beadStack = EngravedBeadFamilyMember::query()
+                            ->whereIn('shopify_product_id', Product::query()->whereIn('id', $componentIds)->select('shopify_id'))
+                            ->whereHas('family', fn ($q) => $q->where('status', 'active')->where('activated_at', '<=', $created))->exists();
+                    }
+                    if (! $beadStack && ($member === null || $member->required_beads === 1 || $created === null
+                        || $created->lt($member->family->activated_at))) {
+                        continue;
+                    }
+                    // A post-cutover fast fulfillment still owes the full physical demand.
+                    $lineId = $this->gid('LineItem', $lineItem['admin_graphql_api_id'] ?? $lineItem['id'] ?? null);
+                    if (! isset($live['lines'][$lineId])) {
+                        continue;
+                    }
+                    $fast = $live;
+                    $fast['lines'][$lineId]['unfulfilled'] = $fast['lines'][$lineId]['current'];
+                    $summary = $this->reconcileLine($event, $lineItem, $summary, $fast);
+                    $skipNote = null;
+                }
             } elseif ($event->topic === 'orders/cancelled' || $live['cancelled']) {
+                $this->beads()->recordHistoricalSkip($event);
                 $summary = $this->releaseAll($event->shopify_order_id, 'cancel:'.$event->shopify_order_id, $summary);
             } else {
                 foreach ((array) data_get($event->payload, 'line_items', []) as $lineItem) {
@@ -79,7 +121,18 @@ final class StackOrderReservationService
                     }
                     $summary = $this->reconcileLine($event, $lineItem, $summary, $live);
                 }
+                // Removed lines can disappear from webhook payloads. Reconcile known snapshots too.
+                $present = collect((array) data_get($event->payload, 'line_items', []))->map(fn ($line) => $this->gid('LineItem', $line['admin_graphql_api_id'] ?? $line['id'] ?? null))->all();
+                foreach (ShopifyStackInventoryReservation::query()->where('shopify_order_id', $event->shopify_order_id)
+                    ->whereNotNull('bead_family_id')->whereNotIn('shopify_order_line_item_id', $present)->get() as $missing) {
+                    $lineId = $missing->shopify_order_line_item_id;
+                    $snapshotLive = $live;
+                    $snapshotLive['lines'][$lineId] ??= ['current' => 0, 'unfulfilled' => 0];
+                    $summary = $this->reconcileLine($event, ['admin_graphql_api_id' => $lineId,
+                        'variant_id' => $missing->shopify_stack_variant_id], $summary, $snapshotLive);
+                }
             }
+            $this->beads()->reconcileRefunds($event);
         } catch (\Throwable $exception) {
             $event->forceFill([
                 'status' => ShopifyStackOrderEvent::STATUS_FAILED,
@@ -98,7 +151,7 @@ final class StackOrderReservationService
     }
 
     /**
-     * @param iterable<int, ShopifyStackInventoryReservation|int> $reservations
+     * @param  iterable<int, ShopifyStackInventoryReservation|int>  $reservations
      * @return array{cancelled:int,skipped:int,failed:int,errors:array<int,string>}
      */
     public function cancelManually(iterable $reservations): array
@@ -131,7 +184,7 @@ final class StackOrderReservationService
 
     private function cancelOne(ShopifyStackInventoryReservation $reservation): bool
     {
-        $lock = Cache::lock('stack-order-inventory:'.$reservation->shopify_order_id, 300);
+        $lock = Cache::lock('stack-order-inventory:'.$reservation->shopify_order_id, 420);
         if (! $lock->get()) {
             throw new \RuntimeException('Stack order inventory is already being processed; retrying.');
         }
@@ -217,6 +270,24 @@ final class StackOrderReservationService
         $stackVariant = $this->findVariant($lineItem['variant_id'] ?? null);
         $draft = $stackVariant instanceof Variant ? $this->findStackDraft($stackVariant, $lineItem) : null;
         if ($reservations->isEmpty() && ! $draft instanceof NewProductDraft) {
+            $outcome = $this->beads()->prepareLine(
+                $event,
+                $lineId,
+                $lineItem,
+                $stackVariant,
+                $liveLine,
+                $this->lines->orderCreatedAt((array) $event->payload),
+                fn (...$arguments) => $this->createReservation(...$arguments),
+            );
+            if ($outcome !== 'reservation_ready') {
+                return $summary;
+            }
+            $reservations = ShopifyStackInventoryReservation::query()
+                ->where('shopify_order_id', $event->shopify_order_id)
+                ->where('shopify_order_line_item_id', $lineId)
+                ->get();
+        }
+        if ($reservations->isEmpty() && ! $draft instanceof NewProductDraft) {
             return $summary;
         }
 
@@ -239,7 +310,8 @@ final class StackOrderReservationService
         }
 
         foreach ($reservations as $reservation) {
-            if ($reservation->status === ShopifyStackInventoryReservation::STATUS_RELEASED) {
+            if ($reservation->status === ShopifyStackInventoryReservation::STATUS_RELEASED
+                && $reservation->bead_family_id === null) {
                 continue;
             }
             $perStack = (int) $reservation->component_quantity_per_stack;
@@ -251,7 +323,11 @@ final class StackOrderReservationService
             ], fn (mixed $value): bool => $value !== null))->save();
 
             $targetRemaining = $unfulfilledStack * $perStack;
-            $pendingConsume = max(0, (($currentStack - $unfulfilledStack) * $perStack) - (int) $reservation->consumed_quantity);
+            if ($reservation->bead_family_id !== null) {
+                $targetRemaining = max(0, $required - (int) $reservation->historical_quantity - (int) $reservation->consumed_quantity);
+            }
+            $pendingConsume = max(0, (($currentStack - $unfulfilledStack) * $perStack)
+                - (int) $reservation->historical_quantity - (int) $reservation->consumed_quantity);
             $remaining = $reservation->remainingReserved();
             if ($targetRemaining > $remaining) {
                 $quantity = $targetRemaining - $remaining;
@@ -259,7 +335,7 @@ final class StackOrderReservationService
                     $reservation,
                     ShopifyStackInventoryMovement::ACTION_RESERVE,
                     $quantity,
-                    "order-target:{$event->shopify_order_id}:{$lineId}:{$required}:{$remaining}",
+                    "order-event:{$event->webhook_id}:{$lineId}",
                 );
                 $summary['reserved']++;
             } else {
@@ -269,7 +345,7 @@ final class StackOrderReservationService
                         $reservation,
                         ShopifyStackInventoryMovement::ACTION_RELEASE,
                         $releasable,
-                        "order-target:{$event->shopify_order_id}:{$lineId}:{$required}:{$remaining}",
+                        "order-event:{$event->webhook_id}:{$lineId}",
                     );
                     $summary['released']++;
                 } else {
@@ -307,6 +383,7 @@ final class StackOrderReservationService
         int $fulfilledBaseline,
         mixed $orderCreatedAt,
     ): ShopifyStackInventoryReservation {
+        $configuredComponentId = $componentProductId;
         $component = Product::query()->with('variants')->find($componentProductId);
         if (! $component instanceof Product) {
             throw new \RuntimeException("Stack component product {$componentProductId} could not be found.");
@@ -319,16 +396,35 @@ final class StackOrderReservationService
         }
         /** @var Variant $componentVariant */
         $componentVariant = $componentVariants->first();
-        $locationId = $this->gid('Location', $this->inventory->resolveLocationId($componentVariant));
-        $ledgerUri = 'leighavenue-cms://stack-reservations/'.rawurlencode($event->shopify_order_id)
-            .'/'.rawurlencode($lineId).'/'.$componentProductId;
+        if (! isset($lineItem['_bead_family_id']) && EngravedBeadConfiguration::fromProduct($component)->participating()) {
+            $pool = app(EngravedBeadStockPool::class);
+            $member = $pool->member($componentVariant);
+            $source = $pool->source($componentVariant);
+            if ($member === null || $source === null || $orderCreatedAt === null || $orderCreatedAt->lt($member->family->activated_at)) {
+                throw new \RuntimeException('Engraved stack component requires an approved shared source and post-cutover order.');
+            }
+            $quantityPerStack *= $member->required_beads;
+            $componentVariant = $source;
+            $component = $source->product;
+            $lineItem['_bead_family_id'] = $member->family_id;
+            $lineItem['_bead_configuration_version'] = $member->family->configuration_version;
+            $lineItem['_bead_location_id'] = $member->family->source_location_id;
+            $fulfilledBaseline = 0;
+        }
+        $engraved = isset($lineItem['_bead_family_id']);
+        $locationId = $this->gid('Location', $engraved ? $lineItem['_bead_location_id'] : $this->inventory->resolveLocationId($componentVariant));
+        $ledgerPrefix = $engraved
+            ? 'leighavenue-cms://engraved-bead-reservations/'
+            : 'leighavenue-cms://stack-reservations/';
+        $ledgerUri = $ledgerPrefix.rawurlencode($event->shopify_order_id)
+            .'/'.rawurlencode($lineId).'/'.$configuredComponentId;
         $baseline = max(0, min($stackQuantity, $fulfilledBaseline)) * $quantityPerStack;
 
         $reservation = ShopifyStackInventoryReservation::query()->firstOrCreate(
             [
                 'shopify_order_id' => $event->shopify_order_id,
                 'shopify_order_line_item_id' => $lineId,
-                'configured_component_product_id' => $componentProductId,
+                'configured_component_product_id' => $configuredComponentId,
             ],
             [
                 'shopify_order_name' => $event->shopify_order_name,
@@ -349,8 +445,11 @@ final class StackOrderReservationService
                 'component_title' => $component->title,
                 'component_quantity_per_stack' => $quantityPerStack,
                 'total_component_quantity_required' => $stackQuantity * $quantityPerStack,
-                'reserved_quantity' => $baseline,
-                'consumed_quantity' => $baseline,
+                'reserved_quantity' => $engraved ? 0 : $baseline,
+                'consumed_quantity' => $engraved ? 0 : $baseline,
+                'historical_quantity' => $engraved ? $baseline : 0,
+                'bead_family_id' => $lineItem['_bead_family_id'] ?? null,
+                'bead_configuration_version' => $lineItem['_bead_configuration_version'] ?? null,
                 'shopify_location_id' => $locationId,
                 'ledger_document_uri' => $ledgerUri,
                 'status' => ShopifyStackInventoryReservation::STATUS_PENDING_PROCESSING,
@@ -372,7 +471,7 @@ final class StackOrderReservationService
             $reservation,
             ShopifyStackInventoryMovement::ACTION_RELEASE,
             $remaining,
-            $eventKey.':remaining:'.$remaining,
+            $eventKey,
         );
 
         return true;
@@ -425,6 +524,11 @@ final class StackOrderReservationService
         }
 
         return $configured;
+    }
+
+    private function beads(): EngravedBeadOrderProcessor
+    {
+        return $this->engravedBeads ??= new EngravedBeadOrderProcessor($this->movements);
     }
 
     private function gid(string $type, mixed $id): string

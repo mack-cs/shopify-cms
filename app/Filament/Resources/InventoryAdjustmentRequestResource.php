@@ -107,6 +107,7 @@ class InventoryAdjustmentRequestResource extends Resource
         $userId = Auth::id();
 
         return $userId !== null
+            && app(InventoryAccessService::class)->canUpdateInventory(Auth::user())
             && $record->status === InventoryAdjustmentRequest::STATUS_PENDING_APPROVAL
             && (int) $record->approver_id === (int) $userId
             && (int) $record->requester_id !== (int) $userId;

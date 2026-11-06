@@ -7,6 +7,17 @@ use App\Models\Variant;
 
 final class StackSellabilityShopifyPushService
 {
+    /** Dirty intent survives failed jobs and unchanged subsequent webhooks. */
+    public function retryPending(): void
+    {
+        Variant::query()->where('inventory_local_dirty', true)
+            ->where('inventory_sync_batch_id', 'stack_sellability_pending')
+            ->whereHas('product', fn ($q) => $q->where('is_bundle', true))
+            ->orderBy('id')->chunkById(100, function ($variants): void {
+                InventorySyncJob::dispatch($variants->pluck('id')->all(), 'push', null, 'stack_sellability_retry');
+            });
+    }
+
     /**
      * @param array<string, mixed> $summary
      * @return array<string, mixed>

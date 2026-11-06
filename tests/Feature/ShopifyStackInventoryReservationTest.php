@@ -721,6 +721,8 @@ function stackLeftoverReservation(array $records, int $orderId, int $reserved, i
         'stack_quantity_ordered' => $reserved,
         'total_component_quantity_required' => $reserved,
         'ledger_document_uri' => "leighavenue-cms://stack-reservations/{$orderId}",
+        'shopify_inventory_item_id' => $records['component_x_variant']->shopify_inventory_item_id,
+        'shopify_location_id' => 'gid://shopify/Location/6001',
         'reserved_quantity' => $reserved,
         'consumed_quantity' => $consumed,
         'released_quantity' => 0,

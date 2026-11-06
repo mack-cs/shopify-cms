@@ -42,6 +42,7 @@ class RefreshShopYourVibeParents implements ShouldBeUnique, ShouldQueue
     {
         try {
             Cache::forget(SiblingCollectionResolver::cacheKey());
+            $shopify->syncStoredCollections($this->userId);
             Cache::put($this->cacheKey, $shopify->parents(), 300);
         } catch (Throwable $exception) {
             $this->notify(
@@ -55,7 +56,7 @@ class RefreshShopYourVibeParents implements ShouldBeUnique, ShouldQueue
 
         $this->notify(
             'Shop Your Vibe collections refreshed',
-            'Latest Shopify collections are ready. Reload the page to view them.',
+            'New and changed Shopify collections were saved. Reload the page to view them.',
             true
         );
     }

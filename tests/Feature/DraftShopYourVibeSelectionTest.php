@@ -18,6 +18,7 @@ use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
+beforeEach(fn () => app()->instance(\App\Contracts\ShopifyGraphqlGateway::class, new \Tests\Support\VibeShopifyFake));
 
 beforeEach(function () {
     \Illuminate\Support\Facades\Cache::forget('shop-your-vibe-parents:'.config('services.shopify.shop'));

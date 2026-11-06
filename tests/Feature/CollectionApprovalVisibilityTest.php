@@ -14,6 +14,8 @@ it('shows pending collection approval requests to all users while keeping target
     $otherUser = User::factory()->create();
 
     $collection = ShopifyCollection::create([
+        'shopify_id' => 'gid://shopify/Collection/7654321',
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Visibility Collection',
         'handle' => 'visibility-collection',
         'approval_version' => 2,
@@ -44,6 +46,8 @@ it('shows open collection approval requests to the sender and other users', func
     $otherUser = User::factory()->create();
 
     $collection = ShopifyCollection::create([
+        'shopify_id' => 'gid://shopify/Collection/7654321',
+        'import_id' => \App\Models\Import::create(['filename' => 'approval-fixture.csv', 'mode' => 'overwrite', 'status' => 'ready', 'created_by' => $requester->id])->id,
         'title' => 'Open Collection Queue',
         'handle' => 'open-collection-queue',
         'approval_version' => 1,
