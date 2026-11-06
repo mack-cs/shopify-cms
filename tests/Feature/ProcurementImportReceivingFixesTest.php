@@ -113,13 +113,15 @@ it('shows every rejected row and does not save anything until explicit UI confir
     foreach (range(1, 15) as $i) {
         $rows .= "MISSING-{$i}\tbad\tPO-UI\t10/11/2026\n";
     }
-    $page = Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
-        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])->assertSee('Valid rows')->assertSee('Rejected rows')->assertSee('MISSING-15');
+    $component = Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
+        ->assertSee('Confirm & Save Valid Rows')
+        ->assertDontSee('accept_valid_rows');
     expect(ProcurementSupplierOrderLine::count())->toBe(0);
-    $page->setActionData(['accept_valid_rows' => false])->callMountedAction()->assertHasActionErrors(['accept_valid_rows']);
-    expect(ProcurementSupplierOrderLine::count())->toBe(0);
-    $page->setActionData(['accept_valid_rows' => true])->callMountedAction()->assertNotified('Purchase order created');
-    expect(ProcurementSupplierOrderLine::count())->toBe(1);
+    $component->callMountedAction()->assertNotified('Purchase order created');
+    expect(ProcurementSupplierOrderLine::count())->toBe(1)
+        ->and(json_encode(\App\Models\ProcurementSupplierImportBatch::query()->latest('id')->first()->errors))->toContain('MISSING-15');
 });
 
 it('downloads rejected originals securely and accepts a corrected re-upload without repeating saved lines', function () {
@@ -149,7 +151,7 @@ it('identifies an already recorded order SKU while saving unrelated rows without
     procurementFixVariant('FIX-2');
     app(SupplierOrderService::class)->createForVariant($one, 'PO-EXISTING', 5, '2026-11-10');
     $batch = procurementFixUpload("SKU,Order ID,Quantity Ordered,ETA Date\nFIX-1,PO-EXISTING,99,10/11/2026\nFIX-2,PO-EXISTING,2,10/11/2026\n");
-    expect($batch->errors['2'][0])->toContain('PO-EXISTING', 'FIX-1', 'already recorded', 'Amend Order Line');
+    expect($batch->errors['2'][0])->toContain('PO-EXISTING', 'FIX-1', 'already recorded', 'No duplicate was created');
     app(SupplierOrderCsvService::class)->confirm($batch->uuid, acceptValidRows: true);
     expect(ProcurementSupplierOrderLine::where('sku', 'FIX-1')->value('quantity_ordered'))->toBe(5)->and(ProcurementSupplierOrderLine::count())->toBe(2);
 });
@@ -222,12 +224,41 @@ it('uses truthful receiving labels for staged, uncertain and post-processing-onl
     ['succeeded', 'failed', 'Received in Shopify; stock summary needs updating'], ['invalid', 'pending', 'Not saved'],
 ]);
 
+it('receives an ordinary tracked bracelet that has zero available stock', function () {
+    Bus::fake();
+    $variant = procurementFixVariant('BRACELET-ZERO');
+    $variant->update(['inventory_tracked' => true, 'inventory_qty' => 0, 'current_available_quantity' => 0, 'current_on_hand_quantity' => 0]);
+    $variant->product()->update(['title' => 'Ordinary bracelet', 'type' => 'Bracelets', 'tags' => 'bracelet, elevated-basics']);
+    app(SupplierOrderService::class)->createForVariant($variant->fresh(), 'PO-BRACELET', 4, '2026-11-10');
+    $batch = procurementFixUpload("Order ID,SKU,Quantity Received\nPO-BRACELET,BRACELET-ZERO,2\n", 'receipt');
+    expect($batch->valid_count)->toBe(1)->and($batch->invalid_count)->toBe(0);
+    app(SupplierOrderCsvService::class)->confirm($batch->uuid, dispatchReceipts: false);
+    expect(ProcurementSupplierReceipt::query()->where('status', 'pending')->value('quantity_received'))->toBe(2);
+    Http::assertNothingSent();
+});
+
+it('explains ordinary unknown and untracked products without calling them multi-bead products', function (?bool $tracked, string $sku, string $message) {
+    Bus::fake();
+    $variant = procurementFixVariant($sku);
+    $variant->update(['inventory_tracked' => $tracked]);
+    $variant->product()->update(['title' => 'Plain bracelet', 'type' => 'Bracelets', 'tags' => 'bracelet']);
+    app(SupplierOrderService::class)->createForVariant($variant->fresh(), 'PO-'.$sku, 3, '2026-11-10');
+    $batch = procurementFixUpload("Order ID,SKU,Quantity Received\nPO-{$sku},{$sku},1\n", 'receipt');
+    $text = implode(' ', $batch->errors['2']);
+    expect($batch->invalid_count)->toBe(1)->and($text)->toContain($message)->not->toContain('multi-bead');
+    Http::assertNothingSent();
+})->with([
+    [null, 'PLAIN-UNKNOWN', 'has not been synchronized'],
+    [false, 'PLAIN-UNTRACKED', 'not tracked in Shopify'],
+]);
+
 it('does not permit an untracked multi-bead member to become a receiving source', function (int $beads) {
     Bus::fake();
     config(['engraved_beads.inventory_writes_enabled' => false, 'engraved_beads.store_contract_verified' => false, 'services.shopify.inventory_location_id' => 'gid://shopify/Location/6001']);
     $fixture = sharedBeadFamily('receiving-protected-bead-family', 74000, true);
     $variant = $fixture['members'][$beads]['variant'];
-    expect(fn () => app(SupplierOrderService::class)->createForVariant($variant, 'PO-NO-MEMBER', 3, '2026-11-10'))->toThrow(ValidationException::class);
+    expect(fn () => app(SupplierOrderService::class)->createForVariant($variant, 'PO-NO-MEMBER', 3, '2026-11-10'))
+        ->toThrow(ValidationException::class, 'untracked multi-bead');
     Http::assertNothingSent();
 })->with([2, 3, 4]);
 
@@ -371,4 +402,83 @@ it('keeps a confirmed receipt received when summary refresh fails and retries wi
     $refreshHealthy = true;
     $job->handle(app(ShopifyInventoryAdjustmentService::class), $inventory, app(SupplierOrderSummaryService::class), app(ProcurementSheetSyncService::class));
     expect($writes)->toBe(1)->and($receipt->fresh()->receiving_status_label)->toBe('Received in Shopify')->and($receipt->fresh()->inventory_after)->toBe(7);
+});
+
+it('reviews the LA2599Test3 paste and saves only the four valid rows after confirmation', function () {
+    Bus::fake();
+    config(['google_sheets.enabled' => false, 'procurement.include_test_products' => true]);
+    $this->actingAs(inventoryAuthorizedUser());
+    foreach (['LAB0186TEST01', 'LAB0185TEST01', 'LAB0185TEST02', 'LAB0186TEST02'] as $sku) {
+        procurementFixVariant($sku);
+    }
+    procurementFixVariant('EBBM02TEST01')->product()->update(['is_bundle' => true, 'tags' => 'bundles']);
+    $rows = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nLAB0186TEST01\t30\tLA2599Test3\t2/12/2026\nLAB0185TEST01\t30\tLA2599Test3\t2/12/2026\nLAB0186TEST01\t20\tLA2599Test3\t2/12/2026\nEBBM02TEST01\t14\tLA2599Test3\t2/12/2026\nLAB0185TEST02\t37\tLA2599Test3\t2/12/2026\nLAB0186TEST02\t12\tLA2599Test3\t2/12/2026\n";
+    $lines = fn () => ProcurementSupplierOrderLine::query()->whereHas('order', fn ($query) => $query->where('order_number', 'LA2599Test3'));
+    $review = Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
+        ->assertSee('6 submitted, 4 valid, 2 rejected')
+        ->assertSee('Confirm & Save Valid Rows')
+        ->assertSee('EBBM02TEST01')
+        ->assertDontSee('accept_valid_rows');
+    expect($lines()->count())->toBe(0);
+    $review->call('unmountAction');
+    expect($lines()->count())->toBe(0);
+    $review->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
+        ->callMountedAction()
+        ->assertNotified('Purchase order created');
+    expect($lines()->count())->toBe(4)
+        ->and($lines()->where('sku', 'LAB0186TEST01')->value('quantity_ordered'))->toBe(30)
+        ->and($lines()->where('sku', 'EBBM02TEST01')->exists())->toBeFalse();
+});
+
+it('stages a receipt only after the review modal is confirmed', function () {
+    Bus::fake();
+    Http::fake();
+    config(['google_sheets.enabled' => false]);
+    $actor = inventoryAuthorizedUser();
+    $this->actingAs($actor);
+    $variant = procurementFixVariant('RCPT-1');
+    app(SupplierOrderService::class)->createForVariant($variant, 'PO-RCPT', 10, '2026-11-10', $actor->id);
+    $rows = "Order ID\tSKU\tQuantity Received\nPO-RCPT\tRCPT-1\t2\nPO-RCPT\tMISSING\t1\n";
+    $review = Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
+        ->callAction('pasteSupplierReceipts', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
+        ->assertSee('Confirm & Stage Valid Receipts');
+    expect(ProcurementSupplierReceipt::count())->toBe(0);
+    $review->callMountedAction()->assertNotified('Received quantities staged');
+    expect(ProcurementSupplierReceipt::query()->where('status', 'pending')->value('quantity_received'))->toBe(2);
+    Http::assertNothingSent();
+});
+
+it('saves nothing when every pasted purchase-order row is rejected', function () {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $this->actingAs(inventoryAuthorizedUser());
+    $rows = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nMISSING\t1\tPO-NONE\t2/12/2026\n";
+    Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
+        ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
+        ->assertSee('No valid rows can be saved')
+        ->callMountedAction()
+        ->assertNotified('No rows saved');
+    expect(ProcurementSupplierOrderLine::count())->toBe(0);
+});
+
+it('keeps the review open with an error when a receipt is no longer valid', function () {
+    Bus::fake();
+    config(['google_sheets.enabled' => false]);
+    $actor = inventoryAuthorizedUser();
+    $this->actingAs($actor);
+    $variant = procurementFixVariant();
+    $line = app(SupplierOrderService::class)->createForVariant($variant, 'PO-RACE-UI', 5, '2026-11-10', $actor->id);
+    $rows = "Order ID\tSKU\tQuantity Received\nPO-RACE-UI\tFIX-1\t4\n";
+    $review = Livewire\Livewire::test(ListInventories::class)->set('activeTab', 'orders')
+        ->callAction('pasteSupplierReceipts', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport');
+    app(SupplierReceiptService::class)->create($line, 3, 'concurrent-ui', $actor->id, dispatch: false);
+    $review->callMountedAction()->assertNotified('Rows were not saved');
+    expect($line->receipts()->count())->toBe(1)
+        ->and(\App\Models\ProcurementSupplierImportBatch::query()->latest('id')->value('status'))->toBe('previewed');
 });

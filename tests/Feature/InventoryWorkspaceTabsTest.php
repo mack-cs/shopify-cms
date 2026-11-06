@@ -35,11 +35,12 @@ it('reports a repeated purchase order paste without claiming to create another o
     $this->actingAs($user);
     $rows = "SKU\tQuantity Ordered\tOrder ID\tETA Date\nREPEAT-PO\t10\tPO-REPEAT\t20/10/2026";
 
-    Livewire::test(ListInventories::class)
+    $review = Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
         ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
-        ->callMountedAction()
-        ->assertNotified('Purchase order created');
+        ->assertActionMounted('reviewSupplierImport');
+    expect($variant->supplierOrderLines()->count())->toBe(0);
+    $review->callMountedAction()->assertNotified('Purchase order created');
 
     Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
@@ -67,6 +68,7 @@ it('accepts a supplier order for a draft shopify product', function (): void {
     Livewire::test(ListInventories::class)
         ->set('activeTab', 'orders')
         ->callAction('pasteSupplierOrder', data: ['pasted_rows' => $rows])
+        ->assertActionMounted('reviewSupplierImport')
         ->callMountedAction()
         ->assertNotified('Purchase order created');
 

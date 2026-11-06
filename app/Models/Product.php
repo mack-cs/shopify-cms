@@ -180,7 +180,7 @@ class Product extends Model
         $query->validProcurementConfiguration();
         $query->sharedBeadProcurementSource();
         $query->where(function (Builder $eligible): void {
-            $eligible->where(fn (Builder $listed): Builder => $listed->activeStatus()->nonBundle())
+            $eligible->where(fn (Builder $listed): Builder => $listed->inventoryEditableStatus()->nonBundle())
                 ->orWhere(fn (Builder $exception): Builder => $exception->unlistedEngravedBeadProcurementException()->nonBundle());
         });
 

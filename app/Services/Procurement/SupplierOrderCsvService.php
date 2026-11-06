@@ -203,6 +203,19 @@ final class SupplierOrderCsvService
             ->values();
     }
 
+    private function missingReceiptLineMessage(string $sku): string
+    {
+        $variants = Variant::query()->active()->whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->with('product')->get();
+        if ($variants->count() === 1 && $variants->first()->product?->isStackProduct()) {
+            return 'This SKU is a stack product. Receive its component products instead of the stack.';
+        }
+        if ($variants->isEmpty()) {
+            return 'This SKU does not match an active product. Check the SKU.';
+        }
+
+        return 'No open purchase order line exists for this SKU under the selected Order ID.';
+    }
+
     private function receiptLineForRow(array $row): ?ProcurementSupplierOrderLine
     {
         $order = trim((string) ($row['order_id'] ?? ''));
@@ -241,7 +254,7 @@ final class SupplierOrderCsvService
             }
         }
         $quantity = $row[$type === 'order' ? 'quantity_ordered' : 'quantity_received'] ?? '';
-        if (! ctype_digit((string) $quantity) || (int) $quantity <= 0) {
+        if (trim((string) $quantity) !== '' && (! ctype_digit((string) $quantity) || (int) $quantity <= 0)) {
             $errors[] = 'Quantity must be a positive whole number.';
         }
         $sku = strtoupper(trim((string) ($row['sku'] ?? '')));
@@ -275,22 +288,24 @@ final class SupplierOrderCsvService
                 }
             }
             if ($sku !== '' && $order !== '' && ProcurementSupplierOrderLine::whereRaw('UPPER(TRIM(sku)) = ?', [$sku])->whereHas('order', fn ($q) => $q->where('order_number', $order))->exists()) {
-                $errors[] = "Order {$order} already contains SKU {$sku}. This row is already recorded; existing quantities will not change. Use the authorized Amend Order Line action to request a change.";
+                $errors[] = "Order {$order} already contains SKU {$sku}. This SKU is already recorded on the purchase order. No duplicate was created.";
             }
         } elseif ($sku !== '' && $order !== '') {
             $line = $this->receiptLineForRow($row);
             if (! $line) {
-                $errors[] = "Order {$order}, SKU {$sku} must identify one open purchase order line. Check the order and SKU.";
+                $errors[] = $this->missingReceiptLineMessage($sku);
             } else {
+                $eligible = true;
                 try {
                     app(SupplierReceivingEligibility::class)->variantForLine($line);
                 } catch (ValidationException $e) {
+                    $eligible = false;
                     $errors = array_merge($errors, collect($e->errors())->flatten()->all());
                 }
-                if ($line->quantity_uncertain > 0) {
+                if ($eligible && $line->quantity_uncertain > 0) {
                     $errors[] = 'An earlier receipt needs reconciliation before more stock can be staged.';
-                } elseif (ctype_digit((string) $quantity) && (int) $quantity > $line->quantity_available_to_receive) {
-                    $errors[] = "Quantity exceeds the outstanding order quantity available to receive ({$line->quantity_available_to_receive}), after staged receipts.";
+                } elseif ($eligible && ctype_digit((string) $quantity) && (int) $quantity > $line->quantity_available_to_receive) {
+                    $errors[] = "Quantity exceeds the outstanding order quantity. Only {$line->quantity_available_to_receive} units remain available to receive; {$line->quantity_staged} are already staged.";
                 }
             }
         }

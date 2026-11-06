@@ -763,6 +763,23 @@ it('can append a missing targeted operational row for local Sheet testing', func
         ->toBe(['LOCAL-APPEND', 'LOCAL-APPEND']);
 });
 
+it('includes a draft shopify product and its open order in procurement records', function (): void {
+    config(['procurement.include_test_products' => true]);
+    [, $variant] = procurementSheetVariant('DRAFT-SHEET', 'livi-road');
+    Product::withoutEvents(fn () => $variant->product->update(['status' => 'draft']));
+    ProcurementCollectionConfig::query()->create([
+        'shopify_collection_id' => 'gid://shopify/Collection/1', 'collection_handle' => 'livi-road',
+        'collection_title' => 'Livi Road', 'is_active' => true, 'google_sheet_tab_name' => 'livi-road',
+    ]);
+    app(SupplierOrderService::class)->createForVariant($variant->fresh(), 'PO-DRAFT-SHEET', 6, '2026-12-02');
+
+    $record = collect(app(ProcurementSheetDatasetBuilder::class)->records())->firstWhere('sku', 'DRAFT-SHEET');
+
+    expect($record)->not->toBeNull()
+        ->and($record['total_quantity_on_order'])->toBe(6)
+        ->and($record['next_order_id'])->toBe('PO-DRAFT-SHEET');
+});
+
 it('includes prelaunch drafts in procurement records while excluding test drafts by default', function (): void {
     config(['procurement.include_test_products' => false]);
     ProcurementCollectionConfig::query()->create([
@@ -893,7 +910,7 @@ it('can append a missing targeted draft operational row for local Sheet testing'
 it('falls back to a new product draft when a matched local variant is procurement excluded', function (): void {
     config(['procurement.include_test_products' => true]);
     [, $variant] = procurementSheetVariant('TEST1P324', 'livi-road');
-    Product::withoutEvents(fn () => $variant->product->update(['status' => 'draft']));
+    Product::withoutEvents(fn () => $variant->product->update(['status' => 'archived']));
     NewProductDraft::query()->create([
         'sku' => 'TEST1P324', 'title' => 'Siblings Template Test', 'handle' => 'siblings-template-test',
         'status' => 'draft', 'vendor' => 'Livi Road', 'type' => 'Bracelets',

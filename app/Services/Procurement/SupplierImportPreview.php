@@ -107,7 +107,7 @@ final class SupplierImportPreview
             $total = array_sum(array_map(fn ($i) => (int) $rows[$i]['quantity_received'], $indices));
             if ($total > $line->quantity_available_to_receive) {
                 foreach ($indices as $i) {
-                    $rows[$i]['_errors'][] = "Combined receipt quantity {$total} for order {$first['order_id']}, SKU {$first['sku']} exceeds {$line->quantity_available_to_receive} still available to receive, after staged receipts.";
+                    $rows[$i]['_errors'][] = "These rows together receive {$total}. Only {$line->quantity_available_to_receive} units remain available to receive; {$line->quantity_staged} are already staged.";
                     $rows[$i]['_valid'] = false;
                 }
             }

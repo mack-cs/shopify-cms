@@ -40,7 +40,7 @@ final class SupplierReceivingEligibility
         $variant->loadMissing('product');
         $product = $variant->product;
         if (! $product || $product->isStackProduct()) {
-            throw ValidationException::withMessages(['sku' => 'Stack products cannot receive independent supplier stock.']);
+            throw ValidationException::withMessages(['sku' => 'This SKU is a stack product. Receive its component products instead of the stack.']);
         }
         if (! in_array(strtolower((string) $product->status), ['active', 'draft', 'unlisted'], true)) {
             throw ValidationException::withMessages(['sku' => 'This product is not eligible for supplier receiving.']);
@@ -51,11 +51,58 @@ final class SupplierReceivingEligibility
             }
         }
         if ($variant->inventory_tracked !== true) {
-            throw ValidationException::withMessages(['sku' => "SKU {$variant->sku}: Shopify inventory tracking must be confirmed before receiving stock. Untracked multi-bead products are not stock sources."]);
+            throw ValidationException::withMessages(['sku' => $this->trackingMessage($variant)]);
         }
         if ($this->isBead($variant) && $this->approvedSource($variant) === null) {
-            throw ValidationException::withMessages(['sku' => "SKU {$variant->sku}: only an approved, validated tracked 1-bead source may receive stock. Complete the existing family source approval; do not enable automation flags to bypass this check."]);
+            $message = $this->beadCount($variant) === 1
+                ? 'This tracked 1-bead source is not approved for receiving. Complete the existing family source approval. Do not enable automation flags to bypass this check.'
+                : 'This SKU is a multi-bead product. Receive inventory against its tracked 1-bead source instead.';
+            throw ValidationException::withMessages(['sku' => $message]);
         }
+    }
+
+    private function beadCount(Variant $variant): ?int
+    {
+        $beads = EngravedBeadConfiguration::fromProduct($variant->product)->beads();
+        if ($beads !== null) {
+            return $beads;
+        }
+        $required = EngravedBeadFamilyMember::query()
+            ->where('shopify_inventory_item_id', $variant->shopify_inventory_item_id)
+            ->value('required_beads');
+
+        return $required === null ? null : (int) $required;
+    }
+
+    private function trackingMessage(Variant $variant): string
+    {
+        if ($this->isUntrackedMultiBead($variant)) {
+            return 'This SKU is an untracked multi-bead product. Receive inventory against its tracked 1-bead source instead.';
+        }
+        if ($this->isBead($variant)) {
+            return 'This 1-bead source is not confirmed as tracked in Shopify. Synchronize inventory tracking before receiving.';
+        }
+        if ($variant->inventory_tracked === null) {
+            return 'Shopify inventory tracking has not been synchronized for this product. Synchronize inventory before receiving.';
+        }
+
+        return 'This product is not tracked in Shopify. Enable inventory tracking and synchronize it before receiving.';
+    }
+
+    private function isUntrackedMultiBead(Variant $variant): bool
+    {
+        if (! $this->isBead($variant)) {
+            return false;
+        }
+        $beads = $this->beadCount($variant);
+        if (in_array($beads, [2, 3, 4], true)) {
+            return true;
+        }
+
+        return EngravedBeadFamilyMember::query()
+            ->where('shopify_inventory_item_id', $variant->shopify_inventory_item_id)
+            ->whereIn('required_beads', [2, 3, 4])
+            ->exists();
     }
 
     public function isBead(Variant $variant): bool

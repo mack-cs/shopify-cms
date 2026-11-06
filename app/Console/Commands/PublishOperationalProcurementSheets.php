@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\NewProductDraft;
+use App\Models\Product;
 use App\Models\Variant;
 use App\Services\GoogleSheets\ProcurementSheetSyncService;
 use Illuminate\Console\Command;
@@ -128,7 +129,9 @@ class PublishOperationalProcurementSheets extends Command
         if (in_array($variant->sync_state, [Variant::SYNC_STATE_LOCAL_DELETED, Variant::SYNC_STATE_REMOTE_DELETED], true)) {
             $reasons[] = "variant sync_state is {$variant->sync_state}";
         }
-        if ($status !== 'active') {
+        $catalogEligible = $product instanceof Product
+            && Product::query()->procurementCatalogEligible()->whereKey($product->id)->exists();
+        if (! in_array($status, ['active', 'draft'], true) && ! $catalogEligible) {
             $reasons[] = "product status is {$status}";
         }
         if ((bool) ($product?->is_bundle ?? false)) {

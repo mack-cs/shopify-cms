@@ -312,6 +312,29 @@ class InventoryResource extends Resource
                     })
                     ->wrap()
                     ->visible(fn ($livewire): bool => $livewire->activeTab === 'grv_reports'),
+                TextColumn::make('rejected_import_date')
+                    ->label('Imported')
+                    ->state(fn (Model $record): ?string => $record instanceof ProcurementSupplierImportBatch ? $record->created_at?->format('d/m/Y H:i') : null)
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'rejected_imports'),
+                TextColumn::make('rejected_import_type')
+                    ->label('Type')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierImportBatch ? ($record->type === 'order' ? 'Purchase order' : 'Receipt') : '-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'rejected_imports'),
+                TextColumn::make('rejected_import_counts')
+                    ->label('Result')
+                    ->state(fn (Model $record): string => $record instanceof ProcurementSupplierImportBatch ? "{$record->valid_count} accepted, {$record->invalid_count} rejected" : '-')
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'rejected_imports'),
+                TextColumn::make('rejected_import_skus')
+                    ->label('Rejected SKUs')
+                    ->state(function (Model $record): string {
+                        if (! $record instanceof ProcurementSupplierImportBatch) {
+                            return '-';
+                        }
+
+                        return collect($record->preview_rows)->filter(fn (array $row): bool => ! ($row['_valid'] ?? false))->pluck('sku')->filter()->unique()->implode(', ') ?: '-';
+                    })
+                    ->wrap()
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'rejected_imports'),
                 TextColumn::make('adjustment_status')
                     ->label('Adjustment Status')
                     ->state(fn (Variant $record): string => self::latestInventoryAdjustmentItem($record)?->request?->status ?? '-')
@@ -738,6 +761,12 @@ class InventoryResource extends Resource
                         );
                         Notification::make()->title('Receipt staged')->body('Review it with the Awaiting Shopify Push filter, then push the selected row.')->success()->send();
                     }),
+                Action::make('viewRejectedImport')
+                    ->label('Rejected rows')->icon('heroicon-o-eye')->color('warning')
+                    ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'rejected_imports' && $record instanceof ProcurementSupplierImportBatch)
+                    ->modalHeading(fn (ProcurementSupplierImportBatch $record): string => ($record->type === 'order' ? 'Rejected purchase-order rows' : 'Rejected receipt rows'))
+                    ->modalContent(fn (ProcurementSupplierImportBatch $record) => view('filament.inventory.supplier-import-preview', ['batch' => $record]))
+                    ->modalSubmitAction(false)->modalCancelActionLabel('Close')->modalWidth(MaxWidth::FiveExtraLarge),
                 Action::make('viewSupplierOrders')
                     ->label('Order Details')->icon('heroicon-o-eye')->color('gray')
                     ->visible(fn (Model $record, $livewire): bool => $livewire->activeTab === 'orders' && $record instanceof Variant)
