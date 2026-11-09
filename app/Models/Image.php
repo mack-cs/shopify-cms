@@ -23,9 +23,14 @@ class Image extends Model
     public const BACKUP_STATUS_MISSING_SOURCE = 'missing_source';
     public const FILENAME_MODE_AUTO = 'auto';
     public const FILENAME_MODE_MANUAL = 'manual';
+    public const ALT_PENDING_REVIEW = 'pending_review';
+    public const ALT_APPROVED = 'approved';
+    public const ALT_PUBLISHED = 'published';
+    public const ALT_FAILED = 'failed';
 
     protected $fillable = [
         'product_id',
+        'source_image_id',
         'shopify_id',
         'image_asset_id',
         'sync_state',
@@ -53,6 +58,10 @@ class Image extends Model
         'shopify_image_sync_error',
         'position',
         'alt_text',
+        'shopify_alt_pending',
+        'shopify_alt_sync_error',
+        'alt_text_status',
+        'shopify_alt_text',
     ];
 
     protected $casts = [
@@ -65,6 +74,7 @@ class Image extends Model
         'backup_completed_at' => 'datetime',
         'last_shopify_image_synced_at' => 'datetime',
         'needs_shopify_image_sync' => 'boolean',
+        'shopify_alt_pending' => 'boolean',
     ];
 
     public function scopeActive(Builder $query): Builder
@@ -81,6 +91,16 @@ class Image extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function sourceImage(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'source_image_id');
+    }
+
+    public function stackCopies(): HasMany
+    {
+        return $this->hasMany(self::class, 'source_image_id');
     }
 
     public function imageAsset(): BelongsTo

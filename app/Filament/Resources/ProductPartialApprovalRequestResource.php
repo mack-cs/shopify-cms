@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Enums\RolesEnum;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ProductPartialApprovalService;
+use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
@@ -132,6 +133,7 @@ class ProductPartialApprovalRequestResource extends Resource
                         ProductShopifyUpdater::SYNC_SCOPE_PRICE => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_PRICE],
                         ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_COMPARE_AT],
                         ProductShopifyUpdater::SYNC_SCOPE_IMAGES => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES],
+                        ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT => ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT],
                     ])
                     ->query(function (Builder $query, array $data): Builder {
                         $value = trim((string) ($data['value'] ?? ''));
@@ -183,6 +185,33 @@ class ProductPartialApprovalRequestResource extends Resource
                             ->title('Partial approval complete')
                             ->body(self::approvalNotificationBody($summary))
                             ->status(($summary['approved'] ?? 0) > 0 ? 'success' : 'warning')
+                            ->send();
+                    }),
+                Tables\Actions\Action::make('rejectRequest')
+                    ->label('Reject')
+                    ->icon('heroicon-o-x-circle')
+                    ->color('danger')
+                    ->visible(fn (ProductPartialApprovalRequest $record): bool => app(ProductPartialApprovalService::class)
+                        ->canApproveRequest($record, (int) Auth::id()))
+                    ->form([
+                        Textarea::make('reason')
+                            ->label('Reason')
+                            ->rows(3)
+                            ->maxLength(1000),
+                    ])
+                    ->action(function (ProductPartialApprovalRequest $record, array $data): void {
+                        $summary = app(ProductPartialApprovalService::class)->rejectRequests(
+                            collect([$record]),
+                            (int) Auth::id(),
+                            $data['reason'] ?? null,
+                        );
+
+                        Notification::make()
+                            ->title('Partial approval rejected')
+                            ->body(($summary['rejected'] ?? 0) > 0
+                                ? 'The request was rejected. Its alt text cannot be published.'
+                                : 'This request could not be rejected.')
+                            ->status(($summary['rejected'] ?? 0) > 0 ? 'success' : 'warning')
                             ->send();
                     }),
                 Tables\Actions\Action::make('deletePendingRequest')
@@ -400,22 +429,68 @@ class ProductPartialApprovalRequestResource extends Resource
                 : 'Yes')
             : 'No';
 
+        $service = app(ProductPartialApprovalService::class);
+        $snapshot = is_array($record->image_alt_snapshot) ? $record->image_alt_snapshot : null;
+        $includesAlt = in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, is_array($record->scopes) ? $record->scopes : [], true);
         $lines = [
             '<div class="space-y-3 text-sm">',
             '<div><strong>Requested by:</strong> ' . e($record->requester?->name ?: 'Unknown') . '</div>',
             '<div><strong>Approver routing:</strong> ' . e($record->targetApprover?->name ?: 'Any eligible reviewer') . '</div>',
+            '<div><strong>Product:</strong> ' . e(trim((string) ($snapshot['product_title'] ?? $record->product?->title ?? 'Product'))) . '</div>',
+            '<div><strong>SKU:</strong> ' . e(trim((string) ($snapshot['sku'] ?? '')) ?: 'None') . '</div>',
             '<div><strong>Product status:</strong> ' . e(trim((string) ($record->product?->status ?? 'unknown'))) . '</div>',
             '<div><strong>Requested fields:</strong> ' . e(implode(', ', $requestedFields)) . '</div>',
             '<div><strong>Handle impact:</strong> ' . $handleImpact . '</div>',
         ];
+        if ($includesAlt && is_array($snapshot) && ! $service->imageAltSnapshotIsCurrent($record)) {
+            $lines[] = '<div><strong>Image descriptions changed after this request.</strong> Approve is unavailable. Send a new partial approval request.</div>';
+        }
 
         $note = trim((string) ($record->request_note ?? ''));
         if ($note !== '') {
             $lines[] = '<div><strong>Review note:</strong><br>' . nl2br(e($note)) . '</div>';
         }
 
+        if ($includesAlt) {
+            $lines[] = self::imageAltReviewTable($snapshot);
+        }
         $lines[] = '</div>';
 
         return implode('', $lines);
+    }
+
+    /**
+     * @param array<string, mixed>|null $snapshot
+     */
+    private static function imageAltReviewTable(?array $snapshot): string
+    {
+        $images = is_array($snapshot['images'] ?? null) ? $snapshot['images'] : null;
+        if ($images === null) {
+            return '<div>This request has no saved image list.</div>';
+        }
+        if ($images === []) {
+            return '<div><strong>Linked images:</strong> none.</div>';
+        }
+
+        $rows = ['<div><strong>Linked images</strong></div><table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left">Image</th><th style="text-align:left">Shopify alt</th><th style="text-align:left">Proposed alt</th><th style="text-align:left">Review</th></tr></thead><tbody>'];
+        foreach ($images as $image) {
+            if (! is_array($image)) {
+                continue;
+            }
+            $src = trim((string) ($image['src'] ?? ''));
+            $thumb = preg_match('~^https://~', $src) === 1
+                ? '<img src="' . e($src) . '" alt="" width="48" height="48" style="object-fit:cover">'
+                : 'No thumbnail';
+            $review = ! empty($image['inherited'])
+                ? 'Inherited'
+                : (! empty($image['changed']) ? 'Changed' : 'No change');
+            $shopify = $image['shopify_alt'] === null || trim((string) $image['shopify_alt']) === ''
+                ? 'Not recorded'
+                : (string) $image['shopify_alt'];
+            $rows[] = '<tr><td style="vertical-align:top;padding:6px">' . $thumb . '<div>#' . e((string) ($image['image_id'] ?? '')) . ' position ' . e((string) ($image['position'] ?? '')) . '</div></td><td style="vertical-align:top;padding:6px">' . e($shopify) . '</td><td style="vertical-align:top;padding:6px">' . e((string) ($image['proposed_alt'] ?? '')) . '</td><td style="vertical-align:top;padding:6px">' . e($review) . '</td></tr>';
+        }
+        $rows[] = '</tbody></table>';
+
+        return implode('', $rows);
     }
 }

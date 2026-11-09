@@ -22,12 +22,14 @@ class ProductPartialApprovalRequest extends Model
         'scopes',
         'core_fields',
         'request_note',
+        'image_alt_snapshot',
         'approved_at',
     ];
 
     protected $casts = [
         'scopes' => 'array',
         'core_fields' => 'array',
+        'image_alt_snapshot' => 'array',
         'approved_at' => 'datetime',
     ];
 

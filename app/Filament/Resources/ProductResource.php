@@ -2979,7 +2979,7 @@ class ProductResource extends Resource
                 ->required()
                 ->live()
                 ->columns(2)
-                ->helperText('Partial approval requests can be sent for active, draft, and unlisted products. Other statuses still need the existing full approval workflow. Price, compare-at price, SKU, barcode, options, weight, and cost are each approved on their own. This request never updates inventory.'),
+                ->helperText('Partial approval requests can be sent for active, draft, and unlisted products. Other statuses still need the existing full approval workflow. Image Alt Text is its own column: selecting it shows every linked image and the proposed alt text, and approving it does not approve any other column. Price, compare-at price, SKU, barcode, options, weight, and cost are each approved on their own. This request never updates inventory or Shopify.'),
             CheckboxList::make('core_fields')
                 ->label('Product core fields')
                 ->options(ProductShopifyUpdater::productCoreFieldLabels())

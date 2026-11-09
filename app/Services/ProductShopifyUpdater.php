@@ -32,6 +32,8 @@ final class ProductShopifyUpdater
 
     public const SYNC_SCOPE_IMAGES = 'images';
 
+    public const SYNC_SCOPE_IMAGE_ALT = 'image_alt';
+
     public const CORE_FIELD_TITLE = 'title';
 
     public const CORE_FIELD_VENDOR = 'vendor';
@@ -769,6 +771,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_PRICE,
             self::SYNC_SCOPE_COMPARE_AT,
             self::SYNC_SCOPE_IMAGES,
+            self::SYNC_SCOPE_IMAGE_ALT,
         ];
     }
 
@@ -785,6 +788,7 @@ final class ProductShopifyUpdater
             self::SYNC_SCOPE_PRICE => 'Price',
             self::SYNC_SCOPE_COMPARE_AT => 'Compare-at price',
             self::SYNC_SCOPE_IMAGES => 'Images',
+            self::SYNC_SCOPE_IMAGE_ALT => 'Image Alt Text',
         ];
     }
 
@@ -6174,7 +6178,10 @@ GQL;
     private function normalizeSyncScopes(?array $scopes): array
     {
         if ($scopes === null) {
-            return self::availableSyncScopes();
+            return array_values(array_filter(
+                self::availableSyncScopes(),
+                fn (string $scope): bool => $scope !== self::SYNC_SCOPE_IMAGE_ALT
+            ));
         }
 
         $allowed = array_fill_keys(self::availableSyncScopes(), true);
@@ -6182,7 +6189,7 @@ GQL;
 
         foreach ($scopes as $scope) {
             $scope = is_string($scope) ? trim($scope) : '';
-            if ($scope === '' || ! isset($allowed[$scope])) {
+            if ($scope === '' || $scope === self::SYNC_SCOPE_IMAGE_ALT || ! isset($allowed[$scope])) {
                 continue;
             }
 

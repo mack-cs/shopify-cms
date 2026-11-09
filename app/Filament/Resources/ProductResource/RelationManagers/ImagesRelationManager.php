@@ -9,6 +9,7 @@ use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\Variant;
 use App\Services\AdminNotification;
+use App\Services\ImageAltTextBackfillService;
 use Filament\Notifications\Notification;
 use Filament\Forms;
 use Filament\Forms\Components\Section;
@@ -22,10 +23,14 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class ImagesRelationManager extends RelationManager
 {
     protected static string $relationship = 'allImages';
+
+    /** @var array<string, mixed> */
+    protected array $imageEditSnapshot = [];
 
     public function form(Forms\Form $form): Forms\Form
     {
@@ -124,7 +129,10 @@ class ImagesRelationManager extends RelationManager
                 Forms\Components\TextInput::make('position')
                     ->numeric()
                     ->default(fn (): int => $this->nextImagePosition()),
-                Forms\Components\TextInput::make('alt_text')->label('Alt Text')->columnSpanFull(),
+                Forms\Components\TextInput::make('alt_text')
+                    ->label('Alt Text')
+                    ->helperText('A changed alt text is saved in the CMS. It is published only after this product is approved through partial approval and then pushed.')
+                    ->columnSpanFull(),
             ])->columns(2),
         ]);
     }
@@ -231,7 +239,28 @@ class ImagesRelationManager extends RelationManager
                 ->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('alt_text')
                 ->wrap()
-                ->toggleable(isToggledHiddenByDefault: true),
+                ->toggleable(),
+            Tables\Columns\TextColumn::make('alt_text_status')
+                ->label('Alt review')
+                ->badge()
+                ->placeholder('Not in review')
+                ->formatStateUsing(fn (?string $state): string => match ($state) {
+                    Image::ALT_PENDING_REVIEW => 'Pending review',
+                    Image::ALT_APPROVED => 'Approved',
+                    Image::ALT_PUBLISHED => 'Published',
+                    Image::ALT_FAILED => 'Failed',
+                    default => 'Not in review',
+                })
+                ->color(fn (?string $state): string => match ($state) {
+                    Image::ALT_PENDING_REVIEW => 'warning',
+                    Image::ALT_APPROVED => 'info',
+                    Image::ALT_PUBLISHED => 'success',
+                    Image::ALT_FAILED => 'danger',
+                    default => 'gray',
+                })
+                ->description(fn (Image $record): ?string => $record->alt_text_status === Image::ALT_FAILED
+                    ? $record->shopify_alt_sync_error
+                    : null),
         ])->filters([
             Tables\Filters\SelectFilter::make('sync_state')
                 ->options([
@@ -333,9 +362,35 @@ class ImagesRelationManager extends RelationManager
             Tables\Actions\EditAction::make()
                 ->visible(fn (Image $record): bool => $record->sync_state !== Image::SYNC_STATE_REMOTE_DELETED
                     && !$record->is_duplicate_hidden)
+                ->before(function (Image $record): void {
+                    $this->imageEditSnapshot = [
+                        'alt_text' => $record->alt_text,
+                        'src' => $record->src,
+                        'image_path' => $record->image_path,
+                        'position' => $record->position,
+                    ];
+                })
                 ->mutateFormDataUsing(fn (array $data): array => $this->normalizeFormData($data))
-                ->after(function (): void {
-                    $this->bumpOwnerApprovalVersion();
+                ->after(function (Image $record): void {
+                    $before = $this->imageEditSnapshot;
+                    $previousAlt = trim((string) ($before['alt_text'] ?? ''));
+                    $altText = trim((string) $record->alt_text);
+                    if ($previousAlt !== $altText) {
+                        try {
+                            app(ImageAltTextBackfillService::class)->markPendingReview($record, $altText);
+                        } catch (RuntimeException $exception) {
+                            Image::withoutEvents(function () use ($record, $before): void {
+                                $record->forceFill(['alt_text' => $before['alt_text'] ?? null])->save();
+                            });
+                            Notification::make()->title('Alt text was not changed')->body($exception->getMessage())->warning()->send();
+                        }
+                    }
+                    $contentChanged = ($before['src'] ?? null) !== $record->src
+                        || ($before['image_path'] ?? null) !== $record->image_path
+                        || (string) ($before['position'] ?? '') !== (string) $record->position;
+                    if ($contentChanged) {
+                        $this->bumpOwnerApprovalVersion();
+                    }
                 }),
             Tables\Actions\Action::make('restoreRemoteDeletedImage')
                 ->label('Restore to Shopify')

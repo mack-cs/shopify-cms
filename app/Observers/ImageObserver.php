@@ -334,6 +334,12 @@ class ImageObserver
             'last_shopify_image_synced_at',
             'needs_shopify_image_sync',
             'shopify_image_sync_error',
+            'alt_text',
+            'alt_text_status',
+            'shopify_alt_pending',
+            'shopify_alt_sync_error',
+            'shopify_alt_text',
+            'source_image_id',
         ];
     }
 

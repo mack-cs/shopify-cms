@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\RolesEnum;
 use App\Jobs\SendProductPartialApprovalSlackReminderJob;
 use App\Models\ChangeLog;
+use App\Models\Image;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\RequiredField;
@@ -44,8 +45,13 @@ class ProductPartialApprovalService
         return ProductPartialApprovalRequest::query()
             ->with(['product', 'requester', 'targetApprover'])
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
-            ->whereHas('product', function (Builder $query): void {
-                $query->whereColumn('products.approval_version', 'product_partial_approval_requests.approval_version');
+            ->where(function (Builder $query): void {
+                $query->whereHas('product', function (Builder $query): void {
+                    $query->whereColumn('products.approval_version', 'product_partial_approval_requests.approval_version');
+                })->orWhere(function (Builder $query): void {
+                    $query->whereJsonContains('scopes', ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT)
+                        ->whereJsonLength('scopes', 1);
+                });
             });
     }
 
@@ -60,11 +66,15 @@ class ProductPartialApprovalService
         }
 
         $product = $request->product;
-        if (!$product instanceof Product || (int) $request->approval_version !== (int) ($product->approval_version ?? 0)) {
+        if (! $product instanceof Product || (! $this->approvalVersionMatches($request, $product) && ! $this->isImageAltOnly($request))) {
             return false;
         }
 
         if ((int) $request->requested_by === $userId) {
+            return false;
+        }
+
+        if ($this->includesImageAlt($request) && ! $this->imageAltSnapshotIsCurrent($request)) {
             return false;
         }
 
@@ -247,6 +257,9 @@ class ProductPartialApprovalService
                 'scopes' => $scopes,
                 'core_fields' => $coreFields,
                 'request_note' => $requestNote,
+                'image_alt_snapshot' => in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, $scopes, true)
+                    ? $this->imageAltSnapshot($product)
+                    : null,
             ]);
 
             $summary['requested']++;
@@ -289,8 +302,14 @@ class ProductPartialApprovalService
 
             $requests = ProductPartialApprovalRequest::query()
                 ->where('product_id', $product->id)
-                ->where('approval_version', $product->approval_version)
                 ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
+                ->where(function (Builder $query) use ($product): void {
+                    $query->where('approval_version', $product->approval_version)
+                        ->orWhere(function (Builder $query): void {
+                            $query->whereJsonContains('scopes', ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT)
+                                ->whereJsonLength('scopes', 1);
+                        });
+                })
                 ->get();
 
             if ($requests->isEmpty()) {
@@ -312,6 +331,16 @@ class ProductPartialApprovalService
                     continue;
                 }
 
+                if (! $this->approvalVersionMatches($request, $product) && ! $this->isImageAltOnly($request)) {
+                    $skipped++;
+                    continue;
+                }
+
+                if ($this->includesImageAlt($request) && ! $this->imageAltSnapshotIsCurrent($request)) {
+                    $skipped++;
+                    continue;
+                }
+
                 $approvedAt = now();
 
                 $request->forceFill([
@@ -320,6 +349,7 @@ class ProductPartialApprovalService
                     'approved_at' => $approvedAt,
                 ])->save();
 
+                $this->grantReviewedAltText($request);
                 $this->syncApprovedHandleWhenTitleApproved($request);
                 $this->markSeoApprovedWhenApplicable($request, $userId);
                 $this->notifyRequestApproved($request, $approvedAt);
@@ -368,7 +398,7 @@ class ProductPartialApprovalService
             }
 
             $product = $request->product;
-            if (!$product instanceof Product || (int) $request->approval_version !== (int) ($product->approval_version ?? 0)) {
+            if (! $product instanceof Product || (! $this->approvalVersionMatches($request, $product) && ! $this->isImageAltOnly($request))) {
                 $skipped++;
                 $skippedStale++;
                 continue;
@@ -386,6 +416,12 @@ class ProductPartialApprovalService
                 continue;
             }
 
+            if ($this->includesImageAlt($request) && ! $this->imageAltSnapshotIsCurrent($request)) {
+                $skipped++;
+                $skippedStale++;
+                continue;
+            }
+
             $approvedAt = now();
 
             $request->forceFill([
@@ -394,6 +430,7 @@ class ProductPartialApprovalService
                 'approved_at' => $approvedAt,
             ])->save();
 
+            $this->grantReviewedAltText($request);
             $this->syncApprovedHandleWhenTitleApproved($request);
             $this->markSeoApprovedWhenApplicable($request, $userId);
             $this->notifyRequestApproved($request, $approvedAt);
@@ -484,6 +521,9 @@ class ProductPartialApprovalService
 
         foreach ($approved as $request) {
             foreach (($request->scopes ?? []) as $scope) {
+                if ($scope === ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT) {
+                    continue;
+                }
                 if (is_string($scope) && in_array($scope, ProductShopifyUpdater::availableSyncScopes(), true)) {
                     $allowedScopes[$scope] = $scope;
                 }
@@ -733,6 +773,10 @@ class ProductPartialApprovalService
             $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGES];
         }
 
+        if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, $scopes, true)) {
+            $labels[] = ProductShopifyUpdater::syncScopeLabels()[ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT];
+        }
+
         return array_values(array_unique(array_filter(array_map('strval', $labels))));
     }
 
@@ -902,6 +946,296 @@ class ProductPartialApprovalService
         }
 
         return null;
+    }
+
+    /**
+     * @param Collection<int, ProductPartialApprovalRequest> $requests
+     * @return array{rejected:int, skipped:int}
+     */
+    public function rejectRequests(Collection $requests, int $userId, ?string $reason = null): array
+    {
+        $rejected = 0;
+        $skipped = 0;
+        $reason = $this->normalizeRequestNote($reason);
+
+        foreach ($requests as $request) {
+            if (! $request instanceof ProductPartialApprovalRequest || ! $this->canApproveRequest($request, $userId)) {
+                $skipped++;
+                continue;
+            }
+
+            $request->forceFill([
+                'status' => ProductPartialApprovalRequest::STATUS_REJECTED,
+            ])->save();
+
+            ChangeLog::create([
+                'import_id' => $request->product?->import_id,
+                'product_id' => $request->product?->id,
+                'changed_by' => $userId,
+                'model_type' => ProductPartialApprovalRequest::class,
+                'model_id' => $request->id,
+                'field' => 'partial_approval_rejected',
+                'old_value' => ProductPartialApprovalRequest::STATUS_PENDING,
+                'new_value' => json_encode([
+                    'status' => ProductPartialApprovalRequest::STATUS_REJECTED,
+                    'reason' => $reason,
+                    'request_id' => (int) $request->id,
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ]);
+
+            $this->notifyRequestRejected($request, $reason);
+            $rejected++;
+        }
+
+        return ['rejected' => $rejected, 'skipped' => $skipped];
+    }
+
+    public function invalidatePendingImageAlt(Product $product): void
+    {
+        $requests = ProductPartialApprovalRequest::query()
+            ->where('product_id', $product->id)
+            ->whereIn('status', [
+                ProductPartialApprovalRequest::STATUS_PENDING,
+                ProductPartialApprovalRequest::STATUS_APPROVED,
+            ])
+            ->get();
+
+        foreach ($requests as $request) {
+            if (! $this->includesImageAlt($request) || $this->imageAltSnapshotIsCurrent($request)) {
+                continue;
+            }
+
+            $this->removeImageAltColumn($request, $product);
+        }
+    }
+
+    public function approvedAlt(Image $image): ?string
+    {
+        if ($this->inheritedStackImage($image)) {
+            return null;
+        }
+
+        $proposed = trim((string) $image->alt_text);
+        if ($proposed === '') {
+            return null;
+        }
+
+        $requests = ProductPartialApprovalRequest::query()
+            ->where('product_id', $image->product_id)
+            ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+            ->orderByDesc('approved_at')
+            ->orderByDesc('id')
+            ->get();
+
+        foreach ($requests as $request) {
+            if (! $this->includesImageAlt($request) || ! $this->imageAltSnapshotIsCurrent($request)) {
+                continue;
+            }
+            foreach ($this->snapshotImages($request) as $row) {
+                if ((int) ($row['image_id'] ?? 0) !== (int) $image->id || ! empty($row['inherited'])) {
+                    continue;
+                }
+                if (trim((string) ($row['proposed_alt'] ?? '')) !== $proposed) {
+                    continue;
+                }
+                if (empty($row['changed']) && ! in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_FAILED, Image::ALT_PENDING_REVIEW], true)) {
+                    return null;
+                }
+
+                return $proposed;
+            }
+        }
+
+        return null;
+    }
+
+    public function imageAltSnapshotIsCurrent(ProductPartialApprovalRequest $request): bool
+    {
+        if (! $this->includesImageAlt($request)) {
+            return true;
+        }
+
+        if (! is_array($request->image_alt_snapshot)) {
+            return false;
+        }
+
+        $product = $request->product;
+        if (! $product instanceof Product) {
+            return false;
+        }
+
+        $saved = array_values(array_filter(
+            $this->snapshotImages($request),
+            fn (array $row): bool => empty($row['inherited'])
+        ));
+        $current = array_values(array_filter(
+            $this->imageAltSnapshot($product)['images'],
+            fn (array $row): bool => empty($row['inherited'])
+        ));
+        if (count($saved) !== count($current)) {
+            return false;
+        }
+
+        $currentById = collect($current)->keyBy('image_id');
+        foreach ($saved as $row) {
+            $live = $currentById->get((int) ($row['image_id'] ?? 0));
+            if (! is_array($live) || trim((string) ($live['proposed_alt'] ?? '')) !== trim((string) ($row['proposed_alt'] ?? ''))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array{sku:string, product_title:string, images:array<int, array<string, mixed>>}
+     */
+    public function imageAltSnapshot(Product $product): array
+    {
+        $images = $product->allImages()->active()
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get();
+
+        return [
+            'sku' => trim((string) ($product->variants()->orderBy('id')->value('sku') ?? '')),
+            'product_title' => trim((string) ($product->title ?? '')),
+            'images' => $images->map(function (Image $image) use ($product): array {
+                $proposed = trim((string) $image->alt_text);
+                $shopify = $image->shopify_alt_text === null ? null : trim((string) $image->shopify_alt_text);
+                $inherited = $this->inheritedStackImage($image, $product);
+
+                return [
+                    'image_id' => (int) $image->id,
+                    'position' => $image->position === null ? null : (int) $image->position,
+                    'src' => trim((string) $image->src),
+                    'proposed_alt' => $proposed,
+                    'shopify_alt' => $shopify,
+                    'changed' => $image->alt_text_status === Image::ALT_PENDING_REVIEW
+                        || ($shopify !== null && $shopify !== $proposed),
+                    'inherited' => $inherited,
+                ];
+            })->values()->all(),
+        ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function snapshotImages(ProductPartialApprovalRequest $request): array
+    {
+        $images = $request->image_alt_snapshot['images'] ?? null;
+
+        return is_array($images) ? array_values(array_filter($images, 'is_array')) : [];
+    }
+
+    private function grantReviewedAltText(ProductPartialApprovalRequest $request): void
+    {
+        if (! $this->includesImageAlt($request)) {
+            return;
+        }
+
+        foreach ($this->snapshotImages($request) as $row) {
+            if (! empty($row['inherited']) || empty($row['changed'])) {
+                continue;
+            }
+
+            $image = Image::query()->find((int) ($row['image_id'] ?? 0));
+            if (! $image instanceof Image) {
+                continue;
+            }
+            if (trim((string) $image->alt_text) !== trim((string) ($row['proposed_alt'] ?? ''))) {
+                continue;
+            }
+            if ($image->alt_text_status === Image::ALT_PUBLISHED && trim((string) $image->shopify_alt_text) === trim((string) $image->alt_text)) {
+                continue;
+            }
+            if ($image->alt_text_status === Image::ALT_FAILED) {
+                continue;
+            }
+
+            Image::withoutEvents(function () use ($image): void {
+                $image->forceFill([
+                    'alt_text_status' => Image::ALT_APPROVED,
+                    'shopify_alt_pending' => true,
+                ])->save();
+            });
+        }
+    }
+
+    private function includesImageAlt(ProductPartialApprovalRequest $request): bool
+    {
+        return in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, is_array($request->scopes) ? $request->scopes : [], true);
+    }
+
+    private function isImageAltOnly(ProductPartialApprovalRequest $request): bool
+    {
+        $scopes = array_values(is_array($request->scopes) ? $request->scopes : []);
+
+        return $scopes === [ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT];
+    }
+
+    private function approvalVersionMatches(ProductPartialApprovalRequest $request, Product $product): bool
+    {
+        return (int) $request->approval_version === (int) ($product->approval_version ?? 0);
+    }
+
+    private function removeImageAltColumn(ProductPartialApprovalRequest $request, Product $product): void
+    {
+        $scopes = array_values(array_filter(
+            is_array($request->scopes) ? $request->scopes : [],
+            fn (mixed $scope): bool => $scope !== ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT
+        ));
+        $previousStatus = (string) $request->status;
+        $request->forceFill([
+            'scopes' => $scopes,
+            'image_alt_snapshot' => null,
+            'status' => $scopes === [] ? ProductPartialApprovalRequest::STATUS_REJECTED : $request->status,
+        ])->save();
+
+        ChangeLog::create([
+            'import_id' => $product->import_id,
+            'product_id' => $product->id,
+            'changed_by' => null,
+            'model_type' => ProductPartialApprovalRequest::class,
+            'model_id' => $request->id,
+            'field' => 'partial_approval_image_alt_stale',
+            'old_value' => $previousStatus,
+            'new_value' => (string) $request->status,
+        ]);
+    }
+
+    private function inheritedStackImage(Image $image, ?Product $product = null): bool
+    {
+        $product ??= $image->product;
+        if (! $product instanceof Product || ! $product->isStackProduct()) {
+            return false;
+        }
+
+        return $image->position !== null && (int) $image->position >= 2;
+    }
+
+    private function notifyRequestRejected(ProductPartialApprovalRequest $request, ?string $reason): void
+    {
+        $product = $request->product;
+        if (! $product instanceof Product) {
+            return;
+        }
+
+        $body = trim((string) ($product->title ?? 'Product'));
+        $body = ($body !== '' ? $body.'. ' : '').'The partial approval request was rejected.';
+        if ($reason !== null) {
+            $body .= ' '.$reason;
+        }
+
+        AdminNotification::sendToUserId(
+            Notification::make()
+                ->title('Partial approval request rejected')
+                ->body($body)
+                ->warning(),
+            (int) $request->requested_by
+        );
     }
 
     private function normalizeTargetApproverId(?int $targetApproverId, int $requesterId): ?int

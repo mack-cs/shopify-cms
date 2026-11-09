@@ -480,7 +480,17 @@ final class Normalizer
                 return;
             }
 
-            $image->fill(array_merge($payload, [
+            $incoming = $payload;
+            if (in_array($image->alt_text_status, [
+                Image::ALT_PENDING_REVIEW,
+                Image::ALT_APPROVED,
+                Image::ALT_PUBLISHED,
+                Image::ALT_FAILED,
+            ], true)) {
+                unset($incoming['alt_text']);
+            }
+
+            $image->fill(array_merge($incoming, [
                 'sync_state' => Image::SYNC_STATE_SYNCED,
                 'local_dirty' => false,
                 'last_shopify_seen_at' => $syncedAt,
