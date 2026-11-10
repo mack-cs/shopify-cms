@@ -5,30 +5,39 @@ namespace App\Filament\Pages;
 use App\Enums\PermissionEnum;
 use App\Jobs\ImportShopifyProductImagesJob;
 use App\Jobs\RebuildShopifyStackImagesJob;
+use App\Models\Product;
 use App\Models\ShopifyImageImportBatch;
 use App\Services\AdminNotification;
 use App\Services\ShopifyImageImportService;
+use App\Services\StackImageSourceRepairService;
 use Filament\Forms\Components\Actions;
 use Filament\Forms\Components\Actions\Action;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Section;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Forms\Form;
+use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\HtmlString;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ImportShopifyProductImages extends Page implements HasForms
 {
     use InteractsWithForms;
 
     protected static ?string $navigationIcon = 'heroicon-o-photo';
+
     protected static ?string $navigationGroup = 'Product Data';
+
     protected static ?string $navigationLabel = 'Import Shopify Product Images';
+
     protected static ?int $navigationSort = 8;
+
     protected static string $view = 'filament.pages.import-shopify-product-images';
 
     public ?array $data = [];
@@ -58,11 +67,21 @@ class ImportShopifyProductImages extends Page implements HasForms
                             ->required()
                             ->live(onBlur: true)
                             ->maxLength(255)
-                            ->helperText('Enter a date like 2026-07-06 or a full prefix like incoming/2026-07-06.'),
+                            ->helperText('Enter a date like 2026-07-06 or a full prefix like incoming/2026-07-06. Alt text is optional. Download a template, then upload the completed alt-text.csv to this same folder.'),
                         Placeholder::make('normalized_prefix')
                             ->label('Normalized prefix')
                             ->content(fn (): string => $this->normalizedPrefixPreview()),
+                        Placeholder::make('alt_text_csv_status')
+                            ->label('Alt text CSV')
+                            ->content(fn (): HtmlString => $this->altTextCsvStatusHtml()),
                         Actions::make([
+                            Action::make('downloadAltTextTemplate')
+                                ->label('Download Alt Text Template')
+                                ->icon('heroicon-o-arrow-down-tray')
+                                ->color('gray')
+                                ->action(function (ShopifyImageImportService $service): ?StreamedResponse {
+                                    return $this->downloadAltTextTemplate($service);
+                                }),
                             Action::make('runImport')
                                 ->label('Run Import')
                                 ->icon('heroicon-o-arrow-up-tray')
@@ -76,12 +95,27 @@ class ImportShopifyProductImages extends Page implements HasForms
                                 ->icon('heroicon-o-arrow-path')
                                 ->color('gray')
                                 ->requiresConfirmation()
-                                ->modalHeading('Rebuild stack images and compare-at prices?')
-                                ->modalDescription('This queues a job for stacks with linked components. Position 1 stays as the lifestyle image and positions 2 onward are rebuilt from component first images. Each stack compare-at price is set to the total of its component prices in Products and New Products, and any compare-at clash on the stack is cleared.')
-                                ->action(function (ShopifyImageImportService $service): void {
-                                    $this->runStackComponentRebuild($service);
+                                ->modalHeading('Stack image maintenance')
+                                ->modalDescription('Source links only preserves photographs, alt text, prices and inventory. The full rebuild option replaces component image rows and recalculates compare-at prices for all linked stacks.')
+                                ->form([
+                                    Select::make('mode')->label('Operation')->options([
+                                        'source_links' => 'Repair source links only — selected stacks',
+                                        'rebuild' => 'Full image and compare-at rebuild — all linked stacks',
+                                    ])->default('source_links')->required()->live(),
+                                    Select::make('stack_ids')->label('Stacks')->multiple()->searchable()
+                                        ->visible(fn (Get $get): bool => $get('mode') === 'source_links')
+                                        ->required(fn (Get $get): bool => $get('mode') === 'source_links')
+                                        ->options(fn (): array => Product::query()->activeStatus()->orderBy('title')->get()
+                                            ->filter(fn (Product $product): bool => $product->isStackProduct())
+                                            ->mapWithKeys(fn (Product $product): array => [$product->id => $product->title.' (#'.$product->id.')'])->all()),
+                                ])
+                                ->action(function (array $data, ShopifyImageImportService $service): void {
+                                    $this->runStackComponentRebuild($service, $data);
                                 }),
                         ]),
+                        Placeholder::make('alt_text_csv_instructions')
+                            ->label('How to add alt text')
+                            ->content(fn (): HtmlString => $this->altTextInstructionsHtml()),
                     ])
                     ->columns(1),
                 Section::make('Recent Image Imports')
@@ -93,14 +127,70 @@ class ImportShopifyProductImages extends Page implements HasForms
             ]);
     }
 
-    public function runImport(ShopifyImageImportService $service): void
+    public function downloadAltTextTemplate(ShopifyImageImportService $service): ?StreamedResponse
     {
-        if (!static::canAccess()) {
+        if (! static::canAccess()) {
             AdminNotification::send(
                 Notification::make()
                     ->title('Image import permission required')
                     ->danger()
             );
+
+            return null;
+        }
+
+        try {
+            $template = $service->altTextTemplate((string) ($this->data['s3_prefix'] ?? ''));
+        } catch (\Throwable $exception) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Unable to create the alt text template')
+                    ->body($exception->getMessage())
+                    ->danger()
+            );
+
+            return null;
+        }
+
+        if (! $template['ok']) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Unable to Check CSV')
+                    ->body($template['message'] ?? 'S3 could not be accessed or checked.')
+                    ->danger()
+            );
+
+            return null;
+        }
+
+        if ($template['message'] !== null) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Alt text template')
+                    ->body($template['message'])
+                    ->warning()
+            );
+        }
+
+        $csv = $template['csv'];
+
+        return response()->streamDownload(function () use ($csv): void {
+            echo $csv;
+        }, 'alt-text.csv', [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Cache-Control' => 'no-store',
+        ]);
+    }
+
+    public function runImport(ShopifyImageImportService $service): void
+    {
+        if (! static::canAccess()) {
+            AdminNotification::send(
+                Notification::make()
+                    ->title('Image import permission required')
+                    ->danger()
+            );
+
             return;
         }
 
@@ -127,14 +217,25 @@ class ImportShopifyProductImages extends Page implements HasForms
         ]);
     }
 
-    public function runStackComponentRebuild(ShopifyImageImportService $service): void
+    public function runStackComponentRebuild(ShopifyImageImportService $service, array $options = []): void
     {
-        if (!static::canAccess()) {
+        if (! static::canAccess()) {
             AdminNotification::send(
                 Notification::make()
                     ->title('Image import permission required')
                     ->danger()
             );
+
+            return;
+        }
+
+        if (($options['mode'] ?? 'source_links') === 'source_links') {
+            $this->repairSelectedSourceLinks((array) ($options['stack_ids'] ?? []));
+
+            return;
+        }
+
+        if (($options['mode'] ?? '') !== 'rebuild') {
             return;
         }
 
@@ -146,6 +247,7 @@ class ImportShopifyProductImages extends Page implements HasForms
                     ->body('No stacks with linked components were found.')
                     ->warning()
             );
+
             return;
         }
 
@@ -162,7 +264,7 @@ class ImportShopifyProductImages extends Page implements HasForms
         AdminNotification::send(
             Notification::make()
                 ->title('Stack rebuild queued')
-                ->body('Batch #' . $batch->id . ' will rebuild images and compare-at prices for ' . count($stackProductIds) . ' stack(s).')
+                ->body('Batch #'.$batch->id.' will rebuild images and compare-at prices for '.count($stackProductIds).' stack(s).')
                 ->success()
         );
     }
@@ -173,6 +275,77 @@ class ImportShopifyProductImages extends Page implements HasForms
             return app(ShopifyImageImportService::class)->normalizePrefix((string) ($this->data['s3_prefix'] ?? ''));
         } catch (\Throwable) {
             return 'Enter a folder or date.';
+        }
+    }
+
+    private function altTextCsvStatusHtml(): HtmlString
+    {
+        $status = app(ShopifyImageImportService::class)->altTextCsvStatus((string) ($this->data['s3_prefix'] ?? ''));
+        [$label, $detail, $color] = match ($status) {
+            'found' => ['Alt Text CSV Found', 'The file exists in the selected S3 folder.', '#047857'],
+            'missing' => ['Alt Text CSV Missing', 'No CSV exists; image-only import is still supported.', '#b45309'],
+            'unavailable' => ['Unable to Check CSV', 'S3 could not be accessed or checked.', '#b91c1c'],
+            default => ['Select an S3 folder to check for alt-text.csv.', 'The status updates when the folder changes.', '#4b5563'],
+        };
+
+        return new HtmlString(
+            '<div data-alt-csv-status="'.e($status).'">'
+            .'<div style="font-weight:600;color:'.$color.';">'.e($label).'</div>'
+            .'<div style="margin-top:2px;font-size:13px;color:#4b5563;">'.e($detail).'</div>'
+            .'</div>'
+        );
+    }
+
+    private function altTextInstructionsHtml(): HtmlString
+    {
+        $example = e(implode("\n", [
+            'filename,alt_text',
+            'LA0550.jpg,"Elegant gold necklace, with café detailing"',
+            'LA0550-2.jpg,',
+        ]));
+
+        return new HtmlString(<<<HTML
+<ol style="margin:0;padding-left:1.25rem;font-size:14px;line-height:1.6;">
+    <li>Select the AWS S3 folder containing the product images.</li>
+    <li>Download the Alt Text CSV Template.</li>
+    <li>Complete the <code>alt_text</code> column.</li>
+    <li>Upload the completed file as <code>alt-text.csv</code> into the same S3 folder.</li>
+    <li>Confirm the CMS displays <strong>Alt Text CSV Found</strong>.</li>
+    <li>Click <strong>Run Import</strong>.</li>
+</ol>
+<pre style="margin-top:12px;overflow-x:auto;border-radius:6px;background:#f9fafb;padding:12px;font-size:12px;line-height:1.5;">{$example}</pre>
+HTML);
+    }
+
+    private function repairSelectedSourceLinks(array $stackIds): void
+    {
+        $stackIds = array_values(array_unique(array_filter(array_map('intval', $stackIds))));
+        if ($stackIds === []) {
+            AdminNotification::send(Notification::make()->title('Select stacks to check source links')->warning());
+
+            return;
+        }
+        $batch = ShopifyImageImportBatch::create([
+            's3_prefix' => 'stack-source-links-only',
+            'status' => ShopifyImageImportBatch::STATUS_RUNNING,
+            'matched_count' => count($stackIds), 'started_at' => now(), 'created_by' => Auth::id(),
+        ]);
+        try {
+            $result = app(StackImageSourceRepairService::class)->review($stackIds, true);
+            $blocked = collect($result['stacks'])->filter(fn (array $stack): bool => $stack['blocked'] !== []);
+            $messages = $blocked->map(fn (array $stack): string => '#'.$stack['product_id'].': '.implode(' ', $stack['blocked']))->implode("\n");
+            $batch->update([
+                'status' => ShopifyImageImportBatch::STATUS_COMPLETED,
+                'updated_count' => count($result['stacks']) - $blocked->count(),
+                'failed_count' => $blocked->count(), 'error_message' => $messages ?: null, 'completed_at' => now(),
+            ]);
+            AdminNotification::send(Notification::make()->title('Stack source checks complete')
+                ->body('Batch #'.$batch->id.': '.$batch->updated_count.' repaired, '.$batch->failed_count.' blocked. '.$messages)
+                ->status($blocked->isEmpty() ? 'success' : 'warning'));
+        } catch (\Throwable $exception) {
+            $batch->update(['status' => ShopifyImageImportBatch::STATUS_FAILED, 'error_message' => $exception->getMessage(),
+                'failed_count' => count($stackIds), 'completed_at' => now()]);
+            AdminNotification::send(Notification::make()->title('Stack source checks failed')->body($exception->getMessage())->danger());
         }
     }
 
@@ -192,7 +365,7 @@ class ImportShopifyProductImages extends Page implements HasForms
             $prefix = e($batch->s3_prefix);
             $created = e($batch->created_at?->format('Y-m-d H:i') ?? '-');
             $completed = e($batch->completed_at?->format('Y-m-d H:i') ?? '-');
-            $counts = e("{$batch->updated_count} updated / {$batch->failed_count} failed / {$batch->total_files} files");
+            $counts = e($batch->resultSummary());
 
             return <<<HTML
 <tr>

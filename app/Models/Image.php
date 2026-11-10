@@ -12,20 +12,35 @@ use Illuminate\Support\Str;
 class Image extends Model
 {
     public const SYNC_STATE_SYNCED = 'synced';
+
     public const SYNC_STATE_LOCAL_NEW = 'local_new';
+
     public const SYNC_STATE_LOCAL_UPDATED = 'local_updated';
+
     public const SYNC_STATE_LOCAL_DELETED = 'local_deleted';
+
     public const SYNC_STATE_REMOTE_DELETED = 'remote_deleted';
+
     public const SYNC_STATE_CONFLICT = 'conflict';
+
     public const BACKUP_STATUS_PENDING = 'pending';
+
     public const BACKUP_STATUS_BACKED_UP = 'backed_up';
+
     public const BACKUP_STATUS_FAILED = 'failed';
+
     public const BACKUP_STATUS_MISSING_SOURCE = 'missing_source';
+
     public const FILENAME_MODE_AUTO = 'auto';
+
     public const FILENAME_MODE_MANUAL = 'manual';
+
     public const ALT_PENDING_REVIEW = 'pending_review';
+
     public const ALT_APPROVED = 'approved';
+
     public const ALT_PUBLISHED = 'published';
+
     public const ALT_FAILED = 'failed';
 
     protected $fillable = [
@@ -58,6 +73,7 @@ class Image extends Model
         'shopify_image_sync_error',
         'position',
         'alt_text',
+        'imported_alt_text',
         'shopify_alt_pending',
         'shopify_alt_sync_error',
         'alt_text_status',
@@ -154,7 +170,7 @@ class Image extends Model
 
     public function backupPublicUrl(): ?string
     {
-        if (!$this->backupReady()) {
+        if (! $this->backupReady()) {
             return null;
         }
 
@@ -188,7 +204,7 @@ class Image extends Model
             $productKey = trim((string) ($this->product?->handle ?? ''));
         }
         if ($productKey === '') {
-            $productKey = 'product-' . ($this->product_id ?: 'unknown');
+            $productKey = 'product-'.($this->product_id ?: 'unknown');
         }
 
         $productSlug = Str::slug(str_replace(['gid://', '/'], ' ', $productKey));
@@ -270,7 +286,7 @@ class Image extends Model
             'duplicate_restored_at' => now(),
             'duplicate_restored_by' => $userId,
             'sync_state' => $hasShopifyId ? self::SYNC_STATE_SYNCED : self::SYNC_STATE_LOCAL_NEW,
-            'local_dirty' => !$hasShopifyId,
+            'local_dirty' => ! $hasShopifyId,
         ])->save();
     }
 
@@ -286,7 +302,7 @@ class Image extends Model
         }
 
         if (str_starts_with($trimmed, '//')) {
-            return 'https:' . $trimmed;
+            return 'https:'.$trimmed;
         }
 
         return $trimmed;

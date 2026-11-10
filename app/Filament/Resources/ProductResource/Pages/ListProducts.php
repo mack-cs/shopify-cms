@@ -5,31 +5,35 @@ namespace App\Filament\Resources\ProductResource\Pages;
 use App\Enums\PermissionEnum;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
+use App\Filament\Resources\ProductResource\Widgets\AltTextExportStatus;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
 use App\Models\Import;
 use App\Models\Product;
-use App\Models\ShopifyCollection;
-use App\Services\DuplicateSkuCsvExporter;
+use App\Models\ProductPartialApprovalRequest;
 use App\Services\DuplicateSkuAuditService;
+use App\Services\DuplicateSkuCsvExporter;
 use App\Services\ImageAltTextBackfillService;
-use App\Services\StackImageSourceRepairService;
+use App\Services\ImageAltTextExportService;
 use App\Services\LocalCatalogResetService;
-use Filament\Forms\Components\FileUpload;
-use Filament\Forms\Components\Select;
-use Filament\Forms\Components\Toggle;
-use Filament\Notifications\Notification;
+use App\Services\ShopifyCollectionMembership;
 use Filament\Actions;
+use Filament\Forms\Components\FileUpload;
+use Filament\Forms\Components\Toggle;
+use Filament\Forms\Form;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 
 class ListProducts extends ListRecords
 {
     protected static string $resource = ProductResource::class;
+
+    public ?string $altTextPreviewHash = null;
+
     protected $listeners = ['products-table-refresh' => '$refresh'];
 
     public function updatedPaginators($page, $pageName): void
@@ -40,170 +44,93 @@ class ListProducts extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
-            Actions\Action::make('downloadImageAltTextTemplate')
-                ->label('Download Alt Text CSV')
-                ->icon('heroicon-o-arrow-down-tray')
-                ->color('gray')
-                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->modalDescription('Exports active products. Leave collections empty for every active product. A stack contributes only its own first image. Inherited component images stay on their component products.')
-                ->form([
-                    $this->altTextCollectionSelect('Membership is read from Shopify. Product tags are not used.'),
-                    Toggle::make('include_images')
-                        ->label('Include the photographs in a ZIP')
-                        ->default(false),
-                ])
-                ->action(function (array $data, ImageAltTextBackfillService $backfill) {
-                    $export = $backfill->export(
-                        array_values(array_filter((array) ($data['collection_ids'] ?? []))),
-                        (bool) ($data['include_images'] ?? false),
-                    );
-                    $exceptions = collect($export['exceptions']);
-                    if ($exceptions->isNotEmpty()) {
-                        Notification::make()
-                            ->title('Some images were left out of the alt text CSV')
-                            ->body($exceptions->take(8)->pluck('message')->implode("\n"))
-                            ->warning()
-                            ->persistent()
-                            ->send();
-                    }
+            Actions\ActionGroup::make([
+                Actions\Action::make('downloadImageAltTextTemplate')
+                    ->label('Export Alt Text CSV')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->color('gray')
+                    ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
+                    ->modalDescription('Queues a background export using the applied Products collection filter. Leave collections unfiltered for all active products. Stacks contribute only their owned first image.')
+                    ->form([
+                        Toggle::make('include_images')
+                            ->label('Include the photographs in a ZIP')
+                            ->default(false),
+                    ])
+                    ->action(function (array $data, ImageAltTextExportService $exports): void {
+                        try {
+                            $state = $this->getTableFilterState('collection') ?? [];
+                            $export = $exports->request(Auth::user(), (array) ($state['values'] ?? []), (bool) ($data['include_images'] ?? false));
+                            Notification::make()->title('Alt text export queued')
+                                ->body('The export runs in the background. Progress and the download will appear below.')->success()->send();
+                        } catch (\RuntimeException $exception) {
+                            Notification::make()->title('Alt text export unavailable')->body($exception->getMessage())->danger()->send();
+                        }
+                    }),
+                Actions\Action::make('backfillImageAltText')
+                    ->label('Import Alt Text CSV')
+                    ->icon('heroicon-o-language')
+                    ->color('info')
+                    ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
+                    ->modalDescription('Upload the alt text CSV. Rows match on image id. Blank alt text is skipped. Inherited stack images are rejected. Saving writes only to the CMS. Request partial approval for the product before anything can be pushed to Shopify.')
+                    ->form([
+                        FileUpload::make('file')
+                            ->label('Alt text CSV')
+                            ->required()
+                            ->disk('local')
+                            ->directory('imports/image-alt-text')
+                            ->acceptedFileTypes([
+                                'text/csv',
+                                'text/plain',
+                                'application/vnd.ms-excel',
+                                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                'application/zip',
+                            ]),
+                    ])
+                    ->modalSubmitActionLabel('Preview')
+                    ->mountUsing(function (Form $form): void {
+                        $this->altTextPreviewHash = null;
+                        session()->forget('alt-text-preview.'.Auth::id());
+                        $form->fill();
+                    })
+                    ->extraModalFooterActions(fn (Actions\Action $action): array => [
+                        $action->makeModalSubmitAction('saveAltText', arguments: ['save' => true])
+                            ->label('Save for review')
+                            ->visible(fn (): bool => $this->altTextPreviewHash !== null),
+                    ])
+                    ->action(function (array $data, array $arguments, Actions\Action $action, ImageAltTextBackfillService $backfill): void {
+                        $path = Storage::disk('local')->path((string) $data['file']);
+                        $apply = (bool) ($arguments['save'] ?? false);
+                        $hash = hash_file('sha256', $path);
+                        $previewKey = 'alt-text-preview.'.Auth::id();
+                        if ($apply && (! is_string($hash) || session()->get($previewKey) !== $hash)) {
+                            Notification::make()->title('Preview this file before saving')->warning()->send();
+                            $action->halt();
+                        }
+                        $result = $backfill->importFromPath($path, $apply);
+                        $failed = collect($result['failed'])->take(8)->map(
+                            fn (array $row): string => "Row {$row['row']}: {$row['reason']}"
+                        )->implode("\n");
+                        $mode = $result['applied'] ? 'Saved for review' : 'Preview';
+                        $body = "{$mode}. Pending review {$result['updated']}. Unchanged {$result['unchanged']}. Blank {$result['skipped_blank']}. Inherited stack rows {$result['excluded']}. Failed ".count($result['failed']).'.';
+                        if ($failed !== '') {
+                            $body .= "\n".$failed;
+                        }
 
-                    return $export['response'];
-                }),
-            Actions\Action::make('backfillImageAltText')
-                ->label('Import Alt Text CSV')
-                ->icon('heroicon-o-language')
-                ->color('info')
-                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->modalDescription('Upload the alt text CSV. Rows match on image id. Blank alt text is skipped. Inherited stack images are rejected. Saving writes only to the CMS. Request partial approval for the product before anything can be pushed to Shopify.')
-                ->form([
-                    FileUpload::make('file')
-                        ->label('Alt text CSV')
-                        ->required()
-                        ->disk('local')
-                        ->directory('imports/image-alt-text')
-                        ->acceptedFileTypes([
-                            'text/csv',
-                            'text/plain',
-                            'application/vnd.ms-excel',
-                            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                            'application/zip',
-                        ]),
-                    Toggle::make('apply')
-                        ->label('Save alt text in the CMS')
-                        ->helperText('Leave this off to preview the file. Saving does not update Shopify.')
-                        ->default(false),
-                ])
-                ->action(function (array $data, ImageAltTextBackfillService $backfill): void {
-                    $path = Storage::disk('local')->path((string) $data['file']);
-                    $result = $backfill->importFromPath($path, (bool) ($data['apply'] ?? false));
-                    $failed = collect($result['failed'])->take(8)->map(
-                        fn (array $row): string => "Row {$row['row']}: {$row['reason']}"
-                    )->implode("\n");
-                    $mode = $result['applied'] ? 'Saved for review' : 'Preview';
-                    $body = "{$mode}. Pending review {$result['updated']}. Unchanged {$result['unchanged']}. Blank {$result['skipped_blank']}. Inherited stack rows {$result['excluded']}. Failed ".count($result['failed']).'.';
-                    if ($failed !== '') {
-                        $body .= "\n".$failed;
-                    }
-
-                    $notification = Notification::make()
-                        ->title($result['applied'] ? 'Alt text saved for review' : 'Alt text import preview')
-                        ->body($body)
-                        ->persistent();
-                    $result['failed'] === [] ? $notification->success() : $notification->warning();
-                    $notification->send();
-                }),
-            Actions\Action::make('pushApprovedImageAltText')
-                ->label('Push Approved Alt Text')
-                ->icon('heroicon-o-cloud-arrow-up')
-                ->color('primary')
-                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->requiresConfirmation()
-                ->modalDescription('Sends alt text that was approved through partial approval. This does not approve anything. Photographs, prices, inventory, and image order are not changed. Component alt text is copied only to verified inherited stack images during this push.')
-                ->form([
-                    $this->altTextCollectionSelect('Leave this empty to push every approved alt text on an active product.'),
-                ])
-                ->action(function (array $data, ImageAltTextBackfillService $backfill): void {
-                    $result = $backfill->publishApproved(array_values(array_filter((array) ($data['collection_ids'] ?? []))));
-                    $failed = collect($result['shopify_failed'])->take(8)->map(
-                        fn (array $row): string => "Image {$row['image_id']}: {$row['reason']}"
-                    )->implode("\n");
-                    $body = "Published {$result['published']}. Inherited copies {$result['propagated']}. Failed ".count($result['shopify_failed']).'.';
-                    if ($failed !== '') {
-                        $body .= "\n".$failed;
-                    }
-                    $notification = Notification::make()
-                        ->title('Approved alt text push complete')
-                        ->body($body)
-                        ->persistent();
-                    $result['shopify_failed'] === [] ? $notification->success() : $notification->warning();
-                    $notification->send();
-                }),
-            Actions\Action::make('retryImageAltText')
-                ->label('Retry Failed Alt Text')
-                ->icon('heroicon-o-arrow-path')
-                ->color('warning')
-                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->requiresConfirmation()
-                ->modalDescription('Retries alt text Shopify did not confirm. The approved CMS alt text is kept. Image files are not uploaded again.')
-                ->form([
-                    $this->altTextCollectionSelect('Leave this empty to retry every failed alt text push on an active product.'),
-                ])
-                ->action(function (array $data, ImageAltTextBackfillService $backfill): void {
-                    $result = $backfill->retryFailed(array_values(array_filter((array) ($data['collection_ids'] ?? []))));
-                    $failed = collect($result['shopify_failed'])->take(8)->map(
-                        fn (array $row): string => "Image {$row['image_id']}: {$row['reason']}"
-                    )->implode("\n");
-                    $notification = Notification::make()
-                        ->title('Failed alt text retry complete')
-                        ->body("Retried {$result['retried']}. Still failing ".count($result['shopify_failed']).($failed !== '' ? "\n".$failed : ''))
-                        ->persistent();
-                    $result['shopify_failed'] === [] ? $notification->success() : $notification->warning();
-                    $notification->send();
-                }),
-            Actions\Action::make('repairStackImageSources')
-                ->label('Repair Stack Image Sources')
-                ->icon('heroicon-o-link')
-                ->color('gray')
-                ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
-                ->modalDescription('Links existing stack photographs to their component images. It does not change alt text, prices, inventory, image order, or upload photographs. Alt text reaches Shopify only through Push Approved Alt Text. Leave the save switch off to preview.')
-                ->form([
-                    Select::make('stack_ids')
-                        ->label('Stacks')
-                        ->multiple()
-                        ->required()
-                        ->searchable()
-                        ->options(function (): array {
-                            return Product::query()->activeStatus()->with(['variants' => fn ($query) => $query->orderBy('id')])->orderBy('id')->get()
-                                ->filter(fn (Product $product): bool => $product->isStackProduct())
-                                ->mapWithKeys(fn (Product $product): array => [
-                                    $product->id => trim((string) ($product->variants->first()?->sku ?? '#'.$product->id)).' — '.$product->title,
-                                ])->all();
-                        }),
-                    Toggle::make('apply')
-                        ->label('Save source links in the CMS')
-                        ->helperText('Off previews the links and does not write.')
-                        ->default(false),
-                ])
-                ->action(function (array $data, StackImageSourceRepairService $repair): void {
-                    $apply = (bool) ($data['apply'] ?? false);
-                    $result = $repair->review(
-                        array_values(array_map('intval', (array) ($data['stack_ids'] ?? []))),
-                        $apply,
-                    );
-                    $blocked = collect($result['stacks'])->filter(fn (array $stack): bool => ($stack['blocked'] ?? []) !== []);
-                    $ready = collect($result['stacks'])->filter(fn (array $stack): bool => ($stack['mode'] ?? '') === 'metadata');
-                    $lines = $blocked->take(8)->map(fn (array $stack): string => ($stack['sku'] !== '' ? $stack['sku'] : '#'.$stack['product_id']).': '.$stack['blocked'][0])->implode("\n");
-                    $body = ($apply ? 'Saved' : 'Preview').'. Ready '.$ready->count().'. Blocked '.$blocked->count().'.';
-                    if ($lines !== '') {
-                        $body .= "\n".$lines;
-                    }
-                    $notification = Notification::make()
-                        ->title($apply ? 'Stack image source repair saved' : 'Stack image source preview')
-                        ->body($body)
-                        ->persistent();
-                    $blocked->isEmpty() ? $notification->success() : $notification->warning();
-                    $notification->send();
-                }),
+                        $notification = Notification::make()
+                            ->title($result['applied'] ? 'Alt text saved for review' : 'Alt text import preview')
+                            ->body($body)
+                            ->persistent();
+                        $result['failed'] === [] ? $notification->success() : $notification->warning();
+                        $notification->send();
+                        if (! $apply) {
+                            session()->put($previewKey, $hash);
+                            $this->altTextPreviewHash = $hash;
+                            $action->halt();
+                        }
+                        session()->forget($previewKey);
+                        $this->altTextPreviewHash = null;
+                    }),
+            ])->label('Alt Text')->icon('heroicon-o-language')->color('gray')->button(),
             Actions\Action::make('exportDuplicateSkus')
                 ->label('Export Duplicate SKUs')
                 ->icon('heroicon-o-arrow-down-tray')
@@ -238,23 +165,19 @@ class ListProducts extends ListRecords
     protected function getHeaderWidgets(): array
     {
         return [
+            AltTextExportStatus::class,
             ProductStatusStats::class,
         ];
     }
 
-    public function getHeading(): string|HtmlString
+    public function getHeading(): string
     {
-        return new HtmlString(
-            '<span style="display:inline-flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">' .
-            '<span style="line-height:1;">Products</span>' .
-            '<span style="color:#d1d5db;">|</span>' .
-            '<span style="max-width:80rem;font-size:18px;line-height:20px;color:#1d4ed8;font-weight:400;padding-top:7px;">' .
-            '<span style="font-weight:600;">In this section you can only:</span> ' .
-            'Edit images, edit variants, sync back to Shopify, and update URLs for redirect.' .
-            '</span>' .
-            '</span>'
-        );
+        return 'Products';
+    }
 
+    public function getSubheading(): ?string
+    {
+        return 'Edit images and variants, sync approved changes to Shopify, and update URLs for redirects.';
     }
 
     public function getTabs(): array
@@ -286,7 +209,7 @@ class ListProducts extends ListRecords
             ->selectRaw('LOWER(status) as status_key, status as status_label')
             ->distinct()
             ->get()
-            ->filter(fn ($row) => !in_array($row->status_key, ['active', 'draft', 'archived'], true));
+            ->filter(fn ($row) => ! in_array($row->status_key, ['active', 'draft', 'archived'], true));
 
         foreach ($extraStatuses as $row) {
             $label = Str::title(str_replace(['_', '-'], ' ', (string) $row->status_label));
@@ -348,7 +271,6 @@ class ListProducts extends ListRecords
                 ));
         }
 
-
         return $tabs;
     }
 
@@ -398,7 +320,7 @@ class ListProducts extends ListRecords
         return self::applyWorkflowStatusScope($query)
             ->whereHas('partialApprovalRequests', function (Builder $sub): void {
                 $sub->whereColumn('approval_version', 'products.approval_version')
-                    ->where('status', \App\Models\ProductPartialApprovalRequest::STATUS_APPROVED);
+                    ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED);
             })
             ->whereRaw(
                 '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'
@@ -437,17 +359,12 @@ class ListProducts extends ListRecords
         return is_string($status) && strtolower(trim($status)) === 'processing';
     }
 
-    private function altTextCollectionSelect(string $helperText): Select
+    public function appliedAltTextCollectionGids(): array
     {
-        return Select::make('collection_ids')
-            ->label('Shopify collections')
-            ->multiple()
-            ->searchable()
-            ->options(fn (): array => ShopifyCollection::query()
-                ->whereNotNull('shopify_id')
-                ->orderBy('title')
-                ->pluck('title', 'shopify_id')
-                ->all())
-            ->helperText($helperText);
+        // Reads applied tableFilters, not unsubmitted deferred filter state.
+        $state = $this->getTableFilterState('collection') ?? [];
+
+        return app(ShopifyCollectionMembership::class)
+            ->resolveCollectionGids((array) ($state['values'] ?? []));
     }
 }

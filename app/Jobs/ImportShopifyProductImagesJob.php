@@ -2,7 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Jobs\RebuildShopifyStackImagesJob;
 use App\Models\ShopifyImageImportBatch;
 use App\Services\AdminNotification;
 use App\Services\ShopifyImageImportService;
@@ -18,6 +17,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 3600;
+
     public int $tries = 2;
 
     public function __construct(
@@ -28,7 +28,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
     public function handle(ShopifyImageImportService $service): void
     {
         $batch = ShopifyImageImportBatch::query()->find($this->batchId);
-        if (!$batch instanceof ShopifyImageImportBatch) {
+        if (! $batch instanceof ShopifyImageImportBatch) {
             return;
         }
 
@@ -51,7 +51,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
                 'completed_at' => now(),
             ])->save();
 
-            if (!empty($result['affected_stack_product_ids'])) {
+            if (! empty($result['affected_stack_product_ids'])) {
                 RebuildShopifyStackImagesJob::dispatch(
                     $batch->id,
                     $result['affected_stack_product_ids'],
@@ -59,11 +59,12 @@ class ImportShopifyProductImagesJob implements ShouldQueue
                 );
             }
 
+            $altErrors = (int) ($result['alt_text_error_count'] ?? 0);
             $this->notify(
                 Notification::make()
                     ->title('Shopify image import complete')
-                    ->body("Batch #{$batch->id}: {$result['updated_count']} updated, {$result['failed_count']} failed from {$result['total_files']} image file(s).")
-                    ->status($result['failed_count'] > 0 ? 'warning' : 'success')
+                    ->body('Batch #'.$batch->id.': '.ShopifyImageImportBatch::formatImportResult($result))
+                    ->status($result['failed_count'] > 0 || $altErrors > 0 ? 'warning' : 'success')
             );
         } catch (\Throwable $e) {
             $batch->forceFill([
@@ -105,6 +106,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
     {
         if ($this->userId) {
             AdminNotification::sendToUserId($notification, $this->userId);
+
             return;
         }
 

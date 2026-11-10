@@ -7,6 +7,7 @@ use App\Filament\Resources\ShopifyImageImportBatchResource\Pages;
 use App\Filament\Resources\ShopifyImageImportBatchResource\RelationManagers\ItemsRelationManager;
 use App\Models\ShopifyImageImportBatch;
 use Filament\Forms\Components\DateTimePicker;
+use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
@@ -21,9 +22,13 @@ use Illuminate\Support\Facades\Auth;
 class ShopifyImageImportBatchResource extends Resource
 {
     protected static ?string $model = ShopifyImageImportBatch::class;
+
     protected static ?string $navigationIcon = 'heroicon-o-photo';
+
     protected static ?string $navigationGroup = 'Audit & History';
+
     protected static ?string $navigationLabel = 'Shopify Image Imports';
+
     protected static ?int $navigationSort = 20;
 
     public static function form(Form $form): Form
@@ -37,9 +42,25 @@ class ShopifyImageImportBatchResource extends Resource
                     TextInput::make('matched_count')->disabled(),
                     TextInput::make('updated_count')->disabled(),
                     TextInput::make('failed_count')->disabled(),
+                    TextInput::make('alt_text_applied')->label('Alt text applied')->disabled(),
+                    TextInput::make('alt_text_missing')->label('Alt text missing')->disabled(),
+                    TextInput::make('alt_text_error_count')->label('Alt-text errors')->disabled(),
                     DateTimePicker::make('started_at')->disabled(),
                     DateTimePicker::make('completed_at')->disabled(),
-                    Textarea::make('error_message')->disabled()->columnSpanFull(),
+                    Textarea::make('error_message')->label('Image import error')->disabled()->columnSpanFull(),
+                    Placeholder::make('alt_text_report_lines')
+                        ->label('Alt text report')
+                        ->content(function (?ShopifyImageImportBatch $record): string {
+                            if (! $record instanceof ShopifyImageImportBatch) {
+                                return '';
+                            }
+
+                            $text = $record->altTextReportText();
+
+                            return $text !== '' ? $text : 'No alt-text notes.';
+                        })
+                        ->visible(fn (?ShopifyImageImportBatch $record): bool => (bool) $record?->alt_text_csv_found)
+                        ->columnSpanFull(),
                 ])
                 ->columns(3),
         ]);
@@ -52,7 +73,7 @@ class ShopifyImageImportBatchResource extends Resource
             ->columns([
                 TextColumn::make('id')
                     ->label('Batch')
-                    ->formatStateUsing(fn (int $state): string => '#' . $state)
+                    ->formatStateUsing(fn (int $state): string => '#'.$state)
                     ->sortable(),
                 TextColumn::make('s3_prefix')->searchable()->sortable(),
                 TextColumn::make('status')

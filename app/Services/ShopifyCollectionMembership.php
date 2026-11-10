@@ -3,16 +3,39 @@
 namespace App\Services;
 
 use App\Contracts\ShopifyGraphqlGateway;
+use App\Models\ShopifyCollection;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class ShopifyCollectionMembership
 {
     public function __construct(private readonly ShopifyGraphqlGateway $shopify) {}
 
+    /** Resolve the existing Products collection filter without inferring membership from tags. */
+    public function resolveCollectionGids(array $values): array
+    {
+        $gids = [];
+        foreach (array_unique(array_filter(array_map(fn ($value): string => trim((string) $value), $values))) as $value) {
+            if ($value === '__none__') {
+                throw new RuntimeException('Clear the No collection filter or select a Shopify collection before exporting alt text.');
+            }
+            $matches = ShopifyCollection::query()->whereNotNull('shopify_id')
+                ->where(fn ($query) => $query->where('shopify_id', $value)
+                    ->orWhere('title', $value)->orWhere('handle', Str::slug($value)))
+                ->pluck('shopify_id')->unique()->values();
+            if ($matches->count() !== 1) {
+                throw new RuntimeException('Collection '.$value.' must match exactly one synced Shopify collection before export.');
+            }
+            $gids[] = (string) $matches->first();
+        }
+
+        return array_values(array_unique($gids));
+    }
+
     /**
      * Product GIDs currently published in the collections with Shopify status ACTIVE.
      *
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array<int, string>
      */
     public function activeProductGids(array $collectionGids): array
@@ -68,6 +91,7 @@ GQL, ['id' => $collectionGid, 'cursor' => $cursor]);
                 }
                 if (! $page['hasNextPage']) {
                     $cursor = null;
+
                     continue;
                 }
 

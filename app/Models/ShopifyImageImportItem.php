@@ -8,8 +8,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class ShopifyImageImportItem extends Model
 {
     public const STATUS_PENDING = 'pending';
+
     public const STATUS_UPDATED = 'updated';
+
     public const STATUS_FAILED = 'failed';
+
     public const STATUS_SKIPPED = 'skipped';
 
     protected $fillable = [
@@ -20,6 +23,7 @@ class ShopifyImageImportItem extends Model
         'shopify_product_id',
         'status',
         'message',
+        'alt_message',
     ];
 
     public function batch(): BelongsTo

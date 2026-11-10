@@ -554,7 +554,7 @@ final class ProductShopifyUpdater
                 continue;
             }
 
-            if ($product->isApprovedByTwo()
+            if ($resolvedScopes !== [self::SYNC_SCOPE_IMAGE_ALT] && $product->isApprovedByTwo()
                 && ! $this->complementaryProducts->hasRequiredMinimumForProduct($product)) {
                 $skippedBlocked++;
                 logger()->warning('Shopify product sync skipped: missing required complementary products', [
@@ -714,7 +714,11 @@ final class ProductShopifyUpdater
 
             try {
                 $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
-                $this->markProductAsSynced($product, $syncBatchId);
+                if ($effectiveScopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
+                    $product->forceFill(['sync_batch_id' => $syncBatchId, 'last_synced_at' => now()])->saveQuietly();
+                } else {
+                    $this->markProductAsSynced($product, $syncBatchId);
+                }
                 if (in_array(self::SYNC_SCOPE_SEO, $effectiveScopes, true)) {
                     app(StyleProfileSeoTimelineService::class)->markSynced($product, $userId, $syncBatchId);
                 }
@@ -1434,6 +1438,12 @@ final class ProductShopifyUpdater
     private function updateProduct(Product $product, array $scopes, array $coreFields): array
     {
         $warnings = [];
+        if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT)) {
+            $this->publishApprovedImageAlt($product);
+            if ($scopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
+                return [];
+            }
+        }
         $syncProduct = $this->scopeEnabled($scopes, self::SYNC_SCOPE_PRODUCT) && ! empty($coreFields);
         $syncSeo = $this->scopeEnabled($scopes, self::SYNC_SCOPE_SEO);
         $syncVariants = $this->scopeEnabled($scopes, self::SYNC_SCOPE_VARIANTS);
@@ -4592,7 +4602,9 @@ GQL;
                     'current_url' => $this->normalizeMediaUrl($image->src),
                     'sync_url' => $this->nullIfEmpty($image->desiredSyncSourceUrl()),
                     'preferred_filename' => $image->preferredFilename(),
-                    'alt' => $this->nullIfEmpty($image->alt_text),
+                    // Ordinary photograph sync must never publish an unreviewed CMS description.
+                    'alt' => app(ImageAltTextBackfillService::class)->approvedUploadAlt($image)
+                        ?? $this->nullIfEmpty($image->shopify_alt_text),
                     'position' => $this->normalizeImagePosition($image->position),
                     'index' => $index,
                     'matched_media_id' => null,
@@ -6178,10 +6190,7 @@ GQL;
     private function normalizeSyncScopes(?array $scopes): array
     {
         if ($scopes === null) {
-            return array_values(array_filter(
-                self::availableSyncScopes(),
-                fn (string $scope): bool => $scope !== self::SYNC_SCOPE_IMAGE_ALT
-            ));
+            return self::availableSyncScopes();
         }
 
         $allowed = array_fill_keys(self::availableSyncScopes(), true);
@@ -6189,7 +6198,7 @@ GQL;
 
         foreach ($scopes as $scope) {
             $scope = is_string($scope) ? trim($scope) : '';
-            if ($scope === '' || $scope === self::SYNC_SCOPE_IMAGE_ALT || ! isset($allowed[$scope])) {
+            if ($scope === '' || ! isset($allowed[$scope])) {
                 continue;
             }
 
@@ -6197,6 +6206,21 @@ GQL;
         }
 
         return array_values($normalized);
+    }
+
+    private function publishApprovedImageAlt(Product $product): void
+    {
+        $images = $product->allImages()->active()->get();
+        $backfill = app(ImageAltTextBackfillService::class);
+        $copies = $images->filter(fn (Image $image): bool => $product->isStackProduct()
+            && ($image->source_image_id !== null || (int) $image->position >= 2));
+        $published = $backfill->publishIds($images->diff($copies)->pluck('id')->all());
+        $retried = $backfill->retryIds($copies->pluck('id')->all());
+        $failures = array_merge($published['shopify_failed'], $retried['shopify_failed']);
+        if ($failures !== []) {
+            throw new \RuntimeException('Image Alt Text: '.collect($failures)
+                ->map(fn (array $failure): string => 'Image '.$failure['image_id'].': '.$failure['reason'])->implode(' '));
+        }
     }
 
     /**

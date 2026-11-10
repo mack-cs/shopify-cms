@@ -4,7 +4,6 @@ namespace App\Filament\Resources\ShopifyImageImportBatchResource\RelationManager
 
 use App\Models\ShopifyImageImportItem;
 use Filament\Resources\RelationManagers\RelationManager;
-use Filament\Tables;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -32,7 +31,8 @@ class ItemsRelationManager extends RelationManager
                 TextColumn::make('s3_key')->label('S3 Key')->searchable()->wrap(),
                 TextColumn::make('product.handle')->label('Product')->searchable()->sortable(),
                 TextColumn::make('shopify_product_id')->label('Shopify Product ID')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('message')->wrap(),
+                TextColumn::make('message')->label('Image result')->wrap(),
+                TextColumn::make('alt_message')->label('Alt text')->wrap(),
                 TextColumn::make('updated_at')->dateTime()->sortable(),
             ])
             ->filters([

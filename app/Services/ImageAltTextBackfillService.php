@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -24,8 +25,32 @@ final class ImageAltTextBackfillService
         return $this->export()['response'];
     }
 
+    /** Worker-only iterator: bounded model chunks; no catalogue-wide image collection. */
+    public function snapshotRows(array $collectionGids): \Generator
+    {
+        $products = Product::query()->activeStatus()->with(['variants' => fn ($query) => $query->orderBy('id')]);
+        if ($collectionGids !== []) {
+            $gids = $this->collections->activeProductGids($collectionGids);
+            $products->whereIn('shopify_id', $gids === [] ? [''] : $gids);
+        }
+        foreach ($products->lazyById(100) as $product) {
+            $images = $product->allImages()->active()->with('imageAsset');
+            if ($product->isStackProduct()) {
+                $owned = $images->whereNull('source_image_id')->where('position', 1)->orderBy('id')->first();
+                if ($owned instanceof Image) {
+                    yield $this->csvRow($product, $owned);
+                }
+
+                continue;
+            }
+            foreach ($images->lazyById(100) as $image) {
+                yield $this->csvRow($product, $image);
+            }
+        }
+    }
+
     /**
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array{exceptions: array<int, array<string, mixed>>, response: StreamedResponse}
      */
     public function export(array $collectionGids = [], bool $includeImages = false): array
@@ -95,6 +120,7 @@ final class ImageAltTextBackfillService
             $altText = trim((string) ($row['alt_text'] ?? ''));
             if ($altText === '') {
                 $skippedBlank++;
+
                 continue;
             }
 
@@ -103,6 +129,7 @@ final class ImageAltTextBackfillService
                 $failed[] = $this->failure($rowNumber, $imageId, $imageId < 1
                     ? 'A local image id is required.'
                     : 'This image id was already present in the file.');
+
                 continue;
             }
             $seen[$imageId] = true;
@@ -110,23 +137,27 @@ final class ImageAltTextBackfillService
             $image = Image::query()->with('product')->find($imageId);
             if (! $image instanceof Image || ! $image->product instanceof Product) {
                 $failed[] = $this->failure($rowNumber, $imageId, 'No image matches image id '.$imageId.'.');
+
                 continue;
             }
 
             $mismatch = $this->mismatch($image, $row);
             if ($mismatch !== null) {
                 $failed[] = $this->failure($rowNumber, $imageId, $mismatch);
+
                 continue;
             }
 
             if ($this->inheritedStackImage($image)) {
                 $excluded++;
                 $failed[] = $this->failure($rowNumber, $imageId, 'Stack image '.$imageId.' is inherited from a component. Update the component image instead.');
+
                 continue;
             }
 
             if (trim((string) $image->alt_text) === $altText) {
                 $unchanged++;
+
                 continue;
             }
 
@@ -167,7 +198,58 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $collectionGids
+     * Stage alt text supplied with an image import.
+     * An identical description leaves the current approval state alone.
+     * The same imported sentence does not replace a newer CMS edit.
+     *
+     * @return 'applied'|'unchanged'|'preserved'
+     */
+    public function stageImportedAlt(Image $image, string $altText): string
+    {
+        $altText = trim($altText);
+        $image = $image->fresh() ?? $image;
+        if ($altText === '') {
+            throw new RuntimeException('Blank alt text is not saved.');
+        }
+        if (mb_strlen($altText) > 255) {
+            throw new RuntimeException('Alt text exceeds the 255 character limit.');
+        }
+        if ($this->inheritedStackImage($image)) {
+            throw new RuntimeException('Stack image '.$image->id.' is inherited from a component. Update the component image instead.');
+        }
+
+        $current = trim((string) $image->alt_text);
+        if ($current === $altText) {
+            $this->rememberImportedAlt($image, $altText);
+
+            return 'unchanged';
+        }
+
+        if ($image->imported_alt_text !== null && trim((string) $image->imported_alt_text) === $altText) {
+            return 'preserved';
+        }
+
+        $this->markPendingReview($image, $altText);
+        $this->rememberImportedAlt($image, $altText);
+
+        return 'applied';
+    }
+
+    public function approvedUploadAlt(Image $image): ?string
+    {
+        if (! $this->inheritedStackImage($image)) {
+            return $this->approvals->approvedAlt($image);
+        }
+        if (! $this->copyHasCurrentSource($image)) {
+            return null;
+        }
+        $source = Image::query()->find((int) $image->source_image_id);
+
+        return $source instanceof Image ? $this->approvals->approvedAlt($source) : null;
+    }
+
+    /**
+     * @param  array<int, string>  $collectionGids
      * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>}
      */
     public function publishApproved(array $collectionGids = []): array
@@ -176,7 +258,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, int> $imageIds
+     * @param  array<int, int>  $imageIds
      * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>}
      */
     public function publishIds(array $imageIds): array
@@ -208,7 +290,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array{retried:int, shopify_failed:array<int, array<string, mixed>>}
      */
     public function retryFailed(array $collectionGids = []): array
@@ -217,7 +299,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, int> $imageIds
+     * @param  array<int, int>  $imageIds
      * @return array{retried:int, shopify_failed:array<int, array<string, mixed>>}
      */
     public function retryIds(array $imageIds): array
@@ -261,7 +343,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array{rows: array<int, array<int, string>>, exceptions: array<int, array<string, mixed>>}
      */
     private function build(array $collectionGids): array
@@ -424,7 +506,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @return array{0: \Illuminate\Support\Collection<int, Image>, 1: \Illuminate\Support\Collection<int, Image>}
+     * @return array{0: Collection<int, Image>, 1: Collection<int, Image>}
      */
     private function componentCopies(Image $componentImage): array
     {
@@ -458,7 +540,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array<int, int>
      */
     private function idsForStatus(array $collectionGids, string $status): array
@@ -480,7 +562,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $collectionGids
+     * @param  array<int, string>  $collectionGids
      * @return array<int, int>
      */
     private function publishableIds(array $collectionGids): array
@@ -503,7 +585,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, int> $imageIds
+     * @param  array<int, int>  $imageIds
      * @return array<int, int>
      */
     private function ids(array $imageIds): array
@@ -528,6 +610,17 @@ final class ImageAltTextBackfillService
                 $this->approvals->invalidatePendingImageAlt($product);
             }
         }
+    }
+
+    private function rememberImportedAlt(Image $image, string $altText): void
+    {
+        if (trim((string) $image->imported_alt_text) === $altText) {
+            return;
+        }
+
+        Image::withoutEvents(function () use ($image, $altText): void {
+            $image->forceFill(['imported_alt_text' => $altText])->save();
+        });
     }
 
     /**
@@ -570,6 +663,7 @@ final class ImageAltTextBackfillService
             $failure = $this->pushAlt($target, $altText);
             if ($failure === null) {
                 $published++;
+
                 continue;
             }
             $failed[] = $failure;
@@ -610,7 +704,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<string, string> $row
+     * @param  array<string, string>  $row
      */
     private function mismatch(Image $image, array $row): ?string
     {
@@ -702,7 +796,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, array<int, string>> $rows
+     * @param  array<int, array<int, string>>  $rows
      */
     private function csvResponse(array $rows, string $filename): StreamedResponse
     {
@@ -720,8 +814,8 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, array<int, string>> $rows
-     * @param array<int, array<string, mixed>> $exceptions
+     * @param  array<int, array<int, string>>  $rows
+     * @param  array<int, array<string, mixed>>  $exceptions
      * @return array{response: StreamedResponse, failures: array<int, array<string, mixed>>}
      */
     private function zipResponse(array $rows, array $exceptions, string $filename): array
@@ -735,7 +829,7 @@ final class ImageAltTextBackfillService
             throw new RuntimeException('The image download could not be created.');
         }
 
-        $zip = new ZipArchive();
+        $zip = new ZipArchive;
         if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
             @unlink($path);
             throw new RuntimeException('The image download could not be created.');
@@ -825,7 +919,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, array<int, string>> $rows
+     * @param  array<int, array<int, string>>  $rows
      */
     private function csvDocument(array $rows, bool $header): string
     {
@@ -872,7 +966,7 @@ final class ImageAltTextBackfillService
 
     private function csvFromXlsx(string $path): string
     {
-        $zip = new ZipArchive();
+        $zip = new ZipArchive;
         if ($zip->open($path) !== true) {
             throw new RuntimeException('The Excel file could not be read.');
         }
@@ -935,7 +1029,7 @@ final class ImageAltTextBackfillService
     }
 
     /**
-     * @param array<int, string> $shared
+     * @param  array<int, string>  $shared
      */
     private function cellValue(\SimpleXMLElement $cell, array $shared): string
     {

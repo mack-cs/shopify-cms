@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Models\ShopifyImageImportBatch;
 use App\Models\ShopifyImageImportItem;
 use App\Models\Variant;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -20,6 +21,7 @@ class ShopifyImageImportService
     public function __construct(
         private readonly ProductImageBackupService $backupService,
         private readonly ProductImageFilenameService $filenameService,
+        private readonly ImageAltTextBackfillService $altText,
     ) {}
 
     public function normalizePrefix(string $input): string
@@ -32,11 +34,86 @@ class ShopifyImageImportService
         }
 
         $root = trim((string) config('shopify_image_import.root_prefix', 'incoming'), '/');
-        if ($root !== '' && $prefix !== $root && !str_starts_with($prefix . '/', $root . '/')) {
-            $prefix = $root . '/' . $prefix;
+        if ($root !== '' && $prefix !== $root && ! str_starts_with($prefix.'/', $root.'/')) {
+            $prefix = $root.'/'.$prefix;
         }
 
         return $prefix;
+    }
+
+    /**
+     * Whether the selected folder contains alt-text.csv.
+     *
+     * @return 'found'|'missing'|'unavailable'|'empty'
+     */
+    public function altTextCsvStatus(string $input): string
+    {
+        try {
+            $prefix = $this->normalizePrefix($input);
+        } catch (\InvalidArgumentException) {
+            return 'empty';
+        }
+
+        try {
+            $exists = Storage::disk($this->diskName())->exists($this->altTextCsvKey($prefix));
+        } catch (\Throwable) {
+            return 'unavailable';
+        }
+
+        return $exists === true ? 'found' : 'missing';
+    }
+
+    /**
+     * Build a blank alt-text.csv for the supported images directly in the selected folder.
+     * An empty selection returns the header only. This does not write anything to S3.
+     *
+     * @return array{ok:bool, csv:string, filenames:array<int, string>, message:?string}
+     */
+    public function altTextTemplate(string $input): array
+    {
+        $headerOnly = [
+            'ok' => true,
+            'csv' => $this->altTextTemplateDocument([]),
+            'filenames' => [],
+            'message' => null,
+        ];
+
+        if (trim($input) === '') {
+            return $headerOnly;
+        }
+
+        try {
+            $prefix = $this->normalizePrefix($input);
+        } catch (\InvalidArgumentException) {
+            return $headerOnly;
+        }
+
+        try {
+            $filenames = [];
+            foreach ($this->imageKeysForPrefix($prefix) as $key) {
+                $filename = $this->imageBasename($key);
+                if (mb_strtolower($filename) === 'alt-text.csv') {
+                    continue;
+                }
+                $filenames[] = $filename;
+            }
+        } catch (\Throwable) {
+            return [
+                'ok' => false,
+                'csv' => '',
+                'filenames' => [],
+                'message' => 'The S3 folder could not be read. The template was not downloaded.',
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'csv' => $this->altTextTemplateDocument($filenames),
+            'filenames' => $filenames,
+            'message' => $filenames === []
+                ? 'This folder has no supported product images. The template contains the header only.'
+                : null,
+        ];
     }
 
     /**
@@ -45,7 +122,13 @@ class ShopifyImageImportService
      *   matched_count:int,
      *   updated_count:int,
      *   failed_count:int,
-     *   affected_stack_product_ids:array<int, int>
+     *   affected_stack_product_ids:array<int, int>,
+     *   alt_text_csv_found:bool,
+     *   alt_text_applied:int,
+     *   alt_text_missing:int,
+     *   alt_text_unchanged:int,
+     *   alt_text_preserved:int,
+     *   alt_text_error_count:int
      * }
      */
     public function runBatch(ShopifyImageImportBatch $batch): array
@@ -58,6 +141,7 @@ class ShopifyImageImportService
         $failed = 0;
         $affectedStackProductIds = [];
         $updatedProductIds = [];
+        $outcomes = [];
 
         $batch->forceFill([
             's3_prefix' => $prefix,
@@ -65,10 +149,27 @@ class ShopifyImageImportService
             'matched_count' => 0,
             'updated_count' => 0,
             'failed_count' => 0,
+            'alt_text_csv_found' => false,
+            'alt_text_applied' => 0,
+            'alt_text_missing' => 0,
+            'alt_text_unchanged' => 0,
+            'alt_text_preserved' => 0,
+            'alt_text_error_count' => 0,
+            'alt_text_report' => null,
         ])->save();
 
         foreach ($keys as $key) {
             $result = $this->processImageKey($batch->fresh() ?? $batch, $key);
+            $basename = $this->imageBasename($key);
+            $outcomes[] = [
+                'item_id' => $result['item_id'],
+                's3_key' => $key,
+                'basename' => $basename,
+                'match_key' => $this->altTextMatchKey($basename),
+                'image_id' => $result['image_id'],
+                'updated' => $result['updated'],
+                'failed' => $result['failed'],
+            ];
 
             if ($result['matched']) {
                 $matched++;
@@ -101,17 +202,25 @@ class ShopifyImageImportService
             $affectedStackProductIds[$stackProductId] = $stackProductId;
         }
 
+        $alt = $this->applyImportedAltText($batch, $prefix, $outcomes);
+
         return [
             'total_files' => count($keys),
             'matched_count' => $matched,
             'updated_count' => $updated,
             'failed_count' => $failed,
             'affected_stack_product_ids' => array_values($affectedStackProductIds),
+            'alt_text_csv_found' => $alt['found'],
+            'alt_text_applied' => $alt['applied'],
+            'alt_text_missing' => $alt['missing'],
+            'alt_text_unchanged' => $alt['unchanged'],
+            'alt_text_preserved' => $alt['preserved'],
+            'alt_text_error_count' => $alt['errors'],
         ];
     }
 
     /**
-     * @param array<int, int> $stackProductIds
+     * @param  array<int, int>  $stackProductIds
      * @return array{rebuilt:int, failed:int, compare_at_updated:int, messages:array<int, string>}
      */
     public function rebuildStacksForBatch(ShopifyImageImportBatch $batch, array $stackProductIds): array
@@ -124,9 +233,10 @@ class ShopifyImageImportService
 
         foreach ($stackProductIds as $stackProductId) {
             $stack = Product::query()->find($stackProductId);
-            if (!$stack instanceof Product) {
+            if (! $stack instanceof Product) {
                 $failed++;
                 $messages[] = "Stack product {$stackProductId} was not found.";
+
                 continue;
             }
 
@@ -184,7 +294,7 @@ class ShopifyImageImportService
     }
 
     /**
-     * @param array<int, int> $componentProductIds
+     * @param  array<int, int>  $componentProductIds
      * @return array<int, int>
      */
     public function stackProductIdsForUpdatedComponents(array $componentProductIds): array
@@ -240,7 +350,7 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int}
+     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int, item_id:int, image_id:?int}
      */
     private function processImageKey(ShopifyImageImportBatch $batch, string $key): array
     {
@@ -256,18 +366,21 @@ class ShopifyImageImportService
                 'sku' => $sku,
                 'status' => ShopifyImageImportItem::STATUS_PENDING,
                 'message' => null,
+                'alt_message' => null,
             ],
         );
 
         if ($sku === '') {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, 'No SKU could be extracted from the filename.');
-            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
+
+            return $this->imageImportResult($item, false, true, null, null, null);
         }
 
         $product = $this->findProductBySku($sku);
-        if (!$product instanceof Product) {
+        if (! $product instanceof Product) {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, "No product variant matched SKU {$sku}.");
-            return ['matched' => false, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
+
+            return $this->imageImportResult($item, false, true, null, null, null);
         }
 
         $item->forceFill([
@@ -295,13 +408,14 @@ class ShopifyImageImportService
 
             $this->markItem($item, ShopifyImageImportItem::STATUS_UPDATED, $message);
 
-            return [
-                'matched' => true,
-                'updated' => true,
-                'failed' => false,
-                'affected_stack_product_id' => $this->isStackProduct($product) ? (int) $product->id : null,
-                'updated_product_id' => (int) $product->id,
-            ];
+            return $this->imageImportResult(
+                $item,
+                true,
+                false,
+                $this->isStackProduct($product) ? (int) $product->id : null,
+                (int) $product->id,
+                (int) $image->id,
+            );
         } catch (\Throwable $e) {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, $e->getMessage());
             $this->markProductImportStatus($product, $batch, 'failed');
@@ -314,8 +428,30 @@ class ShopifyImageImportService
                 'message' => $e->getMessage(),
             ]);
 
-            return ['matched' => true, 'updated' => false, 'failed' => true, 'affected_stack_product_id' => null, 'updated_product_id' => null];
+            return $this->imageImportResult($item, true, true, null, null, null);
         }
+    }
+
+    /**
+     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int, item_id:int, image_id:?int}
+     */
+    private function imageImportResult(
+        ShopifyImageImportItem $item,
+        bool $matched,
+        bool $failed,
+        ?int $stackProductId,
+        ?int $productId,
+        ?int $imageId,
+    ): array {
+        return [
+            'matched' => $matched,
+            'updated' => $matched && ! $failed,
+            'failed' => $failed,
+            'affected_stack_product_id' => $stackProductId,
+            'updated_product_id' => $productId,
+            'item_id' => (int) $item->id,
+            'image_id' => $imageId,
+        ];
     }
 
     /**
@@ -329,7 +465,7 @@ class ShopifyImageImportService
             $image = $this->imageForImportPosition($product, $position);
             $alreadySynced = false;
 
-            if (!$image instanceof Image) {
+            if (! $image instanceof Image) {
                 $image = new Image([
                     'product_id' => $product->id,
                     'position' => $position,
@@ -338,12 +474,12 @@ class ShopifyImageImportService
                 $alreadySynced = (int) ($image->image_asset_id ?? 0) === (int) $asset->id
                     && (int) ($image->last_shopify_synced_image_asset_id ?? 0) === (int) $asset->id
                     && $image->sync_state === Image::SYNC_STATE_SYNCED
-                    && !$image->needs_shopify_image_sync
+                    && ! $image->needs_shopify_image_sync
                     && filled(trim((string) $image->shopify_id));
             }
 
             $hasShopifyId = filled(trim((string) ($image->shopify_id ?? '')));
-            $needsSync = !$alreadySynced;
+            $needsSync = ! $alreadySynced;
             $previousAssetId = (int) ($image->image_asset_id ?? 0);
             $replacedPhotograph = $image->exists && $previousAssetId > 0 && $previousAssetId !== (int) $asset->id;
 
@@ -371,9 +507,11 @@ class ShopifyImageImportService
                 ];
                 if ($replacedPhotograph) {
                     $attributes['alt_text'] = null;
+                    $attributes['imported_alt_text'] = null;
                     $attributes['source_image_id'] = null;
                     $attributes['shopify_alt_pending'] = false;
                     $attributes['shopify_alt_sync_error'] = null;
+                    $attributes['shopify_alt_text'] = null;
                     $attributes['alt_text_status'] = null;
                 }
                 $image->forceFill($attributes)->save();
@@ -419,12 +557,14 @@ class ShopifyImageImportService
             $component = $components->get($componentId);
             if (! $component instanceof Product) {
                 $reasons[] = 'Component #'.$componentId.' was not found.';
+
                 continue;
             }
 
             $componentImage = $this->firstComponentShopifyImage($component);
             if (! $componentImage instanceof Image) {
                 $reasons[] = ($component->handle ?: 'Product #'.$component->id).' has no eligible Shopify image.';
+
                 continue;
             }
 
@@ -451,6 +591,7 @@ class ShopifyImageImportService
             $asset = $this->ensureImageAssetAvailable($componentImage);
             if (! $asset instanceof ImageAsset) {
                 $reasons[] = ($component->handle ?: 'Product #'.$component->id).' image '.$componentImage->id.' has no retrievable managed asset.';
+
                 continue;
             }
 
@@ -496,7 +637,7 @@ class ShopifyImageImportService
                 /** @var ImageAsset $asset */
                 $asset = $source['asset'];
 
-                $image = new Image();
+                $image = new Image;
                 Image::withoutEvents(function () use ($image, $stack, $componentImage, $asset, $position): void {
                     $image->forceFill([
                         'product_id' => $stack->id,
@@ -539,7 +680,7 @@ class ShopifyImageImportService
 
         return [
             'rebuilt' => true,
-            'message' => "{$stack->handle}: rebuilt " . count($createdImageIds) . " component image(s) locally, renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s).{$unverifiedNote} Shopify sync left pending for approval.",
+            'message' => "{$stack->handle}: rebuilt ".count($createdImageIds)." component image(s) locally, renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s).{$unverifiedNote} Shopify sync left pending for approval.",
         ];
     }
 
@@ -557,7 +698,7 @@ class ShopifyImageImportService
 
         $missing = [];
         foreach ($components as $component) {
-            if (!$component instanceof Product) {
+            if (! $component instanceof Product) {
                 continue;
             }
 
@@ -617,14 +758,14 @@ class ShopifyImageImportService
         $disk = Storage::disk($this->diskName());
         $bytes = $disk->get($key);
 
-        if (!is_string($bytes) || $bytes === '') {
+        if (! is_string($bytes) || $bytes === '') {
             throw new \RuntimeException("S3 object {$key} is empty or could not be read.");
         }
 
         $extension = $this->extensionFromName($key);
         $mimeType = $this->mimeTypeFromExtension($extension);
-        $bucket = trim((string) config('filesystems.disks.' . $this->diskName() . '.bucket'));
-        $sourceUrl = 's3://' . ($bucket !== '' ? $bucket . '/' : '') . $key;
+        $bucket = trim((string) config('filesystems.disks.'.$this->diskName().'.bucket'));
+        $sourceUrl = 's3://'.($bucket !== '' ? $bucket.'/' : '').$key;
 
         return $this->storeBytesAsAsset(
             $bytes,
@@ -649,7 +790,7 @@ class ShopifyImageImportService
 
         $asset = ImageAsset::query()->where('sha256', $sha256)->first();
         if ($asset instanceof ImageAsset) {
-            if (!$disk->exists($asset->storage_path ?: $storagePath)) {
+            if (! $disk->exists($asset->storage_path ?: $storagePath)) {
                 $disk->put($asset->storage_path ?: $storagePath, $bytes);
             }
 
@@ -727,18 +868,18 @@ class ShopifyImageImportService
             ->orderBy('id')
             ->get()
             ->groupBy(fn (Image $image): string => (string) $image->position)
-            ->filter(fn (\Illuminate\Support\Collection $images): bool => $images->count() > 1);
+            ->filter(fn (Collection $images): bool => $images->count() > 1);
 
         $removed = 0;
 
         foreach ($duplicateGroups as $images) {
             $primary = $this->preferredPipelineImageToKeep($images);
-            if (!$primary instanceof Image) {
+            if (! $primary instanceof Image) {
                 continue;
             }
 
             foreach ($images as $image) {
-                if (!$image instanceof Image || $image->is($primary)) {
+                if (! $image instanceof Image || $image->is($primary)) {
                     continue;
                 }
 
@@ -782,7 +923,7 @@ class ShopifyImageImportService
         $position = 0;
 
         foreach ($images as $image) {
-            if (!$image instanceof Image) {
+            if (! $image instanceof Image) {
                 continue;
             }
 
@@ -792,7 +933,7 @@ class ShopifyImageImportService
             $modeChanged = trim((string) $image->filename_mode) !== Image::FILENAME_MODE_AUTO;
             $positionChanged = (int) ($image->position ?? 0) !== $position;
 
-            if (!$filenameChanged && !$modeChanged && !$positionChanged) {
+            if (! $filenameChanged && ! $modeChanged && ! $positionChanged) {
                 continue;
             }
 
@@ -835,7 +976,7 @@ class ShopifyImageImportService
             });
     }
 
-    private function preferredPipelineImageToKeep(\Illuminate\Support\Collection $images): ?Image
+    private function preferredPipelineImageToKeep(Collection $images): ?Image
     {
         $first = $images
             ->sort(function (Image $left, Image $right): int {
@@ -891,9 +1032,9 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return \Illuminate\Support\Collection<int, Image>
+     * @return Collection<int, Image>
      */
-    private function ownedPositionOneImages(Product $stack): \Illuminate\Support\Collection
+    private function ownedPositionOneImages(Product $stack): Collection
     {
         return $stack->allImages()
             ->active()
@@ -987,6 +1128,7 @@ class ShopifyImageImportService
                 Image::withoutEvents(function () use ($image, $primary): void {
                     if (blank($image->shopify_id)) {
                         $image->delete();
+
                         return;
                     }
 
@@ -1036,6 +1178,7 @@ class ShopifyImageImportService
                 Image::withoutEvents(function () use ($image): void {
                     if (blank($image->shopify_id)) {
                         $image->delete();
+
                         return;
                     }
 
@@ -1106,9 +1249,9 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return \Illuminate\Support\Collection<int, Product>
+     * @return Collection<int, Product>
      */
-    private function linkedComponentProducts(Product $stack): \Illuminate\Support\Collection
+    private function linkedComponentProducts(Product $stack): Collection
     {
         $ids = $this->linkedComponentIds($stack);
         if ($ids === []) {
@@ -1212,12 +1355,12 @@ class ShopifyImageImportService
 
         foreach ($products as $product) {
             $shopifyId = trim((string) ($product->shopify_id ?? ''));
-            if ($shopifyId !== '' && !isset($productsByShopifyId[$shopifyId])) {
+            if ($shopifyId !== '' && ! isset($productsByShopifyId[$shopifyId])) {
                 $productsByShopifyId[$shopifyId] = $product;
             }
 
             $handle = trim((string) ($product->handle ?? ''));
-            if ($handle !== '' && !isset($productsByHandle[$handle])) {
+            if ($handle !== '' && ! isset($productsByHandle[$handle])) {
                 $productsByHandle[$handle] = $product;
             }
         }
@@ -1306,7 +1449,7 @@ class ShopifyImageImportService
         $safe = preg_replace('/[^A-Za-z0-9._-]+/', '-', $basename) ?: '';
         $safe = trim($safe, '.-_');
 
-        return $safe !== '' ? $safe : 'shopify-image.' . ($this->extensionFromName($filename) ?: 'jpg');
+        return $safe !== '' ? $safe : 'shopify-image.'.($this->extensionFromName($filename) ?: 'jpg');
     }
 
     private function storagePathForHash(string $sha256, ?string $extension): string
@@ -1364,5 +1507,456 @@ class ShopifyImageImportService
         }
 
         return trim(explode(';', $normalized)[0] ?? '') ?: null;
+    }
+
+    /**
+     * @param  array<int, array{item_id:int, s3_key:string, basename:string, match_key:string, image_id:?int, updated:bool, failed:bool}>  $outcomes
+     * @return array{found:bool, applied:int, missing:int, unchanged:int, preserved:int, errors:int}
+     */
+    private function applyImportedAltText(ShopifyImageImportBatch $batch, string $prefix, array $outcomes): array
+    {
+        $empty = ['found' => false, 'applied' => 0, 'missing' => 0, 'unchanged' => 0, 'preserved' => 0, 'errors' => 0];
+
+        try {
+            $csv = $this->readAltTextCsv($prefix);
+        } catch (\Throwable $e) {
+            logger()->error('Shopify image import could not read alt-text.csv.', [
+                'batch_id' => $batch->id,
+                'prefix' => $prefix,
+                'message' => $e->getMessage(),
+            ]);
+            $csv = [
+                'found' => true,
+                'valid' => false,
+                'rows' => [],
+                'errors' => [[
+                    'kind' => 'error',
+                    'filename' => 'alt-text.csv',
+                    'message' => 'alt-text.csv could not be read. No alt text was applied.',
+                ]],
+            ];
+        }
+
+        if (! $csv['found']) {
+            $this->storeAltTextResult($batch, $empty, []);
+
+            return $empty;
+        }
+
+        $result = $csv['valid']
+            ? $this->matchAltTextRows($outcomes, $csv['rows'], $csv['errors'])
+            : [
+                'applied' => 0,
+                'missing' => 0,
+                'unchanged' => 0,
+                'preserved' => 0,
+                'errors' => count($csv['errors']),
+                'report' => $csv['errors'],
+            ];
+
+        $stored = [
+            'found' => true,
+            'applied' => $result['applied'],
+            'missing' => $result['missing'],
+            'unchanged' => $result['unchanged'],
+            'preserved' => $result['preserved'],
+            'errors' => $result['errors'],
+        ];
+        $this->storeAltTextResult($batch, $stored, $result['report']);
+
+        return $stored;
+    }
+
+    /**
+     * @param  array<int, array{item_id:int, s3_key:string, basename:string, match_key:string, image_id:?int, updated:bool, failed:bool}>  $outcomes
+     * @param  array<int, array{row:int, filename:string, match_key:string, alt_text:string}>  $rows
+     * @param  array<int, array{kind:string, filename:string, message:string}>  $errors
+     * @return array{applied:int, missing:int, unchanged:int, preserved:int, errors:int, report:array<int, array{kind:string, filename:string, message:string}>}
+     */
+    private function matchAltTextRows(array $outcomes, array $rows, array $errors): array
+    {
+        $applied = 0;
+        $missing = 0;
+        $unchanged = 0;
+        $preserved = 0;
+        $report = $errors;
+        $byKey = [];
+        $survivorKeyByImage = [];
+
+        foreach ($outcomes as $outcome) {
+            $byKey[$outcome['match_key']] = $outcome;
+            if ($outcome['updated'] && $outcome['image_id'] !== null) {
+                $survivorKeyByImage[$outcome['image_id']] = $outcome['match_key'];
+            }
+        }
+
+        $duplicateKeys = [];
+        $seenKeys = [];
+        foreach ($rows as $row) {
+            if ($row['match_key'] === '') {
+                continue;
+            }
+            if (isset($seenKeys[$row['match_key']])) {
+                $duplicateKeys[$row['match_key']] = $row['filename'];
+            }
+            $seenKeys[$row['match_key']] = $row['filename'];
+        }
+
+        $handledImages = [];
+
+        foreach ($rows as $row) {
+            if ($row['match_key'] === '') {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'] !== '' ? $row['filename'] : 'row '.$row['row'],
+                    'message' => 'Row '.$row['row'].' has no filename.',
+                ];
+
+                continue;
+            }
+
+            if (isset($duplicateKeys[$row['match_key']])) {
+                $duplicateOutcome = $byKey[$row['match_key']] ?? null;
+                if (
+                    is_array($duplicateOutcome)
+                    && $duplicateOutcome['image_id'] !== null
+                    && ($survivorKeyByImage[$duplicateOutcome['image_id']] ?? null) === $row['match_key']
+                ) {
+                    $handledImages[$duplicateOutcome['image_id']] = true;
+                }
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => 'Row '.$row['row'].' duplicates filename '.$duplicateKeys[$row['match_key']].'. Neither row was applied.',
+                ];
+                $this->rememberAltMessage(
+                    is_array($duplicateOutcome) ? $duplicateOutcome['item_id'] : null,
+                    'Duplicate alt-text.csv filename. Alt text was not applied.'
+                );
+
+                continue;
+            }
+
+            $outcome = $byKey[$row['match_key']] ?? null;
+            if ($outcome === null) {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => 'No image imported from this folder matched '.$row['filename'].'.',
+                ];
+
+                continue;
+            }
+
+            if (! $outcome['updated'] || $outcome['image_id'] === null) {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => 'The image import failed, so this alt text was not applied.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text was not applied because the image import failed.');
+
+                continue;
+            }
+
+            if (($survivorKeyByImage[$outcome['image_id']] ?? null) !== $outcome['match_key']) {
+                $winner = $byKey[$survivorKeyByImage[$outcome['image_id']]]['basename'] ?? 'another file';
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => $row['filename'].' was replaced by '.$winner.' during import, so its alt text was not applied.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text was not applied because '.$winner.' replaced this file.');
+
+                continue;
+            }
+
+            if (trim($row['alt_text']) === '') {
+                $missing++;
+                $handledImages[$outcome['image_id']] = true;
+                $report[] = [
+                    'kind' => 'missing',
+                    'filename' => $row['filename'],
+                    'message' => 'Alt text is blank, so the existing description was left unchanged.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text is blank. The existing description was left unchanged.');
+
+                continue;
+            }
+
+            if (mb_strlen(trim($row['alt_text'])) > 255) {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => 'Alt text exceeds the 255 character limit and was not saved.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text exceeds the 255 character limit and was not saved.');
+                $handledImages[$outcome['image_id']] = true;
+
+                continue;
+            }
+
+            $image = Image::query()->find($outcome['image_id']);
+            if (! $image instanceof Image) {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => 'The imported image record was not available, so alt text was not applied.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text was not applied because the image record was not available.');
+                $handledImages[$outcome['image_id']] = true;
+
+                continue;
+            }
+
+            try {
+                $stage = $this->altText->stageImportedAlt($image, $row['alt_text']);
+            } catch (\Throwable $e) {
+                $report[] = [
+                    'kind' => 'error',
+                    'filename' => $row['filename'],
+                    'message' => $e->getMessage(),
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text was not applied. '.$e->getMessage());
+                $handledImages[$outcome['image_id']] = true;
+
+                continue;
+            }
+
+            $handledImages[$outcome['image_id']] = true;
+            if ($stage === 'applied') {
+                $applied++;
+                $this->rememberAltMessage($outcome['item_id'], 'Alt text saved for review.');
+
+                continue;
+            }
+            if ($stage === 'preserved') {
+                $preserved++;
+                $report[] = [
+                    'kind' => 'preserved',
+                    'filename' => $row['filename'],
+                    'message' => 'A newer CMS description was kept.',
+                ];
+                $this->rememberAltMessage($outcome['item_id'], 'A newer CMS description was kept.');
+
+                continue;
+            }
+
+            $unchanged++;
+            $this->rememberAltMessage($outcome['item_id'], 'Alt text already matched. Approval state was left unchanged.');
+        }
+
+        foreach ($survivorKeyByImage as $imageId => $matchKey) {
+            if (isset($handledImages[$imageId])) {
+                continue;
+            }
+            $outcome = $byKey[$matchKey];
+            $missing++;
+            $report[] = [
+                'kind' => 'missing',
+                'filename' => $outcome['basename'],
+                'message' => 'No alt-text.csv row matched this imported file.',
+            ];
+            $this->rememberAltMessage($outcome['item_id'], 'No alt text was supplied for this file.');
+        }
+
+        return [
+            'applied' => $applied,
+            'missing' => $missing,
+            'unchanged' => $unchanged,
+            'preserved' => $preserved,
+            'errors' => count(array_filter($report, fn (array $row): bool => ($row['kind'] ?? '') === 'error')),
+            'report' => $report,
+        ];
+    }
+
+    /**
+     * @param  array{found:bool, applied:int, missing:int, unchanged:int, preserved:int, errors:int}  $result
+     * @param  array<int, array{kind:string, filename:string, message:string}>  $report
+     */
+    private function storeAltTextResult(ShopifyImageImportBatch $batch, array $result, array $report): void
+    {
+        $batch->forceFill([
+            'alt_text_csv_found' => $result['found'],
+            'alt_text_applied' => $result['applied'],
+            'alt_text_missing' => $result['missing'],
+            'alt_text_unchanged' => $result['unchanged'],
+            'alt_text_preserved' => $result['preserved'],
+            'alt_text_error_count' => $result['errors'],
+            'alt_text_report' => $report === [] ? null : array_values($report),
+        ])->save();
+    }
+
+    private function rememberAltMessage(?int $itemId, string $message): void
+    {
+        if ($itemId === null || $itemId < 1) {
+            return;
+        }
+
+        ShopifyImageImportItem::query()->whereKey($itemId)->update([
+            'alt_message' => Str::limit($message, 2000, ''),
+        ]);
+    }
+
+    /**
+     * @return array{found:bool, valid:bool, rows:array<int, array{row:int, filename:string, match_key:string, alt_text:string}>, errors:array<int, array{kind:string, filename:string, message:string}>}
+     */
+    private function readAltTextCsv(string $prefix): array
+    {
+        $disk = Storage::disk($this->diskName());
+        $key = $this->altTextCsvKey($prefix);
+        if (! $disk->exists($key)) {
+            return ['found' => false, 'valid' => false, 'rows' => [], 'errors' => []];
+        }
+
+        $contents = $disk->get($key);
+        if (! is_string($contents) || trim($contents) === '') {
+            return [
+                'found' => true,
+                'valid' => false,
+                'rows' => [],
+                'errors' => [[
+                    'kind' => 'error',
+                    'filename' => 'alt-text.csv',
+                    'message' => 'alt-text.csv is empty. No alt text was applied.',
+                ]],
+            ];
+        }
+
+        $contents = ltrim(str_replace("\r\n", "\n", $contents), "\xEF\xBB\xBF");
+        $handle = fopen('php://temp', 'r+');
+        if ($handle === false) {
+            throw new \RuntimeException('alt-text.csv could not be read.');
+        }
+        fwrite($handle, $contents);
+        rewind($handle);
+        $headers = fgetcsv($handle);
+        if (! is_array($headers)) {
+            fclose($handle);
+
+            return [
+                'found' => true,
+                'valid' => false,
+                'rows' => [],
+                'errors' => [[
+                    'kind' => 'error',
+                    'filename' => 'alt-text.csv',
+                    'message' => 'alt-text.csv must include filename and alt_text columns. No alt text was applied.',
+                ]],
+            ];
+        }
+
+        $columns = [];
+        foreach ($headers as $index => $header) {
+            $name = $this->altTextHeader((string) $header);
+            if ($name === '') {
+                continue;
+            }
+            if (isset($columns[$name])) {
+                fclose($handle);
+
+                return [
+                    'found' => true,
+                    'valid' => false,
+                    'rows' => [],
+                    'errors' => [[
+                        'kind' => 'error',
+                        'filename' => 'alt-text.csv',
+                        'message' => 'alt-text.csv repeats the '.$name.' column. No alt text was applied.',
+                    ]],
+                ];
+            }
+            $columns[$name] = $index;
+        }
+
+        if (! isset($columns['filename'], $columns['alt_text'])) {
+            fclose($handle);
+
+            return [
+                'found' => true,
+                'valid' => false,
+                'rows' => [],
+                'errors' => [[
+                    'kind' => 'error',
+                    'filename' => 'alt-text.csv',
+                    'message' => 'alt-text.csv must include filename and alt_text columns. No alt text was applied.',
+                ]],
+            ];
+        }
+
+        $rows = [];
+        $rowNumber = 1;
+        while (($values = fgetcsv($handle)) !== false) {
+            $rowNumber++;
+            if ($values === [null] || (count($values) === 1 && trim((string) $values[0]) === '')) {
+                continue;
+            }
+            if (str_starts_with(trim((string) ($values[0] ?? '')), '#')) {
+                continue;
+            }
+            $filename = $this->imageBasename(trim((string) ($values[$columns['filename']] ?? '')));
+            $rows[] = [
+                'row' => $rowNumber,
+                'filename' => $filename,
+                'match_key' => $this->altTextMatchKey($filename),
+                'alt_text' => trim((string) ($values[$columns['alt_text']] ?? '')),
+            ];
+        }
+        fclose($handle);
+
+        return ['found' => true, 'valid' => true, 'rows' => $rows, 'errors' => []];
+    }
+
+    private function altTextHeader(string $header): string
+    {
+        $header = strtolower(trim(preg_replace('/^\xEF\xBB\xBF/', '', $header) ?? $header));
+        $header = str_replace([' ', '-'], '_', $header);
+
+        return match ($header) {
+            'file_name', 'image_filename', 'image_file' => 'filename',
+            'alt', 'image_alt', 'image_alt_text' => 'alt_text',
+            default => $header,
+        };
+    }
+
+    private function altTextMatchKey(string $filename): string
+    {
+        return mb_strtolower($this->imageBasename($filename));
+    }
+
+    private function imageBasename(string $path): string
+    {
+        return basename(str_replace('\\', '/', trim($path)));
+    }
+
+    private function altTextCsvKey(string $prefix): string
+    {
+        return trim($prefix, '/').'/alt-text.csv';
+    }
+
+    /**
+     * @param  array<int, string>  $filenames
+     */
+    private function altTextTemplateDocument(array $filenames): string
+    {
+        $handle = fopen('php://temp', 'r+b');
+        if ($handle === false) {
+            throw new \RuntimeException('The alt text template could not be created.');
+        }
+
+        fwrite($handle, "\xEF\xBB\xBF");
+        fputcsv($handle, ['filename', 'alt_text'], ',', '"', '\\');
+        foreach ($filenames as $filename) {
+            fputcsv($handle, [$filename, ''], ',', '"', '\\');
+        }
+        rewind($handle);
+        $csv = stream_get_contents($handle);
+        fclose($handle);
+
+        if (! is_string($csv) || $csv === '') {
+            throw new \RuntimeException('The alt text template could not be created.');
+        }
+
+        return $csv;
     }
 }

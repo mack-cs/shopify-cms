@@ -1,27 +1,42 @@
 <?php
 
 use App\Contracts\ShopifyGraphqlGateway;
+use App\Enums\PermissionEnum;
+use App\Enums\RolesEnum;
+use App\Filament\Pages\ImportShopifyProductImages;
+use App\Filament\Resources\ProductResource\Pages\ListProducts;
+use App\Jobs\GenerateImageAltTextExport;
+use App\Jobs\RebuildShopifyStackImagesJob;
+use App\Jobs\SendProductPartialApprovalSlackReminderJob;
 use App\Models\Image;
+use App\Models\ImageAltTextExport;
 use App\Models\ImageAsset;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
+use App\Models\ProductPartialApprovalRequest;
+use App\Models\ShopifyCollection;
+use App\Models\ShopifyImageImportBatch;
 use App\Models\User;
 use App\Models\Variant;
-use App\Enums\RolesEnum;
-use App\Jobs\SendProductPartialApprovalSlackReminderJob;
-use App\Models\ProductPartialApprovalRequest;
 use App\Services\ImageAltTextBackfillService;
+use App\Services\ImageAltTextShopifyWriter;
+use App\Services\Normalizer;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductShopifyUpdater;
-use Illuminate\Support\Facades\Bus;
-use Spatie\Permission\Models\Role;
-use App\Services\StackImageSourceRepairService;
-use App\Services\Normalizer;
 use App\Services\ShopifyCollectionMembership;
 use App\Services\ShopifyImageImportService;
+use App\Services\StackImageSourceRepairService;
+use Filament\Actions\ActionGroup;
+use Filament\Support\Exceptions\Halt;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -72,7 +87,8 @@ it('filters active products by shopify collection membership and does not duplic
     $image = altTextImage($inside, 1, 'Inside');
     $outside = altTextProduct('OUT-1', 'gid://shopify/Product/32');
     altTextImage($outside, 1, 'Outside');
-    app()->instance(ShopifyCollectionMembership::class, new class(app(ShopifyGraphqlGateway::class)) extends ShopifyCollectionMembership {
+    app()->instance(ShopifyCollectionMembership::class, new class(app(ShopifyGraphqlGateway::class)) extends ShopifyCollectionMembership
+    {
         public function activeProductGids(array $collectionGids): array
         {
             return ['gid://shopify/Product/31', 'gid://shopify/Product/31'];
@@ -93,7 +109,8 @@ it('reports a stack component that is outside the selected collection without ex
     $stack = altTextProduct('STACK-IN', 'gid://shopify/Product/42', true);
     altTextImage($stack, 1, 'Lifestyle');
     altTextDraft($stack, [$component->id]);
-    app()->instance(ShopifyCollectionMembership::class, new class(app(ShopifyGraphqlGateway::class)) extends ShopifyCollectionMembership {
+    app()->instance(ShopifyCollectionMembership::class, new class(app(ShopifyGraphqlGateway::class)) extends ShopifyCollectionMembership
+    {
         public function activeProductGids(array $collectionGids): array
         {
             return ['gid://shopify/Product/42'];
@@ -340,11 +357,16 @@ it('clears alt text when a photograph is replaced', function (): void {
 
 function altTextGateway(bool $fail = false): object
 {
-    $gateway = new class($fail) implements ShopifyGraphqlGateway {
+    $gateway = new class($fail) implements ShopifyGraphqlGateway
+    {
         public int $updates = 0;
+
         public array $queries = [];
+
         public array $variables = [];
+
         public array $resolvedMedia = [];
+
         public array $extraMedia = [];
 
         public function __construct(private bool $fail) {}
@@ -498,9 +520,180 @@ function altTextDraft(Product $stack, array $componentIds): void
     ]));
 }
 
+it('exports using applied collection filters and ignores deferred changes', function (): void {
+    Queue::fake([GenerateImageAltTextExport::class]);
+    $this->actingAs($user = User::factory()->create());
+    Permission::findOrCreate(PermissionEnum::ProductEdit->value);
+    $user->givePermissionTo(PermissionEnum::ProductEdit->value);
+    $gateway = altTextGateway();
+    $a = altTextProduct('APPLIED-A', 'gid://shopify/Product/510');
+    $b = altTextProduct('DEFERRED-B', 'gid://shopify/Product/520');
+    $ia = altTextImage($a, 1, 'A');
+    altTextImage($b, 1, 'B');
+    foreach (['Collection A' => 51, 'Collection B' => 52] as $title => $id) {
+        ShopifyCollection::withoutEvents(fn () => ShopifyCollection::create([
+            'import_id' => $a->import_id, 'title' => $title, 'handle' => Str::slug($title),
+            'shopify_id' => 'gid://shopify/Collection/'.$id,
+        ]));
+    }
+    $membership = new class($gateway) extends ShopifyCollectionMembership
+    {
+        public array $selected = [];
+
+        public function activeProductGids(array $collectionGids): array
+        {
+            $this->selected = $collectionGids;
+
+            return ['gid://shopify/Product/510'];
+        }
+    };
+    app()->instance(ShopifyCollectionMembership::class, $membership);
+    $page = new ListProducts;
+    $page->tableFilters = ['collection' => ['values' => ['Collection A']]];
+    $page->tableDeferredFilters = ['collection' => ['values' => ['Collection B']]];
+    $actions = (new ReflectionMethod($page, 'getHeaderActions'))->invoke($page);
+    expect($actions[0])->toBeInstanceOf(ActionGroup::class);
+    $flat = $actions[0]->getFlatActions();
+    expect(array_keys($flat))->toBe(['downloadImageAltTextTemplate', 'backfillImageAltText']);
+    $flat['downloadImageAltTextTemplate']->call(['data' => ['include_images' => false]]);
+    $export = ImageAltTextExport::firstOrFail();
+    expect($export->criteria)->toBe(['collections' => ['Collection A']])
+        ->and($export->status)->toBe('queued')
+        ->and($membership->selected)->toBe([]);
+    $page->tableFilters = ['collection' => ['values' => ['Collection A', 'Collection B']]];
+    expect($page->appliedAltTextCollectionGids())->toBe(['gid://shopify/Collection/51', 'gid://shopify/Collection/52']);
+    $page->tableFilters = [];
+    expect($page->appliedAltTextCollectionGids())->toBe([]);
+    $page->tableFilters = ['collection' => ['values' => ['Unknown collection']]];
+    expect(fn () => $page->appliedAltTextCollectionGids())->toThrow(RuntimeException::class);
+});
+
+it('requires CSV preview of the same file before CMS save and never calls Shopify', function (): void {
+    Storage::fake('local');
+    $gateway = altTextGateway();
+    $product = altTextProduct('PREVIEW-SAVE');
+    $image = altTextImage($product, 1, 'Old');
+    $this->actingAs(User::factory()->create());
+    Storage::disk('local')->put('alt.csv', "image_id,alt_text\n{$image->id},Pending description\n");
+    $page = new ListProducts;
+    $actions = (new ReflectionMethod($page, 'getHeaderActions'))->invoke($page);
+    $action = $actions[0]->getFlatActions()['backfillImageAltText'];
+    $call = fn (bool $save) => $action->call(['data' => ['file' => 'alt.csv'], 'arguments' => ['save' => $save],
+        'action' => $action, 'backfill' => app(ImageAltTextBackfillService::class)]);
+    expect(fn () => $call(true))->toThrow(Halt::class);
+    expect($image->fresh()->alt_text)->toBe('Old');
+    expect(fn () => $call(false))->toThrow(Halt::class);
+    expect($image->fresh()->alt_text)->toBe('Old');
+    Storage::disk('local')->put('alt.csv', "image_id,alt_text\n{$image->id},Changed file\n");
+    expect(fn () => $call(true))->toThrow(Halt::class);
+    expect(fn () => $call(false))->toThrow(Halt::class);
+    $call(true);
+    expect($image->fresh()->alt_text)->toBe('Changed file')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($gateway->queries)->toBe([]);
+});
+
+it('publishes approved alt through normal product sync without unrelated mutations or approval changes', function (): void {
+    $gateway = altTextGateway();
+    $product = altTextProduct('INTEGRATED-SYNC', 'gid://shopify/Product/530');
+    $image = altTextImage($product, 1, 'Old', 'gid://shopify/MediaImage/5301');
+    app(ImageAltTextBackfillService::class)->markPendingReview($image, 'Approved description');
+    $updater = app(ProductShopifyUpdater::class);
+    $blocked = $updater->updateApprovedProducts(collect([$product]), [ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT], []);
+    expect($blocked['updated'])->toBe(0)->and($gateway->queries)->toBe([]);
+    $approval = altTextApprove($image->fresh());
+    $before = $product->fresh()->getAttributes();
+    $result = $updater->updateApprovedProducts(collect([$product->fresh()]));
+    expect($result['updated'])->toBe(1)->and($result['failed'])->toBe(0)
+        ->and($product->fresh()->approval_version)->toBe($before['approval_version'])
+        ->and($approval->fresh()->status)->toBe(ProductPartialApprovalRequest::STATUS_APPROVED)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED);
+    expect($gateway->updates)->toBe(1);
+    $mutation = collect($gateway->variables)->last();
+    expect($mutation)->toBe(['files' => [['id' => $image->shopify_id, 'alt' => 'Approved description']]]);
+    $updater->updateApprovedProducts(collect([$product->fresh()]));
+    expect($gateway->updates)->toBe(1);
+});
+
+it('reports approved alt failures through existing product sync and retries the saved description', function (): void {
+    altTextGateway(fail: true);
+    $product = altTextProduct('INTEGRATED-RETRY', 'gid://shopify/Product/540');
+    $image = altTextImage($product, 1, 'Retry this', 'gid://shopify/MediaImage/5401');
+    app(ImageAltTextBackfillService::class)->markPendingReview($image, 'Retry this');
+    altTextApprove($image);
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product]), [ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT], []);
+    expect($result['failed'])->toBe(1)->and($result['failures'][0]['details'])->toContain('Shopify was busy')
+        ->and($image->fresh()->alt_text)->toBe('Retry this')->and($image->fresh()->alt_text_status)->toBe(Image::ALT_FAILED);
+    $gateway = altTextGateway();
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$product->fresh()]), [ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT], []);
+    expect($result['updated'])->toBe(1)->and($gateway->updates)->toBe(1)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED);
+});
+
+it('omits unapproved CMS alt text from ordinary photograph uploads', function (): void {
+    Storage::fake('public');
+    $product = altTextProduct('PHOTO-APPROVAL-GUARD', 'gid://shopify/Product/560');
+    $image = verificationManagedSource($product, 1, 'Unreviewed description');
+    Image::withoutEvents(fn () => $image->update(['shopify_id' => null, 'alt_text_status' => Image::ALT_PENDING_REVIEW,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now()]));
+    config()->set('services.shopify.shop', 'verification.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    $uploads = [];
+    Http::fake(function ($request) use (&$uploads) {
+        $query = $request->data()['query'];
+        if (str_contains($query, 'productCreateMedia')) {
+            $uploads[] = $request->data()['variables']['media'][0];
+
+            return Http::response(['data' => ['productCreateMedia' => [
+                'media' => [['id' => 'gid://shopify/MediaImage/5601']], 'mediaUserErrors' => [],
+            ]]]);
+        }
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return Http::response(['data' => ['productByHandle' => ['media' => ['nodes' => []]]]]);
+        }
+        throw new RuntimeException('Unexpected photograph upload request.');
+    });
+    (new ReflectionMethod(ProductShopifyUpdater::class, 'updateImages'))->invoke(
+        app(ProductShopifyUpdater::class), $product, $product->shopify_id, [], [], [$image->id],
+    );
+    expect($uploads)->toHaveCount(1)->and($uploads[0])->not->toHaveKey('alt')
+        ->and($image->fresh()->alt_text)->toBe('Unreviewed description')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('repairs only selected stack source links through the existing image workflow and records failures', function (): void {
+    $gateway = altTextGateway();
+    $this->actingAs($user = User::factory()->create());
+    Permission::findOrCreate(PermissionEnum::ShopifyImageImportAccess->value);
+    $user->givePermissionTo(PermissionEnum::ShopifyImageImportAccess->value);
+    Bus::fake();
+    $component = altTextProduct('WORKFLOW-SOURCE', 'gid://shopify/Product/550');
+    $source = altTextImage($component, 1, 'Current', 'gid://shopify/MediaImage/5501');
+    $stack = altTextProduct('WORKFLOW-STACK', 'gid://shopify/Product/551', true);
+    $first = altTextImage($stack, 1, 'Keep first');
+    $copy = altTextImage($stack, 2, 'Keep copy alt');
+    $copy->update(['src' => $source->src]);
+    altTextDraft($stack, [$component->id]);
+    $blocked = altTextProduct('WORKFLOW-BLOCKED', 'gid://shopify/Product/552', true);
+    altTextImage($blocked, 1, 'No components');
+    $before = $stack->fresh()->getAttributes();
+    $firstBefore = $first->fresh()->getAttributes();
+    $page = new ImportShopifyProductImages;
+    $page->runStackComponentRebuild(app(ShopifyImageImportService::class), ['mode' => 'source_links', 'stack_ids' => [$stack->id, $blocked->id]]);
+    $batch = ShopifyImageImportBatch::latest('id')->first();
+    expect($copy->fresh()->source_image_id)->toBe($source->id)
+        ->and($copy->fresh()->alt_text)->toBe('Keep copy alt')
+        ->and($stack->fresh()->getAttributes())->toBe($before)
+        ->and($first->fresh()->getAttributes())->toBe($firstBefore)
+        ->and($batch->updated_count)->toBe(1)->and($batch->failed_count)->toBe(1)
+        ->and($batch->error_message)->toContain('#'.$blocked->id)
+        ->and($gateway->queries)->toBe([]);
+    Bus::assertNotDispatched(RebuildShopifyStackImagesJob::class);
+});
+
 // Final verification: real membership service, with all external requests replaced.
 it('verifies collection A B union pagination status and ZIP parity end to end', function (): void {
-    \Illuminate\Support\Facades\Http::fake(['*' => \Illuminate\Support\Facades\Http::response('photo', 200)]);
+    Http::fake(['*' => Http::response('photo', 200)]);
     $a = altTextProduct('VERIFY-A', 'gid://shopify/Product/201');
     $b = altTextProduct('VERIFY-B', 'gid://shopify/Product/202');
     $both = altTextProduct('VERIFY-BOTH', 'gid://shopify/Product/203', true);
@@ -517,14 +710,17 @@ it('verifies collection A B union pagination status and ZIP parity end to end', 
     $io = altTextImage($outside, 1, 'Outside');
     altTextImage($inactive, 1, 'Inactive');
     Product::withoutEvents(fn () => $outside->update(['tags' => 'Collection A,Collection B']));
-    $gateway = new class implements ShopifyGraphqlGateway {
+    $gateway = new class implements ShopifyGraphqlGateway
+    {
         public array $calls = [];
+
         public function graphql(string $query, array $variables = []): array
         {
             $this->calls[] = $variables;
             $ids = $variables['id'] === 'gid://shopify/Collection/1'
                 ? ($variables['cursor'] === null ? array_merge([201, 205, 206], range(400, 496)) : [203]) : [202, 203];
             $next = $variables['id'] === 'gid://shopify/Collection/1' && $variables['cursor'] === null;
+
             return ['collection' => ['products' => [
                 'nodes' => array_map(fn ($id) => ['id' => 'gid://shopify/Product/'.$id, 'status' => $id === 206 ? 'ARCHIVED' : 'ACTIVE'], $ids),
                 'pageInfo' => ['hasNextPage' => $next, 'endCursor' => $next ? 'page-two' : null],
@@ -544,7 +740,7 @@ it('verifies collection A B union pagination status and ZIP parity end to end', 
         $bytes = altTextCsv($service->export($collections, true)['response']);
         $path = tempnam(sys_get_temp_dir(), 'verify-alt-');
         file_put_contents($path, $bytes);
-        $zip = new ZipArchive();
+        $zip = new ZipArchive;
         try {
             expect($zip->open($path))->toBeTrue();
             expect($zip->getFromName('alt-text.csv'))->toBe($csv);
@@ -564,9 +760,9 @@ it('verifies collection A B union pagination status and ZIP parity end to end', 
 });
 
 it('records a photograph the ZIP could not download', function (): void {
-    \Illuminate\Support\Facades\Http::fake([
-        'https://cdn.shopify.com/missing-photo.jpg' => \Illuminate\Support\Facades\Http::response('missing', 404),
-        '*' => \Illuminate\Support\Facades\Http::response('photo', 200),
+    Http::fake([
+        'https://cdn.shopify.com/missing-photo.jpg' => Http::response('missing', 404),
+        '*' => Http::response('photo', 200),
     ]);
     $product = altTextProduct('ZIP-FAIL');
     $kept = altTextImage($product, 1, 'Kept');
@@ -576,7 +772,7 @@ it('records a photograph the ZIP could not download', function (): void {
     $export = app(ImageAltTextBackfillService::class)->export([], true);
     $path = tempnam(sys_get_temp_dir(), 'alt-fail-');
     file_put_contents($path, altTextCsv($export['response']));
-    $zip = new ZipArchive();
+    $zip = new ZipArchive;
     try {
         expect($zip->open($path))->toBeTrue();
         $names = [];
@@ -607,15 +803,18 @@ function verificationManagedSource(Product $product, int $position, ?string $alt
         'storage_path' => $name, 'status' => ImageAsset::STATUS_AVAILABLE,
     ]);
     $image->update(['image_asset_id' => $asset->id, 'approved_filename' => $name]);
+
     return $image;
 }
 
 it('verifies legacy rebuild source image order exact alt and description preservation', function (): void {
     Storage::fake('public');
-    \Illuminate\Support\Facades\Http::preventStrayRequests();
+    Http::preventStrayRequests();
     $a = altTextProduct('VERIFY-COMP-A');
     $a1 = verificationManagedSource($a, 1, 'A front');
     verificationManagedSource($a, 2, 'A side must not be copied');
+    app(ImageAltTextBackfillService::class)->markPendingReview($a1, 'A front');
+    altTextApprove($a1);
     $b = altTextProduct('VERIFY-COMP-B');
     $b1 = verificationManagedSource($b, 1, null);
     verificationManagedSource($b, 2, 'B side must not be copied');
@@ -638,24 +837,25 @@ it('verifies legacy rebuild source image order exact alt and description preserv
     config()->set('services.shopify.shop', 'verification.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     $uploads = [];
-    \Illuminate\Support\Facades\Http::fake(function ($request) use (&$uploads) {
+    Http::fake(function ($request) use (&$uploads) {
         $query = $request->data()['query'];
         if (str_contains($query, 'productCreateMedia')) {
             $uploads[] = $request->data()['variables']['media'][0];
-            return \Illuminate\Support\Facades\Http::response(['data' => ['productCreateMedia' => [
+
+            return Http::response(['data' => ['productCreateMedia' => [
                 'media' => [['id' => 'gid://shopify/MediaImage/'.(9000 + count($uploads))]], 'mediaUserErrors' => [],
             ]]]);
         }
         if (str_contains($query, 'productReorderMedia')) {
-            return \Illuminate\Support\Facades\Http::response(['data' => ['productReorderMedia' => ['mediaUserErrors' => []]]]);
+            return Http::response(['data' => ['productReorderMedia' => ['mediaUserErrors' => []]]]);
         }
         if (str_contains($query, 'query ProductByHandleDetails')) {
-            return \Illuminate\Support\Facades\Http::response(['data' => ['productByHandle' => ['media' => ['nodes' => []]]]]);
+            return Http::response(['data' => ['productByHandle' => ['media' => ['nodes' => []]]]]);
         }
         throw new RuntimeException('Unexpected verification request: '.$query);
     });
-    (new ReflectionMethod(\App\Services\ProductShopifyUpdater::class, 'updateImages'))->invoke(
-        app(\App\Services\ProductShopifyUpdater::class), $stack->fresh(), $stack->shopify_id, [], [],
+    (new ReflectionMethod(ProductShopifyUpdater::class, 'updateImages'))->invoke(
+        app(ProductShopifyUpdater::class), $stack->fresh(), $stack->shopify_id, [], [],
         $images->skip(1)->pluck('id')->all(),
     );
     expect($uploads)->toHaveCount(2)
@@ -694,7 +894,7 @@ it('rejects legacy stack CSV rows without source ids and skips unchanged repeate
 
 it('refuses a legacy rebuild when the stack has no position one image', function (): void {
     Storage::fake('public');
-    \Illuminate\Support\Facades\Http::preventStrayRequests();
+    Http::preventStrayRequests();
     $component = altTextProduct('VERIFY-NO-FIRST-COMP');
     verificationManagedSource($component, 1, 'Component');
     $stack = altTextProduct('VERIFY-NO-FIRST', 'gid://shopify/Product/302', true);
@@ -707,7 +907,7 @@ it('refuses a legacy rebuild when the stack has no position one image', function
 
 it('refuses a partial legacy rebuild when a linked component has no images', function (): void {
     Storage::fake('public');
-    \Illuminate\Support\Facades\Http::preventStrayRequests();
+    Http::preventStrayRequests();
     $component = altTextProduct('VERIFY-AVAILABLE');
     verificationManagedSource($component, 1, 'Available');
     $missing = altTextProduct('VERIFY-MISSING');
@@ -741,7 +941,8 @@ it('does not propagate to a stale source link outside the stack components', fun
 });
 
 it('fails closed when Shopify says there are more collection pages but omits the cursor', function (): void {
-    $gateway = new class implements ShopifyGraphqlGateway {
+    $gateway = new class implements ShopifyGraphqlGateway
+    {
         public function graphql(string $query, array $variables = []): array
         {
             return ['collection' => ['products' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => true, 'endCursor' => null]]]];
@@ -752,7 +953,8 @@ it('fails closed when Shopify says there are more collection pages but omits the
 });
 
 it('fails closed when a collection page repeats its cursor', function (): void {
-    $gateway = new class implements ShopifyGraphqlGateway {
+    $gateway = new class implements ShopifyGraphqlGateway
+    {
         public function graphql(string $query, array $variables = []): array
         {
             return ['collection' => ['products' => [
@@ -766,7 +968,8 @@ it('fails closed when a collection page repeats its cursor', function (): void {
 });
 
 it('fails closed when a collection product page is malformed', function (): void {
-    $gateway = new class implements ShopifyGraphqlGateway {
+    $gateway = new class implements ShopifyGraphqlGateway
+    {
         public function graphql(string $query, array $variables = []): array
         {
             return ['collection' => ['products' => ['nodes' => 'nope', 'pageInfo' => ['hasNextPage' => false]]]];
@@ -797,10 +1000,14 @@ it('retries pending alt metadata through the dedicated retry action', function (
 });
 
 it('does not confirm an alt update when Shopify returns no mutation payload', function (): void {
-    $gateway = new class implements ShopifyGraphqlGateway {
-        public function graphql(string $query, array $variables = []): array { return []; }
+    $gateway = new class implements ShopifyGraphqlGateway
+    {
+        public function graphql(string $query, array $variables = []): array
+        {
+            return [];
+        }
     };
-    expect(fn () => (new \App\Services\ImageAltTextShopifyWriter($gateway))->update('gid://shopify/MediaImage/3062', 'Approved'))
+    expect(fn () => (new ImageAltTextShopifyWriter($gateway))->update('gid://shopify/MediaImage/3062', 'Approved'))
         ->toThrow(RuntimeException::class);
 });
 
@@ -1081,7 +1288,7 @@ it('keeps price approval independent from image alt text approval', function ():
         ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_APPROVED)
         ->and($priceRequest->fresh()->status)->toBe(ProductPartialApprovalRequest::STATUS_APPROVED)
         ->and($partial->allowedSelections($product->fresh(), [ProductShopifyUpdater::SYNC_SCOPE_PRICE, ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT])['scopes'])
-        ->toBe([ProductShopifyUpdater::SYNC_SCOPE_PRICE]);
+        ->toBe([ProductShopifyUpdater::SYNC_SCOPE_PRICE, ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT]);
 
     Product::withoutEvents(fn () => $product->forceFill(['approval_version' => 4])->save());
     $pushed = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
@@ -1090,7 +1297,7 @@ it('keeps price approval independent from image alt text approval', function ():
         ->and($image->fresh()->shopify_alt_text)->toBe('Column alt')
         ->and($priceRequest->fresh()->status)->toBe(ProductPartialApprovalRequest::STATUS_APPROVED)
         ->and($partial->allowedSelections($product->fresh(), [ProductShopifyUpdater::SYNC_SCOPE_PRICE, ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT])['scopes'])
-        ->toBe([]);
+        ->toBe([ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT]);
 
     app(ImageAltTextBackfillService::class)->markPendingReview($image->fresh(), 'Edited after approval');
     expect($altRequest->fresh()->status)->toBe(ProductPartialApprovalRequest::STATUS_REJECTED)

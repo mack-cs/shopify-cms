@@ -43,14 +43,14 @@ class ImageObserver
         $contentDirty = $this->contentDirty($image);
         $isLocalDelete = $image->isDirty('sync_state') && $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED;
 
-        if (!empty(array_intersect(['src', 'image_path'], $contentDirty))) {
+        if (! empty(array_intersect(['src', 'image_path'], $contentDirty))) {
             $image->image_asset_id = null;
             $image->backup_status = Image::BACKUP_STATUS_PENDING;
             $image->backup_completed_at = null;
             $image->backup_error = null;
         }
 
-        if (!empty(array_intersect(['src', 'image_path', 'position'], $contentDirty))) {
+        if (! empty(array_intersect(['src', 'image_path', 'position'], $contentDirty))) {
             $this->applyManagedApprovedFilename($image);
             $image->needs_shopify_image_sync = true;
             $image->shopify_image_sync_error = null;
@@ -68,10 +68,11 @@ class ImageObserver
 
         if ($isLocalDelete) {
             $this->deleteShopifyRow($image, $image->getOriginal());
+
             return;
         }
 
-        if (!empty($contentDirty)) {
+        if (! empty($contentDirty)) {
             $this->syncShopifyRow($image, $image->getOriginal());
         }
     }
@@ -81,7 +82,7 @@ class ImageObserver
         $this->deleteStoredImage($image->getOriginal('image_path'));
 
         $product = $image->product_id ? Product::find($image->product_id) : null;
-        if (!$product) {
+        if (! $product) {
             return;
         }
 
@@ -96,7 +97,7 @@ class ImageObserver
             HeaderStore::IMAGE_POSITION => $image->getOriginal('position'),
         ];
         $oldKey = RowKey::imageKey($oldRow);
-        if (!$oldKey) {
+        if (! $oldKey) {
             return;
         }
 
@@ -112,7 +113,7 @@ class ImageObserver
     public function updated(Image $image): void
     {
         $product = $image->product_id ? Product::find($image->product_id) : null;
-        if (!$product) {
+        if (! $product) {
             return;
         }
 
@@ -121,13 +122,13 @@ class ImageObserver
 
     private function bumpProductApprovalVersion(?int $productId): void
     {
-        if (!$productId) {
+        if (! $productId) {
             return;
         }
 
         Product::withoutEvents(function () use ($productId): void {
             $product = Product::find($productId);
-            if (!$product) {
+            if (! $product) {
                 return;
             }
 
@@ -144,13 +145,13 @@ class ImageObserver
         }
 
         $product = Product::find($productId);
-        if (!$product || $product->first_image_auto_rename_completed_at === null) {
+        if (! $product || $product->first_image_auto_rename_completed_at === null) {
             return;
         }
 
         $hasSource = filled(trim((string) ($image->image_path ?? '')))
             || filled(trim((string) ($image->src ?? '')));
-        if (!$hasSource) {
+        if (! $hasSource) {
             return;
         }
 
@@ -174,7 +175,7 @@ class ImageObserver
     private function syncShopifyRow(Image $image, ?array $original): void
     {
         $product = $image->product_id ? Product::find($image->product_id) : null;
-        if (!$product) {
+        if (! $product) {
             return;
         }
 
@@ -216,7 +217,7 @@ class ImageObserver
             }
         }
 
-        if (!$row) {
+        if (! $row) {
             $rowIndex = (int) (ShopifyRow::where('import_id', $product->import_id)->max('row_index') ?? 0);
             $rowIndex++;
 
@@ -229,6 +230,7 @@ class ImageObserver
                 'image_key' => $newKey,
                 'data' => $rowData,
             ]);
+
             return;
         }
 
@@ -240,23 +242,24 @@ class ImageObserver
     private function headersForProduct(Product $product): array
     {
         $headers = $product->import?->headers ?? [];
-        if (!empty($headers)) {
+        if (! empty($headers)) {
             return $headers;
         }
 
         $currentImport = Import::where('is_current', true)->first();
         $headers = $currentImport?->headers ?? [];
-        if (!empty($headers)) {
+        if (! empty($headers)) {
             return $headers;
         }
 
         $templatePath = HeaderStore::latestTemplatePath();
-        if ($templatePath === null || !is_file($templatePath)) {
+        if ($templatePath === null || ! is_file($templatePath)) {
             return [];
         }
 
         $csv = Reader::createFromPath($templatePath);
         $csv->setHeaderOffset(0);
+
         return $csv->getHeader();
     }
 
@@ -282,21 +285,24 @@ class ImageObserver
     {
         $contentDirty = $this->contentDirty($image);
 
-        if (!$isCreating && empty($contentDirty)) {
+        if (! $isCreating && empty($contentDirty)) {
             if ($image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
                 $image->local_dirty = true;
             }
+
             return;
         }
 
         if ($image->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
             $image->local_dirty = true;
+
             return;
         }
 
         if (blank($image->shopify_id)) {
             $image->sync_state = Image::SYNC_STATE_LOCAL_NEW;
             $image->local_dirty = true;
+
             return;
         }
 
@@ -335,6 +341,7 @@ class ImageObserver
             'needs_shopify_image_sync',
             'shopify_image_sync_error',
             'alt_text',
+            'imported_alt_text',
             'alt_text_status',
             'shopify_alt_pending',
             'shopify_alt_sync_error',
@@ -346,7 +353,7 @@ class ImageObserver
     private function deleteShopifyRow(Image $image, ?array $original = null): void
     {
         $product = $image->product_id ? Product::find($image->product_id) : null;
-        if (!$product) {
+        if (! $product) {
             return;
         }
 
@@ -361,7 +368,7 @@ class ImageObserver
             HeaderStore::IMAGE_POSITION => $original['position'] ?? $image->getOriginal('position'),
         ];
         $oldKey = RowKey::imageKey($oldRow);
-        if (!$oldKey) {
+        if (! $oldKey) {
             return;
         }
 
