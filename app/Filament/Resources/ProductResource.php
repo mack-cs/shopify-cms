@@ -544,6 +544,12 @@ class ProductResource extends Resource
                                     $get('collection_filter'),
                                     $get('vendor')
                                 ))
+                                ->afterStateHydrated(function (Select $component, mixed $state): void {
+                                    $display = ElevatedBasicsStackCatalog::displayName(is_string($state) ? $state : null);
+                                    if (is_string($display) && $display !== $state) {
+                                        $component->state($display);
+                                    }
+                                })
                                 ->searchable()
                                 ->preload()
                                 ->reactive()
@@ -4828,8 +4834,9 @@ class ProductResource extends Resource
             return null;
         }
 
+        $expected = ElevatedBasicsStackCatalog::displayName($expected) ?? $expected;
         $current = self::nullIfEmpty($vendor);
-        if ($current !== null && strcasecmp($current, $expected) !== 0) {
+        if ($current !== null && !ElevatedBasicsStackCatalog::namesMatch($current, $expected)) {
             return null;
         }
 
@@ -4839,6 +4846,7 @@ class ProductResource extends Resource
     private static function vendorMatchesCollectionRule(mixed $collection): \Closure
     {
         $expected = self::expectedVendorForCollection(is_string($collection) ? $collection : null);
+        $expected = ElevatedBasicsStackCatalog::displayName($expected) ?? $expected;
 
         return function (string $attribute, $value, $fail) use ($expected): void {
             if ($expected === null) {
@@ -4851,7 +4859,7 @@ class ProductResource extends Resource
                 return;
             }
 
-            if (strcasecmp($vendor, $expected) !== 0) {
+            if (!ElevatedBasicsStackCatalog::namesMatch($vendor, $expected)) {
                 $fail("Expected vendor: {$expected}.");
             }
         };

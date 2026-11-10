@@ -200,5 +200,6 @@ it('keeps elevated basics bundle vendor when bundle rules use the base vendor', 
 
     $updates = app(PrepopulationRuleService::class)->applyRule($rule, [], null);
 
-    expect($updates['vendor'])->toBe('Elevated Basics Bundles');
+    expect($updates['vendor'])->toBe('Elevated Basics Stacks')
+        ->and($updates['tags'])->toContain('elevated-basics-bundles', 'bundles');
 });

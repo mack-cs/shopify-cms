@@ -3,8 +3,9 @@
 namespace App\Services;
 
 /**
- * CMS-only variants of the existing Elevated Basics Bundles collection.
- * Both variants publish into that same Shopify collection.
+ * Elevated Basics and Livi Road stacks.
+ * Collection keys and Shopify tags still use the bundles names.
+ * Vendor and collection labels use Stacks.
  */
 final class ElevatedBasicsStackCatalog
 {
@@ -14,7 +15,7 @@ final class ElevatedBasicsStackCatalog
 
     public const NECKLACE_OPTION = 'Elevated Basics Necklace Stacks';
 
-    public const VENDOR = 'Elevated Basics Bundles';
+    public const VENDOR = 'Elevated Basics Stacks';
 
     public const MEMBERSHIP_TAG = 'elevated-basics-bundles';
 
@@ -69,9 +70,45 @@ final class ElevatedBasicsStackCatalog
             $options[self::NECKLACE_OPTION] = self::NECKLACE_OPTION;
         }
 
-        natcasesort($options);
+        $labeled = [];
+        foreach ($options as $key => $label) {
+            $labeled[$key] = self::displayName((string) $label) ?? (string) $label;
+        }
 
-        return $options;
+        natcasesort($labeled);
+
+        return $labeled;
+    }
+
+    /**
+     * Shopify now calls these vendors and collections Stacks.
+     * A stored Bundles title is the same record; tags are not renamed here.
+     */
+    public static function displayName(?string $name): ?string
+    {
+        $name = trim((string) $name);
+        if ($name === '') {
+            return null;
+        }
+
+        if (!str_contains($name, ' ')) {
+            return $name;
+        }
+
+        $updated = preg_replace('/\s+bundles?$/i', ' Stacks', $name);
+
+        return is_string($updated) && $updated !== '' ? $updated : $name;
+    }
+
+    public static function namesMatch(?string $left, ?string $right): bool
+    {
+        $leftName = self::displayName($left);
+        $rightName = self::displayName($right);
+        if ($leftName === null || $rightName === null) {
+            return false;
+        }
+
+        return strcasecmp($leftName, $rightName) === 0;
     }
 
     public static function selectableCollection(?string $collection): ?string

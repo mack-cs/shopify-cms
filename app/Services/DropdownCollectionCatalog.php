@@ -216,6 +216,8 @@ final class DropdownCollectionCatalog
             return null;
         }
 
-        return implode(' ', array_map(fn (string $part): string => ucfirst($part), $parts));
+        return ElevatedBasicsStackCatalog::displayName(
+            implode(' ', array_map(fn (string $part): string => ucfirst($part), $parts))
+        );
     }
 }

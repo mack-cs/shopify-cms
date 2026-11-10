@@ -132,10 +132,10 @@ final class PrepopulationRuleService
         });
 
         if ($isBundleRule && strcasecmp($vendor, 'Elevated Basics') === 0) {
-            return 'Elevated Basics Bundles';
+            return ElevatedBasicsStackCatalog::VENDOR;
         }
 
-        return $vendor;
+        return ElevatedBasicsStackCatalog::displayName($vendor) ?? $vendor;
     }
 
     /**

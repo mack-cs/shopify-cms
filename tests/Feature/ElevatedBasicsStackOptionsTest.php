@@ -41,7 +41,10 @@ it('replaces the elevated basics bundles dropdown option with bracelet and neckl
     expect($options)->toHaveKey(ElevatedBasicsStackCatalog::BRACELET_OPTION)
         ->and($options)->toHaveKey(ElevatedBasicsStackCatalog::NECKLACE_OPTION)
         ->and($options)->not->toHaveKey(ElevatedBasicsStackCatalog::BASE_COLLECTION)
-        ->and($options)->toHaveKey('Livi Road Bundles');
+        ->and($options)->toHaveKey('Livi Road Bundles')
+        ->and($options['Livi Road Bundles'])->toBe('Livi Road Stacks')
+        ->and(ElevatedBasicsStackCatalog::displayName('Elevated Basics Bundles'))->toBe('Elevated Basics Stacks')
+        ->and(ElevatedBasicsStackCatalog::MEMBERSHIP_TAG)->toBe('elevated-basics-bundles');
 });
 
 it('does not offer the original bundles option for an existing product that has no single stack type', function (): void {
