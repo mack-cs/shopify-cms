@@ -4,10 +4,13 @@ namespace App\Filament\Resources;
 
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages;
+use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages\ListShopifyStackInventoryReservations;
 use App\Jobs\CancelShopifyStackReservationsJob;
 use App\Jobs\DeleteShopifyStackReservationsJob;
 use App\Models\ShopifyStackInventoryReservation;
 use App\Services\Shopify\StackReservationFulfillmentAuditService;
+use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\TextInput;
 use Filament\Forms\Form;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
@@ -15,10 +18,14 @@ use Filament\Tables\Actions\Action;
 use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\BulkActionGroup;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 final class ShopifyStackInventoryReservationResource extends Resource
 {
@@ -42,11 +49,17 @@ final class ShopifyStackInventoryReservationResource extends Resource
         return $table
             ->defaultSort('created_at', 'desc')
             ->columns([
-                TextColumn::make('shopify_order_name')->label('Order')->searchable()->sortable()
+                TextColumn::make('shopify_order_name')->label('Order')
+                    ->searchable(['shopify_order_name', 'shopify_order_id'])
+                    ->sortable()
                     ->placeholder(fn ($record): string => $record->shopify_order_id),
                 TextColumn::make('shopify_order_created_at')->label('Ordered at')->dateTime('d/m/Y H:i')->sortable()->toggleable(),
-                TextColumn::make('stack_title')->label('Stack')->searchable()->description(fn ($record): ?string => $record->stack_sku),
-                TextColumn::make('component_title')->label('Component')->searchable()->description(fn ($record): ?string => $record->component_sku),
+                TextColumn::make('stack_title')->label('Stack')
+                    ->searchable(['stack_title', 'stack_sku'])
+                    ->description(fn ($record): ?string => $record->stack_sku),
+                TextColumn::make('component_title')->label('Component')
+                    ->searchable(['component_title', 'component_sku'])
+                    ->description(fn ($record): ?string => $record->component_sku),
                 TextColumn::make('stack_quantity_ordered')->label('Stack Qty')->numeric(),
                 TextColumn::make('total_component_quantity_required')->label('Required')->numeric(),
                 TextColumn::make('reserved_quantity')->label('Reserved')->numeric(),
@@ -87,6 +100,64 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->query(fn ($query, array $data) => ($data['value'] ?? null) === 'yes'
                         ? $query->withLeftoverReserved()
                         : $query),
+                Filter::make('reserved_on')
+                    ->label('Reserved on')
+                    ->columns(2)
+                    ->form([
+                        DatePicker::make('from')->label('From')->native(false)->displayFormat('d/m/Y'),
+                        DatePicker::make('until')->label('Until')->native(false)->displayFormat('d/m/Y'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => self::whereDayRange(
+                        $query,
+                        'COALESCE(reserved_at, created_at)',
+                        $data['from'] ?? null,
+                        $data['until'] ?? null,
+                    ))
+                    ->indicateUsing(fn (array $data): ?string => self::dayRangeIndicator('Reserved', $data)),
+                Filter::make('ordered_on')
+                    ->label('Ordered on')
+                    ->columns(2)
+                    ->form([
+                        DatePicker::make('from')->label('From')->native(false)->displayFormat('d/m/Y'),
+                        DatePicker::make('until')->label('Until')->native(false)->displayFormat('d/m/Y'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => self::whereDayRange(
+                        $query,
+                        'shopify_order_created_at',
+                        $data['from'] ?? null,
+                        $data['until'] ?? null,
+                    ))
+                    ->indicateUsing(fn (array $data): ?string => self::dayRangeIndicator('Ordered', $data)),
+                Filter::make('order')
+                    ->label('Order')
+                    ->form([
+                        TextInput::make('order')->label('Order id or name'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => self::whereContains(
+                        $query,
+                        ['shopify_order_name', 'shopify_order_id'],
+                        $data['order'] ?? null,
+                    ))
+                    ->indicateUsing(function (array $data): ?string {
+                        $term = trim((string) ($data['order'] ?? ''));
+
+                        return $term === '' ? null : "Order {$term}";
+                    }),
+                Filter::make('sku')
+                    ->label('SKU')
+                    ->form([
+                        TextInput::make('sku')->label('Stack or component SKU'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => self::whereContains(
+                        $query,
+                        ['stack_sku', 'component_sku'],
+                        $data['sku'] ?? null,
+                    ))
+                    ->indicateUsing(function (array $data): ?string {
+                        $term = trim((string) ($data['sku'] ?? ''));
+
+                        return $term === '' ? null : "SKU {$term}";
+                    }),
             ])
             ->headerActions([
                 Action::make('scanLeftoverReservations')
@@ -119,6 +190,24 @@ final class ShopifyStackInventoryReservationResource extends Resource
                             'Content-Type' => 'text/csv',
                         ]);
                     }),
+                Action::make('deleteFilteredReservations')
+                    ->label('Delete filtered reservations')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn (): bool => self::canCancelReservations())
+                    ->requiresConfirmation()
+                    ->modalHeading('Delete every reservation in this filter?')
+                    ->modalDescription(function (ListShopifyStackInventoryReservations $livewire): string {
+                        $count = self::filteredLeftoverQuery($livewire)->count();
+
+                        return "This deletes {$count} reservation(s) in the current filter that still hold stock, including rows on other pages. Filter Reserved on to a burst day, for example 26/09/2026. Held units are removed from stock and are not returned to available. Already settled rows are left as they are.";
+                    })
+                    ->modalSubmitActionLabel('Delete filtered reservations')
+                    ->action(function (ListShopifyStackInventoryReservations $livewire): void {
+                        self::queueReservationDeletes(
+                            self::filteredLeftoverQuery($livewire)->pluck('id')->map(fn ($id): int => (int) $id)->all()
+                        );
+                    }),
             ])
             ->actions([
                 Action::make('cancelReservation')
@@ -150,12 +239,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->visible(fn (): bool => self::canCancelReservations())
                     ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
                     ->action(function (ShopifyStackInventoryReservation $record): void {
-                        DeleteShopifyStackReservationsJob::dispatch([$record->id], Auth::id());
-                        Notification::make()
-                            ->title('Stack reservation delete queued')
-                            ->body('The held units are removed in the background. They are not returned to available.')
-                            ->success()
-                            ->send();
+                        self::queueReservationDeletes([(int) $record->id]);
                     }),
             ])
             ->bulkActions([
@@ -191,15 +275,9 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ->modalSubmitActionLabel('Delete reservations')
                         ->visible(fn (): bool => self::canCancelReservations())
                         ->action(function (Collection $records): void {
-                            DeleteShopifyStackReservationsJob::dispatch(
-                                $records->pluck('id')->map(fn ($id): int => (int) $id)->all(),
-                                Auth::id(),
+                            self::queueReservationDeletes(
+                                $records->pluck('id')->map(fn ($id): int => (int) $id)->all()
                             );
-                            Notification::make()
-                                ->title('Stack reservation delete queued')
-                                ->body('The selected reservations are deleted in the background. Held units are not returned to available.')
-                                ->success()
-                                ->send();
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),
@@ -234,6 +312,99 @@ final class ShopifyStackInventoryReservationResource extends Resource
     public static function canCancelReservations(): bool
     {
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    private static function filteredLeftoverQuery(ListShopifyStackInventoryReservations $livewire): Builder
+    {
+        return $livewire->getFilteredTableQuery()->withLeftoverReserved();
+    }
+
+    /** @param array<int, int> $ids */
+    private static function queueReservationDeletes(array $ids): void
+    {
+        $ids = array_values(array_unique(array_filter(array_map(intval(...), $ids))));
+        if ($ids === []) {
+            Notification::make()
+                ->title('No reservations to delete')
+                ->body('Nothing in the current filter still holds reserved stock.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        foreach (array_chunk($ids, 25) as $chunk) {
+            DeleteShopifyStackReservationsJob::dispatch($chunk, Auth::id());
+        }
+
+        Notification::make()
+            ->title('Stack reservation delete queued')
+            ->body(count($ids).' reservation(s) will be deleted in the background. Held units are not returned to available.')
+            ->success()
+            ->send();
+    }
+
+    private static function whereDayRange(Builder $query, string $expression, mixed $from, mixed $until): Builder
+    {
+        $from = self::calendarDay($from);
+        $until = self::calendarDay($until);
+        if ($from === null && $until === null) {
+            return $query;
+        }
+
+        if ($from !== null) {
+            $query->whereDate(DB::raw($expression), '>=', $from);
+        }
+        if ($until !== null) {
+            $query->whereDate(DB::raw($expression), '<=', $until);
+        }
+
+        return $query;
+    }
+
+    /** @param array<string, mixed> $data */
+    private static function dayRangeIndicator(string $label, array $data): ?string
+    {
+        $from = self::calendarDay($data['from'] ?? null);
+        $until = self::calendarDay($data['until'] ?? null);
+        if ($from === null && $until === null) {
+            return null;
+        }
+        $format = fn (string $day): string => Carbon::parse($day)->format('d/m/Y');
+        if ($from !== null && $until !== null) {
+            return $from === $until
+                ? "{$label} on ".$format($from)
+                : "{$label} {$format($from)} – {$format($until)}";
+        }
+
+        return $from !== null
+            ? "{$label} from ".$format($from)
+            : "{$label} until ".$format((string) $until);
+    }
+
+    /** @param array<int, string> $columns */
+    private static function whereContains(Builder $query, array $columns, mixed $value): Builder
+    {
+        $term = trim((string) $value);
+        if ($term === '') {
+            return $query;
+        }
+        $like = '%'.addcslashes($term, '%_\\').'%';
+
+        return $query->where(function (Builder $query) use ($columns, $like): void {
+            foreach ($columns as $column) {
+                $query->orWhere($column, 'like', $like);
+            }
+        });
+    }
+
+    private static function calendarDay(mixed $value): ?string
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        return Carbon::parse($value)->toDateString();
     }
 
     private static function isSettled(ShopifyStackInventoryReservation $record): bool

@@ -426,7 +426,8 @@ it('shows stack reservation cancel actions only to super admins', function (): v
         ->assertTableActionHidden('deleteReservation', $reservation)
         ->assertTableBulkActionHidden('cancelReservations')
         ->assertTableBulkActionHidden('deleteReservations')
-        ->assertTableActionHidden('scanLeftoverReservations');
+        ->assertTableActionHidden('scanLeftoverReservations')
+        ->assertTableActionHidden('deleteFilteredReservations');
 
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
@@ -436,7 +437,8 @@ it('shows stack reservation cancel actions only to super admins', function (): v
         ->assertTableActionVisible('deleteReservation', $reservation)
         ->assertTableBulkActionVisible('cancelReservations')
         ->assertTableBulkActionVisible('deleteReservations')
-        ->assertTableActionVisible('scanLeftoverReservations');
+        ->assertTableActionVisible('scanLeftoverReservations')
+        ->assertTableActionVisible('deleteFilteredReservations');
 });
 
 it('reports leftover reserved stock on fulfilled Shopify orders without including open orders as fulfilled leftovers', function (): void {
@@ -592,6 +594,76 @@ it('queues a manual reservation cancel', function (): void {
         return $job->reservationIds === [$reservation->id] && $job->userId === $super->id;
     });
     expect($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
+});
+
+it('deletes only the reservations reserved on the filtered day', function (): void {
+    Queue::fake();
+    Role::findOrCreate(RolesEnum::SuperAdmin->value);
+    $records = stackReservationRecords();
+    $burst = stackLeftoverReservation($records, 9261, 1, 0);
+    $burst->forceFill([
+        'reserved_at' => '2026-09-26 14:10:00',
+        'shopify_order_created_at' => '2026-08-01 09:00:00',
+    ])->save();
+    $otherDay = stackLeftoverReservation($records, 9262, 1, 0);
+    $otherDay->forceFill([
+        'reserved_at' => '2026-09-27 08:00:00',
+        'shopify_order_created_at' => '2026-09-26 11:00:00',
+    ])->save();
+    $super = User::factory()->create();
+    $super->assignRole(RolesEnum::SuperAdmin->value);
+    $this->actingAs($super);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('reserved_on', ['from' => '2026-09-26', 'until' => '2026-09-26'])
+        ->assertCanSeeTableRecords([$burst])
+        ->assertCanNotSeeTableRecords([$otherDay])
+        ->callTableAction('deleteFilteredReservations');
+
+    Queue::assertPushed(DeleteShopifyStackReservationsJob::class, function (DeleteShopifyStackReservationsJob $job) use ($burst): bool {
+        return $job->reservationIds === [$burst->id];
+    });
+    Queue::assertPushed(DeleteShopifyStackReservationsJob::class, 1);
+    expect($burst->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING)
+        ->and($otherDay->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('ordered_on', ['from' => '2026-09-26', 'until' => '2026-09-26'])
+        ->assertCanSeeTableRecords([$otherDay])
+        ->assertCanNotSeeTableRecords([$burst]);
+});
+
+it('filters stack reservations by order id and searches by sku', function (): void {
+    $records = stackReservationRecords();
+    $match = stackLeftoverReservation($records, 4814, 1, 0);
+    $match->forceFill([
+        'shopify_order_name' => '#4814',
+        'shopify_order_id' => 'gid://shopify/Order/4814',
+        'stack_sku' => 'LRBU34',
+        'component_sku' => 'LRB0104',
+    ])->save();
+    $other = stackLeftoverReservation($records, 5000, 1, 0);
+    $other->forceFill([
+        'shopify_order_name' => '#5000',
+        'shopify_order_id' => 'gid://shopify/Order/5000',
+        'stack_sku' => 'OTHER',
+        'component_sku' => 'OTHER-1',
+    ])->save();
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('order', ['order' => '4814'])
+        ->assertCanSeeTableRecords([$match])
+        ->assertCanNotSeeTableRecords([$other]);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('sku', ['sku' => 'LRB0104'])
+        ->assertCanSeeTableRecords([$match])
+        ->assertCanNotSeeTableRecords([$other]);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->searchTable('LRBU34')
+        ->assertCanSeeTableRecords([$match])
+        ->assertCanNotSeeTableRecords([$other]);
 });
 
 it('removes held reserved units when a reservation is deleted and does not return them to available', function (): void {
