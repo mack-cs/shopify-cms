@@ -627,6 +627,17 @@ it('deletes only the reservations reserved on the filtered day', function (): vo
     expect($burst->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING)
         ->and($otherDay->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
 
+    Queue::fake();
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('reserved_on', ['from' => '2026-09-26', 'until' => '2026-09-27'])
+        ->set('selectedTableRecords', [(string) $otherDay->id])
+        ->callTableAction('deleteFilteredReservations');
+
+    Queue::assertPushed(DeleteShopifyStackReservationsJob::class, function (DeleteShopifyStackReservationsJob $job) use ($otherDay): bool {
+        return $job->reservationIds === [$otherDay->id];
+    });
+    Queue::assertPushed(DeleteShopifyStackReservationsJob::class, 1);
+
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->filterTable('ordered_on', ['from' => '2026-09-26', 'until' => '2026-09-26'])
         ->assertCanSeeTableRecords([$otherDay])
@@ -765,6 +776,374 @@ it('uses Shopify state movement and consumes reserved without changing available
         'gid://leigh-avenue-cms/Test/1', 'leighavenue-cms://reservation/1', '11111111-1111-4111-8111-111111111111', 'gid://shopify/Location/6001');
     $service->consumeReserved($records['component_x_variant'], 2, 'gid://leigh-avenue-cms/Test/2',
         'leighavenue-cms://reservation/1', '22222222-2222-4222-8222-222222222222', 'gid://shopify/Location/6001');
+});
+
+it('skips gift packaging and free gifts while consuming every stack in one fulfillment', function (): void {
+    $records = stackReservationRecords();
+    createSecondStack($records['import'], $records['component_x_product']);
+    stackOrdinaryProduct($records['import'], 5301, 9301, null, 'gift-packaging', []);
+    stackOrdinaryProduct($records['import'], 5302, 9302, 'LABN2', 'garnet-grandeur-gift');
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'shopify_id' => 'gid://shopify/Product/5777', 'handle' => 'null-sku-stack', 'sku' => null, 'title' => 'Null SKU stack',
+        'tags' => 'bundles', 'status' => 'active', 'bundle_product_ids' => [$records['component_x_product']->id],
+        'bundle_component_quantities' => [['product_id' => $records['component_x_product']->id, 'quantity' => 1]],
+        'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->times(3)->andReturn(['createdAt' => now()->toIso8601String()]);
+    $consumed = [];
+    $inventory->shouldReceive('consumeReserved')->times(3)->andReturnUsing(function (Variant $variant, int $quantity) use (&$consumed): array {
+        $consumed[] = [$variant->sku, $quantity];
+
+        return ['createdAt' => now()->toIso8601String()];
+    });
+    stackOrderService($inventory)->process(stackOrderEvent(8200, [
+        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
+        ['id' => 10002, 'variant_id' => 9002, 'sku' => 'STACK-B', 'quantity' => 1],
+    ]));
+    $fulfillment = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/7354856472712',
+        'shopify_order_id' => '8200',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [
+            ['id' => 50923095785608, 'variant_id' => 9301, 'sku' => null, 'quantity' => 1, 'title' => 'Gift Packaging'],
+            ['id' => 50923095818376, 'variant_id' => 9302, 'sku' => 'LABN2', 'quantity' => 1, 'title' => 'Garnet Grandeur'],
+            ['id' => 10002, 'variant_id' => 9002, 'sku' => 'STACK-B', 'quantity' => 1],
+            ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
+        ]],
+    ]);
+    $service = new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory));
+
+    $first = $service->process($fulfillment);
+    $second = $service->process($fulfillment->fresh());
+
+    expect($first['consumed'])->toBe(3)
+        ->and($second['already_completed'])->toBe(1)
+        ->and($consumed)->toBe([['COMP-X', 2], ['COMP-X', 1], ['COMP-Y', 2]])
+        ->and(ShopifyStackInventoryReservation::query()->where('status', ShopifyStackInventoryReservation::STATUS_PENDING)->count())->toBe(0)
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(5)
+        ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
+});
+
+it('completes a fulfillment of ordinary products that have no reservations', function (): void {
+    $records = stackReservationRecords();
+    stackOrdinaryProduct($records['import'], 5303, 9303, 'NORMAL', 'normal-product');
+    $inventory = stackInventoryMock();
+    $inventory->shouldNotReceive('consumeReserved');
+    $fulfillment = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/7601',
+        'shopify_order_id' => '8201',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [
+            ['id' => 11001, 'variant_id' => 9303, 'sku' => 'NORMAL', 'quantity' => 1],
+        ]],
+    ]);
+
+    $summary = (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment);
+
+    expect($summary['consumed'])->toBe(0)
+        ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED)
+        ->and(ShopifyStackInventoryReservation::query()->count())->toBe(0);
+});
+
+it('keeps retrying when a genuine stack fulfillment has no component reservations', function (): void {
+    stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldNotReceive('consumeReserved');
+    $fulfillment = stackFulfillment(7602, 8202, 1);
+
+    expect(fn () => (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment))
+        ->toThrow(RuntimeException::class, 'No component reservation exists for fulfilled Stack line gid://shopify/LineItem/10001');
+
+    expect($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_FAILED)
+        ->and(ShopifyStackInventoryReservation::query()->count())->toBe(0);
+});
+
+it('consumes only the fulfilled stack quantity when the fulfillment also contains a non-stack line', function (): void {
+    $records = stackReservationRecords();
+    stackOrdinaryProduct($records['import'], 5304, 9304, null, 'gift-packaging-partial', []);
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->twice()->withArgs(
+        fn (Variant $variant, int $quantity): bool => ($variant->is($records['component_x_variant']) && $quantity === 1)
+            || ($variant->is($records['component_y_variant']) && $quantity === 2)
+    )->andReturn(['createdAt' => now()->toIso8601String()]);
+    stackOrderService($inventory)->process(stackOrderEvent(8203, [
+        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 2],
+    ]));
+    $fulfillment = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/7603',
+        'shopify_order_id' => '8203',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [
+            ['id' => 11002, 'variant_id' => 9304, 'sku' => null, 'quantity' => 1],
+            ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
+        ]],
+    ]);
+
+    (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment);
+
+    expect(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->get()->every(
+            fn (ShopifyStackInventoryReservation $reservation): bool => $reservation->remainingReserved() > 0
+                && $reservation->status === ShopifyStackInventoryReservation::STATUS_PENDING
+        ))->toBeTrue();
+});
+
+it('retries a failed fulfillment without consuming reserved units twice', function (): void {
+    stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    stackOrderService($inventory)->process(stackOrderEvent(8204, [
+        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
+    ]));
+    $fulfillment = stackFulfillment(7604, 8204, 1);
+    $service = new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory));
+    $service->process($fulfillment);
+    $fulfillment->forceFill([
+        'processing_status' => ShopifyFulfillment::STATUS_FAILED,
+        'error_message' => 'No component reservation exists for fulfilled Stack line gid://shopify/LineItem/1; retrying after the order webhook.',
+    ])->save();
+
+    $service->process($fulfillment->fresh());
+
+    expect(ShopifyStackInventoryMovement::query()->where('action', ShopifyStackInventoryMovement::ACTION_CONSUME)->count())->toBe(2)
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
+        ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
+});
+
+it('creates the components missing from an interrupted snapshot and will not consume that snapshot as complete', function (): void {
+    $records = stackReservationRecords();
+    $records['component_y_variant']->forceFill(['shopify_inventory_item_id' => null])->save();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $event = stackOrderEvent(8301, [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]);
+
+    expect(fn () => stackOrderService($inventory)->process($event))
+        ->toThrow(RuntimeException::class, 'must have exactly one inventory-tracked variant');
+    expect(ShopifyStackInventoryReservation::query()->pluck('component_sku')->all())->toBe(['COMP-X']);
+
+    $fulfillment = stackFulfillment(8301, 8301, 1);
+    expect(fn () => (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment))
+        ->toThrow(RuntimeException::class, 'Incomplete component reservation snapshot');
+    expect($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_FAILED)
+        ->and(ShopifyStackInventoryMovement::query()->where('action', 'consume')->count())->toBe(0);
+
+    $records['component_y_variant']->forceFill([
+        'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/10102',
+    ])->save();
+    stackOrderService($inventory)->process($event->fresh());
+    (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment->fresh());
+
+    expect(ShopifyStackInventoryReservation::query()->orderBy('component_sku')->pluck('component_sku')->all())->toBe(['COMP-X', 'COMP-Y'])
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->where('status', ShopifyStackInventoryReservation::STATUS_PENDING)->count())->toBe(0);
+});
+
+it('reserves a genuine stack when fulfillment arrives before the order and Shopify already shows it fulfilled', function (): void {
+    $records = stackReservationRecords();
+    ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/8302',
+        'shopify_order_id' => '8302',
+        'shopify_status' => 'success',
+        'processing_status' => ShopifyFulfillment::STATUS_FAILED,
+        'payload' => ['line_items' => [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]],
+    ]);
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->withArgs(
+        fn (Variant $variant, int $quantity): bool => ($variant->is($records['component_x_variant']) && $quantity === 1)
+            || ($variant->is($records['component_y_variant']) && $quantity === 2)
+    )->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+
+    stackOrderService($inventory, 'FULFILLED')->process(stackOrderEvent(8302, [[
+        'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1,
+    ]]));
+    $fulfillment = ShopifyFulfillment::query()->first();
+    (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment);
+
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(2)
+        ->and(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
+        ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
+});
+
+it('does not send a second Shopify adjustment when an ordinary movement outlives idempotency retention', function (): void {
+    stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->once()->andThrow(new RuntimeException('Shopify timed out after applying the adjustment'));
+    $event = stackOrderEvent(8303, [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]);
+    $service = stackOrderService($inventory);
+
+    expect(fn () => $service->process($event))->toThrow(RuntimeException::class, 'timed out');
+    ShopifyStackInventoryMovement::query()->update(['created_at' => now()->subHours(24)]);
+
+    expect(fn () => $service->process($event->fresh()))
+        ->toThrow(RuntimeException::class, 'Remote idempotency retention may expire');
+    expect(ShopifyStackInventoryMovement::query()->count())->toBe(1)
+        ->and(ShopifyStackInventoryMovement::query()->first()->status)->toBe(ShopifyStackInventoryMovement::STATUS_FAILED);
+});
+
+it('clears a failed reservation status after the same movement succeeds', function (): void {
+    stackReservationRecords();
+    $attempts = 0;
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->andReturnUsing(function () use (&$attempts): array {
+        if (++$attempts === 1) {
+            throw new RuntimeException('Temporary Shopify failure');
+        }
+
+        return ['createdAt' => now()->toIso8601String()];
+    });
+    $event = stackOrderEvent(8304, [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]);
+    $service = stackOrderService($inventory);
+
+    expect(fn () => $service->process($event))->toThrow(RuntimeException::class, 'Temporary Shopify failure');
+    expect(ShopifyStackInventoryReservation::query()->first()->status)->toBe(ShopifyStackInventoryReservation::STATUS_FAILED);
+
+    $service->process($event->fresh());
+
+    expect(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
+        ->toBe([ShopifyStackInventoryReservation::STATUS_PENDING])
+        ->and(ShopifyStackInventoryMovement::query()->where('status', ShopifyStackInventoryMovement::STATUS_COMPLETED)->count())->toBe(2);
+});
+
+it('treats numeric and GID fulfillment ids as one consume', function (): void {
+    stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    stackOrderService($inventory)->process(stackOrderEvent(8305, [[
+        'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1,
+    ]]));
+    $numeric = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => '7001',
+        'shopify_order_id' => '8305',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]],
+    ]);
+    $service = new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory));
+    $service->process($numeric);
+
+    $gid = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/7001',
+        'shopify_order_id' => 'gid://shopify/Order/8305',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1]]],
+    ]);
+    $service->process($gid);
+
+    expect(ShopifyStackInventoryMovement::query()->where('action', 'consume')->count())->toBe(2)
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(3)
+        ->and($gid->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
+});
+
+it('stores one fulfillment when Shopify retries with the GID after a numeric id', function (): void {
+    Queue::fake();
+    config(['services.shopify.verify_webhooks' => true, 'services.shopify.webhook_secret' => 'secret']);
+    $numeric = ['id' => 7354856472712, 'order_id' => 19022043021448, 'status' => 'success', 'line_items' => []];
+    $gid = $numeric + ['admin_graphql_api_id' => 'gid://shopify/Fulfillment/7354856472712'];
+    foreach ([$numeric, $gid] as $index => $payload) {
+        $json = json_encode($payload, JSON_THROW_ON_ERROR);
+        $this->call('POST', '/webhooks/shopify/fulfillments', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_X_SHOPIFY_HMAC_SHA256' => base64_encode(hash_hmac('sha256', $json, 'secret', true)),
+            'HTTP_X_SHOPIFY_TOPIC' => 'fulfillments/create',
+            'HTTP_X_SHOPIFY_WEBHOOK_ID' => 'fulfillment-webhook-'.$index,
+        ], $json)->assertStatus(202);
+    }
+
+    expect(ShopifyFulfillment::query()->count())->toBe(1)
+        ->and(ShopifyFulfillment::query()->value('shopify_fulfillment_id'))->toBe('gid://shopify/Fulfillment/7354856472712');
+});
+
+it('does not treat a conflicting handle or an ambiguous sku as a stack', function (): void {
+    $records = stackReservationRecords();
+    NewProductDraft::query()->where('sku', 'STACK-A')->update(['handle' => 'gift-packaging']);
+    stackOrdinaryProduct($records['import'], 5310, 9310, null, 'gift-packaging');
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'shopify_id' => 'gid://shopify/Product/5771', 'handle' => 'other-stack', 'sku' => 'STACK-A', 'title' => 'Other',
+        'status' => 'active', 'bundle_product_ids' => [$records['component_x_product']->id],
+        'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+    $inventory = stackInventoryMock();
+    $inventory->shouldNotReceive('moveQuantity');
+    $inventory->shouldNotReceive('consumeReserved');
+    $fulfillment = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/8310',
+        'shopify_order_id' => '8310',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [
+            ['id' => 11010, 'variant_id' => 9310, 'sku' => null, 'quantity' => 1],
+        ]],
+    ]);
+
+    (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))->process($fulfillment);
+
+    expect($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED)
+        ->and(ShopifyStackInventoryReservation::query()->count())->toBe(0);
+
+    expect(fn () => stackOrderService($inventory)->process(stackOrderEvent(8311, [[
+        'id' => 11011, 'sku' => 'STACK-A', 'quantity' => 1,
+    ]])))->toThrow(RuntimeException::class, 'ambiguous');
+});
+
+it('retries a stack whose local variant is missing instead of ignoring it', function (): void {
+    stackReservationRecords();
+    Variant::query()->where('sku', 'STACK-A')->delete();
+    $inventory = stackInventoryMock();
+    $inventory->shouldNotReceive('moveQuantity');
+
+    expect(fn () => stackOrderService($inventory)->process(stackOrderEvent(8312, [[
+        'id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1,
+    ]])))->toThrow(RuntimeException::class, 'not linked to a local variant');
+
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(0);
+});
+
+it('consumes both stacks from an order shaped like Shopify order 5855', function (): void {
+    $records = stackReservationRecords();
+    $ebb20 = stackNamedBundle($records['import'], 6200, 'EBB20', 'dancing-after-dark', ['LAB0175', 'LAB0184', 'LAB0174']);
+    $ebbm = stackNamedBundle($records['import'], 6300, 'EBBM01', 'the-pleasure-principle', ['LAB0187', 'LA0506', 'LA0551']);
+    stackOrdinaryProduct($records['import'], 6401, 9401, null, 'gift-packaging', []);
+    stackOrdinaryProduct($records['import'], 6402, 9402, 'LABN2', 'garnet-grandeur-gift');
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'shopify_id' => 'gid://shopify/Product/6499', 'handle' => 'null-sku-stack', 'sku' => null, 'title' => 'Null SKU stack',
+        'status' => 'active', 'bundle_product_ids' => [$records['component_x_product']->id],
+        'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('moveQuantity')->times(6)->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('consumeReserved')->times(6)->andReturn(['createdAt' => now()->toIso8601String()]);
+    stackOrderService($inventory)->process(stackOrderEvent(19022043021448, [
+        ['id' => 50923095851144, 'variant_id' => $ebb20, 'sku' => 'EBB20', 'quantity' => 1, 'title' => 'Dancing After Dark Bracelet Stack'],
+        ['id' => 50923095883912, 'variant_id' => $ebbm, 'sku' => 'EBBM01', 'quantity' => 1, 'title' => 'The Pleasure Principle Stack'],
+    ]));
+    $fulfillment = ShopifyFulfillment::create([
+        'shopify_fulfillment_id' => 'gid://shopify/Fulfillment/7354856472712',
+        'shopify_order_id' => 'gid://shopify/Order/19022043021448',
+        'shopify_status' => 'success',
+        'payload' => ['line_items' => [
+            ['id' => 50923095785608, 'variant_id' => 9401, 'sku' => null, 'quantity' => 1, 'title' => 'Gift Packaging'],
+            ['id' => 50923095818376, 'variant_id' => 9402, 'sku' => 'LABN2', 'quantity' => 1, 'title' => 'Garnet Grandeur'],
+            ['id' => 50923095851144, 'variant_id' => $ebb20, 'sku' => 'EBB20', 'quantity' => 1],
+            ['id' => 50923095883912, 'variant_id' => $ebbm, 'sku' => 'EBBM01', 'quantity' => 1],
+        ]],
+    ]);
+    $service = new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory));
+
+    $service->process($fulfillment);
+    $fulfillment->forceFill(['processing_status' => ShopifyFulfillment::STATUS_FAILED])->save();
+    $service->process($fulfillment->fresh());
+
+    expect(ShopifyStackInventoryReservation::query()->count())->toBe(6)
+        ->and(ShopifyStackInventoryReservation::query()->sum('consumed_quantity'))->toBe(6)
+        ->and(ShopifyStackInventoryMovement::query()->where('action', 'consume')->count())->toBe(6)
+        ->and(ShopifyStackInventoryReservation::query()->where('stack_sku', 'EBB20')->count())->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->where('stack_sku', 'EBBM01')->count())->toBe(3)
+        ->and($fulfillment->fresh()->processing_status)->toBe(ShopifyFulfillment::STATUS_COMPLETED);
 });
 
 function stackInventoryMock(): ShopifyInventoryAdjustmentService
@@ -968,6 +1347,54 @@ function createSecondStack(Import $import, Product $component): void
         'bundle_component_quantities' => [['product_id' => $component->id, 'quantity' => 2]],
         'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
     ]));
+}
+
+function stackNamedBundle(Import $import, int $variantId, string $sku, string $handle, array $componentSkus): int
+{
+    $componentIds = [];
+    $quantities = [];
+    foreach ($componentSkus as $index => $componentSku) {
+        $component = stackComponent($import, 7000 + $variantId + $index, 8000 + $variantId + $index, $componentSku);
+        $componentIds[] = $component['product']->id;
+        $quantities[] = ['product_id' => $component['product']->id, 'quantity' => 1];
+    }
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id, 'shopify_id' => 'gid://shopify/Product/'.(5000 + $variantId), 'handle' => $handle,
+        'title' => $sku, 'status' => 'active', 'is_bundle' => true, 'approval_version' => 1,
+    ]));
+    Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id, 'shopify_id' => "gid://shopify/ProductVariant/{$variantId}",
+        'sku' => $sku, 'sync_state' => Variant::SYNC_STATE_SYNCED,
+    ]));
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'shopify_id' => $product->shopify_id, 'handle' => $handle, 'sku' => $sku, 'title' => $sku,
+        'tags' => 'bundles', 'status' => 'active', 'bundle_product_ids' => $componentIds,
+        'bundle_component_quantities' => $quantities,
+        'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    return $variantId;
+}
+
+function stackOrdinaryProduct(Import $import, int $productId, int $variantId, ?string $sku, string $handle, ?array $bundleIds = null): Variant
+{
+    $product = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id, 'shopify_id' => "gid://shopify/Product/{$productId}", 'handle' => $handle,
+        'title' => $handle, 'status' => 'active', 'is_bundle' => false, 'approval_version' => 1,
+    ]));
+    $variant = Variant::withoutEvents(fn (): Variant => Variant::create([
+        'product_id' => $product->id, 'shopify_id' => "gid://shopify/ProductVariant/{$variantId}",
+        'sku' => $sku, 'sync_state' => Variant::SYNC_STATE_SYNCED,
+    ]));
+    if ($bundleIds !== null) {
+        NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+            'shopify_id' => $product->shopify_id, 'handle' => $handle, 'sku' => $sku, 'title' => $handle,
+            'status' => 'active', 'bundle_product_ids' => $bundleIds,
+            'approval_version' => 1, 'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+        ]));
+    }
+
+    return $variant;
 }
 
 /** @return array{product:Product,variant:Variant} */

@@ -74,11 +74,11 @@ final class StackInventoryMovementService
             throw new \RuntimeException('Legacy independent bead reservation requires explicit reconciliation before inventory mutations.');
         }
 
+        if ((int) $movement->attempts > 0 && $movement->created_at !== null && $movement->created_at->lt(now()->subHours(23))) {
+            throw new \RuntimeException('Remote idempotency retention may expire; explicit reconciliation is required before retrying.');
+        }
         if ($engraved) {
             app(EngravedBeadWriteGuard::class)->check();
-            if ((int) $movement->attempts > 0 && $movement->created_at->lt(now()->subHours(23))) {
-                throw new \RuntimeException('Remote idempotency retention may expire; explicit reconciliation is required before retrying.');
-            }
             $family = EngravedBeadFamily::query()->findOrFail($reservation->bead_family_id);
             if ($family->status !== 'active' || $family->source_inventory_item_id !== $reservation->shopify_inventory_item_id
                 || $family->source_location_id !== $reservation->shopify_location_id) {
@@ -205,6 +205,9 @@ final class StackInventoryMovementService
             };
             $locked->{$column} = (int) $locked->{$column} + $quantity;
             $locked->error_message = null;
+            if ($locked->status === ShopifyStackInventoryReservation::STATUS_FAILED) {
+                $locked->status = ShopifyStackInventoryReservation::STATUS_PENDING_PROCESSING;
+            }
             if ($action === ShopifyStackInventoryMovement::ACTION_RESERVE) {
                 $locked->reserved_at ??= now();
             } elseif ($action === ShopifyStackInventoryMovement::ACTION_RELEASE) {

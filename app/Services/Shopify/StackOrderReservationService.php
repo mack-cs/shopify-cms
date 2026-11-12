@@ -7,6 +7,7 @@ use App\Models\EngravedBeadOrderLine;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ShopifyStackInventoryMovement;
+use App\Models\ShopifyFulfillment;
 use App\Models\ShopifyStackInventoryReservation;
 use App\Models\ShopifyStackOrderEvent;
 use App\Models\Variant;
@@ -81,6 +82,7 @@ final class StackOrderReservationService
             }
             if ($live['fulfilled'] && ! $live['cancelled'] && $event->topic !== 'orders/cancelled') {
                 $skipNote = 'Skipped reservation because live Shopify shows this order as fulfilled.';
+                $owesOpenFulfillment = $this->owesOpenFulfillment($event->shopify_order_id);
                 $this->beads()->recordHistoricalSkip($event);
                 foreach ((array) data_get($event->payload, 'line_items', []) as $lineItem) {
                     if (! is_array($lineItem)) {
@@ -89,13 +91,23 @@ final class StackOrderReservationService
                     $variant = $this->findVariant($lineItem['variant_id'] ?? null);
                     $member = $variant ? app(EngravedBeadStockPool::class)->member($variant) : null;
                     $created = $this->lines->orderCreatedAt((array) $event->payload);
-                    $draft = $variant ? $this->findStackDraft($variant, $lineItem) : null;
+                    $draft = $this->findStackDraft($variant, $lineItem);
                     $beadStack = false;
                     if ($draft && $created !== null) {
                         $componentIds = array_keys($this->componentConfiguration($draft));
                         $beadStack = EngravedBeadFamilyMember::query()
                             ->whereIn('shopify_product_id', Product::query()->whereIn('id', $componentIds)->select('shopify_id'))
                             ->whereHas('family', fn ($q) => $q->where('status', 'active')->where('activated_at', '<=', $created))->exists();
+                    }
+                    if ($draft instanceof NewProductDraft && $owesOpenFulfillment && ! $beadStack) {
+                        $lineId = $this->gid('LineItem', $lineItem['admin_graphql_api_id'] ?? $lineItem['id'] ?? null);
+                        if (! isset($live['lines'][$lineId])) {
+                            continue;
+                        }
+                        $summary = $this->reconcileLine($event, $lineItem, $summary, $live, true);
+                        $skipNote = null;
+
+                        continue;
                     }
                     if (! $beadStack && ($member === null || $member->required_beads === 1 || $created === null
                         || $created->lt($member->family->activated_at))) {
@@ -115,11 +127,12 @@ final class StackOrderReservationService
                 $this->beads()->recordHistoricalSkip($event);
                 $summary = $this->releaseAll($event->shopify_order_id, 'cancel:'.$event->shopify_order_id, $summary);
             } else {
+                $owesOpenFulfillment = $this->owesOpenFulfillment($event->shopify_order_id);
                 foreach ((array) data_get($event->payload, 'line_items', []) as $lineItem) {
                     if (! is_array($lineItem)) {
                         continue;
                     }
-                    $summary = $this->reconcileLine($event, $lineItem, $summary, $live);
+                    $summary = $this->reconcileLine($event, $lineItem, $summary, $live, $owesOpenFulfillment);
                 }
                 // Removed lines can disappear from webhook payloads. Reconcile known snapshots too.
                 $present = collect((array) data_get($event->payload, 'line_items', []))->map(fn ($line) => $this->gid('LineItem', $line['admin_graphql_api_id'] ?? $line['id'] ?? null))->all();
@@ -348,7 +361,7 @@ final class StackOrderReservationService
      * @param  array{stack_lines:int,reserved:int,released:int}  $summary
      * @return array{stack_lines:int,reserved:int,released:int}
      */
-    private function reconcileLine(ShopifyStackOrderEvent $event, array $lineItem, array $summary, array $live): array
+    private function reconcileLine(ShopifyStackOrderEvent $event, array $lineItem, array $summary, array $live, bool $owesOpenFulfillment = false): array
     {
         $lineId = $this->gid('LineItem', $lineItem['admin_graphql_api_id'] ?? $lineItem['id'] ?? null);
         if ($lineId === '') {
@@ -365,7 +378,7 @@ final class StackOrderReservationService
         }
 
         $stackVariant = $this->findVariant($lineItem['variant_id'] ?? null);
-        $draft = $stackVariant instanceof Variant ? $this->findStackDraft($stackVariant, $lineItem) : null;
+        $draft = $this->findStackDraft($stackVariant, $lineItem);
         if ($reservations->isEmpty() && ! $draft instanceof NewProductDraft) {
             $outcome = $this->beads()->prepareLine(
                 $event,
@@ -390,19 +403,33 @@ final class StackOrderReservationService
 
         $currentStack = max(0, (int) $liveLine['current']);
         $unfulfilledStack = max(0, min($currentStack, (int) $liveLine['unfulfilled']));
-        if ($reservations->isEmpty() && $unfulfilledStack === 0) {
+        $missingComponents = $draft instanceof NewProductDraft
+            ? $this->missingComponents($reservations, $draft)
+            : [];
+        if ($missingComponents !== [] && ! $stackVariant instanceof Variant) {
+            $sku = trim((string) ($lineItem['sku'] ?? ''));
+            throw new \RuntimeException('Configured stack '.($sku !== '' ? $sku : $lineId).' is not linked to a local variant, so its component reservations were not created.');
+        }
+        if ($reservations->isEmpty() && $unfulfilledStack === 0 && ! $owesOpenFulfillment) {
             return $summary;
+        }
+        if ($missingComponents !== [] && $reservations->isNotEmpty() && $unfulfilledStack === 0 && ! $owesOpenFulfillment) {
+            throw new \RuntimeException("Incomplete stack component snapshot for {$lineId} cannot be closed while the order is already fulfilled.");
         }
 
         $summary['stack_lines']++;
         $orderCreatedAt = $this->lines->orderCreatedAt((array) $event->payload);
         $fulfilledBaseline = max(0, $currentStack - $unfulfilledStack);
-        if ($reservations->isEmpty()) {
-            foreach ($this->componentConfiguration($draft) as $componentProductId => $quantityPerStack) {
-                $reservations->push($this->createReservation(
-                    $event, $lineId, $lineItem, $stackVariant, $componentProductId,
-                    $quantityPerStack, $currentStack, $fulfilledBaseline, $orderCreatedAt,
-                ));
+        $createdNow = [];
+        foreach ($missingComponents as $componentProductId => $quantityPerStack) {
+            $baseline = ($owesOpenFulfillment && $unfulfilledStack === 0) ? 0 : $fulfilledBaseline;
+            $created = $this->createReservation(
+                $event, $lineId, $lineItem, $stackVariant, $componentProductId,
+                $quantityPerStack, $currentStack, $baseline, $orderCreatedAt,
+            );
+            $reservations->push($created);
+            if ($created->wasRecentlyCreated) {
+                $createdNow[$created->id] = true;
             }
         }
 
@@ -422,7 +449,10 @@ final class StackOrderReservationService
                 'shopify_order_created_at' => $reservation->shopify_order_created_at ?? $orderCreatedAt,
             ], fn (mixed $value): bool => $value !== null))->save();
 
-            $targetRemaining = $unfulfilledStack * $perStack;
+            $demandUnfulfilled = isset($createdNow[$reservation->id]) && $owesOpenFulfillment && $unfulfilledStack === 0
+                ? $currentStack
+                : $unfulfilledStack;
+            $targetRemaining = $demandUnfulfilled * $perStack;
             if ($reservation->bead_family_id !== null) {
                 $targetRemaining = max(0, $required - (int) $reservation->historical_quantity - (int) $reservation->consumed_quantity);
             }
@@ -587,43 +617,46 @@ final class StackOrderReservationService
         return Variant::query()->with('product')->whereIn('shopify_id', [$id, $this->gid('ProductVariant', $id)])->first();
     }
 
-    private function findStackDraft(Variant $variant, array $lineItem): ?NewProductDraft
+    private function findStackDraft(?Variant $variant, array $lineItem): ?NewProductDraft
     {
-        $product = $variant->product;
-        $shopifyId = trim((string) ($product?->shopify_id ?? ''));
-        $handle = trim((string) ($product?->handle ?? ''));
-        $sku = trim((string) ($variant->sku ?: ($lineItem['sku'] ?? '')));
-
-        return NewProductDraft::query()
-            ->where(function ($query) use ($shopifyId, $handle, $sku): void {
-                $query->where('shopify_id', $shopifyId);
-                if ($handle !== '') {
-                    $query->orWhere('handle', $handle);
-                }
-                if ($sku !== '') {
-                    $query->orWhere('sku', $sku);
-                }
-            })
-            ->whereNotNull('bundle_product_ids')
-            ->first();
+        return NewProductDraft::configuredStackMatching($variant, $lineItem);
     }
 
     /** @return array<int, int> */
     private function componentConfiguration(NewProductDraft $draft): array
     {
-        $quantities = collect((array) $draft->bundle_component_quantities)->mapWithKeys(function (mixed $row): array {
-            $productId = is_array($row) ? (int) ($row['product_id'] ?? 0) : 0;
+        return $draft->configuredStackComponentQuantities();
+    }
 
-            return $productId > 0 ? [$productId => max(1, (int) ($row['quantity'] ?? 1))] : [];
-        });
-        $configured = [];
-        foreach ((array) $draft->bundle_product_ids as $productId) {
-            if ((int) $productId > 0) {
-                $configured[(int) $productId] = (int) ($quantities[(int) $productId] ?? 1);
+    /**
+     * @param  iterable<int, ShopifyStackInventoryReservation>  $reservations
+     * @return array<int, int>
+     */
+    private function missingComponents(iterable $reservations, NewProductDraft $draft): array
+    {
+        $present = [];
+        foreach ($reservations as $reservation) {
+            $present[(int) $reservation->configured_component_product_id] = true;
+        }
+        $missing = [];
+        foreach ($this->componentConfiguration($draft) as $productId => $quantity) {
+            if (! isset($present[(int) $productId])) {
+                $missing[(int) $productId] = (int) $quantity;
             }
         }
 
-        return $configured;
+        return $missing;
+    }
+
+    private function owesOpenFulfillment(string $orderId): bool
+    {
+        $legacy = str_contains($orderId, '/') ? substr($orderId, strrpos($orderId, '/') + 1) : $orderId;
+        $ids = array_values(array_unique(array_filter([$orderId, $this->gid('Order', $orderId), $legacy])));
+
+        return ShopifyFulfillment::query()
+            ->whereIn('shopify_order_id', $ids)
+            ->whereNotIn('processing_status', [ShopifyFulfillment::STATUS_COMPLETED, ShopifyFulfillment::STATUS_IGNORED])
+            ->exists();
     }
 
     private function beads(): EngravedBeadOrderProcessor

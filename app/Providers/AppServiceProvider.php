@@ -41,6 +41,45 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        foreach ([\App\Models\ShopifyStackOrderEvent::class, \App\Models\ShopifyFulfillment::class,
+            \App\Models\ShopifyStackInventoryReservation::class, \App\Models\ShopifyStackInventoryMovement::class,
+            \App\Models\InventoryOperationAudit::class, \App\Models\EngravedBeadFamily::class,
+            \App\Models\EngravedBeadOrderLine::class, \App\Models\EngravedBeadSellabilityOperation::class] as $model) {
+            $model::saved(function ($record): void {
+                if (! config('inventory_monitor.enabled')) {
+                    return;
+                }
+                // Capture this transition even if the next retry succeeds before the minute scan.
+                $snapshot = clone $record;
+                \Illuminate\Support\Facades\DB::afterCommit(function () use ($snapshot): void {
+                    try {
+                        app(\App\Services\Shopify\InventoryPipelineHealthCheck::class)->recordChanged($snapshot);
+                    } catch (\Throwable $error) {
+                        logger()->error('Inventory record monitor failed; scheduler will rescan.', ['error' => $error->getMessage()]);
+                    }
+                });
+            });
+        }
+        \Illuminate\Support\Facades\Queue::failing(function (\Illuminate\Queue\Events\JobFailed $event): void {
+            try {
+                app(\App\Services\Shopify\InventoryPipelineHealthCheck::class)->exhausted(
+                    $event->job->payload(), $event->job->getQueue(), $event->exception->getMessage(), $event->job->attempts(),
+                );
+            } catch (\Throwable $error) {
+                // Scheduler also inspects failed_jobs if this callback cannot persist an incident.
+                logger()->error('Inventory failure monitor callback failed.', ['error' => $error->getMessage()]);
+            }
+        });
+        \Illuminate\Support\Facades\Queue::after(function (\Illuminate\Queue\Events\JobProcessed $event): void {
+            if ($event->job->isReleased()) {
+                return;
+            }
+            try {
+                app(\App\Services\Shopify\InventoryPipelineHealthCheck::class)->completedJob($event->job->payload(), $event->job->getQueue());
+            } catch (\Throwable $error) {
+                logger()->error('Inventory recovery monitor callback failed.', ['error' => $error->getMessage()]);
+            }
+        });
         Approval::observe(ApprovalObserver::class);
         Product::observe(ProductObserver::class);
         Variant::observe(VariantObserver::class);

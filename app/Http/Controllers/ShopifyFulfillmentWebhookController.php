@@ -34,20 +34,27 @@ final class ShopifyFulfillmentWebhookController extends Controller
             return response()->json(['message' => 'Invalid webhook payload.'], 400);
         }
 
-        $fulfillmentId = trim((string) ($payload['admin_graphql_api_id'] ?? $payload['id'] ?? ''));
+        $receivedFulfillmentId = trim((string) ($payload['admin_graphql_api_id'] ?? $payload['id'] ?? ''));
         $orderId = trim((string) ($payload['order_id'] ?? ''));
-        if ($fulfillmentId === '' || $orderId === '') {
+        if ($receivedFulfillmentId === '' || $orderId === '') {
             return response()->json(['message' => 'Missing fulfillment or order ID.'], 422);
         }
+        $fulfillmentId = $this->gid('Fulfillment', $receivedFulfillmentId);
+        $legacyFulfillmentId = str_contains($fulfillmentId, '/') ? substr($fulfillmentId, strrpos($fulfillmentId, '/') + 1) : $receivedFulfillmentId;
 
         $order = ShopifyOrder::query()
             ->whereIn('shopify_order_id', [$orderId, $this->gid('Order', $orderId)])
             ->first();
         $webhookId = trim((string) $request->header('X-Shopify-Webhook-Id')) ?: null;
 
-        $fulfillment = ShopifyFulfillment::query()->firstOrCreate(
-            ['shopify_fulfillment_id' => $fulfillmentId],
-            [
+        $fulfillment = ShopifyFulfillment::query()
+            ->whereIn('shopify_fulfillment_id', array_values(array_unique(array_filter([
+                $receivedFulfillmentId, $fulfillmentId, $legacyFulfillmentId,
+            ]))))
+            ->first();
+        if (! $fulfillment instanceof ShopifyFulfillment) {
+            $fulfillment = ShopifyFulfillment::query()->create([
+                'shopify_fulfillment_id' => $fulfillmentId,
                 'shopify_order_id' => $orderId,
                 'shopify_order_db_id' => $order?->id,
                 'shopify_location_id' => trim((string) ($payload['location_id'] ?? '')) ?: null,
@@ -57,8 +64,8 @@ final class ShopifyFulfillmentWebhookController extends Controller
                 'payload' => $payload,
                 'fulfilled_at_shopify' => $this->date($payload['created_at'] ?? null),
                 'error_message' => null,
-            ],
-        );
+            ]);
+        }
 
         if (! $fulfillment->wasRecentlyCreated && $fulfillment->processing_status === ShopifyFulfillment::STATUS_COMPLETED
             && strtolower(trim((string) ($payload['status'] ?? ''))) === strtolower((string) $fulfillment->shopify_status)) {

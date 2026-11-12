@@ -85,8 +85,9 @@ final class StackFulfillmentInventoryService
                     ->where('shopify_order_id', $orderId)
                     ->where('shopify_order_line_item_id', $lineId)
                     ->get();
+                $draft = NewProductDraft::configuredStackMatching($this->variantFromLine($lineItem), $lineItem);
                 if ($reservations->isEmpty()) {
-                    if ($this->isConfiguredStack($lineItem)) {
+                    if ($draft instanceof NewProductDraft) {
                         throw new \RuntimeException("No component reservation exists for fulfilled Stack line {$lineId}; retrying after the order webhook.");
                     }
                     if ((new EngravedBeadOrderProcessor($this->movements))->fulfillmentMustWait($lineItem, $orderId)) {
@@ -94,6 +95,20 @@ final class StackFulfillmentInventoryService
                     }
 
                     continue;
+                }
+                if ($draft instanceof NewProductDraft) {
+                    $present = [];
+                    foreach ($reservations as $reservation) {
+                        $present[(int) $reservation->configured_component_product_id] = true;
+                    }
+                    $missing = array_keys(array_filter(
+                        $draft->configuredStackComponentQuantities(),
+                        fn (int $quantity, int $productId): bool => ! isset($present[$productId]),
+                        ARRAY_FILTER_USE_BOTH,
+                    ));
+                    if ($missing !== []) {
+                        throw new \RuntimeException('Incomplete component reservation snapshot for fulfilled Stack line '.$lineId.'; missing component products '.implode(', ', $missing).'.');
+                    }
                 }
 
                 $summary['stack_lines']++;
@@ -131,12 +146,8 @@ final class StackFulfillmentInventoryService
                             continue;
                         }
                     }
-                    $source = "fulfillment:{$fulfillment->shopify_fulfillment_id}:{$lineId}";
-                    $eventKey = hash('sha256', implode('|', [
-                        $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME,
-                    ]));
-                    if ($reservation->movements()->where('event_key', $eventKey)
-                        ->where('status', ShopifyStackInventoryMovement::STATUS_COMPLETED)->exists()) {
+                    $source = $this->consumeSource($fulfillment, $lineId, $reservation);
+                    if ($source === null) {
                         $summary['already_completed']++;
 
                         continue;
@@ -172,24 +183,46 @@ final class StackFulfillmentInventoryService
         return $summary;
     }
 
-    private function isConfiguredStack(array $lineItem): bool
+    private function variantFromLine(array $lineItem): ?Variant
     {
         $variantId = trim((string) ($lineItem['variant_id'] ?? ''));
         if ($variantId === '') {
-            return false;
-        }
-        $variant = Variant::query()->with('product')->whereIn('shopify_id', [
-            $variantId, $this->gid('ProductVariant', $variantId),
-        ])->first();
-        if (! $variant instanceof Variant) {
-            return false;
+            return null;
         }
 
-        return NewProductDraft::query()->whereNotNull('bundle_product_ids')->where(function ($query) use ($variant): void {
-            $query->where('shopify_id', $variant->product?->shopify_id)
-                ->orWhere('handle', $variant->product?->handle)
-                ->orWhere('sku', $variant->sku);
-        })->exists();
+        return Variant::query()->with('product')->whereIn('shopify_id', [
+            $variantId, $this->gid('ProductVariant', $variantId),
+        ])->first();
+    }
+
+    private function consumeSource(ShopifyFulfillment $fulfillment, string $lineId, ShopifyStackInventoryReservation $reservation): ?string
+    {
+        $raw = trim((string) $fulfillment->shopify_fulfillment_id);
+        $canonical = $this->gid('Fulfillment', $raw);
+        $legacy = str_contains($canonical, '/') ? substr($canonical, strrpos($canonical, '/') + 1) : $raw;
+        $sources = array_values(array_unique(array_filter([
+            "fulfillment:{$canonical}:{$lineId}",
+            $raw !== '' ? "fulfillment:{$raw}:{$lineId}" : '',
+            $legacy !== '' ? "fulfillment:{$legacy}:{$lineId}" : '',
+        ])));
+        $keys = [];
+        foreach ($sources as $source) {
+            $keys[$source] = hash('sha256', implode('|', [
+                $source, $reservation->id, ShopifyStackInventoryMovement::ACTION_CONSUME,
+            ]));
+        }
+        $movements = $reservation->movements()->whereIn('event_key', array_values($keys))->get();
+        if ($movements->contains(fn (ShopifyStackInventoryMovement $movement): bool => $movement->status === ShopifyStackInventoryMovement::STATUS_COMPLETED)) {
+            return null;
+        }
+        $open = $movements->first();
+        if ($open instanceof ShopifyStackInventoryMovement) {
+            $source = array_search($open->event_key, $keys, true);
+
+            return is_string($source) ? $source : $sources[0];
+        }
+
+        return "fulfillment:{$canonical}:{$lineId}";
     }
 
     private function gid(string $type, mixed $id): string

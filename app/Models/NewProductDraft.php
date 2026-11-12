@@ -412,6 +412,101 @@ class NewProductDraft extends Model
         return in_array($type, ['bundle', 'bundles', 'stack', 'stacks'], true);
     }
 
+    public function hasConfiguredStackComponents(): bool
+    {
+        foreach ((array) $this->bundle_product_ids as $productId) {
+            if ((int) $productId > 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Component product id => quantity per stack. Empty when this draft is not a stack.
+     *
+     * @return array<int, int>
+     */
+    public function configuredStackComponentQuantities(): array
+    {
+        $quantities = collect((array) $this->bundle_component_quantities)->mapWithKeys(function (mixed $row): array {
+            $productId = is_array($row) ? (int) ($row['product_id'] ?? 0) : 0;
+
+            return $productId > 0 ? [$productId => max(1, (int) ($row['quantity'] ?? 1))] : [];
+        });
+        $configured = [];
+        foreach ((array) $this->bundle_product_ids as $productId) {
+            if ((int) $productId > 0) {
+                $configured[(int) $productId] = (int) ($quantities[(int) $productId] ?? 1);
+            }
+        }
+
+        return $configured;
+    }
+
+    /**
+     * A stack is a draft with at least one component product.
+     * A known Shopify product id matches only that product. Handle and SKU are used
+     * only when they do not point at a different product, and only when the match is unique.
+     * Blank values are not criteria.
+     *
+     * @param  array<string, mixed>  $lineItem
+     */
+    public static function configuredStackMatching(?Variant $variant, array $lineItem = []): ?self
+    {
+        $shopifyId = trim((string) ($variant?->product?->shopify_id ?? ($lineItem['product_id'] ?? '')));
+        $handle = trim((string) ($variant?->product?->handle ?? ($lineItem['handle'] ?? '')));
+        $sku = trim((string) ($variant?->sku ?: ($lineItem['sku'] ?? '')));
+        if ($shopifyId === '' && $handle === '' && $sku === '') {
+            return null;
+        }
+        if ($shopifyId !== '' && ! str_starts_with($shopifyId, 'gid://shopify/')) {
+            $shopifyId = 'gid://shopify/Product/'.$shopifyId;
+        }
+
+        if ($shopifyId !== '') {
+            $exact = self::configuredStackCandidates('shopify_id', $shopifyId);
+            if ($exact->count() > 1) {
+                throw new \RuntimeException("Stack identity for Shopify product {$shopifyId} is ambiguous across multiple configured stacks.");
+            }
+            if ($exact->count() === 1) {
+                return $exact->first();
+            }
+        }
+
+        foreach (['handle' => $handle, 'sku' => $sku] as $column => $value) {
+            if ($value === '') {
+                continue;
+            }
+            $matches = self::configuredStackCandidates($column, $value)
+                ->filter(function (self $draft) use ($shopifyId): bool {
+                    $draftId = trim((string) $draft->shopify_id);
+
+                    return $shopifyId === '' || $draftId === '' || $draftId === $shopifyId;
+                })->values();
+            if ($matches->count() > 1) {
+                throw new \RuntimeException("Stack identity for {$column} {$value} is ambiguous across multiple configured stacks.");
+            }
+            if ($matches->count() === 1) {
+                return $matches->first();
+            }
+        }
+
+        return null;
+    }
+
+    /** @return \Illuminate\Support\Collection<int, self> */
+    private static function configuredStackCandidates(string $column, string $value): \Illuminate\Support\Collection
+    {
+        return self::query()
+            ->where($column, $value)
+            ->whereNotNull('bundle_product_ids')
+            ->get()
+            ->filter(fn (self $draft): bool => $draft->hasConfiguredStackComponents())
+            ->values();
+    }
+
     /**
      * Shopify product GIDs for custom.stack_components, in the stored component order.
      *

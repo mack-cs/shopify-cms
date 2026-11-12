@@ -191,19 +191,45 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ]);
                     }),
                 Action::make('deleteFilteredReservations')
-                    ->label('Delete filtered reservations')
+                    ->label(function (ListShopifyStackInventoryReservations $livewire): string {
+                        $selected = count(self::selectedIds($livewire));
+
+                        return $selected > 0 ? "Delete {$selected} selected" : 'Delete filtered reservations';
+                    })
                     ->icon('heroicon-o-trash')
                     ->color('danger')
                     ->visible(fn (): bool => self::canCancelReservations())
                     ->requiresConfirmation()
-                    ->modalHeading('Delete every reservation in this filter?')
+                    ->modalHeading(function (ListShopifyStackInventoryReservations $livewire): string {
+                        $selected = count(self::selectedIds($livewire));
+
+                        return $selected > 0
+                            ? "Delete the {$selected} selected reservations?"
+                            : 'No rows are selected. Delete every reservation in this filter?';
+                    })
                     ->modalDescription(function (ListShopifyStackInventoryReservations $livewire): string {
+                        $selected = count(self::selectedIds($livewire));
+                        if ($selected > 0) {
+                            return "This deletes only the {$selected} checked rows. The other rows in this filter stay. Held units are removed from stock and are not returned to available.";
+                        }
                         $count = self::filteredLeftoverQuery($livewire)->count();
 
-                        return "This deletes {$count} reservation(s) in the current filter that still hold stock, including rows on other pages. Filter Reserved on to a burst day, for example 26/09/2026. Held units are removed from stock and are not returned to available. Already settled rows are left as they are.";
+                        return "No rows are checked, so this deletes all {$count} reservations in the current filter that still hold stock. Check the rows you want if you only mean those. Held units are not returned to available.";
                     })
-                    ->modalSubmitActionLabel('Delete filtered reservations')
+                    ->modalSubmitActionLabel(function (ListShopifyStackInventoryReservations $livewire): string {
+                        $selected = count(self::selectedIds($livewire));
+
+                        return $selected > 0 ? "Delete {$selected} selected" : 'Delete all in this filter';
+                    })
                     ->action(function (ListShopifyStackInventoryReservations $livewire): void {
+                        $selected = self::selectedIds($livewire);
+                        if ($selected !== []) {
+                            self::queueReservationDeletes($selected);
+                            $livewire->selectedTableRecords = [];
+
+                            return;
+                        }
+
                         self::queueReservationDeletes(
                             self::filteredLeftoverQuery($livewire)->pluck('id')->map(fn ($id): int => (int) $id)->all()
                         );
@@ -312,6 +338,15 @@ final class ShopifyStackInventoryReservationResource extends Resource
     public static function canCancelReservations(): bool
     {
         return Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false;
+    }
+
+    /** @return array<int, int> */
+    private static function selectedIds(ListShopifyStackInventoryReservations $livewire): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            intval(...),
+            $livewire->selectedTableRecords,
+        ))));
     }
 
     private static function filteredLeftoverQuery(ListShopifyStackInventoryReservations $livewire): Builder

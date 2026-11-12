@@ -705,7 +705,42 @@ Schedule::command('shopify:alert-stale-stack-reservations')
     ->timezone('Africa/Johannesburg')
     ->withoutOverlapping()
     ->onOneServer()
-    ->name('daily-stale-stack-reservation-alert');
+    ->name('daily-stale-stack-reservation-alert')
+    ->when(fn () => ! config('inventory_monitor.enabled'));
+
+Artisan::command('shopify:inventory-health {--live-audit : Include the existing read-only Shopify leftover audit}', function (
+    \App\Services\Shopify\InventoryPipelineHealthCheck $health,
+    \App\Services\Shopify\InventoryPipelineNotifications $notifications,
+): int {
+    if (! config('inventory_monitor.enabled')) {
+        $this->info('Inventory monitoring is disabled.');
+
+        return self::SUCCESS;
+    }
+    $failed = false;
+    try {
+        $health->scan((bool) $this->option('live-audit'));
+        $notifications->observe('health_check_failed', 'monitor', $this->option('live-audit') ? 'live' : 'local', false);
+    } catch (\Throwable $error) {
+        $failed = true;
+        report($error);
+        $notifications->observe('health_check_failed', 'monitor', $this->option('live-audit') ? 'live' : 'local', true,
+            ['error_message' => $error->getMessage(), 'status' => 'scan_failed']);
+    }
+    $delivery = $notifications->deliver();
+    $this->info("Inventory monitor: {$delivery['sent']} email(s) sent; {$delivery['failed']} delivery failure(s). No inventory changed.");
+
+    return $failed || $delivery['failed'] > 0 ? self::FAILURE : self::SUCCESS;
+})->purpose('Observe inventory pipeline health and deliver durable alerts without processing inventory jobs.');
+
+Schedule::command('shopify:inventory-health')->everyMinute()->runInBackground()->withoutOverlapping(10)->onOneServer()
+    ->appendOutputTo(storage_path('logs/inventory-pipeline-monitor.log'))
+    ->when(fn () => config('inventory_monitor.enabled'))->name('inventory-pipeline-health');
+
+Schedule::command('shopify:inventory-health --live-audit')->dailyAt('08:00')->timezone('Africa/Johannesburg')
+    ->appendOutputTo(storage_path('logs/inventory-pipeline-monitor.log'))
+    ->runInBackground()->withoutOverlapping(30)->onOneServer()->when(fn () => config('inventory_monitor.enabled'))
+    ->name('inventory-pipeline-live-audit');
 
 Schedule::command('notifications:send-daily-task-reminders')
     ->dailyAt((string) config('services.slack.task_reminder_time', '09:00'))

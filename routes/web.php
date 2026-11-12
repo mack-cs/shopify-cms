@@ -34,10 +34,12 @@ Route::post('/webhooks/shopify/products-update', ShopifyProductUpdateWebhookCont
     ->name('webhooks.shopify.products-update');
 
 Route::post('/webhooks/shopify/fulfillments', ShopifyFulfillmentWebhookController::class)
+    ->middleware(\App\Http\Middleware\MonitorInventoryWebhooks::class)
     ->withoutMiddleware([ValidateCsrfToken::class])
     ->name('webhooks.shopify.fulfillments');
 
 Route::post('/webhooks/shopify/stack-orders', ShopifyStackOrderWebhookController::class)
+    ->middleware(\App\Http\Middleware\MonitorInventoryWebhooks::class)
     ->withoutMiddleware([ValidateCsrfToken::class])
     ->name('webhooks.shopify.stack-orders');
 
