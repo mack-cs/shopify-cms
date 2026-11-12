@@ -22,11 +22,12 @@ final class StackInventoryMovementService
         string $action,
         int $quantity,
         string $sourceEventKey,
+        ?int $actorUserId = null,
     ): ShopifyStackInventoryMovement {
         $pool = implode('|', [$reservation->shopify_inventory_item_id, $reservation->shopify_location_id]);
 
         return Cache::lock('inventory-pool:'.hash('sha256', $pool), 420)->block(5,
-            fn () => $this->executeLocked($reservation->fresh(), $action, $quantity, $sourceEventKey));
+            fn () => $this->executeLocked($reservation->fresh(), $action, $quantity, $sourceEventKey, $actorUserId));
     }
 
     private function executeLocked(
@@ -34,6 +35,7 @@ final class StackInventoryMovementService
         string $action,
         int $quantity,
         string $sourceEventKey,
+        ?int $actorUserId = null,
     ): ShopifyStackInventoryMovement {
         if ($quantity <= 0) {
             throw new \InvalidArgumentException('Stack inventory movement quantity must be positive.');
@@ -82,7 +84,7 @@ final class StackInventoryMovementService
                 || $family->source_location_id !== $reservation->shopify_location_id) {
                 throw new \RuntimeException('Family mapping discrepancy blocks physical movements.');
             }
-            if (in_array($action, [ShopifyStackInventoryMovement::ACTION_CONSUME, ShopifyStackInventoryMovement::ACTION_RELEASE], true)
+            if (in_array($action, [ShopifyStackInventoryMovement::ACTION_CONSUME, ShopifyStackInventoryMovement::ACTION_RELEASE, ShopifyStackInventoryMovement::ACTION_WRITE_OFF], true)
                 && $quantity > $reservation->remainingReserved()) {
                 throw new \RuntimeException('Movement exceeds the outstanding reservation.');
             }
@@ -131,16 +133,19 @@ final class StackInventoryMovementService
             workflow: match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'stack_release',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'stack_consume',
+                ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'stack_write_off',
                 ShopifyStackInventoryMovement::ACTION_RESTOCK => 'engraved_bead_restock',
                 default => 'stack_reserve',
             },
             action: $action,
-            actorType: 'system',
+            actorType: $action === ShopifyStackInventoryMovement::ACTION_WRITE_OFF && $actorUserId ? 'user' : 'system',
+            userId: $action === ShopifyStackInventoryMovement::ACTION_WRITE_OFF ? $actorUserId : null,
             execution: 'queue',
-            processName: 'Order processing',
+            processName: $action === ShopifyStackInventoryMovement::ACTION_WRITE_OFF ? 'Stack reservation delete' : 'Order processing',
             explanation: match ($action) {
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'The stack reservation was released.',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'Reserved component inventory was consumed when the stack was fulfilled.',
+                ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'Reserved units were removed from stock and were not returned to available.',
                 ShopifyStackInventoryMovement::ACTION_RESTOCK => 'Additional engraved beads were restored because Shopify restocked the returned units.',
                 default => 'Component inventory was reserved because an order included this stack.',
             },
@@ -169,6 +174,10 @@ final class StackInventoryMovementService
                     $variant, $quantity, $reference, $reservation->ledger_document_uri,
                     $movement->idempotency_key, $reservation->shopify_location_id, $context,
                 ),
+                ShopifyStackInventoryMovement::ACTION_WRITE_OFF => $this->inventory->writeOffReserved(
+                    $variant, $quantity, $reference, $reservation->ledger_document_uri,
+                    $movement->idempotency_key, $reservation->shopify_location_id, $context,
+                ),
                 ShopifyStackInventoryMovement::ACTION_RESTOCK => $this->inventory->restockAvailable(
                     $variant, $quantity, $reservation->ledger_document_uri,
                     $movement->idempotency_key, $reservation->shopify_location_id, $context,
@@ -191,6 +200,7 @@ final class StackInventoryMovementService
                 ShopifyStackInventoryMovement::ACTION_RESERVE => 'reserved_quantity',
                 ShopifyStackInventoryMovement::ACTION_CONSUME => 'consumed_quantity',
                 ShopifyStackInventoryMovement::ACTION_RELEASE => 'released_quantity',
+                ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'written_off_quantity',
                 ShopifyStackInventoryMovement::ACTION_RESTOCK => 'restocked_quantity',
             };
             $locked->{$column} = (int) $locked->{$column} + $quantity;

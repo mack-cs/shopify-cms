@@ -1,7 +1,7 @@
 @php
     $source = \App\Models\Variant::query()->where('shopify_id', $family->source_variant_id)->first();
     $reserved = \App\Models\ShopifyStackInventoryReservation::query()->where('bead_family_id', $family->id)
-        ->selectRaw('COALESCE(SUM(reserved_quantity - consumed_quantity - released_quantity), 0) as outstanding')->value('outstanding');
+        ->selectRaw('COALESCE(SUM(reserved_quantity - consumed_quantity - released_quantity - written_off_quantity), 0) as outstanding')->value('outstanding');
 @endphp
 <div class="space-y-4">
     <p>Physical stock is counted only on the tracked 1-bead source. Inventory writes require verified store configuration and explicit activation.</p>

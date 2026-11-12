@@ -549,6 +549,71 @@ GRAPHQL, [
         return $this->audited($context, fn (): array => $this->confirmedGroup($data, 'inventoryAdjustQuantities'));
     }
 
+    /**
+     * Remove reserved units from stock. Available is unchanged and on hand drops with reserved.
+     *
+     * @return array<string, mixed>
+     */
+    public function writeOffReserved(
+        Variant $variant,
+        int $quantity,
+        string $referenceUri,
+        string $ledgerDocumentUri,
+        string $idempotencyKey,
+        ?string $locationId = null,
+        ?InventoryAuditContext $audit = null,
+    ): array {
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException('Written-off inventory quantity must be greater than zero.');
+        }
+
+        $inventoryItemId = trim((string) $variant->shopify_inventory_item_id);
+        $locationId = trim((string) ($locationId ?? $this->resolveLocationId($variant)));
+        if ($inventoryItemId === '' || $locationId === '') {
+            throw new \RuntimeException('The component inventory item and location are required.');
+        }
+        $context = $this->auditContext($audit, $variant, [
+            'correlationKey' => $idempotencyKey,
+            'workflow' => 'stack_write_off',
+            'action' => 'write_off',
+            'processName' => 'Stack reservation delete',
+            'explanation' => 'Reserved units were removed from stock and were not returned to available.',
+            'shopifyReason' => 'correction',
+            'inventoryState' => 'reserved',
+            'delta' => -$quantity,
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId,
+            'referenceDocumentUri' => $referenceUri,
+        ]);
+
+        $data = $this->graphqlAudited($context, <<<'GRAPHQL'
+mutation WriteOffReservedStackInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      createdAt reason referenceDocumentUri
+      changes { name delta quantityAfterChange ledgerDocumentUri }
+    }
+    userErrors { field message }
+  }
+}
+GRAPHQL, [
+            'input' => [
+                'name' => 'reserved',
+                'reason' => 'correction',
+                'referenceDocumentUri' => $referenceUri,
+                'changes' => [[
+                    'inventoryItemId' => $inventoryItemId,
+                    'locationId' => $locationId,
+                    'delta' => -$quantity,
+                    'ledgerDocumentUri' => $ledgerDocumentUri,
+                ]],
+            ],
+            'idempotencyKey' => $idempotencyKey,
+        ]);
+
+        return $this->audited($context, fn (): array => $this->confirmedGroup($data, 'inventoryAdjustQuantities'));
+    }
+
     /** @return array<string, mixed> */
     private function confirmedGroup(array $data, string $mutation): array
     {

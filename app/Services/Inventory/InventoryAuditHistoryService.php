@@ -534,6 +534,7 @@ final class InventoryAuditHistoryService
             [$activityKey, $activity, $change, $state, $delta] = match ($movement->action) {
                 ShopifyStackInventoryMovement::ACTION_RELEASE => ['reservation_deleted', 'Stack reservation released', '-'.(int) $movement->quantity.' reserved', 'reserved', -1 * (int) $movement->quantity],
                 ShopifyStackInventoryMovement::ACTION_CONSUME => ['consumed', 'Reserved stack inventory consumed', '-'.(int) $movement->quantity.' reserved', 'reserved', -1 * (int) $movement->quantity],
+                ShopifyStackInventoryMovement::ACTION_WRITE_OFF => ['reservation_written_off', 'Stack reservation deleted', '-'.(int) $movement->quantity.' reserved', 'reserved', -1 * (int) $movement->quantity],
                 default => ['reserved', 'Stack inventory reserved', '+'.(int) $movement->quantity.' reserved', 'reserved', (int) $movement->quantity],
             };
             $occurredAt = $movement->processed_at ?? $movement->created_at ?? now();
@@ -565,6 +566,7 @@ final class InventoryAuditHistoryService
                     ['Reason', match ($movement->action) {
                         ShopifyStackInventoryMovement::ACTION_RELEASE => 'The stack reservation was released.',
                         ShopifyStackInventoryMovement::ACTION_CONSUME => 'Reserved component inventory was consumed when the stack was fulfilled.',
+                        ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'Reserved units were removed from stock and were not returned to available.',
                         default => 'Component inventory was reserved because an order included this stack.',
                     }],
                     ['Triggered by', 'Order processing. No CMS user is stored for this workflow.'],
@@ -706,6 +708,7 @@ final class InventoryAuditHistoryService
                 'stack_reserve' => ['reserved', 'Stack inventory reserved'],
                 'stack_release' => ['reservation_deleted', 'Stack reservation released'],
                 'stack_consume' => ['consumed', 'Reserved stack inventory consumed'],
+                'stack_write_off' => ['reservation_written_off', 'Stack reservation deleted'],
                 default => ['shopify_other', 'Inventory operation'],
             };
 
@@ -1560,7 +1563,7 @@ final class InventoryAuditHistoryService
         $activityKey = (string) ($row['activity_key'] ?? '');
         $activity = strtolower((string) ($row['activity'] ?? ''));
         $process = strtolower((string) ($row['process'] ?? ''));
-        if (in_array($activityKey, ['received', 'reserved', 'reservation_deleted', 'consumed', 'order_created', 'initialized'], true)) {
+        if (in_array($activityKey, ['received', 'reserved', 'reservation_deleted', 'reservation_written_off', 'consumed', 'order_created', 'initialized'], true)) {
             return false;
         }
         foreach (['stack', 'reservation', 'order processing', 'supplier receipt', 'receipt'] as $marker) {

@@ -100,21 +100,26 @@ final class InventoryAuditBackfill
                         'actor_user_id' => null,
                         'actor_type' => 'system',
                         'execution' => 'queue',
-                        'process_name' => 'Order processing',
+                        'process_name' => $action === ShopifyStackInventoryMovement::ACTION_WRITE_OFF
+                            ? 'Stack reservation delete'
+                            : 'Order processing',
                         'workflow' => match ($action) {
                             ShopifyStackInventoryMovement::ACTION_RELEASE => 'stack_release',
                             ShopifyStackInventoryMovement::ACTION_CONSUME => 'stack_consume',
+                            ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'stack_write_off',
                             default => 'stack_reserve',
                         },
                         'action' => $action !== '' ? $action : ShopifyStackInventoryMovement::ACTION_RESERVE,
                         'shopify_reason' => match ($action) {
                             ShopifyStackInventoryMovement::ACTION_RELEASE => 'reservation_deleted',
                             ShopifyStackInventoryMovement::ACTION_CONSUME => 'correction',
+                            ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'correction',
                             default => 'reservation_created',
                         },
                         'explanation' => match ($action) {
                             ShopifyStackInventoryMovement::ACTION_RELEASE => 'The stack reservation was released.',
                             ShopifyStackInventoryMovement::ACTION_CONSUME => 'Reserved component inventory was consumed when the stack was fulfilled.',
+                            ShopifyStackInventoryMovement::ACTION_WRITE_OFF => 'Reserved units were removed from stock and were not returned to available.',
                             default => 'Component inventory was reserved because an order included this stack.',
                         },
                         'inventory_state' => 'reserved',

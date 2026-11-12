@@ -182,6 +182,35 @@ final class StackOrderReservationService
         return $summary;
     }
 
+    /** @return array{deleted:int,skipped:int,failed:int,errors:array<int, string>} */
+    public function deleteHeldStock(iterable $reservations, ?int $actorUserId = null): array
+    {
+        $summary = ['deleted' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => []];
+        foreach ($reservations as $reservation) {
+            $record = $reservation instanceof ShopifyStackInventoryReservation
+                ? $reservation
+                : ShopifyStackInventoryReservation::query()->find($reservation);
+            if (! $record instanceof ShopifyStackInventoryReservation) {
+                $summary['skipped']++;
+
+                continue;
+            }
+            try {
+                if ($this->deleteOne($record, $actorUserId)) {
+                    $summary['deleted']++;
+                } else {
+                    $summary['skipped']++;
+                }
+            } catch (\Throwable $exception) {
+                $summary['failed']++;
+                $summary['errors'][] = trim((string) ($record->shopify_order_name ?: $record->shopify_order_id))
+                    .' '.$record->component_sku.': '.$exception->getMessage();
+            }
+        }
+
+        return $summary;
+    }
+
     private function cancelOne(ShopifyStackInventoryReservation $reservation): bool
     {
         $lock = Cache::lock('stack-order-inventory:'.$reservation->shopify_order_id, 420);
@@ -196,6 +225,10 @@ final class StackOrderReservationService
                 return false;
             }
             if ($locked->status === ShopifyStackInventoryReservation::STATUS_COMPLETED
+                && $locked->remainingReserved() <= 0) {
+                return false;
+            }
+            if ($locked->status === ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF
                 && $locked->remainingReserved() <= 0) {
                 return false;
             }
@@ -238,6 +271,70 @@ final class StackOrderReservationService
             $locked->error_message = $unmoved > 0
                 ? 'Manually closed. Live Shopify reserved stock did not cover this reservation, so no extra quantity was added.'
                 : 'Manually cancelled by a super admin.';
+            $locked->save();
+
+            return true;
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function deleteOne(ShopifyStackInventoryReservation $reservation, ?int $actorUserId): bool
+    {
+        $lock = Cache::lock('stack-order-inventory:'.$reservation->shopify_order_id, 420);
+        if (! $lock->get()) {
+            throw new \RuntimeException('Stack order inventory is already being processed; retrying.');
+        }
+
+        try {
+            $locked = ShopifyStackInventoryReservation::query()->findOrFail($reservation->id);
+            if (in_array($locked->status, [
+                ShopifyStackInventoryReservation::STATUS_RELEASED,
+                ShopifyStackInventoryReservation::STATUS_COMPLETED,
+                ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF,
+            ], true) && $locked->remainingReserved() <= 0) {
+                return false;
+            }
+            if ($locked->remainingReserved() <= 0) {
+                $locked->forceFill([
+                    'status' => ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF,
+                    'error_message' => 'Reservation deleted. No reserved units were left to remove.',
+                ])->save();
+
+                return true;
+            }
+
+            $locked->loadMissing('componentVariant');
+            $variant = $locked->componentVariant;
+            if (! $variant instanceof Variant) {
+                throw new \RuntimeException('The snapshotted component variant no longer exists.');
+            }
+            $remaining = $locked->remainingReserved();
+            $held = $this->inventory->reservedQuantity($variant, $locked->shopify_location_id);
+            $remove = min($remaining, max(0, $held));
+            if ($remove > 0) {
+                $this->movements->execute(
+                    $locked,
+                    ShopifyStackInventoryMovement::ACTION_WRITE_OFF,
+                    $remove,
+                    'manual-delete:'.$locked->id,
+                    $actorUserId,
+                );
+            }
+            $locked = $locked->fresh() ?? $locked;
+            $unmoved = $locked->remainingReserved();
+            if ($unmoved > 0) {
+                $locked->written_off_quantity = (int) $locked->written_off_quantity + $unmoved;
+            }
+            $locked->refreshLedgerStatus();
+            if ($locked->remainingReserved() <= 0) {
+                $locked->status = ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF;
+            }
+            $locked->error_message = $remove === 0
+                ? 'Reservation deleted. Live Shopify reserved stock did not cover this reservation, so no quantity was removed and none was returned to available.'
+                : ($unmoved > 0
+                    ? "Reservation deleted. {$remove} reserved unit(s) were removed from stock. {$unmoved} unit(s) were no longer held in Shopify, so they were closed here without returning quantity to available."
+                    : "Reservation deleted. {$remove} reserved unit(s) were removed from stock and were not returned to available.");
             $locked->save();
 
             return true;
@@ -310,6 +407,9 @@ final class StackOrderReservationService
         }
 
         foreach ($reservations as $reservation) {
+            if ($reservation->status === ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF) {
+                continue;
+            }
             if ($reservation->status === ShopifyStackInventoryReservation::STATUS_RELEASED
                 && $reservation->bead_family_id === null) {
                 continue;

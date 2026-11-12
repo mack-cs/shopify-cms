@@ -13,6 +13,8 @@ final class ShopifyStackInventoryMovement extends Model
 
     public const ACTION_RELEASE = 'release';
 
+    public const ACTION_WRITE_OFF = 'write_off';
+
     public const ACTION_RESTOCK = 'restock';
 
     public const STATUS_PENDING = 'pending';

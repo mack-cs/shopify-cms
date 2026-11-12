@@ -112,6 +112,7 @@ class InventoryAuditHistory extends Page implements HasTable
                     'received' => 'Inventory received',
                     'reserved' => 'Inventory reserved',
                     'reservation_deleted' => 'Reservation released',
+                    'reservation_written_off' => 'Reserved stock deleted',
                     'consumed' => 'Reserved inventory consumed',
                     'correction' => 'Inventory correction',
                     'cms_edit' => 'Quantity edited in the CMS',

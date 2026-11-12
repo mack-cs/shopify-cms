@@ -4,6 +4,7 @@ use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages\ListShopifyStackInventoryReservations;
 use App\Jobs\CancelShopifyStackReservationsJob;
+use App\Jobs\DeleteShopifyStackReservationsJob;
 use App\Jobs\ProcessShopifyStackOrderEventJob;
 use App\Mail\StaleStackReservationAlertMail;
 use App\Models\Import;
@@ -422,7 +423,9 @@ it('shows stack reservation cancel actions only to super admins', function (): v
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->assertCanSeeTableRecords([$reservation])
         ->assertTableActionHidden('cancelReservation', $reservation)
+        ->assertTableActionHidden('deleteReservation', $reservation)
         ->assertTableBulkActionHidden('cancelReservations')
+        ->assertTableBulkActionHidden('deleteReservations')
         ->assertTableActionHidden('scanLeftoverReservations');
 
     $super = User::factory()->create();
@@ -430,7 +433,9 @@ it('shows stack reservation cancel actions only to super admins', function (): v
     $this->actingAs($super);
     Livewire::test(ListShopifyStackInventoryReservations::class)
         ->assertTableActionVisible('cancelReservation', $reservation)
+        ->assertTableActionVisible('deleteReservation', $reservation)
         ->assertTableBulkActionVisible('cancelReservations')
+        ->assertTableBulkActionVisible('deleteReservations')
         ->assertTableActionVisible('scanLeftoverReservations');
 });
 
@@ -584,6 +589,84 @@ it('queues a manual reservation cancel', function (): void {
         ->callTableAction('cancelReservation', $reservation);
 
     Queue::assertPushed(CancelShopifyStackReservationsJob::class, function (CancelShopifyStackReservationsJob $job) use ($reservation, $super): bool {
+        return $job->reservationIds === [$reservation->id] && $job->userId === $super->id;
+    });
+    expect($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
+});
+
+it('removes held reserved units when a reservation is deleted and does not return them to available', function (): void {
+    $records = stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('reservedQuantity')->once()->andReturn(2);
+    $inventory->shouldReceive('writeOffReserved')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldNotReceive('moveQuantity');
+    $reservation = stackLeftoverReservation($records, 9040, 2, 0);
+
+    $result = stackOrderService($inventory)->deleteHeldStock([$reservation], 15);
+
+    $fresh = $reservation->fresh();
+    expect($result['deleted'])->toBe(1)
+        ->and($fresh->status)->toBe(ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF)
+        ->and($fresh->remainingReserved())->toBe(0)
+        ->and($fresh->written_off_quantity)->toBe(2)
+        ->and($fresh->released_quantity)->toBe(0)
+        ->and($fresh->error_message)->toContain('were not returned to available');
+    expect(ShopifyStackInventoryMovement::query()->where('action', 'write_off')->where('quantity', 2)->count())->toBe(1);
+});
+
+it('closes a deleted reservation without a Shopify adjustment when live reserved stock is already zero', function (): void {
+    $records = stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('reservedQuantity')->once()->andReturn(0);
+    $inventory->shouldNotReceive('writeOffReserved');
+    $inventory->shouldNotReceive('moveQuantity');
+    $reservation = stackLeftoverReservation($records, 9041, 3, 0);
+
+    $result = stackOrderService($inventory)->deleteHeldStock([$reservation]);
+
+    $fresh = $reservation->fresh();
+    expect($result['deleted'])->toBe(1)
+        ->and($fresh->status)->toBe(ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF)
+        ->and($fresh->remainingReserved())->toBe(0)
+        ->and($fresh->written_off_quantity)->toBe(3)
+        ->and($fresh->released_quantity)->toBe(0)
+        ->and($fresh->error_message)->toContain('none was returned to available');
+});
+
+it('removes only the reserved units Shopify still holds and closes the rest on the row', function (): void {
+    $records = stackReservationRecords();
+    $inventory = stackInventoryMock();
+    $inventory->shouldReceive('reservedQuantity')->once()->andReturn(1);
+    $inventory->shouldReceive('writeOffReserved')->once()->withArgs(function ($variant, int $quantity): bool {
+        return $quantity === 1;
+    })->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldNotReceive('moveQuantity');
+    $reservation = stackLeftoverReservation($records, 9042, 4, 1);
+
+    $result = stackOrderService($inventory)->deleteHeldStock([$reservation]);
+
+    $fresh = $reservation->fresh();
+    expect($result['deleted'])->toBe(1)
+        ->and($fresh->status)->toBe(ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF)
+        ->and($fresh->remainingReserved())->toBe(0)
+        ->and($fresh->consumed_quantity)->toBe(1)
+        ->and($fresh->written_off_quantity)->toBe(3)
+        ->and($fresh->released_quantity)->toBe(0);
+});
+
+it('queues a manual reservation delete', function (): void {
+    Queue::fake();
+    Role::findOrCreate(RolesEnum::SuperAdmin->value);
+    $records = stackReservationRecords();
+    $reservation = stackLeftoverReservation($records, 9043, 1, 0);
+    $super = User::factory()->create();
+    $super->assignRole(RolesEnum::SuperAdmin->value);
+    $this->actingAs($super);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->callTableAction('deleteReservation', $reservation);
+
+    Queue::assertPushed(DeleteShopifyStackReservationsJob::class, function (DeleteShopifyStackReservationsJob $job) use ($reservation, $super): bool {
         return $job->reservationIds === [$reservation->id] && $job->userId === $super->id;
     });
     expect($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);

@@ -17,6 +17,8 @@ final class ShopifyStackInventoryReservation extends Model
 
     public const STATUS_RELEASED = 'released';
 
+    public const STATUS_WRITTEN_OFF = 'written_off';
+
     public const STATUS_FAILED = 'failed';
 
     protected $guarded = [];
@@ -40,12 +42,12 @@ final class ShopifyStackInventoryReservation extends Model
 
     public function remainingReserved(): int
     {
-        return max(0, (int) $this->reserved_quantity - (int) $this->consumed_quantity - (int) $this->released_quantity);
+        return max(0, (int) $this->reserved_quantity - (int) $this->consumed_quantity - (int) $this->released_quantity - (int) $this->written_off_quantity);
     }
 
     public function scopeWithLeftoverReserved(Builder $query): Builder
     {
-        return $query->whereRaw('(COALESCE(reserved_quantity, 0) - COALESCE(consumed_quantity, 0) - COALESCE(released_quantity, 0)) > 0');
+        return $query->whereRaw('(COALESCE(reserved_quantity, 0) - COALESCE(consumed_quantity, 0) - COALESCE(released_quantity, 0) - COALESCE(written_off_quantity, 0)) > 0');
     }
 
     public function refreshLedgerStatus(): void
@@ -63,6 +65,12 @@ final class ShopifyStackInventoryReservation extends Model
         $required = (int) $this->total_component_quantity_required;
         $consumed = (int) $this->consumed_quantity;
         $released = (int) $this->released_quantity;
+        $writtenOff = (int) $this->written_off_quantity;
+        if ($writtenOff > 0) {
+            $this->status = self::STATUS_WRITTEN_OFF;
+
+            return;
+        }
         if ($required > 0 && $consumed >= $required) {
             $this->status = self::STATUS_COMPLETED;
             $this->completed_at ??= now();

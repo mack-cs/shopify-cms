@@ -98,6 +98,11 @@ final class StackFulfillmentInventoryService
 
                 $summary['stack_lines']++;
                 foreach ($reservations as $reservation) {
+                    if ($reservation->status === ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF) {
+                        $summary['already_completed']++;
+
+                        continue;
+                    }
                     if ($reservation->bead_family_id !== null) {
                         $family = EngravedBeadFamily::query()->findOrFail($reservation->bead_family_id);
                         if ($fulfillment->fulfilled_at_shopify === null) {

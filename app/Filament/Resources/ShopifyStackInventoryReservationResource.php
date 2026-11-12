@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use App\Enums\RolesEnum;
 use App\Filament\Resources\ShopifyStackInventoryReservationResource\Pages;
 use App\Jobs\CancelShopifyStackReservationsJob;
+use App\Jobs\DeleteShopifyStackReservationsJob;
 use App\Models\ShopifyStackInventoryReservation;
 use App\Services\Shopify\StackReservationFulfillmentAuditService;
 use Filament\Forms\Form;
@@ -51,6 +52,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                 TextColumn::make('reserved_quantity')->label('Reserved')->numeric(),
                 TextColumn::make('consumed_quantity')->label('Consumed')->numeric(),
                 TextColumn::make('released_quantity')->label('Released')->numeric(),
+                TextColumn::make('written_off_quantity')->label('Removed')->numeric()->toggleable(),
                 TextColumn::make('remaining_reserved')
                     ->label('Still reserved')
                     ->state(fn (ShopifyStackInventoryReservation $record): int => $record->remainingReserved())
@@ -60,9 +62,11 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ShopifyStackInventoryReservation::STATUS_PENDING => 'warning',
                     ShopifyStackInventoryReservation::STATUS_COMPLETED => 'success',
                     ShopifyStackInventoryReservation::STATUS_RELEASED => 'gray',
+                    ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF => 'danger',
                     ShopifyStackInventoryReservation::STATUS_FAILED => 'danger',
                     default => 'info',
-                }),
+                })
+                    ->formatStateUsing(fn (string $state): string => $state === ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF ? 'Deleted' : $state),
                 TextColumn::make('reserved_at')->dateTime('d/m/Y H:i')->toggleable(),
                 TextColumn::make('completed_at')->dateTime('d/m/Y H:i')->toggleable(),
                 TextColumn::make('released_at')->dateTime('d/m/Y H:i')->toggleable(),
@@ -74,6 +78,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ShopifyStackInventoryReservation::STATUS_PENDING => 'Pending',
                     ShopifyStackInventoryReservation::STATUS_COMPLETED => 'Completed',
                     ShopifyStackInventoryReservation::STATUS_RELEASED => 'Cancelled / Released',
+                    ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF => 'Deleted',
                     ShopifyStackInventoryReservation::STATUS_FAILED => 'Failed',
                 ]),
                 SelectFilter::make('leftover')
@@ -134,6 +139,24 @@ final class ShopifyStackInventoryReservationResource extends Resource
                             ->success()
                             ->send();
                     }),
+                Action::make('deleteReservation')
+                    ->label('Delete reservation')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->modalHeading('Delete this stack reservation?')
+                    ->modalDescription('This removes the reserved units from stock. Available does not increase. On hand drops by the units Shopify still holds as reserved. Units Shopify no longer holds are closed on this row only. Already consumed units stay consumed. The row stays as a deleted record, and a later order update does not reserve these units again.')
+                    ->modalSubmitActionLabel('Delete reservation')
+                    ->visible(fn (): bool => self::canCancelReservations())
+                    ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
+                    ->action(function (ShopifyStackInventoryReservation $record): void {
+                        DeleteShopifyStackReservationsJob::dispatch([$record->id], Auth::id());
+                        Notification::make()
+                            ->title('Stack reservation delete queued')
+                            ->body('The held units are removed in the background. They are not returned to available.')
+                            ->success()
+                            ->send();
+                    }),
             ])
             ->bulkActions([
                 BulkActionGroup::make([
@@ -154,6 +177,27 @@ final class ShopifyStackInventoryReservationResource extends Resource
                             Notification::make()
                                 ->title('Stack reservation cancel queued')
                                 ->body('The selected reservations close in the background.')
+                                ->success()
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+                    BulkAction::make('deleteReservations')
+                        ->label('Delete reservations')
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->modalHeading('Delete the selected stack reservations?')
+                        ->modalDescription('This removes the reserved units from stock. Available does not increase. On hand drops by the units Shopify still holds as reserved. Units Shopify no longer holds are closed on the row only. Already consumed units stay consumed. Deleted rows are kept, and a later order update does not reserve these units again.')
+                        ->modalSubmitActionLabel('Delete reservations')
+                        ->visible(fn (): bool => self::canCancelReservations())
+                        ->action(function (Collection $records): void {
+                            DeleteShopifyStackReservationsJob::dispatch(
+                                $records->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+                                Auth::id(),
+                            );
+                            Notification::make()
+                                ->title('Stack reservation delete queued')
+                                ->body('The selected reservations are deleted in the background. Held units are not returned to available.')
                                 ->success()
                                 ->send();
                         })
@@ -197,6 +241,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
         return in_array($record->status, [
             ShopifyStackInventoryReservation::STATUS_RELEASED,
             ShopifyStackInventoryReservation::STATUS_COMPLETED,
+            ShopifyStackInventoryReservation::STATUS_WRITTEN_OFF,
         ], true) && $record->remainingReserved() <= 0;
     }
 

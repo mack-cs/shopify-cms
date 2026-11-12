@@ -13,7 +13,7 @@
             @if ($this->auditTab === 'adjustments')
                 Inventory adjustments are quantity corrections and manual edits from Shopify or the CMS. One save that changes available and on hand is one adjustment. Supplier receipts, stack reservations, and sales are on Inventory operations. Searching a product includes CMS quantity edits from the last three years.
             @else
-                Inventory operations are stack reservations, reserved stock consumption, supplier receipts, and other automated workflows, with the existing match and review detail.
+                Inventory operations are stack reservations, reserved stock consumption, reservation deletes that remove held stock, supplier receipts, and other automated workflows, with the existing match and review detail.
             @endif
             The date filter starts at the last 120 days. This page does not call Shopify or change stock.
         </p>
