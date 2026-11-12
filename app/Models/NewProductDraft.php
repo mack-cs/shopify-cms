@@ -412,6 +412,50 @@ class NewProductDraft extends Model
         return in_array($type, ['bundle', 'bundles', 'stack', 'stacks'], true);
     }
 
+    /**
+     * Shopify product GIDs for custom.stack_components, in the stored component order.
+     *
+     * @return array<int, string>
+     */
+    public function stackComponentShopifyGids(): array
+    {
+        $ids = collect((array) $this->bundle_product_ids)
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values();
+        if ($ids->isEmpty()) {
+            return [];
+        }
+
+        $shopifyIds = Product::query()->whereIn('id', $ids->all())->pluck('shopify_id', 'id');
+        $gids = [];
+        foreach ($ids as $id) {
+            $gid = self::productGid((string) ($shopifyIds[$id] ?? ''));
+            if ($gid !== null && ! in_array($gid, $gids, true)) {
+                $gids[] = $gid;
+            }
+        }
+
+        return $gids;
+    }
+
+    private static function productGid(string $value): ?string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+        if (str_starts_with($value, 'gid://shopify/Product/')) {
+            return $value;
+        }
+        if (ctype_digit($value)) {
+            return 'gid://shopify/Product/'.$value;
+        }
+
+        return null;
+    }
+
     private static function hasBundleOrStackTag(array $tags): bool
     {
         foreach (TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($tags)) as $tag) {

@@ -1466,6 +1466,110 @@ it('syncs only the first three complementary products to Shopify while keeping e
     expect($row->get(HeaderStore::COMPLEMENTARY_PRODUCTS))->toBe(implode('; ', $selectedComplementary));
 });
 
+it('sends the draft stack components when that metafield is included in an approval sync', function (): void {
+    $product = createWorkflowTestProduct([
+        'shopify_id' => 'gid://shopify/Product/1601',
+        'handle' => 'stack-component-sync',
+        'approval_version' => 1,
+    ]);
+    approveWorkflowTestProduct($product);
+
+    $first = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/1602',
+        'handle' => 'stack-component-a',
+        'title' => 'Component A',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]));
+    $second = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => 'gid://shopify/Product/1603',
+        'handle' => 'stack-component-b',
+        'title' => 'Component B',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]));
+    $unlinked = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $product->import_id,
+        'shopify_id' => null,
+        'handle' => 'stack-component-missing',
+        'title' => 'Component Missing',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]));
+
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'handle' => $product->handle,
+        'shopify_id' => $product->shopify_id,
+        'title' => $product->title,
+        'tags' => 'bundles',
+        'bundle_product_ids' => [$second->id, $unlinked->id, $first->id],
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+
+    ShopifyRow::create([
+        'import_id' => $product->import_id,
+        'row_index' => 1,
+        'handle' => $product->handle,
+        'row_type' => 'product_primary',
+        'data' => [
+            HeaderStore::STACK_COMPONENTS => '["gid://shopify/Product/9999"]',
+        ],
+    ]);
+
+    $capturedMetafields = null;
+    fakeWorkflowShopifyGraphql(function (string $query, array $variables = []) use (&$capturedMetafields): array {
+        if (str_contains($query, 'query ProductByIdDetails')) {
+            return [
+                'product' => [
+                    'id' => 'gid://shopify/Product/1601',
+                    'options' => [],
+                    'category' => null,
+                    'productCategory' => null,
+                    'variants' => ['nodes' => []],
+                    'media' => ['nodes' => []],
+                ],
+            ];
+        }
+        if (str_contains($query, 'query ProductByIdMetafields')) {
+            return ['product' => ['metafields' => ['nodes' => []]]];
+        }
+        if (str_contains($query, 'mutation MetafieldsSet')) {
+            $capturedMetafields = $variables['metafields'] ?? null;
+
+            return [
+                'metafieldsSet' => [
+                    'metafields' => [['id' => 'gid://shopify/Metafield/1601']],
+                    'userErrors' => [],
+                ],
+            ];
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in stack component sync test.');
+    });
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(
+        collect([$product]),
+        [ProductShopifyUpdater::SYNC_SCOPE_METAFIELDS],
+        [ProductShopifyUpdater::CORE_FIELD_STACK_COMPONENTS]
+    );
+
+    expect(ProductShopifyUpdater::metafieldFieldLabels())
+        ->toHaveKey(ProductShopifyUpdater::CORE_FIELD_STACK_COMPONENTS)
+        ->and($result['updated'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($capturedMetafields)->toHaveCount(1)
+        ->and($capturedMetafields[0]['namespace'])->toBe('custom')
+        ->and($capturedMetafields[0]['key'])->toBe('stack_components')
+        ->and($capturedMetafields[0]['type'])->toBe('list.product_reference')
+        ->and(json_decode($capturedMetafields[0]['value'], true))->toBe([
+            'gid://shopify/Product/1603',
+            'gid://shopify/Product/1602',
+        ]);
+});
+
 it('includes the draft-owned stiletto metafields in an automatic full sync for a fully approved product', function (): void {
     $product = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1051',
@@ -1989,6 +2093,97 @@ it('creates a stack in Shopify without sending its images', function (): void {
     expect(json_encode($productSetInput))->not->toContain($firstImage);
     expect(json_encode($productSetInput))->not->toContain($secondImage);
     expect($draft->fresh()->handle)->toBe('test-bracelet-stack');
+});
+
+it('sends stack component product references when a new stack is created in Shopify', function (): void {
+    $user = User::factory()->create();
+    $import = Import::create([
+        'filename' => 'stack-components.csv',
+        'mode' => 'overwrite',
+        'status' => 'ready',
+        'created_by' => $user->id,
+        'is_current' => true,
+    ]);
+    $first = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/1701',
+        'handle' => 'created-component-a',
+        'title' => 'Created Component A',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]));
+    $second = Product::withoutEvents(fn (): Product => Product::create([
+        'import_id' => $import->id,
+        'shopify_id' => 'gid://shopify/Product/1702',
+        'handle' => 'created-component-b',
+        'title' => 'Created Component B',
+        'status' => 'active',
+        'approval_version' => 1,
+    ]));
+
+    $draft = NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'title' => 'Created Bracelet Stack',
+        'type' => 'Bracelets',
+        'tags' => 'bundles',
+        'status' => 'draft',
+        'variant_price' => '250.00',
+        'uvp_short_paragraph' => '<p>A stack promise.</p>',
+        'bundle_product_ids' => [$second->id, $first->id],
+        'complementary_products' => 'gid://shopify/Product/201; gid://shopify/Product/202; gid://shopify/Product/203',
+        'approval_version' => 1,
+        'origin' => NewProductDraft::ORIGIN_DRAFT_TOOL,
+    ]));
+    NewProductDraftApproval::create([
+        'new_product_draft_id' => $draft->id,
+        'user_id' => User::factory()->create()->id,
+        'approval_version' => 1,
+    ]);
+    NewProductDraftApproval::create([
+        'new_product_draft_id' => $draft->id,
+        'user_id' => User::factory()->create()->id,
+        'approval_version' => 1,
+    ]);
+
+    $productSetInput = null;
+    config()->set('services.shopify.shop', 'test-shop.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    config()->set('services.shopify.api_version', '2026-01');
+
+    Http::fake(function ($request) use (&$productSetInput, $draft) {
+        $payload = $request->data();
+        $query = (string) ($payload['query'] ?? '');
+        $variables = (array) ($payload['variables'] ?? []);
+
+        if ($lookup = draftCreationLookupResponse($query)) {
+            return $lookup;
+        }
+
+        if (str_contains($query, 'mutation ProductSetCreate')) {
+            $productSetInput = $variables['input'] ?? null;
+
+            return Http::response(['data' => ['productSet' => [
+                'product' => createdDraftProduct($draft, 'gid://shopify/Product/1700', 'created-bracelet-stack', 'gid://shopify/ProductVariant/1700', 'gid://shopify/InventoryItem/1700'),
+                'userErrors' => [],
+            ]]]);
+        }
+
+        throw new RuntimeException('Unexpected Shopify GraphQL call in stack component create test.');
+    });
+
+    $result = app(NewProductDraftShopifyCreator::class)->createApprovedDrafts(collect([$draft]));
+    $stack = collect($productSetInput['metafields'] ?? [])->firstWhere('key', 'stack_components');
+    $uvp = collect($productSetInput['metafields'] ?? [])->firstWhere('key', 'uvp_short_paragraph');
+
+    expect($result['created'])->toBe(1)
+        ->and($result['failed'])->toBe(0)
+        ->and($uvp)->not->toBeNull()
+        ->and($stack)->not->toBeNull()
+        ->and($stack['namespace'])->toBe('custom')
+        ->and($stack['type'])->toBe('list.product_reference')
+        ->and(json_decode($stack['value'], true))->toBe([
+            'gid://shopify/Product/1702',
+            'gid://shopify/Product/1701',
+        ]);
 });
 
 it('prices a new normal product and initializes tracked inventory to zero when the handle is created', function (): void {

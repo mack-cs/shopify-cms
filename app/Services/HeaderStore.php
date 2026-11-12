@@ -54,6 +54,7 @@ final class HeaderStore
     public const SIBLINGS_COLLECTION_NAME = 'Sibling Option Name (product.metafields.stiletto.sibling_option_name)';
     public const SIBLING_COLLECTION = 'Sibling Collection (product.metafields.stiletto.sibling_collection)';
     public const UVP_SHORT_PARAGRAPH = 'UVP Short Paragraph';
+    public const STACK_COMPONENTS = 'Stack Components (product.metafields.custom.stack_components)';
     public const BEAD_COLOUR_FINISH = 'Bead Colour Finish (product.metafields.stiletto.bead_colour_finish)';
     public const COMPLEMENTARY_PRODUCTS = 'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)';
     public const JEWELRY_MATERIAL = 'Jewelry material (product.metafields.shopify.jewelry-material)';
@@ -186,6 +187,7 @@ final class HeaderStore
             self::SIBLING_COLLECTION,
             self::UVP_SHORT_PARAGRAPH,
             self::BEAD_COLOUR_FINISH,
+            self::STACK_COMPONENTS,
             self::COMPLEMENTARY_PRODUCTS,
         ];
 

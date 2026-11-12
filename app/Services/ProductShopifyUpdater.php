@@ -78,6 +78,8 @@ final class ProductShopifyUpdater
 
     public const CORE_FIELD_UVP_SHORT_PARAGRAPH = 'uvp_short_paragraph';
 
+    public const CORE_FIELD_STACK_COMPONENTS = 'stack_components';
+
     public const CORE_FIELD_BEAD_COLOUR_FINISH = 'bead_colour_finish';
 
     public const CORE_FIELD_SEO_DEINDEX = 'seo_deindex';
@@ -820,6 +822,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_PATTERN_CATEGORY,
             self::CORE_FIELD_PRODUCT_METALS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_STACK_COMPONENTS,
             self::CORE_FIELD_SIBLING_OPTION_NAME,
             self::CORE_FIELD_SIBLING_COLLECTION,
             self::CORE_FIELD_BEAD_COLOUR_FINISH,
@@ -864,6 +867,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_STACK_COMPONENTS,
             self::CORE_FIELD_BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX,
         ];
@@ -910,6 +914,7 @@ final class ProductShopifyUpdater
             self::CORE_FIELD_SIBLING_COLLECTION => 'Sibling collection',
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => 'Complementary products',
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => 'UVP short paragraph',
+            self::CORE_FIELD_STACK_COMPONENTS => 'Stack components',
             self::CORE_FIELD_BEAD_COLOUR_FINISH => 'Bead Colour Finish',
             self::CORE_FIELD_SEO_DEINDEX => 'SEO: Deindex products',
         ];
@@ -3181,6 +3186,9 @@ GQL;
         }
         if ($header === HeaderStore::UVP_SHORT_PARAGRAPH) {
             return 'rich_text_field';
+        }
+        if ($header === HeaderStore::STACK_COMPONENTS) {
+            return 'list.product_reference';
         }
 
         return 'single_line_text_field';
@@ -6288,6 +6296,7 @@ GQL;
             self::CORE_FIELD_SIBLING_COLLECTION => HeaderStore::SIBLING_COLLECTION,
             self::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
             self::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
+            self::CORE_FIELD_STACK_COMPONENTS => HeaderStore::STACK_COMPONENTS,
             self::CORE_FIELD_BEAD_COLOUR_FINISH => HeaderStore::BEAD_COLOUR_FINISH,
             self::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
@@ -6369,6 +6378,15 @@ GQL;
             }
         }
 
+        if ($header === HeaderStore::STACK_COMPONENTS) {
+            $draft = $this->linkedDraft($product);
+            if ($draft instanceof NewProductDraft) {
+                $gids = $draft->stackComponentShopifyGids();
+
+                return $gids === [] ? null : json_encode($gids, JSON_UNESCAPED_SLASHES);
+            }
+        }
+
         $value = $primaryData[$header] ?? null;
         if (! is_scalar($value)) {
             return null;
@@ -6379,7 +6397,7 @@ GQL;
         return $stringValue === '' ? null : $stringValue;
     }
 
-    private function linkedDraftMetafieldValue(Product $product, string $attribute): ?string
+    private function linkedDraft(Product $product): ?NewProductDraft
     {
         $draftQuery = NewProductDraft::query();
 
@@ -6399,7 +6417,14 @@ GQL;
             return null;
         }
 
-        $draft = $draftQuery->first([$attribute]);
+        $draft = $draftQuery->first();
+
+        return $draft instanceof NewProductDraft ? $draft : null;
+    }
+
+    private function linkedDraftMetafieldValue(Product $product, string $attribute): ?string
+    {
+        $draft = $this->linkedDraft($product);
         if (! $draft instanceof NewProductDraft) {
             return null;
         }

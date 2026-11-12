@@ -726,6 +726,15 @@ GQL;
                 'value' => $uvp,
             ];
         }
+        $stackComponents = $draft->stackComponentShopifyGids();
+        if ($stackComponents !== []) {
+            $metafields[] = [
+                'namespace' => 'custom',
+                'key' => 'stack_components',
+                'type' => 'list.product_reference',
+                'value' => json_encode($stackComponents, JSON_UNESCAPED_SLASHES),
+            ];
+        }
 
         return $metafields;
     }

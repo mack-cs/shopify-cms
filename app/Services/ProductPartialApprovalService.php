@@ -862,6 +862,7 @@ class ProductPartialApprovalService
             ProductShopifyUpdater::CORE_FIELD_SIBLING_COLLECTION => HeaderStore::SIBLING_COLLECTION,
             ProductShopifyUpdater::CORE_FIELD_COMPLEMENTARY_PRODUCTS => HeaderStore::COMPLEMENTARY_PRODUCTS,
             ProductShopifyUpdater::CORE_FIELD_UVP_SHORT_PARAGRAPH => HeaderStore::UVP_SHORT_PARAGRAPH,
+            ProductShopifyUpdater::CORE_FIELD_STACK_COMPONENTS => HeaderStore::STACK_COMPONENTS,
             ProductShopifyUpdater::CORE_FIELD_BEAD_COLOUR_FINISH => HeaderStore::BEAD_COLOUR_FINISH,
             ProductShopifyUpdater::CORE_FIELD_SEO_DEINDEX => HeaderStore::SEO_DEINDEX,
         ];
