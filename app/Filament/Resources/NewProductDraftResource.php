@@ -4892,7 +4892,7 @@ class NewProductDraftResource extends Resource
                                 ->default(fn (): array => app(NewProductDraftRoundtripCsvService::class)->defaultExportColumns())
                                 ->columns(2)
                                 ->required()
-                                ->helperText('Draft ID, Handle, and Shopify ID are always included so the file can be imported back safely. Only drafts that already have handles are exported. Complementary Products export as handles.'),
+                                ->helperText('Draft ID, Handle, and Shopify ID are always included so the file can be imported back safely. Only drafts that already have handles are exported. Complementary Products export as SKUs.'),
                         ])
                         ->action(function ($records, array $data, NewProductDraftRoundtripCsvService $service): void {
                             try {

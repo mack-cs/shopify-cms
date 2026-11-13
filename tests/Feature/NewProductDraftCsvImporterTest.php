@@ -977,3 +977,25 @@ it('imports other fields while rejecting incorrectly sized seo values', function
 
     @unlink($path);
 });
+
+it('exports complementary references as SKUs for handles Shopify IDs and unsynced drafts', function (): void {
+    Storage::fake('public');
+    $product = Product::create(['import_id' => $this->draftCsvImport->id, 'title' => 'Complement',
+        'handle' => 'complement-handle', 'shopify_id' => 'gid://shopify/Product/710090', 'status' => 'active']);
+    Variant::withoutEvents(fn () => Variant::create(['product_id' => $product->id, 'sku' => 'COMP-001']));
+    NewProductDraft::create(['handle' => 'draft-complement', 'sku' => 'COMP-002', 'title' => 'Draft complement']);
+    $draft = NewProductDraft::create(['handle' => 'export-parent', 'sku' => 'PARENT', 'title' => 'Parent',
+        'complementary_products' => '["complement-handle","gid://shopify/Product/710090","710090","draft-complement"]']);
+    $result = app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['complementary_products']);
+    $csv = Storage::disk($result['disk'])->get($result['path']);
+    expect($csv)->toContain('COMP-001; COMP-002')->not->toContain('complement-handle')->not->toContain('gid://shopify/Product/710090');
+});
+
+it('reports missing complementary SKUs rather than exporting handles or silently dropping references', function (): void {
+    Storage::fake('public');
+    $draft = NewProductDraft::create(['handle' => 'export-parent', 'sku' => 'PARENT', 'title' => 'Parent',
+        'complementary_products' => 'missing-complement']);
+    expect(fn () => app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['complementary_products']))
+        ->toThrow(InvalidArgumentException::class, 'no matching SKU was found');
+    expect(Storage::disk('public')->allFiles())->toBe([]);
+});

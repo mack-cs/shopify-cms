@@ -140,7 +140,7 @@ final class NewProductDraftRoundtripCsvService
             'sibling_collection' => trim((string) ($draft->sibling_collection ?? '')),
             'uvp_short_paragraph' => trim((string) ($draft->uvp_short_paragraph ?? '')),
             'bead_colour_finish' => trim((string) ($draft->bead_colour_finish ?? '')),
-            'complementary_products' => $this->productReferencesAsHandles($draft->complementary_products),
+            'complementary_products' => $this->productReferencesAsSkus($draft->complementary_products),
             'associated_products' => $this->associatedProductsAsHandles($draft->bundle_product_ids),
             'style_type' => trim((string) ($styleProfile?->style_type ?? '')),
             'draft_seo_title' => trim((string) ($styleProfile?->draft_seo_title ?? '')),
@@ -204,26 +204,35 @@ final class NewProductDraftRoundtripCsvService
         ];
     }
 
-    private function productReferencesAsHandles(?string $value): string
+    private function productReferencesAsSkus(?string $value): string
     {
         $tokens = $this->parseReferenceTokens($value);
         if ($tokens === []) {
             return '';
         }
 
-        $productsByShopifyId = Product::query()
-            ->whereIn('shopify_id', $tokens)
-            ->get(['shopify_id', 'handle'])
-            ->keyBy(fn (Product $product): string => trim((string) ($product->shopify_id ?? '')));
-
-        $handles = [];
+        $skus = [];
         foreach ($tokens as $token) {
-            $product = $productsByShopifyId->get($token);
-            $handle = trim((string) ($product?->handle ?? ''));
-            $handles[] = $handle !== '' ? $handle : $token;
+            $shopifyId = ctype_digit($token) ? 'gid://shopify/Product/'.$token : $token;
+            $product = Product::query()->with('variants')
+                ->where(fn ($query) => $query->where('shopify_id', $shopifyId)->orWhere('handle', $token)
+                    ->orWhereHas('variants', fn ($variants) => $variants->where('sku', $token)))
+                ->orderByDesc('id')->first();
+            $resolved = $product?->variants->sortBy('id')->pluck('sku')
+                ->map(fn ($sku) => trim((string) $sku))->filter()->values()->all() ?? [];
+            if ($resolved === []) {
+                $sku = NewProductDraft::query()
+                    ->where(fn ($query) => $query->where('shopify_id', $shopifyId)->orWhere('handle', $token)->orWhere('sku', $token))
+                    ->whereNotNull('sku')->where('sku', '!=', '')->orderByDesc('id')->value('sku');
+                $resolved = trim((string) $sku) !== '' ? [trim($sku)] : [];
+            }
+            if ($resolved === []) {
+                throw new \InvalidArgumentException("Cannot export complementary product [{$token}] as a SKU: no matching SKU was found. Add or sync its SKU before exporting.");
+            }
+            array_push($skus, ...$resolved);
         }
 
-        return implode('; ', array_values(array_unique(array_filter($handles))));
+        return implode('; ', array_values(array_unique($skus)));
     }
 
     /**
