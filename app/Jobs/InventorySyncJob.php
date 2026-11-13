@@ -76,8 +76,18 @@ class InventorySyncJob implements ShouldQueue, \Illuminate\Contracts\Queue\Shoul
             ? $service->refreshVariants($variants, $this->userId)
             : $service->syncVariants($variants, $this->userId, $this->syncBatchId);
 
-        if ($this->mode !== 'refresh' && ($result['failed'] ?? 0) > 0) {
-            throw new \RuntimeException('Inventory push remains unconfirmed; retry required. '.implode('; ', $result['failures'] ?? []));
+        $failures = $result['failures'] ?? [];
+        $retryable = array_values(array_filter(
+            $failures,
+            fn (string $failure): bool => ! str_contains($failure, 'automatic replay is blocked'),
+        ));
+        if ($this->mode !== 'refresh' && $retryable !== []) {
+            throw new \RuntimeException('Inventory push remains unconfirmed; retry required. '.implode('; ', $failures));
+        }
+        if ($this->mode !== 'refresh' && $failures !== []) {
+            $this->notify($variants, $result);
+
+            return;
         }
 
         if ($this->mode !== 'refresh' && $this->syncBatchId !== null) {
@@ -87,6 +97,15 @@ class InventorySyncJob implements ShouldQueue, \Illuminate\Contracts\Queue\Shoul
             );
         }
 
+        $this->notify($variants, $result);
+    }
+
+    /**
+     * @param Collection<int, Variant> $variants
+     * @param array<string, mixed> $result
+     */
+    private function notify(Collection $variants, array $result): void
+    {
         if (!$this->userId) {
             return;
         }

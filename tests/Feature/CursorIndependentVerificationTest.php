@@ -884,7 +884,7 @@ it('does not send a second correction when the same approval job is delivered tw
     });
     $again = new InventorySyncJob([$restart->id], 'push', $reviewer->id, $restarted->sync_batch_id);
     expect(fn () => $again->handle(app(ProductInventorySyncService::class), $service))->toThrow(RuntimeException::class);
-    expect(fn () => $again->handle(app(ProductInventorySyncService::class), $service))->toThrow(RuntimeException::class);
+    $again->handle(app(ProductInventorySyncService::class), $service);
     expect($attempts)->toBe(1)
         ->and(InventoryWriteIntent::query()->where('variant_id', $restart->id)->value('status'))->toBe('started')
         ->and($restarted->fresh()->status)->toBe(InventoryAdjustmentRequest::STATUS_APPROVED);

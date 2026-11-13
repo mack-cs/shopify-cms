@@ -81,10 +81,9 @@ it('rejects divergent readback even with a valid adjustment group and never repl
     extract(releaseApprovalFixture());
     releaseInventoryResponses(4, false);
     $job = new InventorySyncJob([$variant->id], 'push', $reviewer->id, $request->sync_batch_id);
-    foreach ([1, 2] as $attempt) {
-        expect(fn () => $job->handle(app(ProductInventorySyncService::class), $service))->toThrow(RuntimeException::class);
-    }
-    Http::assertSentCount(4); // First read, mutation, failed readback; retry may only re-read.
+    expect(fn () => $job->handle(app(ProductInventorySyncService::class), $service))->toThrow(RuntimeException::class);
+    $job->handle(app(ProductInventorySyncService::class), $service);
+    Http::assertSentCount(3); // First read, mutation, failed readback. The blocked retry does not read Shopify again.
     expect(collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]['query'], 'InventorySetQuantities')))->toHaveCount(1);
     expect($variant->fresh()->current_on_hand_quantity)->toBe(4)->and($variant->fresh()->inventory_local_dirty)->toBeTrue()->and($request->fresh()->status)->toBe(InventoryAdjustmentRequest::STATUS_APPROVED);
 });
@@ -169,7 +168,7 @@ it('does not overwrite a newer local intent with an older approved count', funct
 it('keeps an uncertain mutation held even when a later refresh matches the requested quantity', function () {
     extract(releaseApprovalFixture());
     releaseInventoryResponses(4, true, null, true);
-    expect(fn () => (new InventorySyncJob([$variant->id], 'push', $reviewer->id, $request->sync_batch_id))->handle(app(ProductInventorySyncService::class), $service))->toThrow(RuntimeException::class);
+    (new InventorySyncJob([$variant->id], 'push', $reviewer->id, $request->sync_batch_id))->handle(app(ProductInventorySyncService::class), $service);
     app(ProductInventorySyncService::class)->refreshVariants(collect([$variant->fresh()]));
     expect($variant->fresh()->inventory_local_dirty)->toBeTrue()->and($variant->fresh()->inventory_sync_error)->toContain('uncertain outcome')
         ->and($variant->fresh()->current_on_hand_quantity)->toBe(4)->and($request->fresh()->status)->toBe(InventoryAdjustmentRequest::STATUS_APPROVED);

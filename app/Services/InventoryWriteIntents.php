@@ -13,6 +13,14 @@ final class InventoryWriteIntents
         return hash('sha256', json_encode([$variant->id, $batch, $payload, (int) $variant->inventory_write_version]));
     }
 
+    public function uncertainOutcome(Variant $variant): bool
+    {
+        return InventoryWriteIntent::query()
+            ->where('variant_id', $variant->id)
+            ->where('status', 'started')
+            ->exists();
+    }
+
     public function claim(Variant $variant, array $payload, ?string $batch): InventoryWriteIntent
     {
         return DB::transaction(function () use ($variant, $payload, $batch) {

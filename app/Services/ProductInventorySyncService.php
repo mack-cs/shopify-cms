@@ -58,8 +58,13 @@ final class ProductInventorySyncService
             }
 
             try {
-                $this->syncProductVariants($product, $group->values(), $syncBatchId, $userId, $warnings);
-                $synced += $group->count();
+                $permanentFailures = [];
+                $this->syncProductVariants($product, $group->values(), $syncBatchId, $userId, $warnings, $permanentFailures);
+                foreach ($permanentFailures as $failure) {
+                    $failed++;
+                    $failures[] = $failure;
+                }
+                $synced += $group->count() - count($permanentFailures);
             } catch (\Throwable $e) {
                 $failed += $group->count();
                 foreach ($group as $variant) {
@@ -169,9 +174,24 @@ final class ProductInventorySyncService
     /**
      * @param Collection<int, Variant> $variants
      * @param array<int, string> $warnings
+     * @param array<int, string> $permanentFailures
      */
-    private function syncProductVariants(Product $product, Collection $variants, ?string $syncBatchId, ?int $userId, array &$warnings): void
+    private function syncProductVariants(Product $product, Collection $variants, ?string $syncBatchId, ?int $userId, array &$warnings, array &$permanentFailures): void
     {
+        $replayBlocked = 'An inventory mutation has an uncertain outcome. Operator reconciliation is required; automatic replay is blocked.';
+        $variants = $variants->filter(function ($variant) use (&$permanentFailures, $replayBlocked): bool {
+            if (! $variant instanceof Variant || ! app(InventoryWriteIntents::class)->uncertainOutcome($variant)) {
+                return $variant instanceof Variant;
+            }
+            $this->markInventorySyncFailed($variant, $replayBlocked);
+            $permanentFailures[] = "Variant {$variant->id}: {$replayBlocked}";
+
+            return false;
+        })->values();
+        if ($variants->isEmpty()) {
+            return;
+        }
+
         app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql('mutation InventoryPreflight',
             ['productId' => $product->shopify_id, 'variants' => $variants->map(fn ($variant) => [
                 'id' => $variant->shopify_id, 'inventoryItemId' => $variant->shopify_inventory_item_id,
