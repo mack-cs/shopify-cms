@@ -12,6 +12,8 @@ use App\Models\ProcurementSupplierImportBatch;
 use App\Models\ProcurementSupplierOrder;
 use App\Models\ProcurementSupplierReceipt;
 use App\Models\Variant;
+use App\Models\User;
+use App\Enums\PermissionEnum;
 use App\Services\AsyncJobStateService;
 use App\Services\InventoryAccessService;
 use App\Services\Procurement\ProcurementPriceUpdateService;
@@ -22,6 +24,8 @@ use Filament\Actions;
 use Filament\Actions\StaticAction;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Hidden;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Resources\Pages\ListRecords\Tab;
@@ -149,15 +153,23 @@ class ListInventories extends ListRecords
                 ->visible(fn (): bool => $this->activeTab === 'everyday'
                     && app(InventoryAccessService::class)->canUpdateInventory(Auth::user()))
                 ->modalHeading('Import Stock CSV')
-                ->modalDescription('This stages physical On Hand counts from a CSV and records inventory history. It does not push changes to Shopify.')
+                ->modalDescription('Upload physical On Hand counts, enter one reason for the file, and choose an approver. One request will include every SKU. Stock is sent to Shopify only after approval.')
+                ->modalSubmitActionLabel('Request approval')
                 ->form([
                     FileUpload::make('file')
                         ->label('CSV File')
                         ->required()
                         ->disk('local')
                         ->directory('imports/inventory')
+                        ->storeFileNamesIn('original_filename')
                         ->acceptedFileTypes(['text/csv', 'text/plain', 'application/vnd.ms-excel'])
-                        ->helperText('Accepted match columns: product_id, shopify_product_id, handle, sku, variant_id, or shopify_variant_id. The physical count column can be on_hand, inventory_qty, stock, quantity, or qty. Multi-variant products need SKU or variant ID.'),
+                        ->helperText('Use SKU and On Hand columns (zero is valid). Product/variant IDs and existing stock column aliases are also supported. Multi-variant products need SKU or variant ID. A Reason column is not required.'),
+                    Hidden::make('original_filename'),
+                    Textarea::make('reason')->label('Reason for this file')->required()->maxLength(2000)->rows(3)
+                        ->helperText('This reason applies to every SKU in the file.'),
+                    Select::make('approver_id')->label('Approver')->required()->searchable()
+                        ->options(fn (): array => User::query()->where('is_active', true)->permission(PermissionEnum::InventoryUpdate->value)
+                            ->whereKeyNot(Auth::id())->orderBy('name')->pluck('name', 'id')->all()),
                 ])
                 ->action(function (array $data, ProductInventoryCsvImporter $importer): void {
                     $file = is_string($data['file'] ?? null) ? $data['file'] : null;
@@ -171,7 +183,16 @@ class ListInventories extends ListRecords
                     }
 
                     try {
-                        $result = $importer->importFromPath(Storage::disk('local')->path($file), Auth::id());
+                        $request = $importer->createApprovalFromPath(Storage::disk('local')->path($file), (int) Auth::id(),
+                            (int) $data['approver_id'], basename((string) ($data['original_filename'] ?? $file)), (string) $data['reason']);
+                    } catch (\Illuminate\Validation\ValidationException $e) {
+                        $statePath = $this->getMountedActionForm()->getStatePath();
+                        $errors = [];
+                        foreach ($e->errors() as $field => $messages) {
+                            $field = in_array($field, ['file', 'reason', 'approver_id'], true) ? $field : 'file';
+                            $errors[$statePath.'.'.$field] = array_merge($errors[$statePath.'.'.$field] ?? [], $messages);
+                        }
+                        throw \Illuminate\Validation\ValidationException::withMessages($errors);
                     } catch (Throwable $e) {
                         Notification::make()
                             ->title('Stock import failed')
@@ -182,24 +203,9 @@ class ListInventories extends ListRecords
                         return;
                     }
 
-                    $skipped = $result['skipped_missing_identifier']
-                        + $result['skipped_missing_quantity']
-                        + $result['skipped_invalid_quantity']
-                        + $result['skipped_invalid_tracked']
-                        + $result['skipped_not_found']
-                        + $result['skipped_ambiguous'];
-
-                    $body = "Rows: {$result['total']}, Updated: {$result['updated']}, Unchanged: {$result['unchanged']}, Snapshots: {$result['snapshots']}, Skipped: {$skipped}.";
-                    if (($result['warnings'] ?? []) !== []) {
-                        $body .= "\n".implode("\n", $result['warnings']);
-                    }
-
-                    $notification = Notification::make()
-                        ->title('Stock import complete')
-                        ->body($body);
-
-                    $skipped > 0 ? $notification->warning() : $notification->success();
-                    $notification->send();
+                    Notification::make()->title('File approval requested')
+                        ->body('Request #'.$request->id.' contains '.$request->items->count().' SKU(s) awaiting the selected approver. Inventory counts have not been changed; the Shopify push will be queued after approval.')
+                        ->success()->send();
                 }),
             Actions\Action::make('reviewMyInventoryApprovals')
                 ->label(fn (): string => 'Review My Approvals'.($this->pendingInventoryApprovalsCount() > 0 ? ' ('.$this->pendingInventoryApprovalsCount().')' : ''))

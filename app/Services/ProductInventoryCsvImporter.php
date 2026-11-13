@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Models\InventoryAdjustmentRequest;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use League\Csv\Reader;
 
 final class ProductInventoryCsvImporter
@@ -15,8 +17,7 @@ final class ProductInventoryCsvImporter
 
     public function __construct(
         private readonly ProductInventoryHistoryRecorder $historyRecorder,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array{
@@ -91,12 +92,14 @@ final class ProductInventoryCsvImporter
                 if ($trackedValue !== null && $tracked === null) {
                     $result['skipped_invalid_tracked']++;
                     $this->warn($result, "Row {$rowNumber}: invalid tracked value '{$trackedValue}'.");
+
                     continue;
                 }
 
                 if ($quantityValue === null && $tracked !== false) {
                     $result['skipped_missing_quantity']++;
                     $this->warn($result, "Row {$rowNumber}: missing stock quantity.");
+
                     continue;
                 }
 
@@ -106,15 +109,17 @@ final class ProductInventoryCsvImporter
                     if ($quantity === null) {
                         $result['skipped_invalid_quantity']++;
                         $this->warn($result, "Row {$rowNumber}: invalid stock quantity '{$quantityValue}'.");
+
                         continue;
                     }
                 }
 
                 $skipReason = 'skipped_missing_identifier';
                 $variant = $this->resolveVariant($data, $skipReason);
-                if (!$variant instanceof Variant) {
+                if (! $variant instanceof Variant) {
                     $result[$skipReason]++;
                     $this->warn($result, $this->skipMessage($rowNumber, $skipReason, $data));
+
                     continue;
                 }
 
@@ -141,7 +146,7 @@ final class ProductInventoryCsvImporter
 
             foreach (array_keys($observedProductIds) as $productId) {
                 $product = Product::query()->with('variants')->find((int) $productId);
-                if (!$product instanceof Product) {
+                if (! $product instanceof Product) {
                     continue;
                 }
 
@@ -157,47 +162,76 @@ final class ProductInventoryCsvImporter
         return $result;
     }
 
-    public function createApprovalFromPath(string $absolutePath, int $requesterId, int $approverId, ?string $filename = null): \App\Models\InventoryAdjustmentRequest
+    public function createApprovalFromPath(string $absolutePath, int $requesterId, int $approverId, ?string $filename = null, ?string $fileReason = null): InventoryAdjustmentRequest
     {
+        app(InventoryAccessService::class)->authorizeInventory($requesterId);
+        app(InventoryAccessService::class)->authorizeInventory($approverId);
+        if ($requesterId === $approverId) {
+            throw ValidationException::withMessages(['approver_id' => 'Requester cannot approve their own inventory adjustment.']);
+        }
+        if ($fileReason !== null && trim($fileReason) === '') {
+            throw ValidationException::withMessages(['reason' => 'Enter one reason for this inventory file.']);
+        }
         $csv = Reader::createFromPath($absolutePath);
         $csv->setHeaderOffset(0);
         $items = [];
+        $seenVariants = [];
 
-        foreach ($csv->getRecords() as $row) {
+        foreach ($csv->getRecords() as $offset => $row) {
+            $rowNumber = (int) $offset + 1;
             $data = $this->normalizeRow($row);
             $quantityValue = $this->firstValue($data, [
                 'on_hand', 'on hand', 'stock on hand', 'inventory_qty', 'inventory quantity',
-                'inventory qty', 'quantity', 'qty', 'available', 'inventory',
+                'inventory qty', 'variant inventory qty', 'variant inventory quantity',
+                'stock', 'stock quantity', 'quantity', 'qty', 'available', 'available quantity',
+                'inventory available', 'inventory available in stock', 'inventory',
             ]);
-            $tracked = $this->parseTracked($this->firstValue($data, [
+            $trackedValue = $this->firstValue($data, [
                 'inventory_tracked', 'inventory tracked', 'variant inventory tracked', 'tracked',
-            ])) ?? true;
-            $reason = $this->firstValue($data, ['reason', 'correction reason', 'adjustment reason']);
-            if ($reason === null) {
-                throw \Illuminate\Validation\ValidationException::withMessages(['reason' => 'A reason is required for every inventory adjustment.']);
+            ]);
+            $parsedTracked = $this->parseTracked($trackedValue);
+            if ($trackedValue !== null && $parsedTracked === null) {
+                throw ValidationException::withMessages(['file' => "Row {$rowNumber}: invalid inventory tracked value."]);
             }
-            $quantity = $tracked === false ? null : ($quantityValue === null ? null : $this->parseQuantity($quantityValue));
-            if ($tracked !== false && $quantity === null) {
-                throw \Illuminate\Validation\ValidationException::withMessages(['quantity' => 'A valid stock quantity is required for every tracked inventory adjustment.']);
+            $tracked = $parsedTracked ?? true;
+            // The upload form supplies one reason for every row. Retain row-reason support for existing service callers.
+            $reason = $fileReason === null ? $this->firstValue($data, ['reason', 'correction reason', 'adjustment reason']) : trim($fileReason);
+            if ($reason === null) {
+                throw ValidationException::withMessages(['reason' => 'A reason is required for every inventory adjustment.']);
+            }
+            $quantity = $quantityValue === null ? null : $this->parseQuantity($quantityValue);
+            if (($quantityValue !== null && ($quantity === null || $quantity < 0)) || ($tracked && $quantity === null)) {
+                throw ValidationException::withMessages(['file' => "Row {$rowNumber}: enter a non-negative whole On Hand count for each tracked SKU."]);
             }
             $skipReason = 'skipped_missing_identifier';
             $variant = $this->resolveVariant($data, $skipReason);
-            if (!$variant instanceof Variant) {
-                throw \Illuminate\Validation\ValidationException::withMessages(['sku' => $this->skipMessage(count($items) + 2, $skipReason, $data)]);
+            if (! $variant instanceof Variant) {
+                throw ValidationException::withMessages(['file' => $this->skipMessage($rowNumber, $skipReason, $data)]);
             }
+            if (isset($seenVariants[$variant->id])) {
+                throw ValidationException::withMessages(['file' => "Row {$rowNumber}: SKU {$variant->sku} appears more than once. Use one count per variant."]);
+            }
+            $rowSku = $this->firstValue($data, ['sku', 'variant sku', 'variant_sku']);
+            if ($rowSku !== null && $rowSku !== (string) $variant->sku) {
+                throw ValidationException::withMessages(['file' => "Row {$rowNumber}: the SKU conflicts with the supplied product/variant identifier."]);
+            }
+            $seenVariants[$variant->id] = true;
             $items[] = [
                 'variant' => $variant,
                 'inventory_tracked' => $tracked,
-                'on_hand_quantity' => $quantity,
+                'on_hand_quantity' => $tracked ? $quantity : null,
                 'reason' => $reason,
             ];
+        }
+        if ($items === []) {
+            throw ValidationException::withMessages(['file' => 'The CSV contains no inventory adjustment rows.']);
         }
 
         return app(InventoryAdjustmentApprovalService::class)->submit($items, $requesterId, $approverId, 'file', 'csv', $filename);
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      */
     private function resolveVariant(array $row, string &$skipReason): ?Variant
     {
@@ -217,6 +251,7 @@ final class ProductInventoryCsvImporter
             }
 
             $skipReason = 'skipped_not_found';
+
             return null;
         }
 
@@ -234,6 +269,7 @@ final class ProductInventoryCsvImporter
             }
 
             $skipReason = 'skipped_not_found';
+
             return null;
         }
 
@@ -251,7 +287,7 @@ final class ProductInventoryCsvImporter
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      */
     private function resolveProduct(array $row): ?Product
     {
@@ -300,6 +336,7 @@ final class ProductInventoryCsvImporter
             }
 
             $skipReason = $variants->isEmpty() ? 'skipped_not_found' : 'skipped_ambiguous';
+
             return null;
         }
 
@@ -309,6 +346,7 @@ final class ProductInventoryCsvImporter
         }
 
         $skipReason = $variants->isEmpty() ? 'skipped_not_found' : 'skipped_ambiguous';
+
         return null;
     }
 
@@ -327,6 +365,7 @@ final class ProductInventoryCsvImporter
         }
 
         $skipReason = $variants->isEmpty() ? 'skipped_not_found' : 'skipped_ambiguous';
+
         return null;
     }
 
@@ -403,7 +442,7 @@ final class ProductInventoryCsvImporter
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      * @return array<string,mixed>
      */
     private function normalizeRow(array $row): array
@@ -431,14 +470,14 @@ final class ProductInventoryCsvImporter
     }
 
     /**
-     * @param array<string,mixed> $row
-     * @param array<int,string> $headers
+     * @param  array<string,mixed>  $row
+     * @param  array<int,string>  $headers
      */
     private function firstValue(array $row, array $headers): ?string
     {
         foreach ($headers as $header) {
             $key = $this->normalizeHeader($header);
-            if (!array_key_exists($key, $row)) {
+            if (! array_key_exists($key, $row)) {
                 continue;
             }
 
@@ -492,7 +531,7 @@ final class ProductInventoryCsvImporter
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      */
     private function skipMessage(int $rowNumber, string $skipReason, array $row): string
     {
@@ -507,7 +546,7 @@ final class ProductInventoryCsvImporter
     }
 
     /**
-     * @param array<string,mixed> $row
+     * @param  array<string,mixed>  $row
      */
     private function rowIdentifierLabel(array $row): string
     {
