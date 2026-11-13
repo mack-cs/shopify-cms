@@ -43,8 +43,8 @@ final class InventoryPendingPushCancellation
                 ->whereHas('items', fn ($q) => $q->whereIn('variant_id', $variantIds))->orderBy('id')->get();
             $variantIds = array_values(array_unique(array_merge($variantIds, $requests->flatMap(fn ($r) => $r->items->pluck('variant_id'))->map(fn ($id) => (int) $id)->all())));
             sort($variantIds);
-            if (count($variantIds) > 10) {
-                throw ValidationException::withMessages(['reason' => 'Linked approvals affect more than 10 SKUs. Review those bulk requests separately.']);
+            if (count($variantIds) > 1000) {
+                throw ValidationException::withMessages(['reason' => 'Linked approvals affect more than 1,000 SKUs. Narrow the selection or investigate the linked requests separately.']);
             }
         } while ($before !== $variantIds);
         $variants = Variant::query()->whereIn('id', $variantIds)->orderBy('id')->get();

@@ -203,5 +203,5 @@ it('hides single and bulk inventory pushes from staff with only status permissio
     Spatie\Permission\Models\Permission::findOrCreate(App\Enums\PermissionEnum::InventoryStatusUpdate->value);
     $actor->givePermissionTo(App\Enums\PermissionEnum::InventoryStatusUpdate->value); $this->actingAs($actor);
     Livewire\Livewire::test(App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
-        ->assertTableActionHidden('pushToShopify',$variant)->assertTableBulkActionHidden('pushToShopify');
+        ->assertTableActionDoesNotExist('pushToShopify')->assertTableBulkActionDoesNotExist('pushToShopify');
 });

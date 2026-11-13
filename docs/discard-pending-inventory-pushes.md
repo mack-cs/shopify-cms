@@ -1,8 +1,8 @@
 # Discard pending inventory pushes
 
-Super Admins now have **Discard pending pushes** on Everyday Inventory rows and on pending/approved/failed Inventory Approval rows. This is for cases such as LAB0184: Shopify was corrected manually, but an old unresolved local write intent freezes CMS On Hand and blocks later adjustments.
+Super Admins have **Discard pending pushes** as both a row action and a selected-record bulk action in Everyday Inventory and Inventory Approvals. Select the affected SKU rows or pending/approved/failed approval requests, then use the bulk action. Applied, rejected or cancelled approvals cannot be included. This is for cases such as LAB0184: Shopify was corrected manually, but an old unresolved local write intent freezes CMS On Hand and blocks later adjustments.
 
-The form previews the affected SKUs and approval IDs, requires a reason, and asks the administrator to confirm that current Shopify stock should replace the local counts. Linked multi-SKU approvals are included in full rather than silently cancelling one item inside an approved bulk request. Selections expanding beyond 10 SKUs are refused for separate operational review.
+The form previews the affected SKUs and approval IDs, requires a reason, and asks the administrator to confirm that current Shopify stock should replace the local counts. Linked multi-SKU approvals are included in full rather than silently cancelling one item inside an approved bulk request. Selections may contain up to 1,000 SKUs including linked approvals. The operation reads each SKU synchronously before making any local changes. Large selections require sufficient web/PHP request time; stage representative file sizes before production use. An incomplete read or expired worker lock prevents the transaction from committing.
 
 On confirmation, the action:
 
@@ -37,3 +37,11 @@ php vendor/pestphp/pest/bin/pest tests/Feature/InventoryPendingPushCancellationT
 Shopify is mocked in tests; production Shopify data is not used. Stage the migration, confirmation UI and multi-worker locking with the production database/cache drivers before production use.
 
 Validation: **73 tests passed, 588 assertions**, including 14 new cancellation tests and the related approval, On Hand sync, inventory UI, webhook, monitoring and independent safety regressions. New PHP files were formatted with Pint; `git diff --check` passed.
+
+## Approval-only Everyday Inventory
+
+The direct row and bulk **Push To Shopify** actions have been removed. The legacy bulk **Start Tracking Inventory** and **Set Sell When Out Of Stock** actions were also removed because they exposed immediate pushes outside approval. Use the existing **Edit Inventory** request for count/tracking changes or **Import Stock CSV** for one file-level approval. Submission does not send stock to Shopify; the selected independent approver authorizes the write. Supplier receipt actions on the Supplier Orders tab are unchanged.
+
+Bulk discard uses the same preview fingerprint, server-side Super Admin authorization, per-variant locks, atomic cancellation transaction and durable replay barriers as row discard. It requires one reason and explicit acknowledgement for the entire disclosed scope. It sends no inventory mutations to Shopify and dispatches no push jobs. Failed-job audit history is retained.
+
+Bulk/approval-only validation: **63 tests passed, 655 assertions** across cancellation, inventory workspace, file approvals, approval workflow and release-risk regression tests. Includes an actual 12-SKU file cancellation, both bulk entry points, staff restrictions, acknowledgement, applied-request rejection and absence of direct push controls. Shopify HTTP calls were mocked. Not deployed.

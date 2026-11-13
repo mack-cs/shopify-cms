@@ -142,13 +142,13 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionVisible('editInventory', $variant)
         ->assertTableActionVisible('updateStatus', $variant)
         ->assertTableActionVisible('refreshFromShopify', $variant)
-        ->assertTableActionVisible('pushToShopify', $variant)
+        ->assertTableActionDoesNotExist('pushToShopify')
         ->assertTableActionHidden('addSupplierOrder', $variant)
         ->assertTableActionHidden('receiveSupplierStock', $variant)
         ->assertTableActionHidden('viewSupplierOrders', $variant)
         ->assertTableActionHidden('viewInventoryAdjustments', $variant)
         ->assertTableBulkActionVisible('exportSelectedInventory')
-        ->assertTableBulkActionVisible('updateInventoryPolicy')
+        ->assertTableBulkActionDoesNotExist('updateInventoryPolicy')
         ->assertTableBulkActionHidden('exportSelectedOrders')
         ->assertTableBulkActionHidden('pushReceivedToShopify')
         ->assertSee('Check Shopify Inventory')
@@ -166,9 +166,9 @@ it('separates everyday inventory controls from supplier order controls', functio
         ->assertTableActionVisible('refreshFromShopify', $variant)
         ->assertTableActionHidden('editInventory', $variant)
         ->assertTableActionHidden('updateStatus', $variant)
-        ->assertTableActionHidden('pushToShopify', $variant)
+        ->assertTableActionDoesNotExist('pushToShopify')
         ->assertTableBulkActionHidden('exportSelectedInventory')
-        ->assertTableBulkActionHidden('updateInventoryPolicy')
+        ->assertTableBulkActionDoesNotExist('updateInventoryPolicy')
         ->assertTableBulkActionVisible('exportSelectedOrders')
         ->assertTableBulkActionVisible('exportSelectedReceipts')
         ->assertTableBulkActionVisible('pushReceivedToShopify')
@@ -368,53 +368,17 @@ it('shows and filters variants that can sell when out of stock', function (): vo
         ->assertCanNotSeeTableRecords([$sellOutOfStock]);
 });
 
-it('bulk updates sell when out of stock policy from the inventory workspace', function (): void {
-    $user = User::factory()->create(['is_active'=>true]);
+it('offers no direct inventory writes even to inventory updaters', function (): void {
+    $user = User::factory()->create(['is_active' => true]);
     Permission::findOrCreate(PermissionEnum::InventoryUpdate->value);
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
-    $import = Import::query()->create([
-        'filename' => 'bulk-sell-oos.csv', 'mode' => 'append', 'status' => 'ready', 'created_by' => $user->id,
-    ]);
-    $product = Product::query()->create([
-        'import_id' => $import->id, 'handle' => 'bulk-sell-oos', 'title' => 'Bulk Sell OOS', 'status' => 'active',
-    ]);
-    $selected = Variant::query()->create([
-        'product_id' => $product->id,
-        'sku' => 'BULK-OOS-1',
-        'shopify_id' => 'gid://shopify/ProductVariant/1001',
-        'inventory_policy' => 'continue',
-        'inventory_local_dirty' => false,
-    ]);
-    $alsoSelected = Variant::query()->create([
-        'product_id' => $product->id,
-        'sku' => 'BULK-OOS-2',
-        'shopify_id' => 'gid://shopify/ProductVariant/1002',
-        'inventory_policy' => 'continue',
-        'inventory_local_dirty' => false,
-    ]);
-    $notSelected = Variant::query()->create([
-        'product_id' => $product->id,
-        'sku' => 'BULK-OOS-3',
-        'inventory_policy' => 'continue',
-        'inventory_local_dirty' => false,
-    ]);
-    Variant::withoutEvents(fn () => Variant::query()
-        ->whereKey([$selected->id, $alsoSelected->id, $notSelected->id])
-        ->update(['inventory_local_dirty' => false]));
     $this->actingAs($user);
 
     Livewire::test(ListInventories::class)
-        ->callTableBulkAction('updateInventoryPolicy', [$selected, $alsoSelected], data: [
-            'inventory_policy' => 'deny',
-            'push_to_shopify' => false,
-        ]);
-
-    expect($selected->fresh()->inventory_policy)->toBe('deny')
-        ->and($selected->fresh()->inventory_local_dirty)->toBeTrue()
-        ->and($alsoSelected->fresh()->inventory_policy)->toBe('deny')
-        ->and($alsoSelected->fresh()->inventory_local_dirty)->toBeTrue()
-        ->and($notSelected->fresh()->inventory_policy)->toBe('continue')
-        ->and($notSelected->fresh()->inventory_local_dirty)->toBeFalse();
+        ->assertTableActionDoesNotExist('pushToShopify')
+        ->assertTableBulkActionDoesNotExist('pushToShopify')
+        ->assertTableBulkActionDoesNotExist('startTracking')
+        ->assertTableBulkActionDoesNotExist('updateInventoryPolicy');
 });
 
 it('shows active and draft products in everyday and supplier inventory', function (): void {

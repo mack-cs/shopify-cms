@@ -299,3 +299,81 @@ function cancellationShopifyRead(Variant|array $variant, int $onHand, ?Closure $
         ]]]]);
     });
 }
+
+it('bulk discards a file approval larger than ten SKUs with one confirmation and only Shopify reads', function () {
+    $f = cancellationFixture();
+    $variants = collect([$f['variant']]);
+    for ($i = 0; $i < 11; $i++) {
+        $variants->push(cancellationVariant($f['import'], 9100 + $i, 'BULK-'.$i));
+    }
+    $file = app(InventoryAdjustmentApprovalService::class)->submit($variants->map(fn ($v) => [
+        'variant' => $v, 'inventory_tracked' => true, 'on_hand_quantity' => 7, 'reason' => 'File count',
+    ])->all(), $f['requester']->id, $f['admin']->id, 'file');
+    $file = app(InventoryAdjustmentApprovalService::class)->approve($file, $f['admin']->id, false);
+    $job = cancellationQueueJob($variants->pluck('id')->all(), $file->sync_batch_id, $f['admin']->id);
+    cancellationShopifyRead($variants->all(), 0);
+    $this->actingAs($f['admin']);
+    Livewire::test(ListInventoryAdjustmentRequests::class)
+        ->assertTableBulkActionVisible('discardPendingPushes')
+        ->callTableBulkAction('discardPendingPushes', [$f['request'], $file], data: [
+            'reason' => 'Use corrected Shopify counts', 'accept_shopify' => true,
+        ])
+        ->assertHasNoTableBulkActionErrors();
+    expect($file->fresh()->status)->toBe('CANCELLED')
+        ->and($f['request']->fresh()->status)->toBe('CANCELLED')
+        ->and(InventoryPushCancellation::count())->toBe(12)
+        ->and(DB::table('jobs')->where('id', $job)->exists())->toBeFalse();
+    foreach ($variants as $variant) {
+        expect($variant->fresh()->current_on_hand_quantity)->toBe(0);
+    }
+    Http::assertSentCount(12);
+    Bus::assertNothingDispatched();
+});
+
+it('offers bulk discard only to Super Admins in Everyday Inventory and approvals', function () {
+    $f = cancellationFixture();
+    $this->actingAs($f['requester']);
+    Livewire::test(ListInventoryAdjustmentRequests::class)->assertTableBulkActionHidden('discardPendingPushes');
+    Livewire::test(\App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
+        ->assertTableBulkActionHidden('discardPendingPushes');
+    $this->actingAs($f['admin']);
+    Livewire::test(\App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
+        ->assertTableBulkActionVisible('discardPendingPushes')
+        ->set('activeTab', 'orders')
+        ->assertTableBulkActionHidden('discardPendingPushes');
+});
+
+it('requires acknowledgement for Everyday Inventory bulk discard and then refreshes all selected rows', function () {
+    $f = cancellationFixture();
+    $other = cancellationVariant($f['import'], 9200, 'OTHER-BULK');
+    cancellationShopifyRead([$f['variant'], $other], 0);
+    $this->actingAs($f['admin']);
+    Livewire::test(\App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
+        ->callTableBulkAction('discardPendingPushes', [$f['variant'], $other], data: [
+            'reason' => 'Use Shopify', 'accept_shopify' => false,
+        ])->assertHasTableBulkActionErrors(['accept_shopify']);
+    expect(InventoryPushCancellation::count())->toBe(0);
+    Http::assertNothingSent();
+    Livewire::test(\App\Filament\Resources\InventoryResource\Pages\ListInventories::class)
+        ->callTableBulkAction('discardPendingPushes', [$f['variant'], $other], data: [
+            'reason' => 'Use Shopify', 'accept_shopify' => true,
+        ])->assertHasNoTableBulkActionErrors();
+    expect(InventoryPushCancellation::count())->toBe(2);
+});
+
+it('refuses a bulk selection containing an applied approval without changing pending requests', function () {
+    $f = cancellationFixture();
+    $applied = app(InventoryAdjustmentApprovalService::class)->submit([[
+        'variant' => $f['variant'], 'inventory_tracked' => true, 'on_hand_quantity' => 7, 'reason' => 'Previous count',
+    ]], $f['requester']->id, $f['admin']->id);
+    $applied->update(['status' => InventoryAdjustmentRequest::STATUS_APPLIED]);
+    $this->actingAs($f['admin']);
+    Livewire::test(ListInventoryAdjustmentRequests::class)
+        ->callTableBulkAction('discardPendingPushes', [$f['request'], $applied], data: [
+            'reason' => 'Use Shopify', 'accept_shopify' => true,
+        ])->assertHasTableBulkActionErrors(['fingerprint']);
+    expect($f['request']->fresh()->status)->toBe('APPROVED')
+        ->and($applied->fresh()->status)->toBe('APPLIED')
+        ->and(InventoryPushCancellation::count())->toBe(0);
+    Http::assertNothingSent();
+});

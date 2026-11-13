@@ -13,6 +13,8 @@ use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Collection;
+use Illuminate\Validation\ValidationException;
 
 class InventoryAdjustmentRequestResource extends Resource
 {
@@ -93,6 +95,15 @@ class InventoryAdjustmentRequestResource extends Resource
                     ->form([Forms\Components\Textarea::make('reason')->label('Rejection reason')->rows(3)])
                     ->visible(fn (InventoryAdjustmentRequest $record): bool => self::canReviewRequest($record))
                     ->action(fn (InventoryAdjustmentRequest $record, array $data) => app(InventoryAdjustmentApprovalService::class)->reject($record, (int) Auth::id(), $data['reason'] ?? null)),
+            ])
+            ->bulkActions([
+                \App\Filament\Actions\DiscardPendingInventoryPushes::makeBulk(function (Collection $records): array {
+                    if ($records->contains(fn ($record) => ! in_array($record->status, ['PENDING_APPROVAL', 'APPROVED', 'FAILED'], true))) {
+                        throw ValidationException::withMessages(['reason' => 'Select only pending, approved or failed requests. Applied, rejected and cancelled requests cannot be discarded.']);
+                    }
+
+                    return $records->flatMap(fn ($record) => $record->items()->pluck('variant_id'))->unique()->values()->all();
+                }),
             ]);
     }
 
