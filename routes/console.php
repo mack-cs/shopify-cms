@@ -1,31 +1,5 @@
 <?php
 
-Artisan::command('alt-text-exports:cleanup', function (): void {
-    $count = app(ImageAltTextExportService::class)->cleanupExpired();
-    $this->info('Removed '.$count.' expired alt text exports.');
-})->purpose('Remove expired alt text export files, image snapshots and temporary files');
-
-Schedule::command('alt-text-exports:cleanup')->hourly()->withoutOverlapping();
-
-Schedule::call(fn () => app(StackSellabilityShopifyPushService::class)->retryPending())
-    ->everyFiveMinutes()->name('stack-sellability-retries')->withoutOverlapping(2)->onOneServer();
-
-Schedule::call(fn () => app(EngravedBeadRecalculation::class)->dispatchPending())
-    ->everyMinute()->name('engraved-bead-reconciliation')->withoutOverlapping(2)->onOneServer();
-
-Schedule::call(fn () => app(InventoryLevelReconciliation::class)->dispatchPending())
-    ->everyMinute()->name('inventory-level-reconciliation')->withoutOverlapping(2)->onOneServer();
-
-Schedule::call(function (): void {
-    ShopYourVibeDraft::where('status', 'pushing')->orderBy('id')->chunkById(100, function ($drafts): void {
-        foreach ($drafts as $draft) {
-            DB::transaction(function () use ($draft): void {
-                app(ShopYourVibeEditing::class)->recoverParent(ShopYourVibeDraft::lockForUpdate()->findOrFail($draft->id));
-            });
-        }
-    });
-})->everyMinute()->name('syv-parent-recovery')->withoutOverlapping(2)->onOneServer();
-
 use App\Jobs\DailyShopifyInventoryRefreshJob;
 use App\Jobs\ReconcileComplementaryProductsJob;
 use App\Jobs\ReconcileProductImageBackupsJob;
@@ -75,6 +49,32 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Schedule;
 use League\Csv\Reader;
+
+Artisan::command('alt-text-exports:cleanup', function (): void {
+    $count = app(ImageAltTextExportService::class)->cleanupExpired();
+    $this->info('Removed '.$count.' expired alt text exports.');
+})->purpose('Remove expired alt text export files, image snapshots and temporary files');
+
+Schedule::command('alt-text-exports:cleanup')->hourly()->withoutOverlapping();
+
+Schedule::call(fn () => app(StackSellabilityShopifyPushService::class)->retryPending())
+    ->everyFiveMinutes()->name('stack-sellability-retries')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(fn () => app(EngravedBeadRecalculation::class)->dispatchPending())
+    ->everyMinute()->name('engraved-bead-reconciliation')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(fn () => app(InventoryLevelReconciliation::class)->dispatchPending())
+    ->everyMinute()->name('inventory-level-reconciliation')->withoutOverlapping(2)->onOneServer();
+
+Schedule::call(function (): void {
+    ShopYourVibeDraft::where('status', 'pushing')->orderBy('id')->chunkById(100, function ($drafts): void {
+        foreach ($drafts as $draft) {
+            DB::transaction(function () use ($draft): void {
+                app(ShopYourVibeEditing::class)->recoverParent(ShopYourVibeDraft::lockForUpdate()->findOrFail($draft->id));
+            });
+        }
+    });
+})->everyMinute()->name('syv-parent-recovery')->withoutOverlapping(2)->onOneServer();
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());

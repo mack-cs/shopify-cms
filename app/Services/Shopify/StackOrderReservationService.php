@@ -233,6 +233,7 @@ final class StackOrderReservationService
 
         try {
             $locked = ShopifyStackInventoryReservation::query()->findOrFail($reservation->id);
+            $this->guardManualClose($locked);
             if ($locked->status === ShopifyStackInventoryReservation::STATUS_RELEASED
                 && $locked->remainingReserved() <= 0) {
                 return false;
@@ -301,6 +302,7 @@ final class StackOrderReservationService
 
         try {
             $locked = ShopifyStackInventoryReservation::query()->findOrFail($reservation->id);
+            $this->guardManualClose($locked);
             if (in_array($locked->status, [
                 ShopifyStackInventoryReservation::STATUS_RELEASED,
                 ShopifyStackInventoryReservation::STATUS_COMPLETED,
@@ -589,6 +591,17 @@ final class StackOrderReservationService
         $reservation->save();
 
         return $reservation;
+    }
+
+    private function guardManualClose(ShopifyStackInventoryReservation $reservation): void
+    {
+        $reason = $this->fulfillment->manualCloseBlockReason($reservation->shopify_order_id);
+        if ($reason === null) {
+            return;
+        }
+        $reservation->forceFill(['error_message' => $reason])->save();
+
+        throw new \RuntimeException(trim((string) ($reservation->shopify_order_name ?: $reservation->shopify_order_id)).': '.$reason);
     }
 
     private function releaseRemaining(ShopifyStackInventoryReservation $reservation, string $eventKey): bool

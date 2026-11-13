@@ -96,9 +96,9 @@ final class ShopifyStackInventoryReservationResource extends Resource
                 ]),
                 SelectFilter::make('leftover')
                     ->label('Still reserved')
-                    ->options(['yes' => 'Has leftover reserved stock'])
+                    ->options(['yes' => 'Fulfilled or cancelled, still reserved'])
                     ->query(fn ($query, array $data) => ($data['value'] ?? null) === 'yes'
-                        ? $query->withLeftoverReserved()
+                        ? $query->withStaleLeftoverReserved()
                         : $query),
                 Filter::make('reserved_on')
                     ->label('Reserved on')
@@ -242,10 +242,10 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Cancel this stack reservation?')
-                    ->modalDescription('This closes the reservation in the background. It does not depend on a saved fulfillment status. If live Shopify still holds the reserved units, they move back to available. If Shopify no longer holds them, the row is closed and no extra quantity is added. Already consumed units are not reversed.')
+                    ->modalDescription('This is only allowed when live Shopify shows the order as fulfilled or cancelled. An unfulfilled order keeps its reservation. Reserved units move back to available only when Shopify still holds them. Already consumed units are not reversed.')
                     ->modalSubmitActionLabel('Cancel reservation')
                     ->visible(fn (): bool => self::canCancelReservations())
-                    ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
+                    ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record) || ! $record->localOrderIsFulfilledOrCancelled())
                     ->action(function (ShopifyStackInventoryReservation $record): void {
                         CancelShopifyStackReservationsJob::dispatch([$record->id], Auth::id());
                         Notification::make()
@@ -260,10 +260,10 @@ final class ShopifyStackInventoryReservationResource extends Resource
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Delete this stack reservation?')
-                    ->modalDescription('This removes the reserved units from stock. Available does not increase. On hand drops by the units Shopify still holds as reserved. Units Shopify no longer holds are closed on this row only. Already consumed units stay consumed. The row stays as a deleted record, and a later order update does not reserve these units again.')
+                    ->modalDescription('This is only allowed when live Shopify shows the order as fulfilled or cancelled. An unfulfilled order keeps its reservation. Held units are removed from stock and are not returned to available. Already consumed units stay consumed.')
                     ->modalSubmitActionLabel('Delete reservation')
                     ->visible(fn (): bool => self::canCancelReservations())
-                    ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record))
+                    ->hidden(fn (ShopifyStackInventoryReservation $record): bool => self::isSettled($record) || ! $record->localOrderIsFulfilledOrCancelled())
                     ->action(function (ShopifyStackInventoryReservation $record): void {
                         self::queueReservationDeletes([(int) $record->id]);
                     }),
@@ -276,7 +276,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ->color('danger')
                         ->requiresConfirmation()
                         ->modalHeading('Cancel the selected stack reservations?')
-                        ->modalDescription('This closes the selected reservations in the background. It does not depend on a saved fulfillment status. Reserved units move back to available only when live Shopify still holds them. Already consumed units are not reversed.')
+                        ->modalDescription('Only reservations whose live Shopify order is fulfilled or cancelled are closed. Unfulfilled orders are left reserved. Reserved units move back to available only when Shopify still holds them.')
                         ->modalSubmitActionLabel('Cancel reservations')
                         ->visible(fn (): bool => self::canCancelReservations())
                         ->action(function (Collection $records): void {
@@ -297,7 +297,7 @@ final class ShopifyStackInventoryReservationResource extends Resource
                         ->color('danger')
                         ->requiresConfirmation()
                         ->modalHeading('Delete the selected stack reservations?')
-                        ->modalDescription('This removes the reserved units from stock. Available does not increase. On hand drops by the units Shopify still holds as reserved. Units Shopify no longer holds are closed on the row only. Already consumed units stay consumed. Deleted rows are kept, and a later order update does not reserve these units again.')
+                        ->modalDescription('Only reservations whose live Shopify order is fulfilled or cancelled are deleted. Unfulfilled orders stay reserved. Held units are not returned to available.')
                         ->modalSubmitActionLabel('Delete reservations')
                         ->visible(fn (): bool => self::canCancelReservations())
                         ->action(function (Collection $records): void {

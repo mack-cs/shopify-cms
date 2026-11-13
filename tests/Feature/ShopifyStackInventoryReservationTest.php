@@ -201,14 +201,13 @@ it('lets a super admin cancel leftover reservations on fulfilled orders without 
     $inventory = stackInventoryMock();
     $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
     $inventory->shouldReceive('consumeReserved')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory);
-    $service->process(stackOrderEvent(8010, [
+    stackOrderService($inventory)->process(stackOrderEvent(8010, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 2],
     ]));
     (new StackFulfillmentInventoryService(new StackInventoryMovementService($inventory)))
         ->process(stackFulfillment(7010, 8010, 1));
 
-    $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
+    $result = stackOrderService($inventory, 'FULFILLED')->cancelManually(ShopifyStackInventoryReservation::query()->get());
 
     expect($result['cancelled'])->toBe(2)
         ->and($result['skipped'])->toBe(0)
@@ -219,22 +218,24 @@ it('lets a super admin cancel leftover reservations on fulfilled orders without 
         ->and(ShopifyStackInventoryReservation::query()->sum('released_quantity'))->toBe(3);
 });
 
-it('does not reserve again after a manual cancel when the same open order is updated', function (): void {
+it('refuses to cancel a reservation while the order is still unfulfilled', function (): void {
     stackReservationRecords();
     $inventory = stackInventoryMock();
-    $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
-    $service = stackOrderService($inventory);
+    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $service = stackOrderService($inventory, 'UNFULFILLED');
     $service->process(stackOrderEvent(8011, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
     ]));
-    $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
-    $service->process(stackOrderEvent(8011, [
-        ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
-    ], 'orders/updated', 'after-manual-cancel'));
 
-    expect(ShopifyStackInventoryMovement::query()->where('action', 'reserve')->count())->toBe(2)
+    $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
+
+    expect($result['cancelled'])->toBe(0)
+        ->and($result['failed'])->toBe(2)
+        ->and($result['errors'][0])->toContain('still unfulfilled')
+        ->and(ShopifyStackInventoryReservation::query()->sum('reserved_quantity'))->toBe(3)
+        ->and(ShopifyStackInventoryReservation::query()->sum('released_quantity'))->toBe(0)
         ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_RELEASED]);
+        ->toBe([ShopifyStackInventoryReservation::STATUS_PENDING]);
 });
 
 it('marks snapshot-only reservations released without a Shopify inventory move', function (): void {
@@ -268,24 +269,34 @@ it('marks snapshot-only reservations released without a Shopify inventory move',
         ->and($reservation->fresh()->error_message)->toContain('Manually cancelled');
 });
 
-it('lets a super admin cancel a reservation while Shopify still shows the order as unfulfilled', function (): void {
+it('lets a super admin cancel a reservation when Shopify shows the order as cancelled', function (): void {
     stackReservationRecords();
-    stackShopifyOrder(8014, 'FULFILLED');
     $inventory = stackInventoryMock();
     $inventory->shouldReceive('moveQuantity')->times(4)->andReturn(['createdAt' => now()->toIso8601String()]);
     $service = stackOrderService($inventory, 'UNFULFILLED');
     $service->process(stackOrderEvent(8014, [
         ['id' => 10001, 'variant_id' => 9001, 'sku' => 'STACK-A', 'quantity' => 1],
     ]));
+    $gateway = Mockery::mock(ShopifyGraphqlGateway::class);
+    $gateway->shouldReceive('graphql')->andReturn(['nodes' => [[
+        'id' => 'gid://shopify/Order/8014',
+        'name' => '#8014',
+        'displayFulfillmentStatus' => 'UNFULFILLED',
+        'cancelledAt' => '2026-11-12T10:00:00Z',
+    ]]]);
+    $cancelled = new StackOrderReservationService(
+        $inventory,
+        new StackInventoryMovementService($inventory),
+        new StackOrderLineMapper,
+        new StackOrderFulfillmentInspector($gateway),
+    );
 
-    $result = $service->cancelManually(ShopifyStackInventoryReservation::query()->get());
+    $result = $cancelled->cancelManually(ShopifyStackInventoryReservation::query()->get());
 
     expect($result['cancelled'])->toBe(2)
-        ->and($result['skipped'])->toBe(0)
+        ->and($result['failed'])->toBe(0)
         ->and(ShopifyStackInventoryReservation::query()->pluck('status')->unique()->all())
-        ->toBe([ShopifyStackInventoryReservation::STATUS_RELEASED])
-        ->and(ShopifyStackInventoryReservation::query()->sum('released_quantity'))->toBe(3)
-        ->and(ShopifyStackInventoryReservation::query()->first()->error_message)->not->toContain('does not show this order as fully fulfilled');
+        ->toBe([ShopifyStackInventoryReservation::STATUS_RELEASED]);
 });
 
 it('reserves from live Shopify and ignores a local fulfilled order record', function (): void {
@@ -416,6 +427,7 @@ it('shows stack reservation cancel actions only to super admins', function (): v
         'released_quantity' => 0,
         'status' => ShopifyStackInventoryReservation::STATUS_PENDING,
     ]);
+    stackShopifyOrder(8013, 'FULFILLED');
 
     $admin = User::factory()->create();
     $admin->assignRole(RolesEnum::Admin->value);
@@ -439,6 +451,30 @@ it('shows stack reservation cancel actions only to super admins', function (): v
         ->assertTableBulkActionVisible('deleteReservations')
         ->assertTableActionVisible('scanLeftoverReservations')
         ->assertTableActionVisible('deleteFilteredReservations');
+});
+
+it('hides unfulfilled orders from the leftover reservation filter', function (): void {
+    Role::findOrCreate(RolesEnum::SuperAdmin->value);
+    $records = stackReservationRecords();
+    $fulfilled = stackLeftoverReservation($records, 9020, 2, 0);
+    $cancelled = stackLeftoverReservation($records, 9021, 1, 0);
+    $open = stackLeftoverReservation($records, 9022, 1, 0);
+    stackShopifyOrder(9020, 'FULFILLED');
+    ShopifyOrder::factory()->create([
+        'shopify_order_id' => 'gid://shopify/Order/9021',
+        'name' => '#9021',
+        'fulfillment_status' => 'UNFULFILLED',
+        'cancelled_at_shopify' => now(),
+    ]);
+    stackShopifyOrder(9022, 'UNFULFILLED');
+    $super = User::factory()->create();
+    $super->assignRole(RolesEnum::SuperAdmin->value);
+    $this->actingAs($super);
+
+    Livewire::test(ListShopifyStackInventoryReservations::class)
+        ->filterTable('leftover', 'yes')
+        ->assertCanSeeTableRecords([$fulfilled, $cancelled])
+        ->assertCanNotSeeTableRecords([$open]);
 });
 
 it('reports leftover reserved stock on fulfilled Shopify orders without including open orders as fulfilled leftovers', function (): void {
@@ -485,12 +521,12 @@ it('reports leftover reserved stock on fulfilled Shopify orders without includin
         ->and($report['unknown_rows'])->toBe(0);
 });
 
-it('cancels selected reservations without a live fulfillment gate', function (): void {
+it('cancels a fulfilled reservation and leaves an unfulfilled order reserved', function (): void {
     $records = stackReservationRecords();
     $fulfilled = stackLeftoverReservation($records, 9013, 2, 0);
     $open = stackLeftoverReservation($records, 9014, 1, 0);
     $inventory = stackInventoryMock();
-    $inventory->shouldReceive('moveQuantity')->twice()->andReturn(['createdAt' => now()->toIso8601String()]);
+    $inventory->shouldReceive('moveQuantity')->once()->andReturn(['createdAt' => now()->toIso8601String()]);
     $service = stackOrderService($inventory, lookupByOrder: [
         'gid://shopify/Order/9013' => 'FULFILLED',
         'gid://shopify/Order/9014' => 'UNFULFILLED',
@@ -498,10 +534,12 @@ it('cancels selected reservations without a live fulfillment gate', function ():
 
     $result = $service->cancelManually([$fulfilled, $open]);
 
-    expect($result['cancelled'])->toBe(2)
-        ->and($result['skipped'])->toBe(0)
+    expect($result['cancelled'])->toBe(1)
+        ->and($result['failed'])->toBe(1)
+        ->and($result['errors'][0])->toContain('still unfulfilled')
         ->and($fulfilled->fresh()->remainingReserved())->toBe(0)
-        ->and($open->fresh()->remainingReserved())->toBe(0);
+        ->and($open->fresh()->remainingReserved())->toBe(1)
+        ->and($open->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_PENDING);
 });
 
 it('closes a reservation without adding Shopify quantity when live reserved stock is already zero', function (): void {
@@ -511,7 +549,7 @@ it('closes a reservation without adding Shopify quantity when live reserved stoc
     $inventory->shouldNotReceive('moveQuantity');
     $reservation = stackLeftoverReservation($records, 8032, 1, 0);
 
-    $result = stackOrderService($inventory)->cancelManually([$reservation]);
+    $result = stackOrderService($inventory, 'FULFILLED')->cancelManually([$reservation]);
 
     expect($result['cancelled'])->toBe(1)
         ->and($reservation->fresh()->status)->toBe(ShopifyStackInventoryReservation::STATUS_RELEASED)
@@ -583,6 +621,7 @@ it('queues a manual reservation cancel', function (): void {
     Role::findOrCreate(RolesEnum::SuperAdmin->value);
     $records = stackReservationRecords();
     $reservation = stackLeftoverReservation($records, 8035, 1, 0);
+    stackShopifyOrder(8035, 'FULFILLED');
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
     $this->actingAs($super);
@@ -610,6 +649,8 @@ it('deletes only the reservations reserved on the filtered day', function (): vo
         'reserved_at' => '2026-09-27 08:00:00',
         'shopify_order_created_at' => '2026-09-26 11:00:00',
     ])->save();
+    stackShopifyOrder(9261, 'FULFILLED');
+    stackShopifyOrder(9262, 'CANCELLED');
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
     $this->actingAs($super);
@@ -685,7 +726,7 @@ it('removes held reserved units when a reservation is deleted and does not retur
     $inventory->shouldNotReceive('moveQuantity');
     $reservation = stackLeftoverReservation($records, 9040, 2, 0);
 
-    $result = stackOrderService($inventory)->deleteHeldStock([$reservation], 15);
+    $result = stackOrderService($inventory, 'FULFILLED')->deleteHeldStock([$reservation], 15);
 
     $fresh = $reservation->fresh();
     expect($result['deleted'])->toBe(1)
@@ -705,7 +746,7 @@ it('closes a deleted reservation without a Shopify adjustment when live reserved
     $inventory->shouldNotReceive('moveQuantity');
     $reservation = stackLeftoverReservation($records, 9041, 3, 0);
 
-    $result = stackOrderService($inventory)->deleteHeldStock([$reservation]);
+    $result = stackOrderService($inventory, 'FULFILLED')->deleteHeldStock([$reservation]);
 
     $fresh = $reservation->fresh();
     expect($result['deleted'])->toBe(1)
@@ -726,7 +767,7 @@ it('removes only the reserved units Shopify still holds and closes the rest on t
     $inventory->shouldNotReceive('moveQuantity');
     $reservation = stackLeftoverReservation($records, 9042, 4, 1);
 
-    $result = stackOrderService($inventory)->deleteHeldStock([$reservation]);
+    $result = stackOrderService($inventory, 'FULFILLED')->deleteHeldStock([$reservation]);
 
     $fresh = $reservation->fresh();
     expect($result['deleted'])->toBe(1)
@@ -742,6 +783,7 @@ it('queues a manual reservation delete', function (): void {
     Role::findOrCreate(RolesEnum::SuperAdmin->value);
     $records = stackReservationRecords();
     $reservation = stackLeftoverReservation($records, 9043, 1, 0);
+    stackShopifyOrder(9043, 'FULFILLED');
     $super = User::factory()->create();
     $super->assignRole(RolesEnum::SuperAdmin->value);
     $this->actingAs($super);

@@ -19,6 +19,19 @@ final class StackOrderFulfillmentInspector
         return (bool) ($snapshot['fulfilled'] ?? false);
     }
 
+    public function manualCloseBlockReason(string $orderId): ?string
+    {
+        $snapshot = $this->snapshotFor($orderId);
+        if (! ($snapshot['known'] ?? false)) {
+            return 'Shopify fulfillment status could not be confirmed, so this reservation was left unchanged.';
+        }
+        if (($snapshot['fulfilled'] ?? false) || filled($snapshot['cancelled_at'] ?? null)) {
+            return null;
+        }
+
+        return 'This order is still unfulfilled, so the reservation was left in place.';
+    }
+
     /**
      * @param  array<int, string>  $orderIds
      * @return array<string, array{gid:string,name:?string,display_fulfillment_status:?string,cancelled_at:?string,fulfilled:bool,known:bool}>
