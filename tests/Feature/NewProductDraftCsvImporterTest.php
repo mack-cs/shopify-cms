@@ -991,11 +991,25 @@ it('exports complementary references as SKUs for handles Shopify IDs and unsynce
     expect($csv)->toContain('COMP-001; COMP-002')->not->toContain('complement-handle')->not->toContain('gid://shopify/Product/710090');
 });
 
-it('reports missing complementary SKUs rather than exporting handles or silently dropping references', function (): void {
+it('exports product names when complementary SKUs are missing and preserves unresolved references', function (): void {
     Storage::fake('public');
+    Product::create(['import_id' => $this->draftCsvImport->id, 'title' => 'Indigo Baobab Bracelet',
+        'handle' => 'indigo-baobab', 'shopify_id' => 'gid://shopify/Product/710091', 'status' => 'active']);
+    NewProductDraft::create(['handle' => 'draft-no-sku', 'title' => 'Draft Without SKU']);
     $draft = NewProductDraft::create(['handle' => 'export-parent', 'sku' => 'PARENT', 'title' => 'Parent',
-        'complementary_products' => 'missing-complement']);
-    expect(fn () => app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['complementary_products']))
-        ->toThrow(InvalidArgumentException::class, 'no matching SKU was found');
-    expect(Storage::disk('public')->allFiles())->toBe([]);
+        'complementary_products' => 'gid://shopify/Product/710091; draft-no-sku; Unmatched Product Name']);
+    $result = app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['complementary_products']);
+    expect(Storage::disk($result['disk'])->get($result['path']))
+        ->toContain('Indigo Baobab Bracelet; Draft Without SKU; Unmatched Product Name');
+});
+
+it('resolves a complementary product name to its SKU when available', function (): void {
+    Storage::fake('public');
+    $product = Product::create(['import_id' => $this->draftCsvImport->id, 'title' => 'Indigo Baobab Bracelet',
+        'handle' => 'indigo-baobab', 'status' => 'active']);
+    Variant::withoutEvents(fn () => Variant::create(['product_id' => $product->id, 'sku' => 'INDIGO-001']));
+    $draft = NewProductDraft::create(['handle' => 'export-parent', 'sku' => 'PARENT', 'title' => 'Parent',
+        'complementary_products' => 'Indigo Baobab Bracelet']);
+    $result = app(NewProductDraftRoundtripCsvService::class)->exportDrafts([$draft], ['complementary_products']);
+    expect(Storage::disk($result['disk'])->get($result['path']))->toContain('INDIGO-001')->not->toContain('Indigo Baobab Bracelet');
 });

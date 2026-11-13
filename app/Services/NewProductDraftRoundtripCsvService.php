@@ -216,18 +216,23 @@ final class NewProductDraftRoundtripCsvService
             $shopifyId = ctype_digit($token) ? 'gid://shopify/Product/'.$token : $token;
             $product = Product::query()->with('variants')
                 ->where(fn ($query) => $query->where('shopify_id', $shopifyId)->orWhere('handle', $token)
-                    ->orWhereHas('variants', fn ($variants) => $variants->where('sku', $token)))
+                    ->orWhere('title', $token)->orWhereHas('variants', fn ($variants) => $variants->where('sku', $token)))
                 ->orderByDesc('id')->first();
             $resolved = $product?->variants->sortBy('id')->pluck('sku')
                 ->map(fn ($sku) => trim((string) $sku))->filter()->values()->all() ?? [];
             if ($resolved === []) {
-                $sku = NewProductDraft::query()
-                    ->where(fn ($query) => $query->where('shopify_id', $shopifyId)->orWhere('handle', $token)->orWhere('sku', $token))
-                    ->whereNotNull('sku')->where('sku', '!=', '')->orderByDesc('id')->value('sku');
-                $resolved = trim((string) $sku) !== '' ? [trim($sku)] : [];
-            }
-            if ($resolved === []) {
-                throw new \InvalidArgumentException("Cannot export complementary product [{$token}] as a SKU: no matching SKU was found. Add or sync its SKU before exporting.");
+                $draft = NewProductDraft::query()
+                    ->where(fn ($query) => $query->where('shopify_id', $shopifyId)->orWhere('handle', $token)
+                        ->orWhere('sku', $token)->orWhere('title', $token))
+                    ->orderByDesc('id')->first();
+                $sku = trim((string) $draft?->sku);
+                if ($sku !== '') {
+                    $resolved = [$sku];
+                } else {
+                    $name = trim((string) $product?->title);
+                    $name = $name !== '' ? $name : trim((string) $draft?->title);
+                    $resolved = [$name !== '' ? $name : $token];
+                }
             }
             array_push($skus, ...$resolved);
         }
