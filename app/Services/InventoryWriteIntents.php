@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\InventoryWriteIntent;
+use App\Models\InventoryPushCancellation;
 use App\Models\Variant;
 use Illuminate\Support\Facades\DB;
 
@@ -23,6 +24,9 @@ final class InventoryWriteIntents
 
     public function claim(Variant $variant, array $payload, ?string $batch): InventoryWriteIntent
     {
+        if (InventoryPushCancellation::blocks($variant->id, $batch)) {
+            throw new \RuntimeException('This pending inventory push was cancelled by a Super Admin. Submit a new adjustment to change Shopify.');
+        }
         return DB::transaction(function () use ($variant, $payload, $batch) {
             $current = Variant::whereKey($variant->id)->lockForUpdate()->firstOrFail();
             if ((int) $current->inventory_write_version !== (int) $variant->inventory_write_version) {

@@ -14,6 +14,8 @@ class InventoryAdjustmentRequest extends Model
     public const STATUS_APPLIED = 'APPLIED';
     public const STATUS_FAILED = 'FAILED';
 
+    public const STATUS_CANCELLED = 'CANCELLED';
+
     protected $guarded = [];
 
     protected $casts = [

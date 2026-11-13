@@ -621,6 +621,7 @@ class InventoryResource extends Resource
                         InventoryAdjustmentRequest::STATUS_REJECTED => 'Rejected',
                         InventoryAdjustmentRequest::STATUS_APPLIED => 'Applied',
                         InventoryAdjustmentRequest::STATUS_FAILED => 'Failed',
+                        InventoryAdjustmentRequest::STATUS_CANCELLED => 'Cancelled',
                     ])
                     ->query(fn (Builder $query, array $data): Builder => $query->getModel() instanceof Variant && filled($data['value'] ?? null)
                         ? $query->whereHas('inventoryAdjustmentRequestItems.request', fn (Builder $requestQuery): Builder => $requestQuery->where('status', $data['value']))
@@ -815,6 +816,9 @@ class InventoryResource extends Resource
                     ]))
                     ->modalSubmitAction(false)
                     ->modalCancelActionLabel('Close'),
+                \App\Filament\Actions\DiscardPendingInventoryPushes::make(fn (Variant $record) => [$record->id])
+                    ->visible(fn ($livewire): bool => $livewire->activeTab === 'everyday'
+                        && \App\Services\InventoryPendingPushCancellation::isSuperAdmin(Auth::user())),
                 Action::make('editInventory')
                     ->label('Update Inventory')
                     ->icon('heroicon-o-pencil-square')

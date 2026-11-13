@@ -64,9 +64,13 @@ class InventoryAdjustmentRequestResource extends Resource
                     InventoryAdjustmentRequest::STATUS_REJECTED => 'Rejected',
                     InventoryAdjustmentRequest::STATUS_APPLIED => 'Applied',
                     InventoryAdjustmentRequest::STATUS_FAILED => 'Failed',
+                    InventoryAdjustmentRequest::STATUS_CANCELLED => 'Cancelled',
                 ]),
             ])
             ->actions([
+                \App\Filament\Actions\DiscardPendingInventoryPushes::make(fn (InventoryAdjustmentRequest $record) => $record->items()->pluck('variant_id')->all())
+                    ->visible(fn (InventoryAdjustmentRequest $record) => \App\Services\InventoryPendingPushCancellation::isSuperAdmin(Auth::user())
+                        && in_array($record->status, ['PENDING_APPROVAL', 'APPROVED', 'FAILED'], true)),
                 Action::make('review')
                     ->label('Review')
                     ->icon('heroicon-o-eye')

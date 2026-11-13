@@ -1,4 +1,13 @@
 <div class="space-y-4">
+    @if($request->status === \App\Models\InventoryAdjustmentRequest::STATUS_CANCELLED)
+        @php($cancellation = json_decode((string) $request->shopify_result, true) ?: [])
+        <div class="rounded-lg border p-3 text-sm">
+            <strong>Cancelled pending inventory pushes</strong>
+            <div>{{ $cancellation['reason'] ?? 'See cancellation audit.' }}</div>
+            <div>By user {{ $cancellation['cancelled_by'] ?? 'Unknown' }} at {{ $cancellation['cancelled_at'] ?? 'Unknown' }}.</div>
+            <div>Shopify inventory was not changed. Audit IDs: {{ implode(', ', $cancellation['cancellation_audit_ids'] ?? []) }}.</div>
+        </div>
+    @endif
     <div class="text-sm">
         <div><strong>Requester:</strong> {{ $request->requester?->name ?? 'Unknown' }}</div>
         <div><strong>Approver:</strong> {{ $request->approver?->name ?? 'Unknown' }}</div>

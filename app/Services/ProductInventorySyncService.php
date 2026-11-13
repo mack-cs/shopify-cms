@@ -171,6 +171,55 @@ final class ProductInventorySyncService
         }
     }
 
+    /** Shopify query only. Used to adopt current remote stock when discarding stale local work. */
+    public function readForPushCancellation(Variant $variant): array
+    {
+        $variant->loadMissing('product');
+        if (! $variant->product || ! $variant->shopify_inventory_item_id) {
+            throw new \RuntimeException('A synchronized product and inventory item are required to read Shopify.');
+        }
+        $details = $this->shopifyProductInventoryDetails($variant->product);
+        $this->assertInventoryRefreshComplete($details, collect([$variant]));
+        $remote = $this->matchRemoteVariant($variant, collect(data_get($details, 'variants.nodes', [])));
+        if (data_get($details, 'variants.pageInfo.hasNextPage') !== false
+            || data_get($remote, 'inventoryItem.inventoryLevels.pageInfo.hasNextPage') !== false
+            || ! is_bool(data_get($remote, 'inventoryItem.tracked'))
+            || ! in_array(strtolower((string) ($remote['inventoryPolicy'] ?? '')), ['deny', 'continue'], true)) {
+            throw new \RuntimeException('Shopify did not return complete pagination/tracking/policy information. Nothing was discarded.');
+        }
+        if (($remote['id'] ?? null) !== $variant->shopify_id
+            || data_get($remote, 'inventoryItem.id') !== $variant->shopify_inventory_item_id) {
+            throw new \RuntimeException('Shopify inventory identity differs from the selected SKU. Nothing was discarded.');
+        }
+        $levels = (array) data_get($remote, 'inventoryItem.inventoryLevels.nodes', []);
+        if (data_get($remote, 'inventoryItem.tracked') === true) {
+            if ($levels === []) {
+                throw new \RuntimeException('Shopify returned no inventory locations. Nothing was discarded.');
+            }
+            foreach ($levels as $level) {
+                $states = collect($level['quantities'] ?? [])->pluck('quantity', 'name');
+                if (! data_get($level, 'location.id') || ! $states->has(['available', 'committed', 'on_hand'])
+                    || $states->contains(fn ($value) => ! is_numeric($value))) {
+                    throw new \RuntimeException('Shopify returned incomplete inventory quantities. Nothing was discarded.');
+                }
+            }
+        }
+        $tracked = data_get($remote, 'inventoryItem.tracked');
+        $quantities = $this->inventoryQuantities($remote);
+
+        return ['observed_at' => now()->toIso8601String(), 'inventory_item_id' => $variant->shopify_inventory_item_id,
+            'locations' => $levels, 'updates' => [
+                'inventory_tracked' => $tracked, 'inventory_qty' => $tracked ? ($quantities['available'] ?? null) : null,
+                'current_inventory_quantity' => $tracked ? ($quantities['available'] ?? null) : null,
+                'current_available_quantity' => $tracked ? ($quantities['available'] ?? null) : null,
+                'current_on_hand_quantity' => $tracked ? ($quantities['on_hand'] ?? null) : null,
+                'current_committed_quantity' => $tracked ? ($quantities['committed'] ?? null) : null,
+                'inventory_location_count' => $this->inventoryLocationCount($remote),
+                'inventory_policy' => strtolower((string) ($remote['inventoryPolicy'] ?? 'deny')),
+                'shopify_available_for_sale' => $remote['availableForSale'] ?? null,
+            ]];
+    }
+
     /**
      * @param Collection<int, Variant> $variants
      * @param array<int, string> $warnings

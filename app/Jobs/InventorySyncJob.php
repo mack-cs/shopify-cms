@@ -3,6 +3,8 @@
 namespace App\Jobs;
 
 use App\Models\Variant;
+use App\Models\InventoryPushCancellation;
+use App\Services\InventoryPendingPushCancellation;
 use App\Services\AdminNotification;
 use App\Services\InventoryAdjustmentApprovalService;
 use App\Services\ProductInventorySyncService;
@@ -13,6 +15,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 
 class InventorySyncJob implements ShouldQueue, \Illuminate\Contracts\Queue\ShouldBeUnique
 {
@@ -46,6 +49,39 @@ class InventorySyncJob implements ShouldQueue, \Illuminate\Contracts\Queue\Shoul
     }
 
     public function handle(ProductInventorySyncService $service, InventoryAdjustmentApprovalService $approvals): void
+    {
+        $locks = [];
+        $originalVariantIds = $this->variantIds;
+        $ids = array_values(array_unique(array_map('intval', $this->variantIds)));
+        sort($ids);
+        try {
+            foreach ($ids as $id) {
+                $lock = Cache::lock(
+                    InventoryPendingPushCancellation::lockKey($id),
+                    InventoryPendingPushCancellation::LOCK_SECONDS,
+                );
+                if (! $lock->get()) {
+                    throw new \RuntimeException('Inventory push is locked for another push or Super Admin cancellation; retry later.');
+                }
+                $locks[] = $lock;
+            }
+            if ($this->mode === 'push') {
+                $uuid = $this->job?->uuid();
+                $this->variantIds = array_values(array_filter($ids, fn ($id) => ! InventoryPushCancellation::blocks($id, $this->syncBatchId, $uuid)));
+                if ($this->variantIds === []) {
+                    return; // A removed/failed job retried later must not restore discarded stock intent.
+                }
+            }
+            $this->processInventory($service, $approvals);
+        } finally {
+            $this->variantIds = $originalVariantIds; // Preserve the ShouldBeUnique lock identity.
+            foreach (array_reverse($locks) as $lock) {
+                $lock->release();
+            }
+        }
+    }
+
+    private function processInventory(ProductInventorySyncService $service, InventoryAdjustmentApprovalService $approvals): void
     {
         if ($this->mode === 'push' && ! str_starts_with((string) $this->syncBatchId, 'stack_sellability_')) {
             if (str_starts_with((string) $this->syncBatchId, 'inventory_approval_')) {
