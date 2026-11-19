@@ -152,7 +152,7 @@ it('replaces a photograph and stores the new alt text for review without the pre
         ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
         ->and($image->fresh()->shopify_alt_text)->toBeNull()
         ->and($image->fresh()->imported_alt_text)->toBe('New description')
-        ->and($image->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/555')
+        ->and($image->fresh()->shopify_id)->toBeNull()
         ->and(app(ImageAltTextBackfillService::class)->approvedUploadAlt($image->fresh()))->toBeNull();
 });
 
@@ -168,7 +168,7 @@ it('clears the previous alt text when a replacement has no csv description', fun
         ->and($image->fresh()->alt_text_status)->toBeNull()
         ->and($image->fresh()->shopify_alt_text)->toBeNull()
         ->and($image->fresh()->imported_alt_text)->toBeNull()
-        ->and($image->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/555')
+        ->and($image->fresh()->shopify_id)->toBeNull()
         ->and(app(ImageAltTextBackfillService::class)->approvedUploadAlt($image->fresh()))->toBeNull();
 });
 
@@ -240,7 +240,7 @@ it('reports alt text separately when the image itself failed to import', functio
         ->and($updated->message)->not->toContain('alt text');
 });
 
-it('saves alt text on the stack owned first image and rejects an inherited stack filename', function (): void {
+it('saves alt text on stack owned images at every position and does not treat a later upload as inherited', function (): void {
     $stack = createImageImportProduct('STACK001', [
         'handle' => 'stack-one',
         'type' => 'Bundle',
@@ -248,19 +248,21 @@ it('saves alt text on the stack owned first image and rejects an inherited stack
     ]);
     Storage::disk('shopify_product_images')->put('incoming/2026-11-10/STACK001.jpg', 'lifestyle');
     Storage::disk('shopify_product_images')->put('incoming/2026-11-10/STACK001-2.jpg', 'component-slot');
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nSTACK001.jpg,Layered jewellery stack\nSTACK001-2.jpg,Do not own this\n");
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nSTACK001.jpg,Layered jewellery stack\nSTACK001-2.jpg,Second owned photograph\n");
 
     [$batch] = runAltTextImport('incoming/2026-11-10');
     $owned = $stack->images()->where('position', 1)->first();
-    $inheritedSlot = $stack->images()->where('position', 2)->first();
+    $second = $stack->images()->where('position', 2)->first();
 
-    expect($batch->alt_text_applied)->toBe(1)
-        ->and($batch->alt_text_error_count)->toBe(1)
+    expect($batch->alt_text_applied)->toBe(2)
+        ->and($batch->alt_text_error_count)->toBe(0)
         ->and($owned->alt_text)->toBe('Layered jewellery stack')
         ->and($owned->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($owned->ownership)->toBe(\App\Services\ImageOwnership::STACK_OWNED)
         ->and($owned->source_image_id)->toBeNull()
-        ->and($inheritedSlot->alt_text)->toBeNull()
-        ->and($batch->altTextReportText())->toContain('inherited');
+        ->and($second->alt_text)->toBe('Second owned photograph')
+        ->and($second->ownership)->toBe(\App\Services\ImageOwnership::STACK_OWNED)
+        ->and($second->source_image_id)->toBeNull();
 });
 
 it('gives the existing stack rebuild the component alt text imported from the csv', function (): void {

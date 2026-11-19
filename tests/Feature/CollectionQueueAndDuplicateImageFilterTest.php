@@ -115,7 +115,7 @@ it('filters products with duplicate active image positions', function () {
         ->not->toContain($duplicateProduct->id);
 });
 
-it('permanently deletes extra duplicate image rows for a product', function (): void {
+it('preserves position collisions and their variant relationships for explicit review', function (): void {
     $user = User::factory()->create();
     $import = Import::create([
         'filename' => 'products',
@@ -158,15 +158,15 @@ it('permanently deletes extra duplicate image rows for a product', function (): 
 
     $deleted = invokePrivateProductResourceMethod('deleteDuplicateImagesForProductForever', [$product]);
 
-    expect($deleted)->toBe(1)
+    expect($deleted)->toBe(0)
         ->and(Image::query()->whereKey($primary->id)->exists())->toBeTrue()
-        ->and(Image::query()->whereKey($duplicate->id)->exists())->toBeFalse()
-        ->and($variant->fresh()->image_id)->toBeNull()
+        ->and(Image::query()->whereKey($duplicate->id)->exists())->toBeTrue()
+        ->and($variant->fresh()->image_id)->toBe($duplicate->id)
         ->and(ProductResource::applyDuplicateImagePositionsFilter(Product::query())->pluck('id')->all())
-        ->not->toContain($product->id);
+        ->toContain($product->id);
 });
 
-it('permanently deletes hidden and deleted duplicate image rows for a product', function (): void {
+it('retains hidden and deleted historical image records', function (): void {
     $user = User::factory()->create();
     $import = Import::create([
         'filename' => 'products',
@@ -221,11 +221,11 @@ it('permanently deletes hidden and deleted duplicate image rows for a product', 
 
     $deleted = invokePrivateProductResourceMethod('deleteDuplicateImagesForProductForever', [$product]);
 
-    expect($deleted)->toBe(3)
+    expect($deleted)->toBe(0)
         ->and(Image::query()->whereKey($primary->id)->exists())->toBeTrue()
-        ->and(Image::query()->whereKey($hiddenDeletedDuplicate->id)->exists())->toBeFalse()
-        ->and(Image::query()->whereKey($remoteDeletedDuplicate->id)->exists())->toBeFalse()
-        ->and(Image::query()->whereKey($orphanHiddenDuplicate->id)->exists())->toBeFalse();
+        ->and(Image::query()->whereKey($hiddenDeletedDuplicate->id)->exists())->toBeTrue()
+        ->and(Image::query()->whereKey($remoteDeletedDuplicate->id)->exists())->toBeTrue()
+        ->and(Image::query()->whereKey($orphanHiddenDuplicate->id)->exists())->toBeTrue();
 });
 
 function invokePrivateProductResourceMethod(string $method, array $arguments): mixed

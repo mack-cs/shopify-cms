@@ -111,6 +111,14 @@ final class NewProductDraftStackAssociationImporter
                         'bundle_component_quantities' => $componentQuantities,
                     ])->save();
                 });
+                try {
+                    app(ComponentStackPropagation::class)->reconcileDraftMembership($draft->fresh());
+                } catch (\Throwable $exception) {
+                    logger()->warning('Stack component membership was not reconciled.', [
+                        'draft_id' => $draft->id,
+                        'message' => $exception->getMessage(),
+                    ]);
+                }
 
                 $result['updated']++;
             }

@@ -11,52 +11,73 @@ final class ImageAltTextShopifyWriter
 
     public function rejectionReason(string $mediaId): ?string
     {
-        $mediaId = trim($mediaId);
-        if ($mediaId === '') {
-            return 'This image has no Shopify media id, so its alt text can be saved locally and retried after the media id is known.';
-        }
-        if (preg_match('~^gid://shopify/MediaImage/\d+$~', $mediaId) !== 1) {
-            return 'Shopify alt text was not changed because '.$mediaId.' is not a MediaImage file id.';
-        }
-
-        return null;
+        return preg_match('~^gid://shopify/MediaImage/\d+$~', trim($mediaId)) === 1
+            ? null : 'Shopify alt text requires a verified MediaImage file id.';
     }
 
-    public function update(string $mediaId, string $altText): void
+    public function update(string $mediaId, string $altText, ?string $productGid = null, bool $confirmationOnly = false, ?callable $assertOwned = null): void
     {
-        $mediaId = trim($mediaId);
-        $rejection = $this->rejectionReason($mediaId);
-        if ($rejection !== null) {
-            throw new RuntimeException($rejection);
+        if (($reason = $this->rejectionReason($mediaId)) !== null || ! $productGid) {
+            throw new RuntimeException($reason ?? 'The product is required for attached media verification.');
         }
-
-        $data = $this->shopify->graphql(<<<'GQL'
+        $node = $this->attachedNode($productGid, $mediaId, 'ReadAttachedImageAlt');
+        if ($node === null || ! ShopifyProductMediaReader::ready($node)) {
+            if ($confirmationOnly) {
+                throw new AltTextAwaitingConfirmation('The previously updated file is not ready for confirmation.');
+            }
+            throw new AltTextRejected('The current attached Shopify file is missing or not READY.');
+        }
+        if (($node['alt'] ?? null) === $altText) {
+            return;
+        }
+        if (! $confirmationOnly) {
+            $assertOwned && $assertOwned();
+            try {
+                $data = $this->shopify->graphql(<<<'GQL'
 mutation UpdateImageAlt($files: [FileUpdateInput!]!) {
-  fileUpdate(files: $files) {
-    files { id alt }
-    userErrors { field message }
-  }
+  fileUpdate(files: $files) { files { id alt } userErrors { field message } }
 }
 GQL, ['files' => [['id' => $mediaId, 'alt' => $altText]]]);
-
-        $fileUpdate = is_array($data) ? ($data['fileUpdate'] ?? null) : null;
-        if (! is_array($fileUpdate) || ! array_key_exists('userErrors', $fileUpdate) || ! is_array($fileUpdate['userErrors'])) {
-            throw new RuntimeException('Shopify did not confirm the alt text update.');
+            } catch (\Throwable $exception) {
+                throw new AltTextAwaitingConfirmation('The update outcome is uncertain; reconcile before resending.', previous: $exception);
+            }
+            $payload = $data['fileUpdate'] ?? null;
+            if (! is_array($payload) || ! is_array($payload['userErrors'] ?? null)) {
+                throw new AltTextAwaitingConfirmation('Shopify did not return a definitive update result.');
+            }
+            if ($payload['userErrors'] !== []) {
+                throw new AltTextRejected(collect($payload['userErrors'])->pluck('message')->implode(' '));
+            }
+            // The mutation response is not publication evidence. Poll the product.
         }
-
-        $errors = $fileUpdate['userErrors'];
-        if ($errors !== []) {
-            $message = collect($errors)->map(fn ($error): string => trim((string) (is_array($error) ? ($error['message'] ?? '') : '')))
-                ->filter()->implode(' ');
-            throw new RuntimeException($message !== '' ? $message : 'Shopify rejected the alt text update.');
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            if ($attempt > 0) {
+                $delay = app()->environment('testing') ? 0 : 500000 * $attempt;
+                usleep($delay);
+            }
+            try {
+                $node = $this->attachedNode($productGid, $mediaId, 'ConfirmAttachedImageAlt');
+                $assertOwned && $assertOwned();
+                if ($node !== null && ShopifyProductMediaReader::ready($node) && ($node['alt'] ?? null) === $altText) {
+                    return;
+                }
+            } catch (\Throwable) {
+                // A read failure cannot prove a mutation failed.
+            }
         }
+        throw new AltTextAwaitingConfirmation('Awaiting confirmation: a fresh read did not show the approved alt text on ready attached media. No update will be replayed automatically.');
+    }
 
-        $files = $fileUpdate['files'] ?? null;
-        $confirmed = is_array($files) && collect($files)->contains(fn ($file): bool => is_array($file)
-            && ($file['id'] ?? null) === $mediaId
-            && ($file['alt'] ?? null) === $altText);
-        if (! $confirmed) {
-            throw new RuntimeException('Shopify did not confirm the alt text update.');
-        }
+    public function attachedAlt(string $productGid, string $mediaId): ?string
+    {
+        $node = $this->attachedNode($productGid, $mediaId, 'ReadAttachedImageAlt');
+
+        return $node !== null && ShopifyProductMediaReader::ready($node) ? (string) ($node['alt'] ?? '') : null;
+    }
+
+    private function attachedNode(string $productGid, string $mediaId, string $queryName): ?array
+    {
+        return collect((new ShopifyProductMediaReader($this->shopify))->media($productGid, $queryName))
+            ->first(fn (array $node): bool => ($node['id'] ?? '') === $mediaId);
     }
 }

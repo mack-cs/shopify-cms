@@ -357,8 +357,12 @@ it('clears populated price and cost inputs that already match CMS state', functi
 
 it('queues active catalog price updates and skips unmatched draft SKUs', function (): void {
     [, $active] = procurementSheetVariant('LRB0004', 'livi-road');
-    [, $draft] = procurementSheetVariant('LTN0227/62', 'livi-road');
-    $draft->product->forceFill(['status' => 'draft'])->save();
+    // A draft Shopify Product is intentionally procurement-eligible at HEAD.
+    // This scenario needs an unmatched prelaunch draft, with no catalog Variant.
+    $draft = NewProductDraft::create([
+        'sku' => 'LTN0227/62', 'handle' => 'unmatched-procurement-draft',
+        'title' => 'Unmatched procurement draft', 'status' => 'draft',
+    ]);
     ProcurementCollectionConfig::query()->create([
         'shopify_collection_id' => 'gid://shopify/Collection/1',
         'collection_handle' => 'livi-road', 'collection_title' => 'Livi Road',

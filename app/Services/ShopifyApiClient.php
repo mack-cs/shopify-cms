@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Contracts\ShopifyGraphqlGateway;
+use App\Services\EngravedBeads\EngravedBeadMutationGuard;
 use Illuminate\Support\Facades\Http;
 
 final class ShopifyApiClient implements ShopifyGraphqlGateway
@@ -13,7 +14,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
 
     public function rest(string $method, string $path, array $payload = []): array
     {
-        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->rest($method, $path, $payload);
+        app(EngravedBeadMutationGuard::class)->rest($method, $path, $payload);
         $shop = config('services.shopify.shop');
         $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
@@ -47,7 +48,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
 
     public function graphql(string $query, array $variables = []): array
     {
-        app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql($query, $variables);
+        app(EngravedBeadMutationGuard::class)->graphql($query, $variables);
         $shop = config('services.shopify.shop');
         $token = $this->awsSecretService->getShopifyToken();
         $version = config('services.shopify.api_version', '2026-01');
@@ -66,7 +67,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
         ]);
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
-            app(\App\Services\EngravedBeads\EngravedBeadMutationGuard::class)->graphql($query, $variables);
+            app(EngravedBeadMutationGuard::class)->graphql($query, $variables);
             $response = Http::withHeaders([
                 'X-Shopify-Access-Token' => $token,
                 'Content-Type' => 'application/json',
@@ -85,9 +86,15 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
                 throw new \RuntimeException('Shopify mutation outcome is uncertain; automatic replay was blocked. Reconcile the recorded operation before retrying.');
             }
             if ($mutation
-                && $this->isThrottledResponse($response->status(),$rawPayload)
-                && (! empty($rawPayload['data']) || data_get($rawPayload,'extensions.cost.actualQueryCost') !== null)) {
+                && $this->isThrottledResponse($response->status(), $rawPayload)
+                && (! empty($rawPayload['data']) || data_get($rawPayload, 'extensions.cost.actualQueryCost') !== null)) {
                 throw new \RuntimeException('Shopify mutation outcome is uncertain; automatic replay was blocked. Reconcile the recorded operation before retrying.');
+            }
+            // Image writes have durable reconciliation state. Even a throttle
+            // response must return to that workflow rather than replaying here.
+            if ($mutation && preg_match('/\b(productCreateMedia|fileUpdate|productDeleteMedia|productVariantAppendMedia|productVariantDetachMedia)\s*\(/', $query)
+                && $this->isThrottledResponse($response->status(), $rawPayload)) {
+                throw new \RuntimeException('Shopify image mutation outcome requires reconciliation; automatic replay was blocked.');
             }
             $payload = $this->discardFalseThrottleErrors($rawPayload);
             if ($this->isThrottledResponse($response->status(), $payload) && $attempt < 4) {

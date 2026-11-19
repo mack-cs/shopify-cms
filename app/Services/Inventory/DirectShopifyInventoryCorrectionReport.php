@@ -10,6 +10,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 final class DirectShopifyInventoryCorrectionReport
@@ -17,7 +18,7 @@ final class DirectShopifyInventoryCorrectionReport
     public function __construct(private readonly ShopifyInventoryHistorySync $sync) {}
 
     /**
-     * Read the last 7 days of stored correction history and email direct Shopify edits.
+     * Email the previous complete Monday-Sunday once, on Mondays only.
      * A day is loaded from Shopify only when that day is not already stored.
      * This does not change stock.
      *
@@ -25,20 +26,35 @@ final class DirectShopifyInventoryCorrectionReport
      */
     public function send(int $days = 7): array
     {
-        $days = max(1, min(7, $days));
-        $until = now()->startOfDay();
-        $from = $until->copy()->subDays($days - 1);
-        $this->ensureStored($from, $until);
-
-        $rows = $this->directRows($from, $until);
-
         $result = [
-            'corrections' => $rows->count(),
+            'corrections' => 0,
             'email_sent' => false,
             'copied_users' => 0,
             'errors' => [],
         ];
+        // Manual actions and old queued jobs must respect the weekly schedule too.
+        if (! now('Africa/Johannesburg')->isMonday()) {
+            return $result;
+        }
+
+        $until = now('Africa/Johannesburg')->startOfDay()->subDay();
+        $from = $until->copy()->subDays(6);
+        $previous = DB::table('direct_inventory_correction_reports')->where('week_start', $from->toDateString())->first();
+        if ($previous) {
+            if (in_array($previous->status, ['sending', 'needs_review'], true)) {
+                $result['errors'][] = 'The weekly email has an unresolved delivery outcome. Review its receipt ledger before any manual action; no retry was sent.';
+            }
+            return $result;
+        }
+        $this->ensureStored($from, $until);
+        $rows = $this->directRows($from, $until);
         if ($rows->isEmpty()) {
+            return $result;
+        }
+        $unknown = DB::table('direct_inventory_correction_report_items')->whereIn('adjustment_id', $rows->pluck('adjustment_id'))
+            ->whereIn('status', ['cutover_baseline', 'cutover_review'])->count();
+        if ($unknown) {
+            $result['errors'][] = $unknown.' historical correction(s) have no verified delivery receipt. Review the cutover ledger; none were silently marked sent or retried.';
             return $result;
         }
 
@@ -50,6 +66,31 @@ final class DirectShopifyInventoryCorrectionReport
         }
 
         $copies = $this->copyRecipients($email);
+        [$reportId, $rows] = DB::transaction(function () use ($from, $rows): array {
+            $claimed = DB::table('direct_inventory_correction_reports')->insertOrIgnore([
+                'week_start' => $from->toDateString(), 'status' => 'sending',
+                'created_at' => now(), 'updated_at' => now(),
+            ]);
+            if (! $claimed) {
+                return [null, collect()];
+            }
+            $reportId = DB::table('direct_inventory_correction_reports')->where('week_start', $from->toDateString())->value('id');
+            $claimedRows = $rows->filter(function ($row) use ($reportId): bool {
+                return DB::table('direct_inventory_correction_report_items')->insertOrIgnore([
+                    'adjustment_id' => $row->adjustment_id, 'report_id' => $reportId,
+                    'status' => 'reserved', 'created_at' => now(), 'updated_at' => now(),
+                ]) === 1;
+            })->values();
+            return [$reportId, $claimedRows];
+        });
+        if (! $reportId) {
+            return $result;
+        }
+        $result['corrections'] = $rows->count();
+        if ($rows->isEmpty()) {
+            DB::table('direct_inventory_correction_reports')->where('id', $reportId)->update(['status' => 'empty', 'updated_at' => now()]);
+            return $result;
+        }
         $result['copied_users'] = count($copies);
         $grouped = $this->grouped($rows);
 
@@ -59,8 +100,13 @@ final class DirectShopifyInventoryCorrectionReport
                 $pending->cc($copies);
             }
             $pending->send(new DirectShopifyInventoryCorrectionMail($grouped, $from, $until));
+            DB::table('direct_inventory_correction_reports')->where('id', $reportId)->update(['status' => 'sent', 'updated_at' => now()]);
+            DB::table('direct_inventory_correction_report_items')->where('report_id', $reportId)->update(['status' => 'sent', 'updated_at' => now()]);
             $result['email_sent'] = true;
         } catch (Throwable $exception) {
+            // A transport exception may follow acceptance. Never automatically
+            // replay an uncertain email and repeat all its corrections.
+            DB::table('direct_inventory_correction_reports')->where('id', $reportId)->update(['status' => 'needs_review', 'error' => $exception->getMessage(), 'updated_at' => now()]);
             $result['errors'][] = 'Email: '.$exception->getMessage();
             Log::error('Direct Shopify inventory correction email failed.', [
                 'recipient' => $email,
@@ -78,9 +124,8 @@ final class DirectShopifyInventoryCorrectionReport
      */
     public function preview(int $days = 7): array
     {
-        $days = max(1, min(7, $days));
-        $until = now()->startOfDay();
-        $from = $until->copy()->subDays($days - 1);
+        $until = now('Africa/Johannesburg')->startOfWeek(Carbon::MONDAY)->subDay();
+        $from = $until->copy()->subDays(6);
         $rows = $this->directRows($from, $until);
 
         return [
@@ -111,10 +156,14 @@ final class DirectShopifyInventoryCorrectionReport
             $logged = ShopifyInventoryHistorySyncLog::query()
                 ->whereDate('history_date', $day->toDateString())
                 ->first();
-            if ($logged && in_array($logged->status, ['succeeded', 'corrections'], true)) {
+            if ($logged && in_array($logged->status, ['succeeded', 'corrections'], true)
+                && $logged->finished_at && $logged->finished_at->gte($day->copy()->endOfDay())) {
                 continue;
             }
-            $this->sync->syncDay($day->copy(), null, 'correction');
+            $loaded = $this->sync->syncDay($day->copy(), null, 'correction');
+            if (! in_array($loaded['status'], ['succeeded', 'corrections'], true)) {
+                throw new \RuntimeException('Correction history is incomplete for '.$day->toDateString().'; the weekly report was not sent.');
+            }
             if ($day->copy()->addDay()->lte($until)) {
                 sleep(2);
             }

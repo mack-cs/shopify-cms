@@ -1,23 +1,26 @@
 <?php
 
 use App\Filament\Resources\NewProductDraftResource;
+use App\Models\Approval;
+use App\Models\Image;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\NewProductDraftApproval;
 use App\Models\Product;
-use App\Models\Approval;
 use App\Models\RequiredField;
+use App\Models\ShopifyCollection;
 use App\Models\ShopifyMetafield;
 use App\Models\ShopifyRow;
 use App\Models\StyleProfile;
 use App\Models\User;
 use App\Models\Variant;
 use App\Services\HeaderStore;
-use App\Services\NewProductDraftSeeder;
 use App\Services\NewProductDraftProductSync;
+use App\Services\NewProductDraftSeeder;
 use App\Services\NewProductDraftShopifyCreator;
 use App\Services\Normalizer;
 use App\Services\ProductShopifyUpdater;
+use App\Services\TagNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -363,7 +366,7 @@ it('copies a draft image onto the linked product when the product has no images'
 
     $image = $product->images()->firstOrFail();
 
-    expect($image->sync_state)->toBe(\App\Models\Image::SYNC_STATE_LOCAL_NEW)
+    expect($image->sync_state)->toBe(Image::SYNC_STATE_LOCAL_NEW)
         ->and($image->local_dirty)->toBeTrue()
         ->and($image->needs_shopify_image_sync)->toBeTrue()
         ->and($image->image_path)->toBe('new-product-images/draft-image.jpg')
@@ -756,7 +759,7 @@ it('does not flag a tag conflict when shopify returns the same tags in a differe
         'approval_version' => 1,
     ]);
 
-    $draftTags = \App\Services\TagNormalizer::normalizeFromArray(array_reverse(\App\Services\TagNormalizer::parseTokens($product->fresh()->tags)));
+    $draftTags = TagNormalizer::normalizeFromArray(array_reverse(TagNormalizer::parseTokens($product->fresh()->tags)));
     NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
         'handle' => $product->handle,
         'shopify_id' => $product->shopify_id,
@@ -768,8 +771,8 @@ it('does not flag a tag conflict when shopify returns the same tags in a differe
 
     $seeded = app(NewProductDraftSeeder::class)->upsertFromProduct($product);
 
-    expect(\App\Services\TagNormalizer::normalizeForComparison($seeded->tags))
-        ->toBe(\App\Services\TagNormalizer::normalizeForComparison($draftTags))
+    expect(TagNormalizer::normalizeForComparison($seeded->tags))
+        ->toBe(TagNormalizer::normalizeForComparison($draftTags))
         ->and(collect($seeded->shopifySyncWarnings())->pluck('field')->all())->not->toContain('tags');
 });
 
@@ -816,7 +819,7 @@ it('does not flag uvp short paragraph conflicts when only rich text formatting a
 
 it('does not flag uvp short paragraph conflicts when equivalent html differs only by spacing and line breaks', function (): void {
     $product = createWorkflowTestProduct([
-        'uvp_short_paragraph' => "<p>The Emberwing Bracelet is radiant freedom and endless elegance. For women who embody <strong>grace</strong>, <strong>light</strong>, <strong>power</strong>.</p>",
+        'uvp_short_paragraph' => '<p>The Emberwing Bracelet is radiant freedom and endless elegance. For women who embody <strong>grace</strong>, <strong>light</strong>, <strong>power</strong>.</p>',
         'approval_version' => 1,
     ]);
 
@@ -1187,7 +1190,7 @@ it('does not treat the string false as an on sale draft value', function (): voi
         'approval_version' => 1,
     ]);
 
-    $tags = \App\Services\TagNormalizer::parseTokens((string) $draft->tags);
+    $tags = TagNormalizer::parseTokens((string) $draft->tags);
 
     expect($draft->is_on_sale)->toBeFalse();
     expect((int) $draft->getRawOriginal('is_on_sale'))->toBe(0);
@@ -1245,7 +1248,7 @@ it('adds sale by type and collection tags to on sale drafts', function (): void 
         'approval_version' => 1,
     ]);
 
-    $tags = \App\Services\TagNormalizer::parseTokens((string) $draft->tags);
+    $tags = TagNormalizer::parseTokens((string) $draft->tags);
 
     expect($tags)->toContain('sale');
     expect($tags)->toContain('charms-sale');
@@ -1580,7 +1583,7 @@ it('includes the draft-owned stiletto metafields in an automatic full sync for a
 
     approveWorkflowTestProduct($product);
 
-    \App\Models\ShopifyCollection::create([
+    ShopifyCollection::create([
         'import_id' => $product->import_id,
         'shopify_id' => 'gid://shopify/Collection/2051',
         'title' => 'Matching Sibling Collection',
@@ -1905,14 +1908,14 @@ it('reuses the existing Shopify media when only an image filename changes', func
 
     approveWorkflowTestProduct($product);
 
-    $image = \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+    $image = Image::withoutEvents(fn () => Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/MediaImage/9001',
-        'sync_state' => \App\Models\Image::SYNC_STATE_LOCAL_UPDATED,
+        'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
         'local_dirty' => true,
         'src' => 'https://cdn.shopify.com/s/files/1/test/existing-image.png',
         'image_path' => 'product-images/test/rename-only.png',
-        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
         'position' => 1,
         'approved_filename' => 'renamed-product-01.png',
         'last_shopify_synced_filename' => 'old-product-01.png',
@@ -2490,7 +2493,7 @@ it('uses variant sku as the barcode when the stored barcode is blank', function 
     app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
 
     expect($product->fresh()->error_fields)
-        ->not->toContain('missing:' . HeaderStore::VARIANT_BARCODE)
+        ->not->toContain('missing:'.HeaderStore::VARIANT_BARCODE)
         ->not->toContain('mismatch:variant_barcode');
 });
 
@@ -2540,28 +2543,28 @@ it('moves videos behind the approved image order during Shopify image sync', fun
 
     approveWorkflowTestProduct($product);
 
-    \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+    Image::withoutEvents(fn () => Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/MediaImage/9101',
-        'sync_state' => \App\Models\Image::SYNC_STATE_SYNCED,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
         'local_dirty' => false,
         'src' => 'https://cdn.shopify.com/s/files/1/test/media-order-01.png',
         'image_path' => 'product-images/test/media-order-01.png',
-        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
         'position' => 1,
         'approved_filename' => 'media-order-01.png',
         'last_shopify_synced_filename' => 'media-order-01.png',
         'needs_shopify_image_sync' => false,
     ]));
 
-    \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+    Image::withoutEvents(fn () => Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/MediaImage/9102',
-        'sync_state' => \App\Models\Image::SYNC_STATE_SYNCED,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
         'local_dirty' => false,
         'src' => 'https://cdn.shopify.com/s/files/1/test/media-order-02.png',
         'image_path' => 'product-images/test/media-order-02.png',
-        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
         'position' => 2,
         'approved_filename' => 'media-order-02.png',
         'last_shopify_synced_filename' => 'media-order-02.png',
@@ -2617,6 +2620,11 @@ it('moves videos behind the approved image order during Shopify image sync', fun
         $query = (string) ($payload['query'] ?? '');
         $variables = (array) ($payload['variables'] ?? []);
 
+        if (str_contains($query, 'ProductImageSyncMedia') || str_contains($query, 'ProductImageReorderMedia')) {
+            $complete = workflowCompleteMediaProduct($shopifyProduct);
+
+            return Http::response(['data' => ['product' => $complete]]);
+        }
         if (str_contains($query, 'query ProductByIdDetails')) {
             return Http::response(['data' => ['product' => $shopifyProduct]]);
         }
@@ -2656,7 +2664,7 @@ it('moves videos behind the approved image order during Shopify image sync', fun
     ]);
 });
 
-it('uses media image ids for ordering when local images still store legacy Shopify image ids', function (): void {
+it('preserves legacy media without reordering when photograph evidence is unavailable', function (): void {
     $product = createWorkflowTestProduct([
         'shopify_id' => 'gid://shopify/Product/1302',
         'approval_version' => 1,
@@ -2664,14 +2672,14 @@ it('uses media image ids for ordering when local images still store legacy Shopi
 
     approveWorkflowTestProduct($product);
 
-    $image = \App\Models\Image::withoutEvents(fn () => \App\Models\Image::create([
+    $image = Image::withoutEvents(fn () => Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/ProductImage/9201',
-        'sync_state' => \App\Models\Image::SYNC_STATE_LOCAL_UPDATED,
+        'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
         'local_dirty' => true,
         'src' => 'https://cdn.shopify.com/s/files/1/test/legacy-stack-01.png',
         'image_path' => null,
-        'backup_status' => \App\Models\Image::BACKUP_STATUS_PENDING,
+        'backup_status' => Image::BACKUP_STATUS_PENDING,
         'position' => 1,
         'approved_filename' => 'legacy-stack-01.png',
         'needs_shopify_image_sync' => true,
@@ -2726,6 +2734,11 @@ it('uses media image ids for ordering when local images still store legacy Shopi
         $query = (string) ($payload['query'] ?? '');
         $variables = (array) ($payload['variables'] ?? []);
 
+        if (str_contains($query, 'ProductImageSyncMedia') || str_contains($query, 'ProductImageReorderMedia')) {
+            $complete = workflowCompleteMediaProduct($shopifyProduct);
+
+            return Http::response(['data' => ['product' => $complete]]);
+        }
         if (str_contains($query, 'query ProductByIdDetails')) {
             return Http::response(['data' => ['product' => $shopifyProduct]]);
         }
@@ -2756,14 +2769,11 @@ it('uses media image ids for ordering when local images still store legacy Shopi
 
     $result = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product]));
 
-    expect($result['synced'])->toBe(1);
-    expect($result['failed'])->toBe(0);
-    expect($reorderMoves)->toBe([
-        ['id' => 'gid://shopify/MediaImage/9201', 'newPosition' => '0'],
-        ['id' => 'gid://shopify/Video/8001', 'newPosition' => '1'],
-    ]);
-    expect(collect($result['warnings'])->pluck('warning')->first())
-        ->toContain('could not be republished');
+    expect($result['synced'])->toBe(0);
+    expect($result['failed'])->toBe(1);
+    expect($reorderMoves)->toBeNull();
+    expect(collect($result['warnings'])->pluck('warning')->implode(' '))
+        ->toContain('media ID is not available');
     expect($image->fresh()->needs_shopify_image_sync)->toBeTrue();
 });
 
@@ -2776,7 +2786,11 @@ function fakeWorkflowShopifyGraphql(callable $handler): void
     Http::fake(function ($request) use ($handler) {
         $payload = $request->data();
         $query = (string) ($payload['query'] ?? '');
-        $variables = (array) ($payload['variables'] ?? []);
+        if (str_contains($query, 'ProductImageSyncMedia') || str_contains($query, 'ProductImageReorderMedia')) {
+            $response = $handler('query ProductByIdDetails', $payload['variables'] ?? []);
+
+            return Http::response(['data' => ['product' => workflowCompleteMediaProduct($response['product'])]]);
+        }        $variables = (array) ($payload['variables'] ?? []);
 
         return Http::response([
             'data' => $handler($query, $variables),
@@ -2809,7 +2823,7 @@ it('treats the product UVP column as present when the Shopify row cell is blank'
     app(Normalizer::class)->recalculateErrorsForProduct($product->fresh());
 
     expect($product->fresh()->error_fields)
-        ->not->toContain('missing:' . HeaderStore::UVP_SHORT_PARAGRAPH);
+        ->not->toContain('missing:'.HeaderStore::UVP_SHORT_PARAGRAPH);
 });
 
 it('copies a draft UVP and SKU onto a product matched by title', function (): void {
@@ -2871,8 +2885,8 @@ it('copies a draft UVP and SKU onto a product matched by title', function (): vo
         ->and($variant->fresh()->barcode)->toBe('EBBM02TEST01')
         ->and($row->fresh()->get(HeaderStore::VARIANT_BARCODE))->toBe('EBBM02TEST01')
         ->and($product->fresh()->error_fields)
-            ->not->toContain('missing:' . HeaderStore::UVP_SHORT_PARAGRAPH)
-            ->not->toContain('missing:' . HeaderStore::VARIANT_BARCODE);
+        ->not->toContain('missing:'.HeaderStore::UVP_SHORT_PARAGRAPH)
+        ->not->toContain('missing:'.HeaderStore::VARIANT_BARCODE);
 });
 
 it('sends the draft UVP and SKU when creating the Shopify product', function (): void {
@@ -3187,7 +3201,7 @@ it('does not create a product when the SKU already belongs to another Shopify pr
     configureDraftShopify();
 
     $productSetCalls = 0;
-    Http::fake(function ($request) use (&$productSetCalls, $draft) {
+    Http::fake(function ($request) use (&$productSetCalls) {
         $query = (string) ($request->data()['query'] ?? '');
         if (str_contains($query, 'mutation ProductSetCreate')) {
             $productSetCalls++;
@@ -3361,7 +3375,7 @@ it('does not send a second productSet when Shopify returns no product', function
     configureDraftShopify();
 
     $productSetCalls = 0;
-    Http::fake(function ($request) use (&$productSetCalls, $draft) {
+    Http::fake(function ($request) use (&$productSetCalls) {
         $query = (string) ($request->data()['query'] ?? '');
 
         if ($lookup = draftCreationLookupResponse($query)) {
@@ -3685,4 +3699,15 @@ function createdDraftProduct(
             ]],
         ],
     ];
+}
+
+function workflowCompleteMediaProduct(array $product): array
+{
+    foreach (['media', 'images'] as $field) {
+        $product[$field]['nodes'] ??= [];
+        $product[$field]['pageInfo'] = ['hasNextPage' => false, 'endCursor' => null];
+    }
+    $product['media']['nodes'] = array_map(fn (array $node): array => array_merge(['status' => 'READY', 'fileStatus' => 'READY'], $node), $product['media']['nodes']);
+
+    return $product;
 }

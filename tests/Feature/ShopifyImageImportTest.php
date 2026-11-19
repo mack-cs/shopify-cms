@@ -60,7 +60,7 @@ it('imports only direct image files in the normalized S3 folder and records the 
     $duplicate = Image::withoutEvents(fn (): Image => Image::create([
         'product_id' => $product->id,
         'shopify_id' => 'gid://shopify/MediaImage/1002',
-        'image_asset_id' => $asset->id,
+        'image_asset_id' => createImportTestAsset('other photograph', 'png', 'duplicate.png')->id,
         'sync_state' => Image::SYNC_STATE_SYNCED,
         'local_dirty' => false,
         'src' => 'https://cdn.shopify.com/s/files/duplicate.png',
@@ -97,11 +97,11 @@ it('imports only direct image files in the normalized S3 folder and records the 
             'filename' => 'lrb0001-1.png',
         ]))
         ->and($image->approved_filename)->toBe('lrb0001-1.png')
-        ->and($image->needs_shopify_image_sync)->toBeTrue()
-        ->and($duplicate->sync_state)->toBe(Image::SYNC_STATE_LOCAL_DELETED)
-        ->and($duplicate->is_duplicate_hidden)->toBeTrue()
-        ->and($duplicate->local_dirty)->toBeTrue()
-        ->and($product->images()->where('position', 1)->count())->toBe(1);
+        ->and($image->needs_shopify_image_sync)->toBeFalse()
+        ->and($duplicate->sync_state)->toBe(Image::SYNC_STATE_SYNCED)
+        ->and($duplicate->is_duplicate_hidden)->toBeFalse()
+        ->and($duplicate->local_dirty)->toBeFalse()
+        ->and($product->allImages()->count())->toBe(2);
 
     $item = ShopifyImageImportItem::query()->firstOrFail();
 

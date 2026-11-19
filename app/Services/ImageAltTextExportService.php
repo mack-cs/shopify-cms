@@ -18,7 +18,7 @@ use ZipArchive;
 
 class ImageAltTextExportService
 {
-    public const HEADERS = ['image_id', 'product_id', 'shopify_product_id', 'shopify_media_id', 'sku', 'product_title', 'position', 'image_url', 'alt_text'];
+    public const HEADERS = ['image_id', 'product_id', 'shopify_product_id', 'shopify_media_id', 'sku', 'product_title', 'position', 'image_url', 'alt_text', 'ownership', 'review_status'];
 
     public function request(User $user, array $collectionValues, bool $includeImages): ImageAltTextExport
     {

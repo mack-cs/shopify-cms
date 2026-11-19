@@ -305,12 +305,18 @@ class InventoryAuditHistory extends Page implements HasTable
 
     public function emailDirectCorrectionReport(): void
     {
+        if (! now('Africa/Johannesburg')->isMonday()) {
+            Notification::make()->title('Report sends on Mondays only')
+                ->body('No email was queued. The scheduled report covers the previous complete Monday-Sunday once.')
+                ->warning()->send();
+            return;
+        }
         ReportDirectShopifyInventoryCorrectionsJob::dispatch();
         $this->directCorrectionOpen = true;
         $recipient = (string) config('services.shopify.direct_inventory_correction_email', 'shonayimack@gmail.com');
         Notification::make()
             ->title('7-day direct correction report queued')
-            ->body('It will be emailed to '.$recipient.' and every active user. This page does not call Shopify.')
+            ->body('Delivery runs on Mondays only, for the previous Monday-Sunday, to '.$recipient.' and every active user. Already reported corrections are excluded. This page does not call Shopify.')
             ->success()
             ->send();
     }

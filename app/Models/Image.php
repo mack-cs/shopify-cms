@@ -43,6 +43,8 @@ class Image extends Model
 
     public const ALT_FAILED = 'failed';
 
+    public const ALT_AWAITING_CONFIRMATION = 'awaiting_confirmation';
+
     protected $fillable = [
         'product_id',
         'source_image_id',
@@ -60,6 +62,7 @@ class Image extends Model
         'last_shopify_seen_at',
         'last_synced_at',
         'src',
+        'shopify_cdn_url',
         'image_path',
         'backup_status',
         'backup_completed_at',
@@ -71,6 +74,10 @@ class Image extends Model
         'last_shopify_image_synced_at',
         'needs_shopify_image_sync',
         'shopify_image_sync_error',
+        'shopify_media_create_uncertain',
+        'shopify_identity_unresolved',
+        'alt_confirmation_media_id',
+        'alt_confirmation_text',
         'position',
         'alt_text',
         'imported_alt_text',
@@ -78,6 +85,8 @@ class Image extends Model
         'shopify_alt_sync_error',
         'alt_text_status',
         'shopify_alt_text',
+        'ownership',
+        'alt_inheritance_mode',
     ];
 
     protected $casts = [
@@ -90,6 +99,8 @@ class Image extends Model
         'backup_completed_at' => 'datetime',
         'last_shopify_image_synced_at' => 'datetime',
         'needs_shopify_image_sync' => 'boolean',
+        'shopify_media_create_uncertain' => 'boolean',
+        'shopify_identity_unresolved' => 'boolean',
         'shopify_alt_pending' => 'boolean',
     ];
 

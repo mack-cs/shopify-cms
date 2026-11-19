@@ -66,11 +66,12 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
 
         if ($this->manageBatchStatus) {
             $batch->forceFill([
-                'status' => ShopifyImageImportBatch::STATUS_COMPLETED,
+                'status' => $result['failed'] > 0 ? ShopifyImageImportBatch::STATUS_FAILED : ShopifyImageImportBatch::STATUS_COMPLETED,
                 'matched_count' => count($stackProductIds),
                 'updated_count' => $result['rebuilt'],
                 'failed_count' => $result['failed'],
                 'completed_at' => now(),
+                'error_message' => $result['failed'] > 0 ? collect($result['messages'])->take(8)->implode(' | ') : null,
             ])->save();
         }
 
@@ -81,7 +82,7 @@ class RebuildShopifyStackImagesJob implements ShouldQueue
         }
 
         $notification = Notification::make()
-            ->title('Stack image rebuild complete')
+            ->title($result['failed'] > 0 ? 'Stack image rebuild incomplete' : 'Stack image rebuild complete')
             ->body($message)
             ->status($result['failed'] > 0 ? 'warning' : 'success');
 

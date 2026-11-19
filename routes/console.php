@@ -56,6 +56,7 @@ Artisan::command('alt-text-exports:cleanup', function (): void {
 })->purpose('Remove expired alt text export files, image snapshots and temporary files');
 
 Schedule::command('alt-text-exports:cleanup')->hourly()->withoutOverlapping();
+Schedule::command('images:recover-component-stack-propagation')->everyFiveMinutes()->withoutOverlapping()->runInBackground();
 
 Schedule::call(fn () => app(StackSellabilityShopifyPushService::class)->retryPending())
     ->everyFiveMinutes()->name('stack-sellability-retries')->withoutOverlapping(2)->onOneServer();
@@ -694,11 +695,11 @@ Artisan::command('shopify:alert-stale-stack-reservations', function (StackReserv
 })->purpose('Email stale stack reservations for a manual fix. Does not change Shopify inventory or reservation rows.');
 
 Schedule::job(new ReportDirectShopifyInventoryCorrectionsJob)
-    ->dailyAt('07:30')
+    ->weeklyOn(1, '07:30')
     ->timezone('Africa/Johannesburg')
     ->withoutOverlapping()
     ->onOneServer()
-    ->name('daily-direct-shopify-inventory-correction-report');
+    ->name('weekly-direct-shopify-inventory-correction-report');
 
 Schedule::command('shopify:alert-stale-stack-reservations')
     ->dailyAt('08:00')

@@ -67,7 +67,7 @@ it('runs a real queued worker and freezes collection union image IDs while recor
     $side = queuedExportImage($a, 2, 'A side');
     [$b, $bfront] = queuedExportProduct('B', 702);
     [$stack, $owned] = queuedExportProduct('STACK', 703, true);
-    queuedExportImage($stack, 2, 'Unmapped legacy');
+    $legacy = queuedExportImage($stack, 2, 'Unmapped legacy');
     $copy = queuedExportImage($stack, 3, 'Inherited copy');
     $copy->update(['source_image_id' => $front->id]);
     [$outside] = queuedExportProduct('OUTSIDE', 704);
@@ -86,30 +86,30 @@ it('runs a real queued worker and freezes collection union image IDs while recor
     $service = app(ImageAltTextExportService::class);
     $export = $service->request($this->exportUser, ['Collection A', 'Collection B'], true);
     queuedExportWork(); // Shopify pagination and durable snapshot, no image downloads.
-    expect($export->fresh()->status)->toBe('processing')->and($export->fresh()->total)->toBe(4)
-        ->and($export->fresh()->items()->pluck('image_id')->all())->toBe([$front->id, $side->id, $bfront->id, $owned->id]);
+    expect($export->fresh()->status)->toBe('processing')->and($export->fresh()->total)->toBe(6)
+        ->and($export->fresh()->items()->pluck('image_id')->all())->toBe([$front->id, $side->id, $bfront->id, $owned->id, $legacy->id, $copy->id]);
     Http::assertNothingSent();
     queuedExportImage($a, 4, 'Created after snapshot');
     Image::withoutEvents(fn () => $front->update(['alt_text' => 'Changed after snapshot']));
     $this->travel(2)->seconds();
     queuedExportWork();
     expect($export->fresh()->processed)->toBe(1)->and($export->fresh()->status)->toBe('processing');
-    Livewire::test(AltTextExportStatus::class)->assertSee('Processing')->assertSee('1 / 4 images processed');
+    Livewire::test(AltTextExportStatus::class)->assertSee('Processing')->assertSee('1 / 6 images processed');
     queuedExportDrain($export);
     $export->refresh();
-    expect($export->status)->toBe('completed')->and($export->processed)->toBe(4)->and($export->download_failed)->toBe(1)
+    expect($export->status)->toBe('completed')->and($export->processed)->toBe(6)->and($export->download_failed)->toBe(1)
         ->and($gateway->queries)->toHaveCount(2);
-    Http::assertSentCount(4);
+    Http::assertSentCount(6);
     $path = Storage::disk('local')->path($export->path);
     $zip = new ZipArchive;
     expect($zip->open($path, ZipArchive::CHECKCONS))->toBeTrue();
     try {
         $csv = $zip->getFromName('alt-text.csv');
         $manifest = $zip->getFromName('manifest.csv');
-        expect($csv)->toContain('A front')->not->toContain('Changed after snapshot', 'Created after snapshot', 'Unmapped legacy', 'Inherited copy', 'OUTSIDE', 'INACTIVE');
+        expect($csv)->toContain('A front', 'Unmapped legacy', 'Inherited copy', 'Review ownership')->not->toContain('Changed after snapshot', 'Created after snapshot', 'OUTSIDE', 'INACTIVE');
         expect($manifest)->toContain('failed', 'HTTP 404')
             ->and($zip->locateName('images/image-'.$side->id.'.jpg'))->toBeFalse()
-            ->and($zip->numFiles)->toBe(5);
+            ->and($zip->numFiles)->toBe(7);
     } finally {
         $zip->close();
     }
@@ -119,17 +119,17 @@ it('runs a real queued worker and freezes collection union image IDs while recor
     $response = $this->get(route('image-alt-text-exports.download', $export));
     $response->assertOk();
     expect(hash('sha256', $response->streamedContent()))->toBe($export->sha256);
-    Http::assertSentCount(4); // Download serves the artifact; it does not generate again.
+    Http::assertSentCount(6); // Download serves the artifact; it does not generate again.
     $count = DB::table('jobs')->count();
     (new GenerateImageAltTextExport($export->id, $export->connection, $export->queue))->handle($service);
-    Http::assertSentCount(4);
+    Http::assertSentCount(6);
     expect(DB::table('jobs')->count())->toBe($count);
     $recovered = true;
     $service->retry($this->exportUser, $export->fresh());
     queuedExportDrain($export);
     expect($export->fresh()->download_failed)->toBe(0)->and($export->fresh()->status)->toBe('completed')
         ->and($gateway->queries)->toHaveCount(2);
-    Http::assertSentCount(5); // Only the failed photograph was retried; successful files and snapshot remain intact.
+    Http::assertSentCount(7); // Only the failed photograph was retried; successful files and snapshot remain intact.
 });
 
 it('resumes a failed job from its immutable snapshot without redownloading successful files', function (): void {

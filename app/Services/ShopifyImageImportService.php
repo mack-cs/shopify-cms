@@ -459,10 +459,34 @@ class ShopifyImageImportService
      */
     private function prepareImageForImport(Product $product, ImageAsset $asset, string $filename, int $position = 1): array
     {
+        $mutex = new ImageSyncMutex;
+        if (! $mutex->acquire((int) $product->id)) {
+            throw new \RuntimeException('An image operation is running for this product. Retry the import later.');
+        }
+        try {
+            $mutex->assertOwned();
+
+            return $this->prepareImageForImportLocked($product, $asset, $filename, $position);
+        } finally {
+            $mutex->release();
+        }
+    }
+
+    private function prepareImageForImportLocked(Product $product, ImageAsset $asset, string $filename, int $position = 1): array
+    {
         $position = max(1, $position);
 
         return DB::transaction(function () use ($product, $asset, $filename, $position): array {
-            $image = $this->imageForImportPosition($product, $position);
+            Product::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
+            $byAsset = $product->allImages()->active()->where('image_asset_id', $asset->id)->lockForUpdate()->get();
+            if ($byAsset->count() > 1) {
+                throw new \RuntimeException('More than one CMS row contains this photograph. Review without merging approval history.');
+            }
+            $atPosition = $product->allImages()->active()->where('position', $position)->get();
+            if ($byAsset->isEmpty() && $atPosition->count() > 1) {
+                throw new \RuntimeException('This import position contains different or unresolved photographs. Review the collision explicitly.');
+            }
+            $image = $byAsset->first() ?? $this->imageForImportPosition($product, $position);
             $alreadySynced = false;
 
             if (! $image instanceof Image) {
@@ -481,9 +505,17 @@ class ShopifyImageImportService
             $hasShopifyId = filled(trim((string) ($image->shopify_id ?? '')));
             $needsSync = ! $alreadySynced;
             $previousAssetId = (int) ($image->image_asset_id ?? 0);
-            $replacedPhotograph = $image->exists && $previousAssetId > 0 && $previousAssetId !== (int) $asset->id;
+            $replacedPhotograph = $image->exists && $previousAssetId !== (int) $asset->id;
 
-            Image::withoutEvents(function () use ($image, $asset, $filename, $hasShopifyId, $needsSync, $alreadySynced, $position, $replacedPhotograph): void {
+            if ($replacedPhotograph && ($image->alt_confirmation_media_id !== null || $image->shopify_media_create_uncertain
+                || app(ImageUploadOperations::class)->active($image))) {
+                throw new \RuntimeException('Resolve the pending Shopify image or alt operation before replacing this photograph. Its tracking and approval history were preserved.');
+            }
+
+            if ($replacedPhotograph) {
+                app(ImagePhotographEvidence::class)->archive($image, 'S3 photograph replacement');
+            }
+            Image::withoutEvents(function () use ($image, $asset, $filename, $hasShopifyId, $needsSync, $alreadySynced, $position, $replacedPhotograph, $product): void {
                 $attributes = [
                     'image_asset_id' => $asset->id,
                     'image_path' => null,
@@ -509,10 +541,21 @@ class ShopifyImageImportService
                     $attributes['alt_text'] = null;
                     $attributes['imported_alt_text'] = null;
                     $attributes['source_image_id'] = null;
+                    $attributes['shopify_id'] = null;
+                    $attributes['shopify_cdn_url'] = null;
+                    $attributes['src'] = null;
+                    $attributes['shopify_identity_unresolved'] = true;
+                    $attributes['last_shopify_synced_image_asset_id'] = null;
+                    $attributes['alt_confirmation_media_id'] = null;
+                    $attributes['alt_confirmation_text'] = null;
                     $attributes['shopify_alt_pending'] = false;
                     $attributes['shopify_alt_sync_error'] = null;
                     $attributes['shopify_alt_text'] = null;
                     $attributes['alt_text_status'] = null;
+                }
+                $resultingSource = $replacedPhotograph ? null : $image->source_image_id;
+                if ($product->isStackProduct() && $image->ownership === null && $resultingSource === null) {
+                    $attributes['ownership'] = \App\Services\ImageOwnership::STACK_OWNED;
                 }
                 $image->forceFill($attributes)->save();
             });
@@ -531,156 +574,26 @@ class ShopifyImageImportService
      */
     private function rebuildStackImages(Product $stack): array
     {
-        $owned = $this->ownedPositionOneImages($stack);
-        if ($owned->count() !== 1) {
-            $reason = $owned->isEmpty()
-                ? 'stack has no owned image at position 1.'
-                : 'position 1 ownership is ambiguous.';
-
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: {$reason}"];
+        $mutex = new ImageSyncMutex;
+        if (! $mutex->acquire((int) $stack->id)) {
+            throw new \RuntimeException('Another image operation is running for this stack. Retry later.');
         }
-        $lifestyle = $owned->first();
-        if (! $lifestyle instanceof Image) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: stack has no owned image at position 1."];
+        try {
+            $mutex->assertOwned();
+
+            return $this->rebuildStackImagesLocked($stack);
+        } finally {
+            $mutex->release();
         }
+    }
 
-        $componentIds = $this->linkedComponentIds($stack);
-        if ($componentIds === []) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: no linked components found."];
-        }
-
-        $components = Product::query()->whereIn('id', $componentIds)->get()->keyBy(fn (Product $product): int => (int) $product->id);
-        $reasons = [];
-        $resolved = [];
-
-        foreach ($componentIds as $componentId) {
-            $component = $components->get($componentId);
-            if (! $component instanceof Product) {
-                $reasons[] = 'Component #'.$componentId.' was not found.';
-
-                continue;
-            }
-
-            $componentImage = $this->firstComponentShopifyImage($component);
-            if (! $componentImage instanceof Image) {
-                $reasons[] = ($component->handle ?: 'Product #'.$component->id).' has no eligible Shopify image.';
-
-                continue;
-            }
-
-            $resolved[] = [
-                'component' => $component,
-                'image' => $componentImage,
-            ];
-        }
-
-        if ($reasons !== []) {
-            return [
-                'rebuilt' => false,
-                'message' => "{$stack->handle}: rebuild stopped before replacing images. ".implode(' ', $reasons),
-            ];
-        }
-
-        $componentSources = [];
-        $seenAssetIds = [];
-        foreach ($resolved as $item) {
-            /** @var Product $component */
-            $component = $item['component'];
-            /** @var Image $componentImage */
-            $componentImage = $item['image'];
-            $asset = $this->ensureImageAssetAvailable($componentImage);
-            if (! $asset instanceof ImageAsset) {
-                $reasons[] = ($component->handle ?: 'Product #'.$component->id).' image '.$componentImage->id.' has no retrievable managed asset.';
-
-                continue;
-            }
-
-            if (isset($seenAssetIds[$asset->id])) {
-                continue;
-            }
-
-            $seenAssetIds[$asset->id] = true;
-            $componentSources[] = [
-                'component' => $component,
-                'image' => $componentImage->fresh() ?? $componentImage,
-                'asset' => $asset,
-            ];
-        }
-
-        if ($reasons !== []) {
-            return [
-                'rebuilt' => false,
-                'message' => "{$stack->handle}: rebuild stopped before replacing images. ".implode(' ', $reasons),
-            ];
-        }
-
-        if ($componentSources === []) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: no component first images had available managed assets."];
-        }
-
-        $rebuild = DB::transaction(function () use ($stack, $lifestyle, $componentSources): array {
-            Image::withoutEvents(function () use ($lifestyle): void {
-                $lifestyle->forceFill([
-                    'position' => 1,
-                    'is_duplicate_hidden' => false,
-                ])->save();
-            });
-
-            $unverified = $this->removeStackImagesFromPositionTwo($stack, $lifestyle);
-
-            $created = [];
-            $position = 2;
-
-            foreach ($componentSources as $source) {
-                /** @var Image $componentImage */
-                $componentImage = $source['image'];
-                /** @var ImageAsset $asset */
-                $asset = $source['asset'];
-
-                $image = new Image;
-                Image::withoutEvents(function () use ($image, $stack, $componentImage, $asset, $position): void {
-                    $image->forceFill([
-                        'product_id' => $stack->id,
-                        'shopify_id' => null,
-                        'image_asset_id' => $asset->id,
-                        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
-                        'local_dirty' => true,
-                        'src' => null,
-                        'image_path' => null,
-                        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
-                        'backup_completed_at' => now(),
-                        'backup_error' => null,
-                        'approved_filename' => $this->safeFilename($componentImage->preferredFilename()),
-                        'filename_mode' => Image::FILENAME_MODE_MANUAL,
-                        'needs_shopify_image_sync' => true,
-                        'shopify_image_sync_error' => null,
-                        'position' => $position,
-                        'alt_text' => $this->inheritedComponentAlt($componentImage),
-                        'source_image_id' => $componentImage->id,
-                    ])->save();
-                });
-
-                $this->pointImageSrcAtManagedRoute($image->fresh() ?? $image);
-                $created[] = (int) $image->id;
-                $position++;
-            }
-
-            return ['created' => $created, 'unverified' => $unverified];
-        });
-
-        $stack = $stack->fresh() ?? $stack;
-        $duplicateCleanupCount = $this->cleanupDuplicatePositionsForPipeline($stack);
-        $renamedCount = $this->renameActiveProductImagesFromHandle($stack->fresh() ?? $stack);
-        $this->pointActiveManagedImageSrcsAtManagedRoutes($stack->fresh() ?? $stack);
-
-        $createdImageIds = $rebuild['created'];
-        $unverifiedNote = $rebuild['unverified'] > 0
-            ? " {$rebuild['unverified']} replaced image(s) had no verified component source."
-            : '';
+    private function rebuildStackImagesLocked(Product $stack): array
+    {
+        $staged = app(ComponentStackPropagation::class)->stageStack($stack);
 
         return [
-            'rebuilt' => true,
-            'message' => "{$stack->handle}: rebuilt ".count($createdImageIds)." component image(s) locally, renamed {$renamedCount}, removed {$duplicateCleanupCount} duplicate row(s).{$unverifiedNote} Shopify sync left pending for approval.",
+            'rebuilt' => $staged['rebuilt'],
+            'message' => $staged['message'],
         ];
     }
 
@@ -854,52 +767,8 @@ class ShopifyImageImportService
 
     private function cleanupDuplicatePositionsForPipeline(Product $product): int
     {
-        $duplicateGroups = $product->allImages()
-            ->whereNotNull('position')
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->orderBy('position')
-            ->orderBy('id')
-            ->get()
-            ->groupBy(fn (Image $image): string => (string) $image->position)
-            ->filter(fn (Collection $images): bool => $images->count() > 1);
-
-        $removed = 0;
-
-        foreach ($duplicateGroups as $images) {
-            $primary = $this->preferredPipelineImageToKeep($images);
-            if (! $primary instanceof Image) {
-                continue;
-            }
-
-            foreach ($images as $image) {
-                if (! $image instanceof Image || $image->is($primary)) {
-                    continue;
-                }
-
-                if (blank($image->shopify_id)) {
-                    $this->permanentlyDeleteImageRow($image);
-                } else {
-                    $image->hideAsDuplicate(
-                        $primary,
-                        null,
-                        $image->position !== null
-                            ? "Duplicate image position {$image->position}"
-                            : 'Image import duplicate cleanup'
-                    );
-                }
-
-                $removed++;
-            }
-        }
-
-        return $removed;
+        // Position collisions require an explicit reviewed cleanup decision.
+        return 0;
     }
 
     private function renameActiveProductImagesFromHandle(Product $product): int
@@ -937,17 +806,13 @@ class ShopifyImageImportService
                 continue;
             }
 
-            Image::withoutEvents(function () use ($image, $filename, $position, $filenameChanged): void {
+            Image::withoutEvents(function () use ($image, $filename, $position): void {
                 $updates = [
                     'approved_filename' => $filename,
                     'filename_mode' => Image::FILENAME_MODE_AUTO,
                     'position' => $position,
                     'shopify_image_sync_error' => null,
                 ];
-
-                if ($filenameChanged && $image->hasManagedSource()) {
-                    $updates['needs_shopify_image_sync'] = true;
-                }
 
                 $image->forceFill($updates)->save();
             });
@@ -1000,24 +865,6 @@ class ShopifyImageImportService
         return $first instanceof Image ? $first : null;
     }
 
-    private function permanentlyDeleteImageRow(Image $image): void
-    {
-        $imageId = (int) $image->id;
-        if ($imageId <= 0) {
-            return;
-        }
-
-        Variant::query()
-            ->where('image_id', $imageId)
-            ->update(['image_id' => null]);
-
-        Image::query()
-            ->where('duplicate_of_image_id', $imageId)
-            ->update(['duplicate_of_image_id' => null]);
-
-        $image->delete();
-    }
-
     private function findProductBySku(string $sku): ?Product
     {
         $normalized = mb_strtolower(trim($sku));
@@ -1063,21 +910,7 @@ class ShopifyImageImportService
 
     private function firstComponentShopifyImage(Product $product): ?Image
     {
-        return $product->allImages()
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->whereNotNull('shopify_id')
-            ->where('shopify_id', '!=', '')
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-            ->orderBy('position')
-            ->orderBy('id')
-            ->first();
+        return app(ComponentPhotographSelector::class)->selected($product);
     }
 
     private function imageForImportPosition(Product $product, int $position): ?Image
@@ -1112,38 +945,7 @@ class ShopifyImageImportService
 
     private function removeExtraActiveImagesAtPosition(Product $product, Image $primary, int $position): void
     {
-        $product->allImages()
-            ->whereKeyNot($primary->id)
-            ->where('position', $position)
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->get()
-            ->each(function (Image $image) use ($primary): void {
-                Image::withoutEvents(function () use ($image, $primary): void {
-                    if (blank($image->shopify_id)) {
-                        $image->delete();
-
-                        return;
-                    }
-
-                    $image->forceFill([
-                        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
-                        'local_dirty' => true,
-                        'is_duplicate_hidden' => true,
-                        'duplicate_of_image_id' => $primary->id,
-                        'duplicate_hidden_at' => now(),
-                        'duplicate_hidden_reason' => $image->position !== null
-                            ? "Duplicate image position {$image->position}"
-                            : 'Image import duplicate cleanup',
-                    ])->save();
-                });
-            });
+        // Retain every row and its approval/source relationships.
     }
 
     private function inheritedComponentAlt(Image $componentImage): ?string
@@ -1153,46 +955,13 @@ class ShopifyImageImportService
         return $alt === '' ? null : $alt;
     }
 
-    private function removeStackImagesFromPositionTwo(Product $stack, Image $lifestyle): int
+    /**
+     * @param  array<int, int>  $exceptIds
+     */
+    private function removeStackImagesFromPositionTwo(Product $stack, Image $lifestyle, array $exceptIds = []): int
     {
-        $unverified = 0;
-        $stack->allImages()
-            ->whereKeyNot($lifestyle->id)
-            ->where(function ($query): void {
-                $query->whereNull('position')
-                    ->orWhere('position', '>=', 2);
-            })
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->get()
-            ->each(function (Image $image) use (&$unverified): void {
-                if ($image->source_image_id === null) {
-                    $unverified++;
-                }
-                Image::withoutEvents(function () use ($image): void {
-                    if (blank($image->shopify_id)) {
-                        $image->delete();
-
-                        return;
-                    }
-
-                    $image->forceFill([
-                        'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
-                        'local_dirty' => true,
-                        'is_duplicate_hidden' => true,
-                        'duplicate_hidden_at' => now(),
-                        'duplicate_hidden_reason' => 'Stack image rebuild replaced this image locally.',
-                    ])->save();
-                });
-            });
-
-        return $unverified;
+        // Obsolete copies remain available for explicit review; never delete by position.
+        return 0;
     }
 
     private function pointImageSrcAtManagedRoute(Image $image): void
@@ -1202,10 +971,15 @@ class ShopifyImageImportService
             return;
         }
 
-        Image::withoutEvents(function () use ($image, $src): void {
-            $image->forceFill([
-                'src' => $src,
-            ])->save();
+        $cdnUrl = ShopifyMediaPath::rememberableCdnUrl($image->shopify_cdn_url)
+            ?? ShopifyMediaPath::rememberableCdnUrl($image->src);
+
+        Image::withoutEvents(function () use ($image, $src, $cdnUrl): void {
+            $updates = ['src' => $src];
+            if ($cdnUrl !== null) {
+                $updates['shopify_cdn_url'] = $cdnUrl;
+            }
+            $image->forceFill($updates)->save();
         });
     }
 
@@ -1272,29 +1046,7 @@ class ShopifyImageImportService
      */
     private function linkedComponentIds(Product $stack): array
     {
-        $shopifyId = trim((string) ($stack->shopify_id ?? ''));
-        $handle = trim((string) ($stack->handle ?? ''));
-
-        if ($shopifyId === '' && $handle === '') {
-            return [];
-        }
-
-        $draft = NewProductDraft::query()
-            ->where(function ($query) use ($shopifyId, $handle): void {
-                if ($shopifyId !== '') {
-                    $query->where('shopify_id', $shopifyId);
-                }
-
-                if ($handle !== '') {
-                    $shopifyId !== ''
-                        ? $query->orWhere('handle', $handle)
-                        : $query->where('handle', $handle);
-                }
-            })
-            ->orderByDesc('updated_at')
-            ->first(['bundle_product_ids']);
-
-        return $this->normalizeProductIds($draft?->bundle_product_ids);
+        return app(StackComponentCatalog::class)->componentIds($stack);
     }
 
     /**

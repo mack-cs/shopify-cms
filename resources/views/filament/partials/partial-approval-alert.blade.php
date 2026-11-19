@@ -18,7 +18,30 @@
         };
 
         const writeSeenIds = (ids) => {
-            window.localStorage.setItem(storageKey, JSON.stringify(ids.slice(-200)));
+            const unique = [...new Set(ids)];
+            window.localStorage.setItem(storageKey, JSON.stringify(unique.slice(-5000)));
+        };
+
+        const snoozeKey = 'partial-approval-alert-snoozed-until';
+
+        const snooze = () => {
+            window.sessionStorage.setItem(snoozeKey, String(Date.now() + (30 * 60 * 1000)));
+        };
+
+        const isSnoozed = () => {
+            const until = Number(window.sessionStorage.getItem(snoozeKey) || 0);
+
+            return Number.isFinite(until) && until > Date.now();
+        };
+
+        const onQueuePage = (queueUrl) => {
+            try {
+                const path = new URL(queueUrl || window.location.href, window.location.origin).pathname.replace(/\/$/, '');
+
+                return window.location.pathname.replace(/\/$/, '') === path;
+            } catch (_) {
+                return window.location.pathname.includes('product-partial-approval-requests');
+            }
         };
 
         const escapeHtml = (value) => String(value ?? '')
@@ -98,13 +121,17 @@
 
             const dismiss = () => {
                 markSeen(requests.map((request) => request.id));
+                snooze();
                 removeExistingModal();
             };
 
             overlay.querySelector('#partial-approval-alert-close')?.addEventListener('click', dismiss);
             overlay.querySelector('#partial-approval-alert-ignore')?.addEventListener('click', dismiss);
-            overlay.querySelector('#partial-approval-alert-review')?.addEventListener('click', () => {
-                markSeen(requests.map((request) => request.id));
+            overlay.querySelector('#partial-approval-alert-review')?.addEventListener('click', dismiss);
+            overlay.addEventListener('click', (event) => {
+                if (event.target === overlay) {
+                    dismiss();
+                }
             });
         };
 
@@ -127,9 +154,21 @@
                 const seenIds = new Set(readSeenIds());
                 const unseen = requests.filter((request) => !seenIds.has(request.id));
 
-                if (unseen.length > 0) {
-                    showModal(unseen);
+                if (unseen.length === 0 || document.getElementById('partial-approval-alert-overlay')) {
+                    return;
                 }
+
+                if (onQueuePage(unseen[0]?.queue_url)) {
+                    markSeen(unseen.map((request) => request.id));
+
+                    return;
+                }
+
+                if (isSnoozed()) {
+                    return;
+                }
+
+                showModal(unseen);
             } catch (_) {
                 // Ignore polling failures and try again later.
             }

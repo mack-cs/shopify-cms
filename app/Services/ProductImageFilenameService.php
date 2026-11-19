@@ -74,8 +74,6 @@ class ProductImageFilenameService
                 $image->forceFill([
                     'approved_filename' => $filename,
                     'filename_mode' => $mode,
-                    'needs_shopify_image_sync' => true,
-                    'shopify_image_sync_error' => null,
                 ])->save();
             });
 

@@ -13,10 +13,19 @@ use App\Models\ShopifyRow;
 use App\Models\Variant;
 use App\Services\EngravedBeads\EngravedBeadConfiguration;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 final class ProductShopifyUpdater
 {
+    public const IMAGE_SYNC_LOCK_PREFIX = 'shopify-image-sync:product:';
+
     private const COMPLEMENTARY_PRODUCTS_SYNC_LIMIT = 3;
+
+    private bool $imageSyncLockHeld = false;
+
+    private ?ImageSyncMutex $imageSyncMutex = null;
+
+    private array $imageOutcomes = [];
 
     public const SYNC_SCOPE_PRODUCT = 'product';
 
@@ -330,7 +339,7 @@ final class ProductShopifyUpdater
             $product->type,
         );
 
-        $productData = $this->client->graphql($this->productUpdateMutation(), [
+        $productData = $this->graphql($this->productUpdateMutation(), [
             'input' => [
                 'id' => $productId,
                 'tags' => $tags,
@@ -357,7 +366,7 @@ final class ProductShopifyUpdater
             'compareAtPrice' => $compareAt,
         ];
 
-        $variantData = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+        $variantData = $this->graphql($this->variantsBulkUpdateMutation(), [
             'productId' => $productId,
             'variants' => [$variantInput],
         ]);
@@ -410,7 +419,7 @@ final class ProductShopifyUpdater
         }
 
         $confirmedPrice = number_format((float) $price, 2, '.', '');
-        $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+        $data = $this->graphql($this->variantsBulkUpdateMutation(), [
             'productId' => $productId,
             'variants' => [[
                 'id' => $variantId,
@@ -455,7 +464,7 @@ final class ProductShopifyUpdater
         }
 
         $confirmedCost = number_format((float) $cost, 2, '.', '');
-        $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+        $data = $this->graphql($this->variantsBulkUpdateMutation(), [
             'productId' => $productId,
             'variants' => [[
                 'id' => $variantId,
@@ -497,6 +506,7 @@ final class ProductShopifyUpdater
      */
     public function updateApprovedProducts(Collection $products, ?array $scopes = null, ?array $coreFields = null, ?string $syncBatchId = null, ?int $userId = null): array
     {
+        $this->imageOutcomes = [];
         $resolvedScopes = $this->normalizeSyncScopes($scopes);
         $resolvedCoreFields = $this->normalizeCoreFields($coreFields);
         $fullSyncScopes = $this->normalizeSyncScopes(null);
@@ -511,6 +521,7 @@ final class ProductShopifyUpdater
                 'failed' => 0,
                 'warnings' => [],
                 'failures' => [],
+                'image_outcomes' => [],
             ];
         }
 
@@ -715,6 +726,10 @@ final class ProductShopifyUpdater
             ]);
 
             try {
+                $this->imageOutcomes[$product->id] = [
+                    'photographs' => in_array(self::SYNC_SCOPE_IMAGES, $effectiveScopes, true) ? 'not_completed' : 'not_requested',
+                    'alt_text' => in_array(self::SYNC_SCOPE_IMAGE_ALT, $effectiveScopes, true) ? 'not_completed' : 'not_requested',
+                ];
                 $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
                 if ($effectiveScopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
                     $product->forceFill(['sync_batch_id' => $syncBatchId, 'last_synced_at' => now()])->saveQuietly();
@@ -750,6 +765,7 @@ final class ProductShopifyUpdater
             'failed' => $failed,
             'warnings' => $warnings,
             'failures' => $failures,
+            'image_outcomes' => $this->imageOutcomes,
         ];
     }
 
@@ -1022,9 +1038,19 @@ final class ProductShopifyUpdater
                 }
 
                 $details = $this->productDetails($product, null, $productId);
-                $warnings = array_merge($warnings, $this->updateImages($product, $productId, [], $details));
-                $synced++;
-                $syncedProductIds[] = $product->id;
+                $imageWarnings = $this->updateImages($product, $productId, [], $details);
+                $warnings = array_merge($warnings, $imageWarnings);
+                if ($imageWarnings === []) {
+                    $synced++;
+                    $syncedProductIds[] = $product->id;
+                } else {
+                    $failed++;
+                    $failures[] = [
+                        'product_id' => $product->id,
+                        'reason' => 'unconfirmed',
+                        'details' => collect($imageWarnings)->pluck('warning')->implode(' '),
+                    ];
+                }
             } catch (\Throwable $e) {
                 $failed++;
                 $failures[] = [
@@ -1050,6 +1076,355 @@ final class ProductShopifyUpdater
             'warnings' => $warnings,
             'failures' => $failures,
         ];
+    }
+
+    /**
+     * Inherited stack photographs are published from a confirmed component generation.
+     * They do not wait for a separate stack approval.
+     *
+     * @return array{confirmed:bool, warnings:array<int, array{product_id:int, warning:string}>}
+     */
+    public function synchronizeInheritedStackImage(Product $product, int $imageId): array
+    {
+        $productId = $this->resolveProductId($product);
+        if (! $productId) {
+            throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+        }
+        $warnings = $this->updateImages($product, $productId, [], [], [$imageId]);
+        $image = Image::query()->useWritePdo()->find($imageId);
+        $confirmed = $warnings === []
+            && $image instanceof Image
+            && filled(trim((string) $image->shopify_id))
+            && ! $image->shopify_media_create_uncertain
+            && ! $image->shopify_identity_unresolved
+            && ! $image->needs_shopify_image_sync;
+
+        return ['confirmed' => $confirmed, 'warnings' => $warnings];
+    }
+
+    /** Removes one superseded media attachment from this stack product. It does not delete a file globally. */
+    public function retireStackProductMedia(Product $stack, string $mediaId, string $replacementMediaId, ?callable $assertCurrent = null, int $retiringImageId = 0): void
+    {
+        if ($mediaId === '' || ($replacementMediaId !== '' && $mediaId === $replacementMediaId)) {
+            return;
+        }
+        $productId = $this->resolveProductId($stack);
+        if (! $productId) {
+            throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
+        }
+        $lock = new ImageSyncMutex;
+        $acquired = false;
+        if ($this->imageSyncLockHeld && $this->imageSyncMutex instanceof ImageSyncMutex) {
+            $this->imageSyncMutex->assertOwned();
+        } elseif (! $lock->acquire((int) $stack->id)) {
+            throw new \RuntimeException('Another image operation is running.');
+        } else {
+            $acquired = true;
+            $this->imageSyncLockHeld = true;
+            $this->imageSyncMutex = $lock;
+        }
+        try {
+            $this->imageSyncMutex->assertOwned();
+            $nodes = (new ShopifyProductMediaReader($this->client))->media($productId, 'StackRetirementMedia');
+            $this->guardRetirementCurrent($assertCurrent);
+            $present = collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId);
+            if (! $present) {
+                foreach ($this->stackVariantMedia($productId) as $variant) {
+                    if (in_array($mediaId, $variant['media_ids'], true)) {
+                        throw new \RuntimeException('A variant still references absent media; retirement is not confirmed.');
+                    }
+                }
+                return;
+            }
+            if (! collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId && ShopifyProductMediaReader::ready($node))) {
+                throw new \RuntimeException('The obsolete file is not READY for association removal.');
+            }
+            $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
+            $retiring = Image::query()->active()->with('imageAsset')->where('product_id', $stack->id)->find($retiringImageId);
+            $oldNode = collect($nodes)->first(fn (array $node): bool => ($node['id'] ?? null) === $mediaId);
+            if (! $retiring || ! ImageOwnership::isInherited($retiring) || $retiring->shopify_id !== $mediaId
+                || $retiring->shopify_identity_unresolved || ! app(ImagePhotographEvidence::class)->matchesMedia($retiring, $oldNode)) {
+                throw new \RuntimeException('Retirement requires a verified obsolete inherited photograph; no association was changed.');
+            }
+            if ($replacementMediaId !== '') {
+                $replacementReady = collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $replacementMediaId
+                    && ShopifyProductMediaReader::ready($node));
+                if (! $replacementReady) {
+                    throw new \RuntimeException('The replacement photograph is not READY. The superseded attachment was kept.');
+                }
+            }
+            $affected = [];
+            foreach ($this->stackVariantMedia($productId) as $variant) {
+                if (in_array($mediaId, $variant['media_ids'], true)) {
+                    $affected[] = $variant['id'];
+                }
+            }
+            foreach ($affected as $variantId) {
+                $this->guardRetirementCurrent($assertCurrent);
+                $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
+                if ($replacementMediaId !== '') {
+                    $this->ensureVariantReplacement($productId, $variantId, $replacementMediaId, $retiringImageId, $mediaId, $assertCurrent);
+                }
+                $current = $this->variantMediaIds($variantId);
+                if (! in_array($mediaId, $current, true)) {
+                    continue;
+                }
+                if ($replacementMediaId !== '' && ! in_array($replacementMediaId, $current, true)) {
+                    throw new \RuntimeException('The replacement is not attached to the variant. The previous photograph was kept.');
+                }
+                $this->guardRetirementCurrent($assertCurrent);
+                $this->noteRetirement($retiringImageId, $mediaId, 'detach', $variantId);
+                $this->requireMutationPayload($this->graphql($this->productVariantDetachMediaMutation(), [
+                    'productId' => $productId,
+                    'variantMedia' => [['variantId' => $variantId, 'mediaIds' => [$mediaId]]],
+                ]), 'productVariantDetachMedia');
+                $afterDetach = $this->variantMediaIds($variantId);
+                if (in_array($mediaId, $afterDetach, true) || ($replacementMediaId !== '' && ! in_array($replacementMediaId, $afterDetach, true))) {
+                    throw new \RuntimeException('Variant media was not reconciled. The previous photograph was kept.');
+                }
+            }
+            $variants = $this->stackVariantMedia($productId);
+            foreach ($variants as $variant) {
+                if (in_array($mediaId, $variant['media_ids'], true)) {
+                    throw new \RuntimeException('A variant still references the superseded photograph. It was not removed.');
+                }
+            }
+            $this->guardRetirementCurrent($assertCurrent);
+            $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
+            $this->noteRetirement($retiringImageId, $mediaId, 'delete', $productId);
+            $this->requireMutationPayload($this->graphql($this->detachProductMediaMutation(), [
+                'files' => [['id' => $mediaId, 'referencesToRemove' => [$productId]]],
+            ]), 'fileUpdate');
+            $after = (new ShopifyProductMediaReader($this->client))->media($productId, 'StackRetirementConfirmed');
+            if (collect($after)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId)) {
+                throw new \RuntimeException('Shopify still has the superseded stack photograph. The CMS image was not deleted.');
+            }
+            foreach ($this->stackVariantMedia($productId) as $variant) {
+                if (in_array($mediaId, $variant['media_ids'], true)
+                    || ($replacementMediaId !== '' && in_array($variant['id'], $affected, true) && ! in_array($replacementMediaId, $variant['media_ids'], true))) {
+                    throw new \RuntimeException('Variant references are not confirmed after association removal.');
+                }
+            }
+        } finally {
+            if ($acquired) {
+                $this->imageSyncLockHeld = false;
+                $this->imageSyncMutex = null;
+                $lock->release();
+            }
+        }
+    }
+
+    private function guardRetirementCurrent(?callable $assertCurrent): void
+    {
+        $this->imageSyncMutex?->assertOwned();
+        if ($assertCurrent !== null) {
+            $assertCurrent();
+        }
+    }
+
+    /** Read-only confirmation used by operator recovery; API failures propagate. */
+    public function stackMediaAbsent(Product $stack, string $mediaId): bool
+    {
+        $nodes = (new ShopifyProductMediaReader($this->client))->media((string) $stack->shopify_id, 'RecoverStackRetirementMedia');
+        if (collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId)) {
+            return false;
+        }
+        foreach ($this->stackVariantMedia((string) $stack->shopify_id) as $variant) {
+            if (in_array($mediaId, $variant['media_ids'], true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function ensureVariantReplacement(string $productId, string $variantId, string $replacementMediaId, int $imageId, string $oldMediaId, ?callable $assertCurrent = null): void
+    {
+        if (in_array($replacementMediaId, $this->variantMediaIds($variantId), true)) {
+            return;
+        }
+        $this->guardRetirementCurrent($assertCurrent);
+        $this->noteRetirement($imageId, $oldMediaId, 'append', $variantId);
+        try {
+            $this->requireMutationPayload($this->graphql($this->productVariantAppendMediaMutation(), [
+                'productId' => $productId,
+                'variantMedia' => [['variantId' => $variantId, 'mediaIds' => [$replacementMediaId]]],
+            ]), 'productVariantAppendMedia');
+        } catch (\Throwable $exception) {
+            if (! in_array($replacementMediaId, $this->variantMediaIds($variantId), true)) {
+                throw $exception;
+            }
+        }
+        if (! in_array($replacementMediaId, $this->variantMediaIds($variantId), true)) {
+            throw new \RuntimeException('The replacement is not attached to the variant. The previous photograph was kept.');
+        }
+    }
+
+    private function refuseSharedMedia(Product $stack, string $mediaId, int $retiringImageId): void
+    {
+        $referenced = Image::query()->active()
+            ->where('product_id', $stack->id)
+            ->where('shopify_id', $mediaId)
+            ->when($retiringImageId > 0, fn ($query) => $query->where('id', '!=', $retiringImageId))
+            ->exists();
+        if ($referenced) {
+            throw new \RuntimeException('Another active stack image still uses this photograph. It was not removed.');
+        }
+    }
+
+    private function noteRetirement(int $imageId, string $mediaId, string $operation, string $target = ''): void
+    {
+        if ($imageId < 1 || $mediaId === '') {
+            return;
+        }
+        if (DB::transactionLevel() > 0 && ! app()->environment('testing')) {
+            throw new \RuntimeException('Retirement intent must be durable outside an enclosing database transaction.');
+        }
+        $intent = DB::table('inherited_media_retirements')->where('image_id', $imageId)->where('old_media_id', $mediaId)
+            ->whereIn('status', ['pending', 'mutating'])->first();
+        if (! $intent) {
+            throw new \RuntimeException('Retirement requires a persisted pending operation before any Shopify mutation.');
+        }
+        if ($intent && $intent->status === 'mutating' && $intent->last_operation === $operation
+            && (string) $intent->last_operation_target === $target) {
+            throw new \RuntimeException('Uncertain retirement mutation still requires confirmation. It will not be replayed; use images:resolve-media-retirement.');
+        }
+        DB::table('inherited_media_retirements')
+            ->where('image_id', $imageId)
+            ->where('old_media_id', $mediaId)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->update(['status' => 'mutating', 'last_operation' => $operation, 'last_operation_target' => $target, 'updated_at' => now()]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     */
+    private function requireMutationPayload(array $data, string $field): void
+    {
+        $payload = $data[$field] ?? null;
+        if (! is_array($payload)) {
+            throw new \RuntimeException('Shopify '.$field.' returned no payload. The mutation was not treated as successful.');
+        }
+        $errors = $payload['userErrors'] ?? $payload['mediaUserErrors'] ?? null;
+        if (! is_array($errors) || $errors !== []) {
+            $message = is_array($errors) ? collect($errors)->pluck('message')->implode(' ') : 'Shopify did not return mutation errors.';
+
+            throw new \RuntimeException($message !== '' ? $message : 'Shopify rejected the stack media change.');
+        }
+    }
+
+    /**
+     * @return array<int, array{id: string, media_ids: array<int, string>}>
+     */
+    private function stackVariantMedia(string $productId): array
+    {
+        $variants = [];
+        $cursor = null;
+        $seen = [];
+        do {
+            $data = $this->graphql(<<<'GQL'
+query StackRetirementVariants($id: ID!, $after: String) {
+  product(id: $id) {
+    variants(first: 50, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GQL, ['id' => $productId, 'after' => $cursor]);
+            $connection = $data['product']['variants'] ?? null;
+            if (! is_array($connection) || ! is_array($connection['nodes'] ?? null) || ! is_bool($connection['pageInfo']['hasNextPage'] ?? null)) {
+                throw new \RuntimeException('Shopify returned an incomplete variant connection. Retirement was not attempted.');
+            }
+            foreach ($connection['nodes'] as $node) {
+                if (is_array($node) && filled($node['id'] ?? null)) {
+                    $variants[] = ['id' => (string) $node['id'], 'media_ids' => $this->variantMediaIds((string) $node['id'])];
+                }
+            }
+            if (! $connection['pageInfo']['hasNextPage']) {
+                break;
+            }
+            $cursor = $connection['pageInfo']['endCursor'] ?? null;
+            if (! is_string($cursor) || $cursor === '' || isset($seen[$cursor])) {
+                throw new \RuntimeException('Shopify variant pagination did not advance. Retirement was not attempted.');
+            }
+            $seen[$cursor] = true;
+        } while (true);
+
+        return $variants;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function variantMediaIds(string $variantId): array
+    {
+        $ids = [];
+        $cursor = null;
+        $seen = [];
+        do {
+            $data = $this->graphql(<<<'GQL'
+query StackRetirementVariantMedia($id: ID!, $after: String) {
+  productVariant(id: $id) {
+    media(first: 250, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GQL, ['id' => $variantId, 'after' => $cursor]);
+            $connection = $data['productVariant']['media'] ?? null;
+            if (! is_array($connection) || ! is_array($connection['nodes'] ?? null) || ! is_bool($connection['pageInfo']['hasNextPage'] ?? null)) {
+                throw new \RuntimeException('Shopify returned incomplete variant media. Retirement was not attempted.');
+            }
+            foreach ($connection['nodes'] as $node) {
+                if (is_array($node) && filled($node['id'] ?? null)) {
+                    $ids[] = (string) $node['id'];
+                }
+            }
+            if (! $connection['pageInfo']['hasNextPage']) {
+                break;
+            }
+            $cursor = $connection['pageInfo']['endCursor'] ?? null;
+            if (! is_string($cursor) || $cursor === '' || isset($seen[$cursor])) {
+                throw new \RuntimeException('Shopify variant media pagination did not advance. Retirement was not attempted.');
+            }
+            $seen[$cursor] = true;
+        } while (true);
+
+        return $ids;
+    }
+
+    /**
+     * @param  array{synced:int, failed:int, warnings:array<int, array{product_id:int, warning:string}>, failures:array<int, array{product_id:int, reason:string, details:string|null}>}  $result
+     */
+    private function applyImageSyncConfirmation(array &$result): void
+    {
+        if ($result['warnings'] === []) {
+            $result['synced'] = 1;
+
+            return;
+        }
+        $result['synced'] = 0;
+        $result['failed'] = 1;
+        $result['failures'][] = [
+            'product_id' => (int) ($result['warnings'][0]['product_id'] ?? 0),
+            'reason' => 'unconfirmed',
+            'details' => collect($result['warnings'])->pluck('warning')->implode(' '),
+        ];
+    }
+
+    public static function imageSyncWarningIsRetryable(string $warning): bool
+    {
+        $warning = strtolower($warning);
+
+        return str_contains($warning, 'another sync is already running')
+            || str_contains($warning, 'another image operation is running')
+            || str_contains($warning, 'awaiting upload')
+            || str_contains($warning, 'uncertain')
+            || str_contains($warning, 'processing')
+            || str_contains($warning, 'not ready')
+            || str_contains($warning, 'incomplete');
     }
 
     /**
@@ -1117,7 +1492,8 @@ final class ProductShopifyUpdater
 
             $details = $this->productDetails($product, null, $productId);
             $result['warnings'] = $this->updateImages($product, $productId, [], $details, $selectedImageIds, $allowRemoteDeletedRestore);
-            $result['synced'] = 1;
+            $result['warnings'] = array_merge($result['warnings'], $this->syncVariantMediaAssignments($product, $productId, [], $selectedImageIds));
+            $this->applyImageSyncConfirmation($result);
         } catch (\Throwable $e) {
             $result['failed'] = 1;
             $result['failures'][] = [
@@ -1178,7 +1554,7 @@ final class ProductShopifyUpdater
 
             $details = $this->productDetails($product, null, $productId);
             $result['warnings'] = $this->updateImages($product, $productId, [], $details);
-            $result['synced'] = 1;
+            $this->applyImageSyncConfirmation($result);
         } catch (\Throwable $e) {
             $result['failed'] = 1;
             $result['failures'][] = [
@@ -1351,7 +1727,7 @@ final class ProductShopifyUpdater
     //     }
 
     //     // Product update (with category included when possible)
-    //     $data = $this->client->graphql($this->productUpdateMutation(), [
+    //     $data = $this->graphql($this->productUpdateMutation(), [
     //         'input' => $input,
     //     ]);
 
@@ -1372,7 +1748,7 @@ final class ProductShopifyUpdater
 
     //             // Retry productUpdate WITHOUT category
     //             unset($input['category']);
-    //             $data = $this->client->graphql($this->productUpdateMutation(), [
+    //             $data = $this->graphql($this->productUpdateMutation(), [
     //                 'input' => $input,
     //             ]);
 
@@ -1443,7 +1819,7 @@ final class ProductShopifyUpdater
     private function updateProduct(Product $product, array $scopes, array $coreFields): array
     {
         $warnings = [];
-        if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT)) {
+        if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT) && ! $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES)) {
             $this->publishApprovedImageAlt($product);
             if ($scopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
                 return [];
@@ -1575,7 +1951,7 @@ final class ProductShopifyUpdater
                 'fields' => array_values(array_diff(array_keys($input), ['id'])),
             ]);
             // 1) Update product (and category if provided)
-            $data = $this->client->graphql($this->productUpdateMutation(), [
+            $data = $this->graphql($this->productUpdateMutation(), [
                 'input' => $input,
             ]);
 
@@ -1594,7 +1970,7 @@ final class ProductShopifyUpdater
 
                     unset($input['category']);
 
-                    $data = $this->client->graphql($this->productUpdateMutation(), [
+                    $data = $this->graphql($this->productUpdateMutation(), [
                         'input' => $input,
                     ]);
 
@@ -1709,10 +2085,19 @@ final class ProductShopifyUpdater
 
         // 6) Images
         if ($syncImages) {
+            $imageWarnings = $this->updateImages($product, $productId, $imageRows, $details);
+            $this->imageOutcomes[$product->id]['photographs'] = $imageWarnings === [] ? 'verified' : 'incomplete';
+            $this->imageOutcomes[$product->id]['photograph_warnings'] = $imageWarnings;
             $warnings = array_merge(
                 $warnings,
-                $this->updateImages($product, $productId, $imageRows, $details)
+                $imageWarnings
             );
+            if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT)) {
+                $this->publishApprovedImageAlt($product->fresh() ?? $product);
+            }
+            if ($imageWarnings !== []) {
+                throw new \RuntimeException('Photograph synchronization incomplete: '.collect($imageWarnings)->pluck('warning')->implode(' '));
+            }
             if ($this->isUnlistedLaunchProduct($product)) {
                 $publicationError = app(NewProductDraftShopifyCreator::class)->publishUnlistedProductToAllChannels($productId);
                 if ($publicationError !== null) {
@@ -1742,10 +2127,15 @@ final class ProductShopifyUpdater
         }
 
         if ($syncImages) {
+            $variantWarnings = $this->syncVariantMediaAssignments($product, $productId, $variantRows);
+            $this->imageOutcomes[$product->id]['variant_associations'] = $variantWarnings === [] ? 'verified_or_unmapped_preserved' : 'needs_review';
             $warnings = array_merge(
                 $warnings,
-                $this->syncVariantMediaAssignments($product, $productId, $variantRows)
+                $variantWarnings
             );
+            if ($variantWarnings !== []) {
+                throw new \RuntimeException('Variant image synchronization incomplete: '.collect($variantWarnings)->pluck('warning')->implode(' '));
+            }
         }
 
         // 7) Coverage warnings
@@ -1786,7 +2176,7 @@ final class ProductShopifyUpdater
             return $warnings;
         }
 
-        $data = $this->client->graphql($this->metafieldsSetMutation(), [
+        $data = $this->graphql($this->metafieldsSetMutation(), [
             'metafields' => $metafields,
         ]);
 
@@ -1942,7 +2332,7 @@ final class ProductShopifyUpdater
 
     private function resolveShopifyId(string $handle): ?string
     {
-        $data = $this->client->graphql($this->productByHandleQuery(), [
+        $data = $this->graphql($this->productByHandleQuery(), [
             'handle' => $handle,
         ]);
 
@@ -1966,7 +2356,7 @@ final class ProductShopifyUpdater
 
     private function productByHandleDetails(string $handle): array
     {
-        $data = $this->client->graphql($this->productByHandleDetailsQuery(), [
+        $data = $this->graphql($this->productByHandleDetailsQuery(), [
             'handle' => $handle,
         ]);
 
@@ -1975,7 +2365,7 @@ final class ProductShopifyUpdater
 
     private function productByIdDetails(string $id): array
     {
-        $data = $this->client->graphql($this->productByIdDetailsQuery(), [
+        $data = $this->graphql($this->productByIdDetailsQuery(), [
             'id' => $id,
         ]);
 
@@ -1999,7 +2389,7 @@ final class ProductShopifyUpdater
      */
     private function productMetafieldRawValuesByHandle(string $handle): array
     {
-        $data = $this->client->graphql($this->productByHandleMetafieldsQuery(), [
+        $data = $this->graphql($this->productByHandleMetafieldsQuery(), [
             'handle' => $handle,
         ]);
 
@@ -2032,7 +2422,7 @@ final class ProductShopifyUpdater
      */
     private function productMetafieldRawValuesById(string $id): array
     {
-        $data = $this->client->graphql($this->productByIdMetafieldsQuery(), [
+        $data = $this->graphql($this->productByIdMetafieldsQuery(), [
             'id' => $id,
         ]);
 
@@ -2118,7 +2508,7 @@ final class ProductShopifyUpdater
             ]];
         }
 
-        $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+        $data = $this->graphql($this->variantsBulkUpdateMutation(), [
             'productId' => $productId,
             'variants' => $variants,
         ]);
@@ -2413,7 +2803,7 @@ final class ProductShopifyUpdater
                 'variant_input_count' => count($variantInputs),
                 'variant_inputs' => $variantInputs,
             ]);
-            $data = $this->client->graphql($this->variantsBulkUpdateMutation(), [
+            $data = $this->graphql($this->variantsBulkUpdateMutation(), [
                 'productId' => $productId,
                 'variants' => $variantInputs,
             ]);
@@ -2857,7 +3247,7 @@ GQL;
             throw new \RuntimeException('Product has no Shopify ID.');
         }
 
-        $data = $this->client->graphql($this->productUpdateMutation(), [
+        $data = $this->graphql($this->productUpdateMutation(), [
             'input' => [
                 'id' => $productId,
                 'status' => 'ARCHIVED',
@@ -2999,7 +3389,7 @@ GQL;
                 ];
 
                 try {
-                    $data = $this->client->graphql($this->productUpdateMutation(), [
+                    $data = $this->graphql($this->productUpdateMutation(), [
                         'input' => $input,
                     ]);
                 } catch (\Throwable $e) {
@@ -3764,7 +4154,7 @@ GQL;
         }
 
         try {
-            $data = $this->client->graphql($this->productByHandleQuery(), [
+            $data = $this->graphql($this->productByHandleQuery(), [
                 'handle' => $trimmed,
             ]);
         } catch (\Throwable) {
@@ -3784,7 +4174,7 @@ GQL;
         }
 
         try {
-            $data = $this->client->graphql($this->productsSearchQuery(), [
+            $data = $this->graphql($this->productsSearchQuery(), [
                 'query' => $query,
             ]);
         } catch (\Throwable) {
@@ -3858,7 +4248,7 @@ GQL;
 
         $types = [];
         try {
-            $data = $this->client->graphql($this->metafieldDefinitionQuery(), [
+            $data = $this->graphql($this->metafieldDefinitionQuery(), [
                 'namespace' => $namespace,
                 'key' => $key,
             ]);
@@ -3914,7 +4304,7 @@ GQL;
         $definitionIds = array_values(array_unique($definitionIds));
         if (! empty($definitionIds)) {
             try {
-                $nodeData = $this->client->graphql($this->metaobjectDefinitionTypesQuery(), [
+                $nodeData = $this->graphql($this->metaobjectDefinitionTypesQuery(), [
                     'ids' => $definitionIds,
                 ]);
             } catch (\Throwable) {
@@ -3961,7 +4351,7 @@ GQL;
         }
 
         try {
-            $data = $this->client->graphql($this->metaobjectsByTypeQuery(), [
+            $data = $this->graphql($this->metaobjectsByTypeQuery(), [
                 'type' => $type,
             ]);
         } catch (\Throwable) {
@@ -4502,6 +4892,13 @@ GQL;
         return null;
     }
 
+    private function graphql(string $query, array $variables = []): array
+    {
+        $this->imageSyncMutex?->assertOwned();
+
+        return $this->client->graphql($query, $variables);
+    }
+
     private function updateImages(
         Product $product,
         string $productId,
@@ -4510,6 +4907,37 @@ GQL;
         ?array $selectedImageIds = null,
         bool $allowRemoteDeletedRestore = false,
     ): array {
+        if (! $this->imageSyncLockHeld) {
+            $lock = new ImageSyncMutex;
+            if (! $lock->acquire((int) $product->id)) {
+                return [[
+                    'product_id' => $product->id,
+                    'warning' => "Image sync for product {$product->id} skipped because another sync is already running.",
+                ]];
+            }
+
+            $this->imageSyncLockHeld = true;
+            $this->imageSyncMutex = $lock;
+            try {
+                return $this->updateImages(
+                    $product,
+                    $productId,
+                    $_rowDataList,
+                    $details,
+                    $selectedImageIds,
+                    $allowRemoteDeletedRestore,
+                );
+            } finally {
+                $this->imageSyncLockHeld = false;
+                $this->imageSyncMutex = null;
+                $lock->release();
+            }
+        }
+
+        $this->imageSyncMutex->assertOwned();
+        $current = (new ShopifyProductMediaReader($this->client))->read($productId, 'ProductImageSyncMedia');
+        $this->imageSyncMutex->assertOwned();
+        $details = array_replace($details, $current);
         $warnings = [];
         $selectedImageIds = $selectedImageIds !== null
             ? array_values(array_unique(array_map('intval', $selectedImageIds)))
@@ -4518,62 +4946,9 @@ GQL;
             ? array_fill_keys($selectedImageIds, true)
             : null;
         $selectedSync = $selectedImageIdMap !== null;
-        $existingEntriesById = [];
-        $existingEntriesByUrl = [];
-
-        $existingMediaNodes = collect(data_get($details, 'media.nodes', []))
-            ->filter(fn ($node) => is_array($node))
-            ->map(function (array $node): array {
-                return [
-                    'id' => trim((string) ($node['id'] ?? '')),
-                    'url' => trim((string) data_get($node, 'image.url', '')),
-                    'mode' => 'file_reference',
-                ];
-            })
-            ->filter(fn (array $row) => $row['url'] !== '')
-            ->values()
-            ->all();
-
-        foreach ($existingMediaNodes as $row) {
-            $id = trim((string) ($row['id'] ?? ''));
-            $url = trim((string) ($row['url'] ?? ''));
-            if ($id === '' || $url === '') {
-                continue;
-            }
-
-            $existingEntriesById[$id] = $row;
-            $existingEntriesByUrl[$url] = $row;
-        }
-
-        $legacyImageNodes = collect(data_get($details, 'images.nodes', []))
-            ->filter(fn ($node) => is_array($node))
-            ->map(function (array $node): array {
-                return [
-                    'id' => trim((string) ($node['id'] ?? '')),
-                    'url' => trim((string) ($node['url'] ?? '')),
-                    'mode' => 'legacy_image',
-                ];
-            })
-            ->filter(fn (array $row) => $row['url'] !== '')
-            ->values()
-            ->all();
-
-        foreach ($legacyImageNodes as $row) {
-            $id = trim((string) ($row['id'] ?? ''));
-            $url = trim((string) ($row['url'] ?? ''));
-            if ($url === '' || isset($existingEntriesByUrl[$url])) {
-                continue;
-            }
-
-            if ($id !== '') {
-                $existingEntriesById[$id] = $row;
-            }
-            $existingEntriesByUrl[$url] = $row;
-        }
-
         $matchedExistingIds = [];
 
-        $imageQuery = $product->allImages()
+        $imageQuery = $product->allImages()->useWritePdo()
             ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
             ->where(function ($query): void {
                 $query->whereNull('is_duplicate_hidden')
@@ -4595,15 +4970,7 @@ GQL;
             ->orderBy('id')
             ->get()
             ->values()
-            ->map(function (Image $image, int $index) use ($existingEntriesById, $existingEntriesByUrl, $allowRemoteDeletedRestore): array {
-                $previousMatch = $this->findExistingImageMatch(
-                    $this->nullIfEmpty($image->shopify_id),
-                    $this->normalizeMediaUrl($image->src),
-                    $this->nullIfEmpty($image->desiredSyncSourceUrl()),
-                    $existingEntriesById,
-                    $existingEntriesByUrl,
-                );
-
+            ->map(function (Image $image, int $index) use ($allowRemoteDeletedRestore): array {
                 return [
                     'image' => $image,
                     'shopify_id' => $this->nullIfEmpty($image->shopify_id),
@@ -4618,8 +4985,6 @@ GQL;
                     'matched_media_id' => null,
                     'requires_republish' => $image->needsShopifyRepublish()
                         || ($allowRemoteDeletedRestore && $image->sync_state === Image::SYNC_STATE_REMOTE_DELETED),
-                    'previous_media_id' => trim((string) ($previousMatch['id'] ?? '')) ?: null,
-                    'previous_media_mode' => trim((string) ($previousMatch['mode'] ?? '')) ?: null,
                 ];
             })
             ->sortBy(fn (array $row): string => sprintf(
@@ -4627,204 +4992,206 @@ GQL;
                 $row['position'] ?? 2147483647,
                 $row['index']
             ))
-            ->unique(function (array $row): string {
-                return (string) ($row['shopify_id'] ?: $row['sync_url'] ?: $row['current_url'] ?: $row['index']);
-            })
             ->values();
-
-        $desiredImages = $desiredImages->map(function (array $desiredImage) use (&$matchedExistingIds, $existingEntriesById, $existingEntriesByUrl): array {
-            $shopifyId = $desiredImage['shopify_id'];
-            $currentUrl = $desiredImage['current_url'];
-            $syncUrl = $desiredImage['sync_url'];
-            $match = null;
-
-            if ($desiredImage['requires_republish'] && $syncUrl !== null) {
-                return $desiredImage;
-            }
-
-            if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
-                $match = $existingEntriesById[$shopifyId];
-            } elseif ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
-                $match = $existingEntriesByUrl[$currentUrl];
-            } elseif ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
-                $match = $existingEntriesByUrl[$syncUrl];
-            }
-
-            if ($match !== null) {
-                $matchedId = trim((string) ($match['id'] ?? ''));
-                if ($matchedId !== '') {
-                    $matchedExistingIds[] = $matchedId;
-                    $desiredImage['matched_media_id'] = $matchedId;
-                    if (! $desiredImage['requires_republish']) {
-                        $this->markImageSynced($desiredImage['image'], $matchedId, $desiredImage['preferred_filename']);
-                    }
-                }
-            }
-
-            return $desiredImage;
-        });
-
-        $desiredImages = $desiredImages
-            ->filter(function (array $row) use (&$warnings, $product): bool {
-                /** @var Image $image */
-                $image = $row['image'];
-
-                if ($row['matched_media_id'] !== null) {
-                    if ($row['requires_republish'] && $row['sync_url'] === null) {
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => "Matched existing Shopify media for image {$image->id}, but it could not be republished because it has no usable sync source URL.",
-                        ];
-                    }
-
-                    return true;
-                }
-
-                if ($row['sync_url'] !== null) {
-                    return true;
-                }
-
+        $occupiedPositions = [];
+        $seenPhotographs = [];
+        $desiredImages = $desiredImages->map(function (array $row) use (&$occupiedPositions, &$seenPhotographs, &$warnings, $product): array {
+            $imageId = (int) $row['image']->id;
+            $position = $row['position'];
+            if ($position !== null && isset($occupiedPositions[$position])) {
                 $warnings[] = [
                     'product_id' => $product->id,
-                    'warning' => "Skipped image {$image->id} because it has no usable sync source URL.",
+                    'warning' => "Image {$imageId} shares position {$position} with image {$occupiedPositions[$position]}. Both records were kept and no additional Shopify file was created for that collision.",
                 ];
+                $row['duplicate_position'] = true;
+            } elseif ($position !== null) {
+                $occupiedPositions[$position] = $imageId;
+            }
+            $identity = $row['shopify_id'] ?: $row['sync_url'] ?: $row['current_url'];
+            if (is_string($identity) && $identity !== '' && isset($seenPhotographs[$identity])) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Image {$imageId} repeats image {$seenPhotographs[$identity]}. It was not uploaded again.",
+                ];
+                $row['repeat_photograph'] = $seenPhotographs[$identity];
+            } elseif (is_string($identity) && $identity !== '') {
+                $seenPhotographs[$identity] = $imageId;
+            }
 
-                return false;
-            })
-            ->values();
+            return $row;
+        })->values();
 
-        if (! $selectedSync) {
-            // Non-destructive cleanup: remove product references for shared media files,
-            // and never delete the underlying Shopify CDN asset from this sync path.
-            $staleEntries = collect($existingEntriesByUrl)
-                ->reject(function (array $row) use ($matchedExistingIds): bool {
-                    $id = trim((string) ($row['id'] ?? ''));
+        $operations = app(ImageUploadOperations::class);
+        $desiredImages = $desiredImages->map(function (array $row) use ($operations, $details, &$matchedExistingIds, &$warnings, $product): array {
+            $image = $row['image'];
+            if (ImageOwnership::effective($image) === ImageOwnership::UNRESOLVED) {
+                $row['blocked'] = true;
+                $warnings[] = ['product_id' => $product->id, 'warning' => "Stack image {$image->id} has unresolved ownership. It was preserved and not uploaded."];
 
-                    return $id !== '' && in_array($id, $matchedExistingIds, true);
-                })
-                ->values()
-                ->all();
+                return $row;
+            }
+            if (ImageOwnership::isInherited($image)) {
+                $source = Image::query()->find((int) $image->source_image_id);
+                $publishable = $source instanceof Image
+                    && (int) $source->image_asset_id === (int) $image->image_asset_id
+                    && (app(ComponentPhotographSelector::class)->publicationAllowed($source)
+                        || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image))
+                    && app(ImageAltTextBackfillService::class)->copyHasCurrentSource($image);
+                if (! $publishable) {
+                    $existingId = trim((string) $image->shopify_id);
+                    $attached = $existingId !== '' && collect($details['media']['nodes'] ?? [])->contains(
+                        fn ($node): bool => is_array($node) && ($node['id'] ?? null) === $existingId
+                    );
+                    $row['blocked'] = true;
+                    if ($attached && ! $row['requires_republish']) {
+                        $row['matched_media_id'] = $existingId;
+                        $matchedExistingIds[] = $existingId;
 
-            $fileDetachInputs = collect($staleEntries)
-                ->filter(fn (array $row) => ($row['mode'] ?? null) === 'file_reference')
-                ->map(function (array $row) use ($productId): ?array {
-                    $id = trim((string) ($row['id'] ?? ''));
-                    if ($id === '') {
-                        return null;
+                        return $row;
                     }
+                    $warnings[] = ['product_id' => $product->id, 'warning' => "Stack image {$image->id} is inherited and its current component generation is not approved and confirmed on Shopify. It was not uploaded."];
 
-                    return [
-                        'id' => $id,
-                        'referencesToRemove' => [$productId],
-                    ];
-                })
-                ->filter()
-                ->unique('id')
-                ->values()
-                ->all();
-
-            if (! empty($fileDetachInputs)) {
-                try {
-                    $detachData = $this->client->graphql($this->fileUpdateMutation(), [
-                        'files' => $fileDetachInputs,
-                    ]);
-
-                    $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
-                    if (is_array($detachErrors) && ! empty($detachErrors)) {
-                        $messages = $this->formatUserErrors($detachErrors, 'files');
-                        $warnings[] = [
-                            'product_id' => $product->id,
-                            'warning' => $messages !== '' ? $messages : 'Shopify image detach failed.',
-                        ];
-                    }
-                } catch (\Throwable $e) {
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => 'Shopify image detach failed: '.$e->getMessage(),
-                    ];
+                    return $row;
                 }
             }
+            $operation = $operations->active($image);
+            if ($operation !== null) {
+                $node = $operations->reconcile($image, $operation, $details['media']['nodes']);
+                if ($node !== null) {
+                    $this->imageSyncMutex->assertOwned();
+                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url']);
+                    $operations->complete($operation, $node['id']);
+                    $row['matched_media_id'] = $node['id'];
+                    $matchedExistingIds[] = $node['id'];
+                }
+                $row['blocked'] = true;
 
-            $legacyStaleCount = collect($staleEntries)
-                ->filter(fn (array $row) => ($row['mode'] ?? null) === 'legacy_image')
-                ->count();
-
-            if ($legacyStaleCount > 0) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Skipped {$legacyStaleCount} stale legacy Shopify product image(s) to avoid destructive deletion.",
-                ];
+                return $row;
             }
-        }
+            if ($image->shopify_media_create_uncertain) {
+                $row['blocked'] = true;
+                $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} requires manual reconciliation of a legacy uncertain upload."];
 
-        $desiredImages = $desiredImages->map(function (array $desiredImage) use ($product, $productId, &$warnings): array {
-            if ($desiredImage['matched_media_id'] !== null) {
-                return $desiredImage;
+                return $row;
             }
-
-            /** @var Image $image */
-            $image = $desiredImage['image'];
-            $imageUrl = $desiredImage['sync_url'];
-            if ($imageUrl === null) {
-                return $desiredImage;
+            $row['blocked'] = false;
+            $assetKey = $image->imageAsset ? hash('sha256', $product->shopify_id.':'.$image->imageAsset->sha256) : null;
+            $recordedId = $assetKey ? DB::table('image_upload_operations')->useWritePdo()->where('asset_key', $assetKey)->value('media_id') : null;
+            $changedPhotograph = $image->shopify_identity_unresolved || $this->imageBytesChangedSinceShopifySync($image);
+            $paths = collect([$image->shopify_cdn_url, $image->src, $image->imageAsset?->source_url])
+                ->reject(fn ($url) => ShopifyMediaPath::isCmsDeliveryUrl($url))
+                ->map(fn ($url) => ShopifyMediaPath::canonical($url))->filter()->unique();
+            if ($changedPhotograph) {
+                $paths = collect();
             }
+            $componentMediaIds = ImageOwnership::isInherited($image)
+                ? Image::query()->whereIn('product_id', app(StackComponentCatalog::class)->componentIds($product))->whereNotNull('shopify_id')->pluck('shopify_id')->all()
+                : [];
+            $candidates = collect($details['media']['nodes'])->filter(fn (array $node): bool => ! in_array($node['id'] ?? '', $componentMediaIds, true) && preg_match('~^gid://shopify/MediaImage/\d+$~', (string) ($node['id'] ?? '')) === 1
+                && (($node['id'] ?? '') === $recordedId || (! $changedPhotograph && ($node['id'] ?? '') === $image->shopify_id) || $paths->contains(ShopifyMediaPath::canonical($node['image']['url'] ?? null)))
+            )->values();
+            if ($candidates->isEmpty() && $image->image_asset_id) {
+                $currentImages = collect($details['media']['nodes'])->filter(fn (array $node): bool => ! in_array($node['id'] ?? '', $componentMediaIds, true) && preg_match('~^gid://shopify/MediaImage/\d+$~', (string) ($node['id'] ?? '')) === 1);
+                // A renamed file is still the same photograph. Current attachment
+                // plus exact original bytes is independent of SKU/position/URL.
+                foreach ($currentImages as $node) {
+                    if (! ShopifyProductMediaReader::ready($node)) {
+                        // Known identity candidates and active upload claims are checked above.
+                        // Unrelated processing media is not evidence about this photograph.
 
-            $mediaInput = [
-                'originalSource' => $imageUrl,
-                'mediaContentType' => 'IMAGE',
-            ];
-            if ($desiredImage['alt'] !== null) {
-                $mediaInput['alt'] = $desiredImage['alt'];
+                        continue;
+                    }
+                    if (app(ImagePhotographEvidence::class)->matchesMedia($image, $node)) {
+                        $candidates->push($node);
+                    }
+                }
             }
-
-            $data = $this->client->graphql($this->productCreateMediaMutation(), [
-                'productId' => $productId,
-                'media' => [
-                    $mediaInput,
-                ],
-            ]);
-
-            $payload = $data['productCreateMedia'] ?? null;
-            if (! $payload) {
-                $this->markImageSyncFailed($image, "Missing productCreateMedia payload for image {$image->id}.");
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Missing productCreateMedia payload for image {$image->id}.",
-                ];
-
-                return $desiredImage;
+            if ($candidates->count() > 1) {
+                $row['blocked'] = true;
+            } elseif ($candidates->count() === 1) {
+                $node = $candidates->first();
+                $proven = $image->image_asset_id
+                    ? app(ImagePhotographEvidence::class)->matchesMedia($image, $node)
+                    : ($node['id'] === $image->shopify_id && ! $row['requires_republish']);
+                if ($proven && ShopifyProductMediaReader::ready($node)) {
+                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'] ?? null);
+                    $row['matched_media_id'] = $node['id'];
+                    $row['requires_republish'] = false;
+                    $matchedExistingIds[] = $node['id'];
+                } else {
+                    $row['blocked'] = true;
+                }
             }
-
-            $errors = $payload['mediaUserErrors'] ?? [];
-            if (! empty($errors)) {
-                $messages = $this->formatUserErrors($errors, 'media');
-                $this->markImageSyncFailed(
-                    $image,
-                    $messages !== '' ? $messages : "Unknown media error for image {$image->id}."
+            if ($row['matched_media_id'] === null && filled($image->shopify_id)) {
+                $attached = collect($details['media']['nodes'] ?? [])->contains(
+                    fn ($node): bool => is_array($node) && ($node['id'] ?? null) === $image->shopify_id
                 );
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => $messages !== '' ? $messages : "Unknown media error for image {$image->id}.",
-                ];
-
-                return $desiredImage;
+                // A stale id that is no longer attached, or a photograph whose bytes
+                // changed, must be uploaded. An attached file that was not proved is
+                // kept and never replaced by a second upload.
+                if ($attached && ! $row['requires_republish']) {
+                    $row['blocked'] = true;
+                }
             }
 
-            $createdMediaId = trim((string) data_get($payload, 'media.0.id', ''));
-            if ($createdMediaId !== '') {
-                $desiredImage['matched_media_id'] = $createdMediaId;
-                $this->markImageSynced($image, $createdMediaId, $desiredImage['preferred_filename']);
-            }
-
-            return $desiredImage;
+            return $row;
         });
 
-        if ($selectedSync) {
-            $warnings = array_merge(
-                $warnings,
-                $this->cleanupSelectedStaleImages($product, $productId, $desiredImages)
-            );
-        }
+        // Absence is never an implicit instruction to detach or merge media.
+        $desiredImages = $desiredImages->map(function (array $row) use ($productId, $details, $operations, &$warnings, $product): array {
+            $image = $row['image'];
+            if (($row['repeat_photograph'] ?? null) !== null && $row['matched_media_id'] === null) {
+                $row['blocked'] = true;
+
+                return $row;
+            }
+            if ($row['matched_media_id'] !== null || ($row['blocked'] ?? false)) {
+                return $row;
+            }
+            if ($row['sync_url'] === null) {
+                $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} has no immutable backed-up source."];
+
+                return $row;
+            }
+            $this->imageSyncMutex->assertOwned();
+            $operation = $operations->claim($image, $productId, $details['media']['nodes']);
+            if ($operation === null) {
+                $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} shares a recorded upload or has an unresolved operation. Review without creating another file."];
+
+                return $row;
+            }
+            try {
+                $data = $this->graphql($this->productCreateMediaMutation(), [
+                    'productId' => $productId,
+                    // Alt text is published separately after ready-file verification.
+                    'media' => [['originalSource' => $operation->source_url, 'mediaContentType' => 'IMAGE']],
+                ]);
+                $payload = $data['productCreateMedia'] ?? null;
+                $id = is_array($payload) ? data_get($payload, 'media.0.id') : null;
+                if (is_string($id) && preg_match('~^gid://shopify/MediaImage/\d+$~', $id)) {
+                    $operations->record($operation, 'processing', $id);
+                } else {
+                    $operations->record($operation, 'needs_review', error: 'No definitive media id was returned. Review before allowing another create.');
+                }
+                $operation = $operations->active($image);
+                $media = (new ShopifyProductMediaReader($this->client))->media($productId, 'ProductImageCreatedMedia');
+                $node = $operations->reconcile($image, $operation, $media);
+                if ($node !== null) {
+                    $this->imageSyncMutex->assertOwned();
+                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url']);
+                    $operations->complete($operation, $node['id']);
+                    $row['matched_media_id'] = $node['id'];
+                } else {
+                    $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} is awaiting upload reconciliation; it was not marked synced."];
+                }
+            } catch (\Throwable $exception) {
+                $operations->record($operations->active($image) ?? $operation, 'needs_review', error: $exception->getMessage());
+                $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} has an uncertain upload: ".$exception->getMessage()];
+            }
+
+            return $row;
+        });
+        // Removing existing Shopify media requires a separate explicit cleanup decision.
 
         $warnings = array_merge(
             $warnings,
@@ -4836,133 +5203,36 @@ GQL;
         return $warnings;
     }
 
-    private function findExistingImageMatch(
-        ?string $shopifyId,
-        ?string $currentUrl,
-        ?string $syncUrl,
-        array $existingEntriesById,
-        array $existingEntriesByUrl,
-    ): ?array {
-        $urlMatch = null;
-        if ($currentUrl !== null && isset($existingEntriesByUrl[$currentUrl])) {
-            $urlMatch = $existingEntriesByUrl[$currentUrl];
-        } elseif ($syncUrl !== null && isset($existingEntriesByUrl[$syncUrl])) {
-            $urlMatch = $existingEntriesByUrl[$syncUrl];
-        }
-
-        if ($shopifyId !== null && isset($existingEntriesById[$shopifyId])) {
-            $idMatch = $existingEntriesById[$shopifyId];
-            if (
-                $urlMatch !== null
-                && ($idMatch['mode'] ?? null) === 'legacy_image'
-                && ($urlMatch['mode'] ?? null) !== 'legacy_image'
-            ) {
-                return $urlMatch;
-            }
-
-            return $idMatch;
-        }
-
-        if ($urlMatch !== null) {
-            return $urlMatch;
-        }
-
-        return null;
-    }
-
     /**
-     * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
+     * A one-file gallery cannot prove that every approved image is attached and ordered.
+     *
      * @return array<int, array{product_id:int, warning:string}>
      */
-    private function cleanupSelectedStaleImages(Product $product, string $productId, Collection $desiredImages): array
+    private function unverifiedImageOrderWarnings(Product $product, Collection $desiredImages, string $prefix): array
     {
         $warnings = [];
-
-        $fileDetachInputs = [];
-        $legacyMediaIds = [];
-
         foreach ($desiredImages as $desiredImage) {
-            $previousMediaId = trim((string) ($desiredImage['previous_media_id'] ?? ''));
-            $matchedMediaId = trim((string) ($desiredImage['matched_media_id'] ?? ''));
-
-            if ($previousMediaId === '' || $matchedMediaId === '' || $previousMediaId === $matchedMediaId) {
+            if ($desiredImage['matched_media_id'] !== null) {
                 continue;
             }
-
-            $mode = trim((string) ($desiredImage['previous_media_mode'] ?? ''));
-
-            if ($mode === 'file_reference') {
-                $fileDetachInputs[] = [
-                    'id' => $previousMediaId,
-                    'referencesToRemove' => [$productId],
-                ];
-
-                continue;
-            }
-
-            if ($mode === 'legacy_image') {
-                $legacyMediaIds[] = $previousMediaId;
-            }
+            /** @var Image $image */
+            $image = $desiredImage['image'];
+            $warnings[] = [
+                'product_id' => $product->id,
+                'warning' => "{$prefix} for image {$image->id} because the product media ID is not available yet.",
+            ];
         }
-
-        $fileDetachInputs = collect($fileDetachInputs)
-            ->unique('id')
-            ->values()
-            ->all();
-
-        if (! empty($fileDetachInputs)) {
-            try {
-                $detachData = $this->client->graphql($this->fileUpdateMutation(), [
-                    'files' => $fileDetachInputs,
-                ]);
-
-                $detachErrors = data_get($detachData, 'fileUpdate.userErrors', []);
-                if (is_array($detachErrors) && ! empty($detachErrors)) {
-                    $messages = $this->formatUserErrors($detachErrors, 'files');
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify selected image detach failed.',
-                    ];
-                }
-            } catch (\Throwable $e) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => 'Shopify selected image detach failed: '.$e->getMessage(),
-                ];
-            }
-        }
-
-        $legacyMediaIds = array_values(array_unique(array_filter($legacyMediaIds)));
-        if (! empty($legacyMediaIds)) {
-            try {
-                $deleteData = $this->client->graphql($this->productDeleteMediaMutation(), [
-                    'productId' => $productId,
-                    'mediaIds' => $legacyMediaIds,
-                ]);
-
-                $deleteErrors = data_get($deleteData, 'productDeleteMedia.mediaUserErrors', []);
-                if (is_array($deleteErrors) && ! empty($deleteErrors)) {
-                    $messages = $this->formatUserErrors($deleteErrors, 'media');
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify selected legacy image removal failed.',
-                    ];
-                }
-            } catch (\Throwable $e) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => 'Shopify selected legacy image removal failed: '.$e->getMessage(),
-                ];
-            }
+        $matchedCount = $desiredImages->filter(fn (array $row): bool => $row['matched_media_id'] !== null)->count();
+        if ($matchedCount > 1) {
+            $warnings[] = [
+                'product_id' => $product->id,
+                'warning' => 'Image order could not be verified because Shopify returned fewer media records than the approved images.',
+            ];
         }
 
         return $warnings;
     }
 
-    /**
-     * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
-     * @return array<int, array{product_id:int, warning:string}>
-     */
     private function reorderSelectedProductImages(Product $product, string $productId, Collection $desiredImages): array
     {
         $warnings = [];
@@ -4971,7 +5241,7 @@ GQL;
             return $warnings;
         }
 
-        $details = $this->productByHandleDetails($product->handle);
+        $details = (new ShopifyProductMediaReader($this->client))->read($productId, 'ProductImageReorderMedia');
         $mediaNodes = collect(data_get($details, 'media.nodes', []))
             ->filter(fn ($node) => is_array($node))
             ->map(function (array $node): array {
@@ -4984,7 +5254,7 @@ GQL;
             ->values();
 
         if ($mediaNodes->count() <= 1) {
-            return $warnings;
+            return array_merge($warnings, $this->unverifiedImageOrderWarnings($product, $desiredImages, 'Selected image reorder skipped'));
         }
 
         $mediaIdByUrl = $mediaNodes
@@ -4999,9 +5269,7 @@ GQL;
         foreach ($desiredImages
             ->sortBy(fn (array $row): string => sprintf('%010d-%010d', $row['position'] ?? 2147483647, $row['index']))
             ->values() as $desiredImage) {
-            $mediaId = $desiredImage['matched_media_id']
-                ?? ($desiredImage['current_url'] ? ($mediaIdByUrl[$desiredImage['current_url']] ?? null) : null)
-                ?? ($desiredImage['sync_url'] ? ($mediaIdByUrl[$desiredImage['sync_url']] ?? null) : null);
+            $mediaId = $desiredImage['matched_media_id'];
 
             if ($mediaId === null) {
                 /** @var Image $image */
@@ -5057,7 +5325,7 @@ GQL;
         }
 
         try {
-            $reorderData = $this->client->graphql($this->productReorderMediaMutation(), [
+            $reorderData = $this->graphql($this->productReorderMediaMutation(), [
                 'id' => $productId,
                 'moves' => $moves,
             ]);
@@ -5092,7 +5360,7 @@ GQL;
             return $warnings;
         }
 
-        $details = $this->productByHandleDetails($product->handle);
+        $details = (new ShopifyProductMediaReader($this->client))->read($productId, 'ProductImageReorderMedia');
         $mediaNodes = collect(data_get($details, 'media.nodes', []))
             ->filter(fn ($node) => is_array($node))
             ->map(function (array $node): array {
@@ -5105,7 +5373,7 @@ GQL;
             ->values();
 
         if ($mediaNodes->count() <= 1) {
-            return $warnings;
+            return array_merge($warnings, $this->unverifiedImageOrderWarnings($product, $desiredImages, 'Shopify image reorder skipped'));
         }
 
         $mediaIdByUrl = $mediaNodes
@@ -5118,9 +5386,7 @@ GQL;
 
         $desiredMediaIds = [];
         foreach ($desiredImages as $desiredImage) {
-            $mediaId = $desiredImage['matched_media_id']
-                ?? ($desiredImage['current_url'] ? ($mediaIdByUrl[$desiredImage['current_url']] ?? null) : null)
-                ?? ($desiredImage['sync_url'] ? ($mediaIdByUrl[$desiredImage['sync_url']] ?? null) : null);
+            $mediaId = $desiredImage['matched_media_id'];
 
             if ($mediaId === null) {
                 /** @var Image $image */
@@ -5163,7 +5429,7 @@ GQL;
         }
 
         try {
-            $reorderData = $this->client->graphql($this->productReorderMediaMutation(), [
+            $reorderData = $this->graphql($this->productReorderMediaMutation(), [
                 'id' => $productId,
                 'moves' => $moves,
             ]);
@@ -5190,276 +5456,82 @@ GQL;
      * @param  array<int, array>  $rowDataList
      * @return array<int, array{product_id:int, warning:string}>
      */
-    private function syncVariantMediaAssignments(Product $product, string $productId, array $rowDataList): array
+    private function syncVariantMediaAssignments(Product $product, string $productId, array $rowDataList, ?array $selectedImageIds = null): array
     {
         $warnings = [];
-
-        $localVariantsOrdered = $product->variants()
-            ->with('image')
-            ->orderBy('id')
-            ->get()
-            ->values();
-
-        $variantSources = $this->buildVariantSources($rowDataList, $localVariantsOrdered);
-        if (empty($variantSources)) {
-            return $warnings;
+        $synchronizer = new VariantImageSynchronizer($this->client);
+        $variants = $product->variants()->with('image');
+        if ($selectedImageIds !== null) {
+            $variants->whereIn('image_id', $selectedImageIds);
         }
-
-        $details = $this->productByHandleDetails($product->handle);
-        $variantNodes = data_get($details, 'variants.nodes', []);
-        if (! is_array($variantNodes) || empty($variantNodes)) {
-            return $warnings;
-        }
-
-        $variantNodesOrdered = array_values(array_filter($variantNodes, fn ($node) => is_array($node) && ! empty($node['id'])));
-        $shopifyVariantsBySku = [];
-        $shopifyVariantsBySignature = [];
-
-        foreach ($variantNodesOrdered as $variantNode) {
-            $sku = trim((string) ($variantNode['sku'] ?? ''));
-            if ($sku !== '') {
-                $shopifyVariantsBySku[$sku] = $variantNode;
-            }
-
-            $signature = $this->variantOptionSignatureFromNode($variantNode);
-            if ($signature !== '') {
-                $shopifyVariantsBySignature[$signature] = $variantNode;
-            }
-        }
-
-        $mediaNodes = collect(data_get($details, 'media.nodes', []))
-            ->filter(fn ($node) => is_array($node))
-            ->map(function (array $node): array {
-                return [
-                    'id' => trim((string) ($node['id'] ?? '')),
-                    'url' => trim((string) data_get($node, 'image.url', '')),
-                ];
-            })
-            ->filter(fn (array $row) => $row['id'] !== '')
-            ->values();
-
-        $mediaIdByShopifyId = $product->images()
-            ->whereNotNull('shopify_id')
-            ->pluck('shopify_id', 'id')
-            ->mapWithKeys(fn (string $shopifyId, int $imageId): array => [$imageId => trim($shopifyId)])
-            ->all();
-
-        $mediaIdByUrl = $mediaNodes
-            ->filter(fn (array $row) => $row['url'] !== '')
-            ->mapWithKeys(fn (array $row): array => [$row['url'] => $row['id']])
-            ->all();
-
-        $detachInputs = [];
-        $appendInputs = [];
-
-        foreach ($variantSources as $rowIndex => $variantSource) {
-            /** @var Variant|null $localVariant */
-            $localVariant = $variantSource['local'];
-            if ($localVariant === null) {
+        foreach ($variants->get() as $variant) {
+            // An unmapped legacy variant is not an instruction to erase Shopify associations.
+            if ($variant->image_id === null) {
                 continue;
             }
-
-            $variantNode = $this->resolveShopifyVariantNode(
-                $variantNodesOrdered,
-                $shopifyVariantsBySku,
-                $shopifyVariantsBySignature,
-                $localVariant,
-                $variantSource['row'],
-                $rowIndex,
-            );
-
-            if ($variantNode === null) {
-                continue;
-            }
-
-            $variantId = trim((string) ($variantNode['id'] ?? ''));
-            if ($variantId === '') {
-                continue;
-            }
-
-            $currentMediaIds = collect(data_get($variantNode, 'media.nodes', []))
-                ->filter(fn ($node) => is_array($node))
-                ->map(fn (array $node): string => trim((string) ($node['id'] ?? '')))
-                ->filter()
-                ->values()
-                ->all();
-
-            $desiredMediaId = $this->desiredVariantMediaId($localVariant, $mediaIdByShopifyId, $mediaIdByUrl);
-
-            if ($localVariant->image_id !== null && $desiredMediaId === null) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => "Variant {$localVariant->sku} image assignment was skipped because the linked product image has not been synced to Shopify yet.",
-                ];
-
-                continue;
-            }
-
-            $mediaIdsToDetach = $desiredMediaId === null
-                ? $currentMediaIds
-                : array_values(array_filter(
-                    $currentMediaIds,
-                    fn (string $mediaId): bool => $mediaId !== $desiredMediaId
-                ));
-
-            if (! empty($mediaIdsToDetach)) {
-                $detachInputs[] = [
-                    'variantId' => $variantId,
-                    'mediaIds' => $mediaIdsToDetach,
-                ];
-            }
-
-            if ($desiredMediaId !== null && ! in_array($desiredMediaId, $currentMediaIds, true)) {
-                $appendInputs[] = [
-                    'variantId' => $variantId,
-                    'mediaIds' => [$desiredMediaId],
-                ];
-            }
-        }
-
-        if (! empty($detachInputs)) {
             try {
-                $detachData = $this->client->graphql($this->productVariantDetachMediaMutation(), [
-                    'productId' => $productId,
-                    'variantMedia' => $detachInputs,
-                ]);
-
-                $detachErrors = data_get($detachData, 'productVariantDetachMedia.userErrors', []);
-                if (is_array($detachErrors) && ! empty($detachErrors)) {
-                    $messages = $this->formatUserErrors($detachErrors, 'variantMedia');
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify variant image detach failed.',
-                    ];
+                $variantId = trim((string) $variant->shopify_id);
+                if (! preg_match('~^gid://shopify/ProductVariant/\d+$~', $variantId) || ! $variant->image) {
+                    throw new \RuntimeException('The variant or linked photograph needs identity review; no position or SKU fallback is allowed.');
                 }
-            } catch (\Throwable $e) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => 'Shopify variant image detach failed: '.$e->getMessage(),
-                ];
+                $version = (int) $product->approval_version;
+                $imageId = (int) $variant->image_id;
+                $synchronizer->synchronize($product, $variantId, $variant->image, function () use ($product, $variant, $version, $imageId, $variantId): void {
+                    $live = $variant->fresh();
+                    if (! $live || $live->shopify_id !== $variantId || (int) $live->image_id !== $imageId
+                        || (int) $product->fresh()->approval_version !== $version) {
+                        throw new \RuntimeException('Variant mapping or product approval changed during synchronization. Reconcile before continuing.');
+                    }
+                });
+            } catch (\Throwable $exception) {
+                $warnings[] = ['product_id' => $product->id, 'warning' => 'Variant '.$variant->id.': '.$exception->getMessage()];
             }
         }
-
-        if (! empty($appendInputs)) {
-            try {
-                $appendData = $this->client->graphql($this->productVariantAppendMediaMutation(), [
-                    'productId' => $productId,
-                    'variantMedia' => $appendInputs,
-                ]);
-
-                $appendErrors = data_get($appendData, 'productVariantAppendMedia.userErrors', []);
-                if (is_array($appendErrors) && ! empty($appendErrors)) {
-                    $messages = $this->formatUserErrors($appendErrors, 'variantMedia');
-                    $warnings[] = [
-                        'product_id' => $product->id,
-                        'warning' => $messages !== '' ? $messages : 'Shopify variant image attach failed.',
-                    ];
-                }
-            } catch (\Throwable $e) {
-                $warnings[] = [
-                    'product_id' => $product->id,
-                    'warning' => 'Shopify variant image attach failed: '.$e->getMessage(),
-                ];
-            }
-        }
-
         return $warnings;
     }
 
-    /**
-     * @param  array<int, array>  $variantNodesOrdered
-     * @param  array<string, array>  $shopifyVariantsBySku
-     * @param  array<string, array>  $shopifyVariantsBySignature
-     * @param  array<string, mixed>  $rowData
-     */
-    private function resolveShopifyVariantNode(
-        array $variantNodesOrdered,
-        array $shopifyVariantsBySku,
-        array $shopifyVariantsBySignature,
-        ?Variant $localVariant,
-        array $rowData,
-        int $rowIndex
-    ): ?array {
-        $desiredSku = $this->variantDesiredValue($localVariant, $rowData, 'sku', HeaderStore::VARIANT_SKU);
-        $desiredSignature = $this->variantOptionSignature(
-            $this->variantOptionValuesFromSource($rowData, $localVariant)
-        );
-
-        $variantNode = $desiredSku !== null
-            ? ($shopifyVariantsBySku[$desiredSku] ?? null)
-            : null;
-
-        if ($variantNode === null && $desiredSignature !== '') {
-            $variantNode = $shopifyVariantsBySignature[$desiredSignature] ?? null;
-        }
-
-        if ($variantNode === null) {
-            $variantNode = $variantNodesOrdered[$rowIndex] ?? null;
-        }
-
-        return is_array($variantNode) ? $variantNode : null;
-    }
-
-    /**
-     * @param  array<int, string>  $mediaIdByShopifyId
-     * @param  array<string, string>  $mediaIdByUrl
-     */
-    private function desiredVariantMediaId(Variant $variant, array $mediaIdByShopifyId, array $mediaIdByUrl): ?string
+    private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null, ?string $cdnUrl = null): void
     {
-        $image = $variant->image;
-        if ($image === null) {
-            return null;
-        }
-
-        $linkedShopifyId = trim((string) ($mediaIdByShopifyId[$image->id] ?? ''));
-        if ($linkedShopifyId !== '') {
-            return $linkedShopifyId;
-        }
-
-        $currentUrl = $this->normalizeMediaUrl($image->src);
-        if ($currentUrl !== null && isset($mediaIdByUrl[$currentUrl])) {
-            return $mediaIdByUrl[$currentUrl];
-        }
-
-        $syncUrl = $this->nullIfEmpty($image->desiredSyncSourceUrl());
-        if ($syncUrl !== null && isset($mediaIdByUrl[$syncUrl])) {
-            return $mediaIdByUrl[$syncUrl];
-        }
-
-        return null;
-    }
-
-    private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null): void
-    {
-        Image::withoutEvents(function () use ($image, $shopifyId, $filename): void {
-            $updates = [
-                'sync_state' => Image::SYNC_STATE_SYNCED,
-                'local_dirty' => false,
-                'last_shopify_seen_at' => now(),
-                'last_synced_at' => now(),
-                'last_shopify_synced_image_asset_id' => $image->image_asset_id,
-                'last_shopify_synced_filename' => $filename ?: $image->preferredFilename(),
-                'last_shopify_image_synced_at' => now(),
-                'needs_shopify_image_sync' => false,
-                'shopify_image_sync_error' => null,
-            ];
-
-            if ($shopifyId !== null && trim($shopifyId) !== '') {
-                $updates['shopify_id'] = $shopifyId;
+        $this->imageSyncMutex?->assertOwned();
+        DB::transaction(function () use ($image, $shopifyId, $filename, $cdnUrl): void {
+            $current = Image::query()->lockForUpdate()->findOrFail($image->id);
+            if ($current->image_asset_id !== $image->image_asset_id
+                || in_array($current->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)) {
+                throw new \RuntimeException('The CMS photograph changed during synchronization; the upload remains unresolved.');
             }
-
-            $image->forceFill($updates)->save();
+            Image::withoutEvents(function () use ($current, $shopifyId, $filename, $cdnUrl): void {
+                $updates = [
+                    'sync_state' => Image::SYNC_STATE_SYNCED, 'local_dirty' => false,
+                    'last_shopify_seen_at' => now(), 'last_synced_at' => now(),
+                    'last_shopify_synced_image_asset_id' => $current->image_asset_id,
+                    'last_shopify_synced_filename' => $filename ?: $current->preferredFilename(),
+                    'last_shopify_image_synced_at' => now(), 'needs_shopify_image_sync' => false,
+                    'shopify_image_sync_error' => null, 'shopify_media_create_uncertain' => false,
+                    'shopify_identity_unresolved' => false,
+                ];
+                if ($shopifyId) {
+                    $updates['shopify_id'] = $shopifyId;
+                }
+                if (($remembered = ShopifyMediaPath::rememberableCdnUrl($cdnUrl)) !== null) {
+                    $updates['shopify_cdn_url'] = $remembered;
+                }
+                $current->forceFill($updates)->save();
+            });
+            app(ComponentStackPropagation::class)->recordConfirmedPhotograph(
+                $current->fresh(['product', 'imageAsset']) ?? $current,
+                true,
+                (string) ($shopifyId ?: $current->shopify_id)
+            );
         });
+        $image->refresh();
     }
 
-    private function markImageSyncFailed(Image $image, string $message): void
+    private function imageBytesChangedSinceShopifySync(Image $image): bool
     {
-        Image::withoutEvents(function () use ($image, $message): void {
-            $image->forceFill([
-                'needs_shopify_image_sync' => true,
-                'shopify_image_sync_error' => $message,
-            ])->save();
-        });
+        $last = (int) ($image->last_shopify_synced_image_asset_id ?? 0);
+        $current = (int) ($image->image_asset_id ?? 0);
+
+        return $last > 0 && $current > 0 && $last !== $current;
     }
 
     private function normalizeMediaUrl(?string $value): ?string
@@ -5551,14 +5623,14 @@ mutation ProductVariantDetachMedia($productId: ID!, $variantMedia: [ProductVaria
 GQL;
     }
 
-    private function productDeleteMediaMutation(): string
+    private function detachProductMediaMutation(): string
     {
+        // Remove only the stack reference; retain the file and every other product.
         return <<<'GQL'
-mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
-  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
-    deletedMediaIds
-    deletedProductImageIds
-    mediaUserErrors {
+mutation DetachInheritedStackMedia($files: [FileUpdateInput!]!) {
+  fileUpdate(files: $files) {
+    files { id }
+    userErrors {
       field
       message
     }
@@ -5760,7 +5832,7 @@ GQL;
         foreach ($desiredOptions as $position => $desiredOption) {
             $currentOption = $currentOptions[$position] ?? null;
             if (! is_array($currentOption) || empty($currentOption['id'])) {
-                $data = $this->client->graphql($this->productOptionsCreateMutation(), [
+                $data = $this->graphql($this->productOptionsCreateMutation(), [
                     'productId' => $productId,
                     'options' => [[
                         'name' => $desiredOption['name'],
@@ -5859,7 +5931,7 @@ GQL;
                 $variables['optionValuesToUpdate'] = $optionValuesToUpdate;
             }
 
-            $data = $this->client->graphql($this->productOptionUpdateMutation(), $variables);
+            $data = $this->graphql($this->productOptionUpdateMutation(), $variables);
             $errors = data_get($data, 'productOptionUpdate.userErrors', []);
             if (is_array($errors) && ! empty($errors)) {
                 $messages = $this->formatUserErrors($errors, 'productOptionUpdate');
@@ -6012,7 +6084,7 @@ GQL;
             'variant_inputs' => $createInputs,
         ]);
 
-        $data = $this->client->graphql($this->variantsBulkCreateMutation(), [
+        $data = $this->graphql($this->variantsBulkCreateMutation(), [
             'productId' => $productId,
             'variants' => $createInputs,
         ]);
@@ -6220,11 +6292,14 @@ GQL;
     {
         $images = $product->allImages()->active()->get();
         $backfill = app(ImageAltTextBackfillService::class);
-        $copies = $images->filter(fn (Image $image): bool => $product->isStackProduct()
-            && ($image->source_image_id !== null || (int) $image->position >= 2));
-        $published = $backfill->publishIds($images->diff($copies)->pluck('id')->all());
-        $retried = $backfill->retryIds($copies->pluck('id')->all());
-        $failures = array_merge($published['shopify_failed'], $retried['shopify_failed']);
+        $published = $backfill->publishIds($images->pluck('id')->all());
+        $failures = $published['shopify_failed'];
+        $reviewIds = $images->filter(fn (Image $image): bool => $backfill->approvedUploadAlt($image->fresh(['product', 'imageAsset'])) === null)->pluck('id')->all();
+        $this->imageOutcomes[$product->id]['alt_text'] = $failures !== [] ? 'needs_review'
+            : ($reviewIds !== [] ? 'verified_eligible_with_review_pending' : 'verified_eligible');
+        $this->imageOutcomes[$product->id]['alt_review_required_ids'] = $reviewIds;
+        $this->imageOutcomes[$product->id]['alt_updates_verified'] = $published['published'];
+        $this->imageOutcomes[$product->id]['alt_failures'] = $failures;
         if ($failures !== []) {
             throw new \RuntimeException('Image Alt Text: '.collect($failures)
                 ->map(fn (array $failure): string => 'Image '.$failure['image_id'].': '.$failure['reason'])->implode(' '));

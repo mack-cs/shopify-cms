@@ -7,6 +7,7 @@ use App\Enums\RolesEnum;
 use App\Filament\Resources\ProductResource;
 use App\Filament\Resources\ProductResource\Widgets\AltTextExportStatus;
 use App\Filament\Resources\ProductResource\Widgets\ProductStatusStats;
+use App\Models\Image;
 use App\Models\Import;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
@@ -15,6 +16,7 @@ use App\Services\DuplicateSkuCsvExporter;
 use App\Services\ImageAltTextBackfillService;
 use App\Services\ImageAltTextExportService;
 use App\Services\LocalCatalogResetService;
+use App\Services\ProductShopifyUpdater;
 use App\Services\ShopifyCollectionMembership;
 use Filament\Actions;
 use Filament\Forms\Components\FileUpload;
@@ -320,7 +322,23 @@ class ListProducts extends ListRecords
         return self::applyWorkflowStatusScope($query)
             ->whereHas('partialApprovalRequests', function (Builder $sub): void {
                 $sub->whereColumn('approval_version', 'products.approval_version')
-                    ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED);
+                    ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+                    ->where(function (Builder $open): void {
+                        $open->where(function (Builder $otherFields): void {
+                            $otherFields->whereJsonLength('scopes', '!=', 1)
+                                ->orWhereJsonDoesntContain('scopes', ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT);
+                        })->orWhereExists(function ($images): void {
+                            $images->selectRaw('1')
+                                ->from('images')
+                                ->whereColumn('images.product_id', 'products.id')
+                                ->whereIn('images.alt_text_status', [
+                                    Image::ALT_APPROVED,
+                                    Image::ALT_FAILED,
+                                    Image::ALT_AWAITING_CONFIRMATION,
+                                    Image::ALT_PENDING_REVIEW,
+                                ]);
+                        });
+                    });
             })
             ->whereRaw(
                 '(select count(distinct user_id) from approvals where approvals.product_id = products.id and approvals.approval_version = products.approval_version) < 2'

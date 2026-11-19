@@ -2319,7 +2319,18 @@ class ProductResource extends Resource
                     ->label('Request Partial Approval')
                     ->icon('heroicon-o-check-circle')
                     ->color('warning')
-                    ->form(self::partialApprovalFormSchema())
+                    ->form(function ($livewire): array {
+                        $count = $livewire->getSelectedTableRecords()->count();
+
+                        return [
+                            Placeholder::make('partial_approval_selection_count')
+                                ->label('Products in this request')
+                                ->content($count === 1
+                                    ? '1 selected product will be included.'
+                                    : "{$count} selected products will be included."),
+                            ...self::partialApprovalFormSchema(),
+                        ];
+                    })
                     ->requiresConfirmation()
                     ->modalWidth('7xl')
                     ->modalFooterActionsAlignment(\Filament\Support\Enums\Alignment::Start)
@@ -2485,13 +2496,14 @@ class ProductResource extends Resource
                     })
                     ->deselectRecordsAfterCompletion(),
                  BulkAction::make('bulkRemoveDuplicateImages')
+                    ->disabled()->tooltip('Use Image Alt Review and the duplicate-position report. Position alone cannot authorize cleanup.')
                     ->label('Hide Duplicate Images')
                     ->icon('heroicon-o-trash')
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Remove duplicate images')
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false)
-                    ->modalDescription('This will keep one image per duplicate position, hide the extra local rows from normal users, and mark Shopify-backed duplicates for deletion where needed.')
+                    ->modalDescription('Position-based cleanup is disabled. Review photograph identity, approvals and relationships before any separate cleanup decision.')
                     ->action(function (Collection $records): void {
                         $productsProcessed = 0;
                         $imagesRemoved = 0;
@@ -2513,12 +2525,13 @@ class ProductResource extends Resource
                     })
                     ->deselectRecordsAfterCompletion(),
                 BulkAction::make('bulkDeleteDuplicateImagesForever')
+                    ->disabled()->tooltip('Permanent bulk deletion is disabled to preserve image and approval history.')
                     ->label('Delete Duplicate Images Forever')
                     ->icon('heroicon-o-trash')
                     ->color('danger')
                     ->requiresConfirmation()
                     ->modalHeading('Permanently delete duplicate images?')
-                    ->modalDescription('This keeps one active image per duplicate position and permanently deletes extra duplicate, hidden, local-deleted, and remote-deleted duplicate image rows from the CMS for the selected products.')
+                    ->modalDescription('Historical image rows and their approval evidence are retained. Bulk deletion is disabled.')
                     ->visible(fn (): bool => Auth::user()?->hasRole(RolesEnum::SuperAdmin->value) ?? false)
                     ->action(function (Collection $records): void {
                         $productsProcessed = 0;
@@ -2574,58 +2587,20 @@ class ProductResource extends Resource
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
 
             ]),
-        ]);
+        ])
+            ->selectCurrentPageOnly();
     }
 
     private static function removeDuplicateImagesForProduct(Product $product): int
     {
-        $groups = self::duplicateImagePositionGroups($product);
-
-        $removed = 0;
-
-        foreach ($groups as $images) {
-            $primary = self::preferredDuplicateImageToKeep($images);
-            $imagesToRemove = $images->slice(1);
-
-            foreach ($imagesToRemove as $image) {
-                if (!$image instanceof Image) {
-                    continue;
-                }
-
-                $image->hideAsDuplicate(
-                    $primary instanceof Image ? $primary : null,
-                    Auth::id(),
-                    'Bulk duplicate-position cleanup'
-                );
-                $removed++;
-            }
-        }
-        if ($removed > 0) {
-            $product->touch();
-        }
-
-        return $removed;
+        // A position collision is a review signal, never a photograph identity.
+        return 0;
     }
 
     private static function deleteDuplicateImagesForProductForever(Product $product): int
     {
-        $imagesToDelete = self::duplicateImagesForPermanentDeletion($product);
-        $deleted = 0;
-
-        foreach ($imagesToDelete as $image) {
-            if (!$image instanceof Image) {
-                continue;
-            }
-
-            self::permanentlyDeleteImageRecord($image);
-            $deleted++;
-        }
-
-        if ($deleted > 0) {
-            $product->touch();
-        }
-
-        return $deleted;
+        // Historical records, approval snapshots and relationships must be retained.
+        return 0;
     }
 
     /**

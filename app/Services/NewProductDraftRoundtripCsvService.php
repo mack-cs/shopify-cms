@@ -30,7 +30,7 @@ final class NewProductDraftRoundtripCsvService
      */
     public function defaultExportColumns(): array
     {
-        return array_keys($this->columnDefinitions());
+        return [];
     }
 
     /**

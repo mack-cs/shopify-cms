@@ -10,10 +10,14 @@ class ReportDirectShopifyInventoryCorrections extends Command
 {
     protected $signature = 'inventory:report-direct-shopify-corrections {--now : Run in this process. The default queues the report so this command returns immediately}';
 
-    protected $description = 'Email a 7-day snapshot of inventory corrections made directly in Shopify';
+    protected $description = 'Email unreported direct Shopify corrections once on Monday for the previous complete week';
 
     public function handle(DirectShopifyInventoryCorrectionReport $report): int
     {
+        if (! now('Africa/Johannesburg')->isMonday()) {
+            $this->info('This report sends on Mondays only, for the previous Monday-Sunday. No email was sent or queued.');
+            return self::SUCCESS;
+        }
         if (! (bool) $this->option('now')) {
             ReportDirectShopifyInventoryCorrectionsJob::dispatch();
             $this->info('Queued the 7-day direct Shopify inventory correction report.');
@@ -30,7 +34,7 @@ class ReportDirectShopifyInventoryCorrections extends Command
             return self::FAILURE;
         }
         if ($result['corrections'] === 0) {
-            $this->info('No direct Shopify inventory corrections in the last 7 days. No email was sent.');
+            $this->info('No unreported corrections to send, or this week was already processed. No email was sent.');
 
             return self::SUCCESS;
         }

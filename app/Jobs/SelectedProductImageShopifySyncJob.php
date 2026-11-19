@@ -20,6 +20,16 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
 
     public int $timeout = 1800;
 
+    public int $tries = 5;
+
+    /**
+     * @return array<int, int>
+     */
+    public function backoff(): array
+    {
+        return [15, 30, 60, 120, 300];
+    }
+
     /**
      * @param array<int, int> $imageIds
      */
@@ -48,8 +58,14 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
 
         $backupResult = $backupService->backupImages($images);
         $result = $updater->syncSelectedProductImages($product->fresh(), $imageIds, $this->allowRemoteDeletedRestore);
+        $warningText = collect($result['warnings'])->pluck('warning')->implode(' ');
+        $retryable = $result['failed'] > 0 && ProductShopifyUpdater::imageSyncWarningIsRetryable($warningText);
 
         if (!$this->userId) {
+            if ($retryable) {
+                throw new \RuntimeException($warningText !== '' ? $warningText : 'Image synchronization was not confirmed.');
+            }
+
             return;
         }
 
@@ -101,12 +117,16 @@ class SelectedProductImageShopifySyncJob implements ShouldQueue
             ->title($this->allowRemoteDeletedRestore ? 'Remote-deleted image restore complete' : 'Selected image sync complete')
             ->body(implode(' ', $parts));
 
-        if ($result['failed'] > 0 || $backupResult['failed'] > 0) {
+        if ($result['failed'] > 0 || $backupResult['failed'] > 0 || $result['warnings'] !== [] || (int) $result['synced'] < 1) {
             $notification->warning();
         } else {
             $notification->success();
         }
 
         AdminNotification::sendToUserId($notification, $this->userId);
+
+        if ($retryable) {
+            throw new \RuntimeException($warningText !== '' ? $warningText : 'Image synchronization was not confirmed.');
+        }
     }
 }

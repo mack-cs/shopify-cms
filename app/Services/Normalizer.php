@@ -3,31 +3,35 @@
 namespace App\Services;
 
 use App\Jobs\ProductImageBackupImagesJob;
+use App\Models\Category;
+use App\Models\Color;
+use App\Models\DropdownOption;
+use App\Models\Image;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
-use App\Models\Category;
-use App\Models\Color;
-use App\Models\StyleProfile;
-use App\Models\Status;
-use App\Models\Type;
-use App\Models\ShopifyRow;
 use App\Models\RequiredField;
-use App\Models\Variant;
-use App\Models\Image;
+use App\Models\ShopifyRow;
+use App\Models\Status;
+use App\Models\StyleProfile;
 use App\Models\Tag;
-use App\Models\DropdownOption;
+use App\Models\Type;
+use App\Models\Variant;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
-use App\Services\TagNormalizer;
-use App\Services\DropdownCollectionCatalog;
 
 final class Normalizer
 {
     public function buildNormalizedTables(Import $import, bool $stageExistingProductUpdates = false): void
     {
         $imageIdsNeedingBackup = [];
+        $incoming = ShopifyRow::where('import_id', $import->id)->whereNotNull('handle')->get();
+        $images = Image::query()->with('imageAsset')->whereIn('product_id', Product::query()
+            ->whereIn('handle', $incoming->pluck('handle')->unique())->select('id'))->get();
+        $evidence = app(CatalogImageMatcher::class)->prepareEvidence($images, $incoming
+            ->map(fn (ShopifyRow $row): string => (string) $row->get(HeaderStore::IMAGE_SRC, ''))->filter()->all());
 
-        DB::transaction(function () use ($import, $stageExistingProductUpdates, &$imageIdsNeedingBackup) {
+        DB::transaction(function () use ($import, $stageExistingProductUpdates, $evidence, &$imageIdsNeedingBackup) {
             $rows = ShopifyRow::where('import_id', $import->id)
                 ->whereNotNull('handle')
                 ->orderBy('row_index')
@@ -149,7 +153,7 @@ final class Normalizer
 
                 // Images
                 $imageRows = $handleRows->filter(function (ShopifyRow $r) {
-                    return trim((string)$r->get(HeaderStore::IMAGE_SRC, '')) !== '';
+                    return trim((string) $r->get(HeaderStore::IMAGE_SRC, '')) !== '';
                 });
                 $imageRow = $imageRows
                     ->sortBy(fn (ShopifyRow $row) => (int) ($row->get(HeaderStore::IMAGE_POSITION, 0) ?: 0))
@@ -159,7 +163,7 @@ final class Normalizer
 
                 $imageIdsNeedingBackup = array_merge(
                     $imageIdsNeedingBackup,
-                    $this->reconcileImages($product, $imageRows)
+                    $this->reconcileImages($product, $imageRows, $evidence)
                 );
 
                 $existingStyleProfile = StyleProfile::where('handle', $handle)->first();
@@ -200,7 +204,7 @@ final class Normalizer
 
                 Product::withoutEvents(function () use ($product, $errors): void {
                     $product->forceFill([
-                        'has_errors' => !empty($errors),
+                        'has_errors' => ! empty($errors),
                         'error_fields' => $errors,
                     ])->save();
                 });
@@ -220,7 +224,7 @@ final class Normalizer
             return;
         }
 
-        if (!preg_match('/(?:^|[\s,_-])siblings?(?:$|[\s,_-])/', strtolower((string) $tags))) {
+        if (! preg_match('/(?:^|[\s,_-])siblings?(?:$|[\s,_-])/', strtolower((string) $tags))) {
             return;
         }
 
@@ -243,7 +247,7 @@ final class Normalizer
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, ShopifyRow> $variantRows
+     * @param  Collection<int, ShopifyRow>  $variantRows
      */
     private function reconcileVariants(Product $product, $variantRows): ?string
     {
@@ -294,6 +298,7 @@ final class Normalizer
             if ($existingVariant) {
                 $this->syncInboundVariant($existingVariant, $payload, $syncedAt);
                 $seenVariantIds[] = $existingVariant->id;
+
                 continue;
             }
 
@@ -326,11 +331,12 @@ final class Normalizer
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, ShopifyRow> $imageRows
+     * @param  Collection<int, ShopifyRow>  $imageRows
      */
-    private function reconcileImages(Product $product, $imageRows): array
+    private function reconcileImages(Product $product, $imageRows, array $evidence = []): array
     {
-        $existingImages = $product->allImages()
+        Product::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
+        $existingImages = $product->allImages()->lockForUpdate()
             ->orderBy('id')
             ->get();
 
@@ -340,21 +346,42 @@ final class Normalizer
 
         foreach ($imageRows as $ir) {
             $shopifyId = $this->normalizeValue($ir->get(HeaderStore::INTERNAL_IMAGE_SHOPIFY_ID, null));
+            $src = $ir->get(HeaderStore::IMAGE_SRC, null);
             $payload = [
                 'product_id' => $product->id,
                 'shopify_id' => $shopifyId,
-                'src' => $ir->get(HeaderStore::IMAGE_SRC, null),
+                'src' => $src,
                 'position' => (int) ($ir->get(HeaderStore::IMAGE_POSITION, 0) ?: 0) ?: null,
                 'alt_text' => $ir->get(HeaderStore::IMAGE_ALT_TEXT, null),
             ];
+            $cdnUrl = ShopifyMediaPath::rememberableCdnUrl(is_string($src) ? $src : null);
+            if ($cdnUrl !== null) {
+                $payload['shopify_cdn_url'] = $cdnUrl;
+            }
 
-            $existingImage = $this->resolveExistingImage($existingImages, $ir, $shopifyId, $seenImageIds);
+            $decision = app(CatalogImageMatcher::class)->match(
+                $existingImages,
+                $seenImageIds,
+                $shopifyId,
+                is_string($src) ? $src : null,
+                $evidence,
+            );
+            $existingImage = $decision['image'];
+
+            if ($decision['ambiguous']) {
+                foreach ($decision['candidate_ids'] as $candidateId) {
+                    $seenImageIds[] = (int) $candidateId;
+                }
+
+                continue;
+            }
 
             if ($existingImage) {
                 if ($this->syncInboundImage($existingImage, $payload, $syncedAt)) {
                     $imageIdsNeedingBackup[] = $existingImage->id;
                 }
                 $seenImageIds[] = $existingImage->id;
+
                 continue;
             }
 
@@ -367,6 +394,7 @@ final class Normalizer
                     'backup_status' => Image::BACKUP_STATUS_PENDING,
                     'backup_completed_at' => null,
                     'backup_error' => null,
+                    'shopify_media_create_uncertain' => false,
                     'last_shopify_seen_at' => $syncedAt,
                     'last_synced_at' => $syncedAt,
                 ]));
@@ -393,7 +421,7 @@ final class Normalizer
     /**
      * Preserve tool-owned edits when a synced row is already locally dirty.
      *
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function syncInboundVariant(Variant $variant, array $payload, $syncedAt): void
     {
@@ -437,6 +465,7 @@ final class Normalizer
                 }
 
                 $variant->fill($updates)->save();
+
                 return;
             }
 
@@ -453,12 +482,12 @@ final class Normalizer
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function syncInboundImage(Image $image, array $payload, $syncedAt): bool
     {
         $wasLocalDirty = (bool) $image->local_dirty;
-        $sourceChanged = $this->normalizeComparableValue($image->getAttribute('src')) !== $this->normalizeComparableValue($payload['src'] ?? null);
+        $identityChanged = ShopifyMediaPath::canonical($image->getAttribute('src')) !== ShopifyMediaPath::canonical($payload['src'] ?? null);
         $shopifyIdChanged = $this->normalizeComparableValue($image->getAttribute('shopify_id')) !== $this->normalizeComparableValue($payload['shopify_id'] ?? null);
 
         Image::withoutEvents(function () use ($image, $payload, $syncedAt): void {
@@ -468,6 +497,9 @@ final class Normalizer
                     'shopify_id' => $payload['shopify_id'] ?? $image->shopify_id,
                     'last_shopify_seen_at' => $syncedAt,
                 ];
+                if (array_key_exists('shopify_cdn_url', $payload)) {
+                    $updates['shopify_cdn_url'] = $payload['shopify_cdn_url'];
+                }
 
                 if (
                     $image->sync_state !== Image::SYNC_STATE_LOCAL_DELETED
@@ -477,6 +509,7 @@ final class Normalizer
                 }
 
                 $image->fill($updates)->save();
+
                 return;
             }
 
@@ -486,6 +519,7 @@ final class Normalizer
                 Image::ALT_APPROVED,
                 Image::ALT_PUBLISHED,
                 Image::ALT_FAILED,
+                Image::ALT_AWAITING_CONFIRMATION,
             ], true)) {
                 unset($incoming['alt_text']);
             }
@@ -502,23 +536,23 @@ final class Normalizer
             return false;
         }
 
-        $needsBackup = $sourceChanged
+        $needsBackup = $identityChanged
             || $shopifyIdChanged
             || (int) ($image->image_asset_id ?? 0) === 0
             || $image->backup_status !== Image::BACKUP_STATUS_BACKED_UP;
 
-        if (!$needsBackup) {
+        if (! $needsBackup) {
             return false;
         }
 
-        Image::withoutEvents(function () use ($image, $sourceChanged, $shopifyIdChanged): void {
+        Image::withoutEvents(function () use ($image, $identityChanged, $shopifyIdChanged): void {
             $updates = [
                 'backup_status' => Image::BACKUP_STATUS_PENDING,
                 'backup_completed_at' => null,
                 'backup_error' => null,
             ];
 
-            if ($sourceChanged || $shopifyIdChanged) {
+            if ($identityChanged || $shopifyIdChanged) {
                 $updates['image_asset_id'] = null;
             }
 
@@ -540,6 +574,7 @@ final class Normalizer
                     $variant->sync_state = Variant::SYNC_STATE_CONFLICT;
                 }
                 $variant->save();
+
                 return;
             }
 
@@ -557,7 +592,7 @@ final class Normalizer
             return false;
         }
 
-        $needsBackup = !$image->local_dirty && (int) ($image->image_asset_id ?? 0) === 0;
+        $needsBackup = ! $image->local_dirty && (int) ($image->image_asset_id ?? 0) === 0;
 
         Image::withoutEvents(function () use ($image, $syncedAt): void {
             if ($image->local_dirty) {
@@ -565,6 +600,7 @@ final class Normalizer
                     $image->sync_state = Image::SYNC_STATE_CONFLICT;
                 }
                 $image->save();
+
                 return;
             }
 
@@ -579,7 +615,7 @@ final class Normalizer
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function variantPayloadDiffers(Variant $variant, array $payload): bool
     {
@@ -608,7 +644,7 @@ final class Normalizer
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function imagePayloadDiffers(Image $image, array $payload): bool
     {
@@ -626,14 +662,14 @@ final class Normalizer
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, Variant> $existingVariants
-     * @param array<int, int> $seenVariantIds
+     * @param  Collection<int, Variant>  $existingVariants
+     * @param  array<int, int>  $seenVariantIds
      */
     private function resolveExistingVariant($existingVariants, ShopifyRow $row, ?string $shopifyId, array $seenVariantIds): ?Variant
     {
         if ($shopifyId !== null) {
             $match = $existingVariants->first(function (Variant $variant) use ($shopifyId, $seenVariantIds): bool {
-                return !in_array($variant->id, $seenVariantIds, true)
+                return ! in_array($variant->id, $seenVariantIds, true)
                     && trim((string) $variant->shopify_id) === $shopifyId;
             });
 
@@ -648,37 +684,23 @@ final class Normalizer
         }
 
         return $existingVariants->first(function (Variant $variant) use ($variantKey, $seenVariantIds): bool {
-            return !in_array($variant->id, $seenVariantIds, true)
+            return ! in_array($variant->id, $seenVariantIds, true)
                 && $this->variantKeyFromModel($variant) === $variantKey;
         });
     }
 
     /**
-     * @param \Illuminate\Support\Collection<int, Image> $existingImages
-     * @param array<int, int> $seenImageIds
+     * @param  Collection<int, Image>  $existingImages
+     * @param  array<int, int>  $seenImageIds
      */
     private function resolveExistingImage($existingImages, ShopifyRow $row, ?string $shopifyId, array $seenImageIds): ?Image
     {
-        if ($shopifyId !== null) {
-            $match = $existingImages->first(function (Image $image) use ($shopifyId, $seenImageIds): bool {
-                return !in_array($image->id, $seenImageIds, true)
-                    && trim((string) $image->shopify_id) === $shopifyId;
-            });
-
-            if ($match) {
-                return $match;
-            }
-        }
-
-        $imageKey = trim((string) ($row->image_key ?? ''));
-        if ($imageKey === '') {
-            return null;
-        }
-
-        return $existingImages->first(function (Image $image) use ($imageKey, $seenImageIds): bool {
-            return !in_array($image->id, $seenImageIds, true)
-                && $this->imageKeyFromModel($image) === $imageKey;
-        });
+        return app(CatalogImageMatcher::class)->match(
+            $existingImages,
+            $seenImageIds,
+            $shopifyId,
+            $row->get(HeaderStore::IMAGE_SRC, null),
+        )['image'];
     }
 
     private function variantKeyFromModel(Variant $variant): ?string
@@ -711,7 +733,7 @@ final class Normalizer
             foreach ($rows as $handle => $handleRows) {
                 /** @var ShopifyRow $primary */
                 $primary = $handleRows->firstWhere('row_type', 'product_primary') ?? $handleRows->first();
-                if (!$primary) {
+                if (! $primary) {
                     continue;
                 }
 
@@ -719,7 +741,7 @@ final class Normalizer
                     ->where('handle', $handle)
                     ->first();
 
-                if (!$product) {
+                if (! $product) {
                     continue;
                 }
 
@@ -759,7 +781,7 @@ final class Normalizer
 
         Product::withoutEvents(function () use ($product, $errors): void {
             $product->forceFill([
-                'has_errors' => !empty($errors),
+                'has_errors' => ! empty($errors),
                 'error_fields' => $errors,
             ])->save();
         });
@@ -767,10 +789,15 @@ final class Normalizer
 
     private function toDecimal(mixed $v): ?float
     {
-        if ($v === null) return null;
-        $s = trim((string)$v);
-        if ($s === '') return null;
-        return (float)$s;
+        if ($v === null) {
+            return null;
+        }
+        $s = trim((string) $v);
+        if ($s === '') {
+            return null;
+        }
+
+        return (float) $s;
     }
 
     private function normalizeVariantComparableValue(string $field, mixed $value): mixed
@@ -793,13 +820,13 @@ final class Normalizer
             return null;
         }
 
-        if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
+        if (str_contains($normalized, ',') && ! str_contains($normalized, '.')) {
             $normalized = str_replace(',', '.', $normalized);
         } else {
             $normalized = str_replace(',', '', $normalized);
         }
 
-        if (!is_numeric($normalized)) {
+        if (! is_numeric($normalized)) {
             return (string) $this->normalizeComparableValue($value);
         }
 
@@ -822,6 +849,7 @@ final class Normalizer
 
         if (is_string($value)) {
             $trimmed = trim($value);
+
             return $trimmed === '' ? null : $trimmed;
         }
 
@@ -835,7 +863,7 @@ final class Normalizer
         }
 
         $s = trim((string) $v);
-        if ($s === '' || !is_numeric($s)) {
+        if ($s === '' || ! is_numeric($s)) {
             return null;
         }
 
@@ -867,6 +895,7 @@ final class Normalizer
     private function defaultBatchForImport(Import $import): string
     {
         $stamp = $import->created_at?->format('YmdH') ?? now()->format('YmdH');
+
         return "import_{$stamp}";
     }
 
@@ -883,6 +912,7 @@ final class Normalizer
         }
 
         $lower = strtolower($name);
+
         return Category::whereRaw('LOWER(name) = ?', [$lower])->first();
     }
 
@@ -896,7 +926,7 @@ final class Normalizer
         foreach ($parts as $name) {
             $lower = strtolower($name);
             $existing = Color::whereRaw('LOWER(name) = ?', [$lower])->first();
-            if (!$existing) {
+            if (! $existing) {
                 Color::create(['name' => $name, 'active' => true]);
             }
         }
@@ -911,7 +941,7 @@ final class Normalizer
 
         foreach ($tokens as $token) {
             $existing = Tag::whereRaw('LOWER(name) = ?', [strtolower($token)])->first();
-            if (!$existing) {
+            if (! $existing) {
                 Tag::create(['name' => $token, 'active' => true]);
             }
         }
@@ -937,6 +967,7 @@ final class Normalizer
         }
 
         $trimmed = trim((string) $value);
+
         return $trimmed === '' ? null : $trimmed;
     }
 
@@ -948,12 +979,14 @@ final class Normalizer
                 return $value;
             }
         }
+
         return null;
     }
 
     private function normalizeColorString(?string $value): ?string
     {
         $parts = $this->parseColorTokens($value);
+
         return empty($parts) ? null : implode('; ', $parts);
     }
 
@@ -1016,7 +1049,7 @@ final class Normalizer
 
         $lower = strtolower($status);
         $existing = Status::whereRaw('LOWER(name) = ?', [$lower])->first();
-        if (!$existing) {
+        if (! $existing) {
             Status::create(['name' => $status, 'active' => true]);
         }
     }
@@ -1029,7 +1062,7 @@ final class Normalizer
         }
 
         $googleCategory = $this->normalizeValue($googleCategory);
-        if (!CategoryTypeMap::byType($typeName)) {
+        if (! CategoryTypeMap::byType($typeName)) {
             return;
         }
 
@@ -1047,7 +1080,7 @@ final class Normalizer
     {
         $errors = [];
 
-        if (!empty($resolved['mismatch'])) {
+        if (! empty($resolved['mismatch'])) {
             $errors[] = 'mismatch:category_type';
         }
 
@@ -1082,7 +1115,7 @@ final class Normalizer
         $categoryValue = $this->normalizeValue($resolved['category'] ?? $product->product_category);
         if ($categoryValue !== null) {
             $exists = Category::whereRaw('LOWER(name) = ?', [strtolower($categoryValue)])->exists();
-            if (!$exists) {
+            if (! $exists) {
                 $errors[] = 'invalid:category';
             }
         }
@@ -1097,7 +1130,7 @@ final class Normalizer
                 $complementaryProducts = app(ComplementaryProductAuditService::class);
                 $value = $complementaryProducts->localComplementaryValueForProduct($product);
                 if ($complementaryProducts->referenceCount($value) < ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT) {
-                    $errors[] = "missing:{$label} (minimum " . ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT . ')';
+                    $errors[] = "missing:{$label} (minimum ".ComplementaryProductAuditService::SHOPIFY_TARGET_COUNT.')';
                 }
 
                 continue;
@@ -1144,7 +1177,7 @@ final class Normalizer
         $variants = $product->variants;
 
         $requiredVariantFields = $requiredDefinitions['variant'];
-        if (!empty($requiredVariantFields)) {
+        if (! empty($requiredVariantFields)) {
             if ($variants->isEmpty()) {
                 foreach ($requiredVariantFields as $field) {
                     $attribute = $field['attribute'];
@@ -1186,7 +1219,7 @@ final class Normalizer
         }
 
         $requiredImageFields = $requiredDefinitions['image'];
-        if (!empty($requiredImageFields)) {
+        if (! empty($requiredImageFields)) {
             $images = $product->images;
 
             if ($images->isEmpty()) {
@@ -1269,7 +1302,7 @@ final class Normalizer
 
     private function dropdownInactiveErrors(Product $product, ?ShopifyRow $primary): array
     {
-        if (!$primary) {
+        if (! $primary) {
             return [];
         }
 
@@ -1288,7 +1321,7 @@ final class Normalizer
             // to validate against yet, so don't mark inactive.
             $contextQuery = DropdownOption::query()->where('header', $header);
             $isBundleContext = TagNormalizer::containsBundleOrStackTag($collectionContext['tag_secondary']);
-            if (!$isBundleContext) {
+            if (! $isBundleContext) {
                 if ($collectionContext['tag_primary'] !== null) {
                     $contextQuery->where('collection_tag_primary', $collectionContext['tag_primary']);
                 } else {
@@ -1340,7 +1373,7 @@ final class Normalizer
     {
         $headers = $this->controlledDropdownHeaders();
 
-        if (!RequiredField::query()->exists()) {
+        if (! RequiredField::query()->exists()) {
             return $headers;
         }
 
@@ -1398,6 +1431,7 @@ final class Normalizer
 
         $normalized = str_replace(',', ';', $value);
         $parts = array_map('trim', explode(';', $normalized));
+
         return array_values(array_filter($parts, fn (string $part) => $part !== ''));
     }
 
@@ -1418,10 +1452,10 @@ final class Normalizer
             $primary = strtolower((string) ($ctx['tag_primary'] ?? ''));
             $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
 
-            if ($primary === '' || !in_array($primary, $tokenSet, true)) {
+            if ($primary === '' || ! in_array($primary, $tokenSet, true)) {
                 continue;
             }
-            if ($secondary !== '' && !in_array($secondary, $tokenSet, true)) {
+            if ($secondary !== '' && ! in_array($secondary, $tokenSet, true)) {
                 continue;
             }
 
@@ -1439,8 +1473,8 @@ final class Normalizer
             $secondary = strtolower((string) ($ctx['tag_secondary'] ?? ''));
             if (
                 $secondary === ''
-                || !in_array($secondary, $tokenSet, true)
-                || !TagNormalizer::containsBundleOrStackTag($secondary)
+                || ! in_array($secondary, $tokenSet, true)
+                || ! TagNormalizer::containsBundleOrStackTag($secondary)
             ) {
                 continue;
             }
@@ -1464,7 +1498,7 @@ final class Normalizer
     private function requiredDefinitions(): array
     {
         $required = RequiredField::query()->where('required', true)->get();
-        if ($required->isEmpty() && !RequiredField::query()->exists()) {
+        if ($required->isEmpty() && ! RequiredField::query()->exists()) {
             $fallbackProduct = [];
             foreach (config('product_error_rules.product_fields', []) as $attribute) {
                 $fallbackProduct[] = ['attribute' => $attribute, 'label' => $attribute];
@@ -1504,6 +1538,7 @@ final class Normalizer
                     'attribute' => $field->attribute,
                     'label' => $field->label,
                 ];
+
                 continue;
             }
             if ($field->source === 'row') {
@@ -1511,6 +1546,7 @@ final class Normalizer
                     'attribute' => $field->attribute,
                     'label' => $field->label,
                 ];
+
                 continue;
             }
             if ($field->source === 'variant') {
@@ -1518,6 +1554,7 @@ final class Normalizer
                     'attribute' => $field->attribute,
                     'label' => $field->label,
                 ];
+
                 continue;
             }
             if ($field->source === 'image') {
@@ -1579,6 +1616,7 @@ final class Normalizer
     {
         $value = strtolower(trim($value));
         $value = preg_replace('/[^a-z0-9]+/', '_', $value) ?? $value;
+
         return trim($value, '_');
     }
 
@@ -1588,18 +1626,19 @@ final class Normalizer
             return $this->normalizeValue($variant->sku) !== null;
         });
 
-        if (!$hasVariantSku) {
+        if (! $hasVariantSku) {
             return $errors;
         }
 
         return array_values(array_filter($errors, function (string $error): bool {
-            if (!str_starts_with($error, 'missing:')) {
+            if (! str_starts_with($error, 'missing:')) {
                 return true;
             }
 
             $label = substr($error, strlen('missing:'));
             $normalized = $this->normalizeKey($label);
-            return !in_array($normalized, ['sku', 'variant_sku'], true);
+
+            return ! in_array($normalized, ['sku', 'variant_sku'], true);
         }));
     }
 

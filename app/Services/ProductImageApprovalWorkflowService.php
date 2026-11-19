@@ -22,7 +22,7 @@ class ProductImageApprovalWorkflowService
 
         $updated = false;
 
-        DB::transaction(function () use ($productId, &$updated): void {
+        DB::transaction(function () use ($productId, $approval, &$updated): void {
             $product = Product::query()
                 ->lockForUpdate()
                 ->find($productId);
@@ -30,6 +30,8 @@ class ProductImageApprovalWorkflowService
             if (!$product) {
                 return;
             }
+
+            app(ImageAltApprovalEvidence::class)->captureFullApproval($product, (int) $approval->user_id);
 
             if (
                 $product->first_image_auto_rename_completed_at !== null

@@ -1,0 +1,260 @@
+Leigh Avenue CMS image remediation - implementation and verification record
+Date: 19 November 2026
+
+Release assessment
+Ordinary image management: implemented for controlled staging verification.
+Automatic component-to-stack propagation: do not enable in production. Development-store
+integration and the destructive-operation acceptance matrix below remain release gates.
+COMPONENT_STACK_IMAGE_PROPAGATION was not enabled. No deployment or commit occurred.
+
+Implementation, independently inspected in the current working tree
+
+1. Alt approval and full-gallery publication
+ImageAltApprovalEvidence binds a sentence to a CMS image, immutable backup asset and SHA-256.
+Full product approval captures every eligible image, not just the primary photograph.
+ProductPartialApprovalService retains approved historical snapshots instead of deleting
+unaffected image approvals after another image changes. Missing historical asset fields
+use corroborating pre-approval backup, URL, sync-baseline and replacement-history evidence;
+insufficient evidence requires review. Actual photograph replacements require new approval.
+ImageAltTextBackfillService supports independently reviewed inherited descriptions and
+component-following descriptions. Stack-owned and independent inherited descriptions are
+protected from component fanout. Existing verified media is reused; alt-only work creates
+no photograph. READY state, attachment, approved sentence and original photograph bytes
+are checked. A post-update photograph check precedes the final local published state.
+Lost responses or delayed read-back retain confirmation state and cannot automatically
+resend fileUpdate. Editing/replacing an unresolved operation requires recovery first.
+
+2. Complete reporting and historical ownership
+Both queued and synchronous alt exports include all active images, including unresolved
+legacy stack images. Appended ownership and review_status columns identify operator work.
+Importing a CSV does not classify ownership or approve descriptions. Hidden/deleted image
+rows remain historical records. The CMS Image Alt Review page provides explicit ownership
+review, independent sentence approval, backup/rebuild preparation, publication and recovery.
+Ownership is never inferred from position, filename or SKU. Imported ambiguous Shopify
+stack records remain unresolved; explicit new local stack photographs are stack-owned.
+Existing SHA-256 backup storage and the S3 inbox are retained.
+
+3. Inherited conflicts and provenance
+InheritedAltResolution validates a resolution against current membership, active source
+relationships, source assets, approved sentences and publication generations. Legacy
+unbound decisions are retained as history but require review. Removed provenance does not
+participate in current conflicts. Staging and publishing use the same resolution service.
+Unapproved source disagreements cannot overwrite an approved independent stack sentence.
+Previous descriptions are archived and preserved when a conflict appears.
+Changes/reopening/removal of source links are captured in inherited_image_source_events.
+Component selection and membership revision allocation use short database transactions
+with a common product-row serialization point and fresh selection/version checks.
+
+4. Relationship recovery
+The former newest-40 scan could permanently starve older drafts. Recovery now persists
+a bounded ascending-ID cursor, a pass high-water mark, completed passes and a separate
+failure lane. It revisits the whole catalogue and survives worker restarts. Per-item
+failures cannot prevent progress through other drafts. Reconciliation/task keys remain
+idempotent. The latest dependency list, including an empty list, takes precedence over
+older draft relationships. Blank draft identities do not select an arbitrary product.
+Use images:recover-component-stack-propagation --report for read-only backlog/progress.
+With the flag disabled, ordinary recovery dispatch does nothing; --report remains readable.
+
+5. Network work and database locks
+Normalizer collects remote catalogue byte evidence before its locking transaction.
+CatalogImageMatcher compares that evidence against the freshly locked current asset;
+stale or unavailable evidence produces an unresolved decision rather than duplication.
+Alt HTTP requests and photograph probes no longer run inside the alt row-lock transaction.
+The durable pending marker and MySQL session mutex protect the operation; a short final
+transaction revalidates current identity/approval before committing publication.
+
+6. Upload and retirement safety
+ImageUploadOperations persists a claim before creation. Uncertain uploads do not replay.
+If the creation response supplied no durable media ID, matching original bytes and a new
+attachment cannot alone prove that the uncertain request created that file. Automatic
+adoption is blocked. Image Alt Review offers an explicit administrator-reviewed file
+adoption action with a reason, backed by fresh READY/attachment/original-byte checks and
+exclusion of files referenced by other CMS records. images:resolve-upload --adopt-media-id
+performs the same review without uploading or mutating Shopify. Timeout never grants
+permission to replay creation. Manual confirmed-not-created decisions require active
+administrator authority and documented independent evidence, not an elapsed-time guess.
+Reconciliation excludes files already belonging to another CMS image or a component source,
+even if original bytes match. Component and stack files retain separate identities.
+Pending alt/upload tracking cannot be erased by a replacement import.
+Retirement requires an obsolete inherited image with verified original bytes; stack-owned,
+unresolved and shared active associations are protected. Replacement must be attached and
+READY. Variant references are checked and paginated, replacement is appended and verified
+before detachment, and mutation payloads and fresh remote absence are checked before CMS
+retirement. Each retirement step/target is durable. Uncertain steps cannot blindly replay.
+The remote retirement operation now uses fileUpdate.referencesToRemove for the stack product,
+retaining the file rather than deleting it globally. No fileDelete is used by this path.
+images:resolve-media-retirement can confirm absence or explicitly retain an obsolete file
+with an active administrator and documented reason; it sends no Shopify mutation.
+
+7. Ordinary variant assignments
+The older path used URL/position fallback, detached first and lacked durable confirmation.
+VariantImageSynchronizer requires the exact variant product and verified target photograph,
+appends/read-backs first, then detaches/read-backs. Durable image_variant_operations prevent
+replay after lost responses or crashes. Unmapped legacy variants keep their current remote
+associations rather than being treated as an implicit request to detach everything.
+The CMS review page and images:resolve-variant-image-operation support confirmation or
+explicit abandonment without a remote mutation. New assignment identity failures are
+visible and make the product sync incomplete. Clearing a legacy mapping alone does not
+authorize remote deletion; intentional unassignment requires an explicit reviewed action.
+Selected-photo publication reconciles only variants linked to selected images; full image
+publication checks all mapped variants. Each step rechecks the local mapping and product
+approval version. Component removal clears obsolete CMS variant links only after confirmed
+remote removal, while replacement maps those links to the verified replacement row.
+
+8. Product results and cleanup
+updateApprovedProducts returns image_outcomes with separate photograph, alt, review-needed
+and variant-association states. Incomplete galleries no longer mark the product synchronized.
+Eligible alt descriptions can still publish while another gallery item requires review.
+Bulk position-based hiding and permanent duplicate deletion are disabled. Their handlers
+do not mutate records. Position collisions are review signals; existing approvals, variant
+links, source relationships and hidden/deleted history are retained. No duplicate cleanup
+was performed during this assignment.
+
+9. Inventory email changes in the working tree
+Monday/previous-complete-week delivery and deduplication remain. Historical adjustments
+are marked cutover_review, not assumed sent. Uncertain mail receipts are not automatically
+replayed; errors surface as failed queue work instead of being swallowed. The audit-page
+button also respects Monday. inventory:correction-delivery-review-report exposes uncertain
+and unreported records, including older records outside the current weekly window, without
+sending or claiming delivery. Historical email receipts still need an operator decision.
+Recommend releasing this inventory/email change separately with an approved receipt-cutover
+procedure. Do not omit its migration while shipping code that expects its ledger tables.
+
+Verification
+Final full-repository verification: 1,520 tests passed, 9,150 assertions, no failures;
+262.97 seconds (storage/logs/remediation-final-complete-verification.log).
+Focused verification: 335 tests passed, 1,898 assertions, across 16 affected suites
+(storage/logs/remediation-final-verified-image-suites.log).
+Earlier exploratory runs exposed failures: stale procurement and legacy-media fakes,
+old expectations of automatic uncertain-file adoption, and a shared-file operation labelled
+processing instead of needs_review. The fixtures/safe expectations and classification were
+corrected and the final runs above passed. Earlier logs are retained under storage/logs.
+SQLite/mock results are not Shopify or MySQL evidence. Full repository runs exercised
+CSV/import/export, selection, approval, stack rebuilding, partial alerts, inventory reports
+and image lifecycle suites. The previous CSV-status UI failure did not reproduce.
+The prior queued-export omission and unsafe hidden/deleted cleanup behavior were corrected.
+An unrelated procurement test constructed a matched draft Shopify Product while claiming
+to test an unmatched prelaunch draft. HEAD intentionally permits draft Shopify Products in
+procurement, and another test verifies that policy. The fixture now uses NewProductDraft
+without a catalogue Variant; the original skip expectation and business behavior remain.
+The legacy CDN recovery fake also emitted a duplicate copy of the adopted MediaImage with
+a CMS backup URL. Explicit remote fixture nodes now remain authoritative, allowing the
+new post-update original-byte verification without simulating an impossible Shopify node.
+
+Principal code evidence (workspace paths and current entry lines)
+app/Services/ImageAltApprovalEvidence.php:31,54,83 - approval, full approval, legacy evidence
+app/Services/ProductPartialApprovalService.php:1026,1044 - review invalidation and approval
+app/Services/ImageAltTextBackfillService.php:239,297,792 - eligibility, all-image publishing, verified write
+app/Services/InheritedAltResolution.php:11,39 - context binding and shared resolution gate
+app/Services/ComponentStackPropagation.php:454,497,1008,1210,1254 - recovery, staging, resolution, revisions, scan
+app/Services/CatalogImageMatcher.php:16,43 - prefetch and current-asset evidence matching
+app/Services/Normalizer.php:25 - catalogue import evidence before transaction
+app/Services/ImageUploadOperations.php:87 - uncertain file adoption protections
+app/Services/ImagePhotographEvidence.php:13 - append-only provenance change evidence
+app/Services/ShopifyImageImportService.php:512 - pending-operation replacement guard
+app/Services/ProductShopifyUpdater.php:768,1106,2099,2137,5459,5630 - outcomes, retirement, gallery/variant gates, assignments, reference removal
+app/Services/VariantImageSynchronizer.php:48,155 - verified assignment and read-only remote recovery
+app/Services/ImageAltRecovery.php:13,46 - explicit rebuild/classification and preserved links
+app/Filament/Pages/ImageAltTextRecovery.php:31 - authenticated CMS recovery/review workflow
+app/Filament/Resources/ProductResource.php:2498,2527,2594,2600 - disabled bulk cleanup and nonmutating handlers
+app/Console/Commands/ResolveMediaRetirement.php:16 - confirm/retain retirement without remote mutation
+app/Console/Commands/ResolveVariantImageOperation.php:8 - attributed variant recovery
+app/Console/Commands/ResolveImageUploadOperation.php:17 - active-admin manual upload resolution and explicit file adoption
+app/Console/Commands/ReportInventoryCorrectionDeliveryReview.php:9 - read-only receipt backlog
+app/Services/Inventory/DirectShopifyInventoryCorrectionReport.php:27 - weekly claims and uncertain receipts
+database/migrations/2026_11_19_190000_add_image_recovery_scan_state.php:10 - durable scan, provenance and variant operations
+tests/Feature/ImageRemediationLifecycleTest.php - durable scan, stale evidence, migration retry, shared-file uncertainty
+tests/Feature/ImageAltPublicationPriorityTest.php - full gallery, independent approval, component fanout, replacement and confirmation
+tests/Feature/VariantImageSynchronizationTest.php - replacement-before-detach and uncertain association recovery
+
+Real MySQL verification
+tests/Integration/image-mysql-verification.php creates an isolated image_audit_<random>
+database on a LOCAL server only, verifies the selected database, runs all migrations and
+retries the eight new image/delivery migrations, then drops only its generated database.
+It first migrates the pre-change schema, seeds a legacy image and approved historical
+snapshot, then upgrades and verifies ownership remains null and the sentence and persisted
+snapshot remain intact. MySQL canonicalizes JSON object key ordering, so the harness compares
+persisted snapshots on both sides of migration rather than an unsaved PHP object's ordering.
+It also verifies JSON historical approval evidence and null ownership; independent-session
+GET_LOCK contention; a separate PHP lock contender; connection-death release; InnoDB
+row-lock contention/rollback; two concurrent application generation workers producing one
+generation/outbox; and two competing upload-claim workers terminating before the request,
+leaving exactly one durable uncertain operation and preventing another claim.
+Final evidence: storage/logs/remediation-mysql-final-upgrade-verification.log (all nine checks).
+The final generated database image_audit_6f85ac47a8d6c1e7 was removed after successful checks.
+No configured CMS database was selected and Shopify was not contacted by this harness.
+
+Not integration-tested
+No authorized Shopify development store was identified, so no actual Shopify mutations
+were performed. Actual token scopes, asynchronous processing/read-back, shared-file effects,
+variant API behavior, source replacement during remote calls and full network interruption
+must pass in a development store. MySQL service tests do not prove every full importer race,
+injected deadlock retry, abrupt server failure during DDL, or every crash boundary during a
+real HTTP operation. Those remain explicit controlled-staging/integration acceptance work.
+Product 702, the reported 102/858 legacy ownership population and the 77 failed alt rows were
+not queried or modified in production. Recoverability must be established per image from
+current evidence; this implementation does not promise all historical rows are recoverable.
+
+Reproducible checks (local workspace)
+php -d memory_limit=1G vendor/pestphp/pest/bin/pest --compact --colors=never --do-not-cache-result
+php tests/Integration/image-mysql-verification.php
+The MySQL harness uses local DB credentials or IMAGE_AUDIT_MYSQL_HOST/PORT/USER/PASSWORD;
+it refuses remote hosts and never migrates the configured CMS database.
+
+Read-only operational verification, only after approval to access the target environment
+php artisan images:legacy-image-ownership-report --output=storage/app/ownership-review.csv
+php artisan images:alt-text-reconciliation-report --status=failed --output=storage/app/alt-review.csv
+php artisan images:upload-reconciliation-report --output=storage/app/upload-review.csv
+php artisan images:duplicate-position-report --output=storage/app/duplicate-review.csv
+php artisan images:recover-component-stack-propagation --report
+php artisan images:verify-shopify-photograph <CMS_IMAGE_ID> --media-id=<ATTACHED_MEDIA_IMAGE_GID>
+php artisan inventory:correction-delivery-review-report --output=storage/app/delivery-review.csv
+These reports do not authorize bulk retries, image adoption or cleanup. Some commands read
+Shopify and download original bytes; CSV outputs write only report artifacts locally.
+Recovery commands without report options can change LOCAL workflow state and are not
+read-only verification commands. Never run synchronization/recovery as a reporting shortcut.
+
+Required development-store acceptance
+Use a separate environment/database/bucket and explicit development-store credentials.
+Verify effective SHOPIFY_API_VERSION=2026-01 and read_products/write_products/read_files/
+write_files access needed by the selected operations. Never point this exercise at the
+production store. Import five photographs, fully approve/publish all five and their alt;
+repeat; change only the third description; replace/reapprove the third photograph; reorder.
+Check creation counts, READY/original SHA, exact alt read-back and media IDs each time.
+Create two dependent stacks with independent files and one stack-owned photograph. Verify
+component alt changes affect both inherited copies only. Remove/re-add/remove membership
+on one stack and verify the other stack/component/owned image and their variant references
+remain unchanged. Resolve shared-source conflicts and then change generation/membership;
+the old resolution must stop authorizing publication. Run the >40-draft scan and overlapping
+jobs, interrupt before/after each upload/append/detach/reference-removal boundary, and confirm
+durable uncertainty prevents replay and supports explicit operator recovery. Verify paginated
+media/variant connections and injected API/read-back errors. Confirm removing a stack
+reference retains the original file, component and second stack. Compare all remote and
+local records before/after. Enable propagation only in this isolated test environment.
+
+Migration/deployment safeguards (not executed)
+Back up database and immutable backup assets. Inventory pending operations/read-only reports.
+Stop old image workers and schedulers and quiesce image editing before schema changes;
+drain/record in-flight operations, do not clear uncertain claims. Keep propagation false.
+Apply these pending migrations in timestamp order:
+  2026_11_17_170000_add_shopify_media_identity_to_images_table
+  2026_11_17_180000_add_image_lifecycle_safeguards
+  2026_11_18_120000_add_component_stack_image_propagation
+  2026_11_18_140000_harden_component_stack_image_propagation
+  2026_11_18_160000_version_stack_membership_and_retirement_resolution
+  2026_11_19_170000_track_direct_inventory_correction_reports
+  2026_11_19_180000_add_individual_image_alt_approvals
+  2026_11_19_190000_add_image_recovery_scan_state
+Guarded additive DDL supports retry after partially completed migration steps. This is not
+a claim of MySQL transactional DDL. Stop writers throughout migration/retry, inspect the
+schema and pending migration ledger after interruption, and rehearse on a production-shaped
+copy. Start only matching-version workers after all required schema exists. Verify effective
+cached configuration, run read-only reports, then perform controlled staging checks.
+Rollback application code with workers stopped while retaining the added schema and all
+approval/provenance/operation/delivery history. Destructive down migrations intentionally
+refuse. Do not run migrate:rollback as a routine rollback or erase operation ledgers.
+
+Shopify API reference checked, not a substitute for store integration evidence
+https://shopify.dev/docs/api/admin-graphql/2026-01/mutations/fileUpdate
+https://shopify.dev/docs/api/admin-graphql/2026-01/input-objects/FileUpdateInput
+https://shopify.dev/docs/api/admin-graphql/2026-01/mutations/productDeleteMedia

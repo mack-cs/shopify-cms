@@ -7,9 +7,11 @@ use App\Models\Import;
 use App\Models\Product;
 use App\Models\ShopifyRow;
 use App\Services\HeaderStore;
+use App\Services\ImagePhotographEvidence;
 use App\Services\Normalizer;
 use App\Services\ProductImageFilenameService;
 use App\Services\RowKey;
+use App\Services\ShopifyMediaPath;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader;
 
@@ -17,6 +19,12 @@ class ImageObserver
 {
     public function creating(Image $image): void
     {
+        if ($image->ownership === null && $image->source_image_id === null && $image->product_id) {
+            $product = $image->relationLoaded('product') ? $image->product : Product::query()->find($image->product_id);
+            if ($product instanceof Product && $product->isStackProduct()) {
+                $image->ownership = \App\Services\ImageOwnership::STACK_OWNED;
+            }
+        }
         $this->applyManagedApprovedFilename($image);
         $image->needs_shopify_image_sync = true;
         $image->shopify_image_sync_error = null;
@@ -43,23 +51,32 @@ class ImageObserver
         $contentDirty = $this->contentDirty($image);
         $isLocalDelete = $image->isDirty('sync_state') && $image->sync_state === Image::SYNC_STATE_LOCAL_DELETED;
 
-        if (! empty(array_intersect(['src', 'image_path'], $contentDirty))) {
+        if ($this->shopifyIdentityChanged($image, $contentDirty)) {
+            app(ImagePhotographEvidence::class)->archive($image, 'Local photograph replacement');
             $image->image_asset_id = null;
             $image->backup_status = Image::BACKUP_STATUS_PENDING;
             $image->backup_completed_at = null;
             $image->backup_error = null;
+            $image->shopify_id = null;
+            $image->shopify_cdn_url = null;
+            $image->shopify_identity_unresolved = true;
+            $image->alt_text = null;
+            $image->alt_text_status = null;
+            $image->shopify_alt_text = null;
+            $image->alt_confirmation_media_id = null;
+            $image->alt_confirmation_text = null;
+            $image->needs_shopify_image_sync = true;
+            $image->shopify_image_sync_error = null;
         }
 
         if (! empty(array_intersect(['src', 'image_path', 'position'], $contentDirty))) {
             $this->applyManagedApprovedFilename($image);
-            $image->needs_shopify_image_sync = true;
-            $image->shopify_image_sync_error = null;
         }
 
         if (in_array('image_path', $contentDirty, true)) {
             $previousPath = $image->getOriginal('image_path');
             if (is_string($previousPath) && trim($previousPath) !== '' && $previousPath !== $image->image_path) {
-                $this->deleteStoredImage($previousPath);
+                // Retain previous bytes for the archived photograph revision.
             }
         }
 
@@ -75,6 +92,27 @@ class ImageObserver
         if (! empty($contentDirty)) {
             $this->syncShopifyRow($image, $image->getOriginal());
         }
+    }
+
+    public function updated(Image $image): void
+    {
+        if ($image->wasChanged(['position', 'is_duplicate_hidden', 'sync_state'])) {
+            try {
+                app(\App\Services\ComponentStackPropagation::class)->reconcileComponentSelection((int) $image->product_id);
+            } catch (\Throwable $exception) {
+                logger()->warning('Component photograph selection was not propagated.', [
+                    'image_id' => $image->id,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        $product = $image->product_id ? Product::find($image->product_id) : null;
+        if (! $product) {
+            return;
+        }
+
+        app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
 
     public function deleted(Image $image): void
@@ -106,16 +144,6 @@ class ImageObserver
             ->where('row_type', 'image')
             ->where('image_key', $oldKey)
             ->delete();
-
-        app(Normalizer::class)->recalculateErrorsForProduct($product);
-    }
-
-    public function updated(Image $image): void
-    {
-        $product = $image->product_id ? Product::find($image->product_id) : null;
-        if (! $product) {
-            return;
-        }
 
         app(Normalizer::class)->recalculateErrorsForProduct($product);
     }
@@ -274,6 +302,23 @@ class ImageObserver
     }
 
     /**
+     * A cache-buster query change is still the same photograph.
+     *
+     * @param  array<int, string>  $dirty
+     */
+    private function shopifyIdentityChanged(Image $image, array $dirty): bool
+    {
+        if (in_array('image_path', $dirty, true)) {
+            return true;
+        }
+        if (! in_array('src', $dirty, true)) {
+            return false;
+        }
+
+        return ShopifyMediaPath::canonical($image->getOriginal('src')) !== ShopifyMediaPath::canonical($image->src);
+    }
+
+    /**
      * @return array<int, string>
      */
     private function contentDirty(Image $image): array
@@ -340,6 +385,11 @@ class ImageObserver
             'last_shopify_image_synced_at',
             'needs_shopify_image_sync',
             'shopify_image_sync_error',
+            'shopify_media_create_uncertain',
+            'shopify_identity_unresolved',
+            'alt_confirmation_media_id',
+            'alt_confirmation_text',
+            'shopify_cdn_url',
             'alt_text',
             'imported_alt_text',
             'alt_text_status',
@@ -347,6 +397,8 @@ class ImageObserver
             'shopify_alt_sync_error',
             'shopify_alt_text',
             'source_image_id',
+            'ownership',
+            'alt_inheritance_mode',
         ];
     }
 

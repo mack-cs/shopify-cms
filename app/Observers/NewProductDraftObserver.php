@@ -63,5 +63,15 @@ class NewProductDraftObserver
         }
 
         app(StackCompareAtPriceService::class)->syncFromDraftChange($draft);
+        if ($draft->wasRecentlyCreated || in_array('bundle_product_ids', array_keys($draft->getChanges()), true)) {
+            try {
+                app(\App\Services\ComponentStackPropagation::class)->reconcileDraftMembership($draft);
+            } catch (\Throwable $exception) {
+                logger()->warning('Stack component membership was not reconciled.', [
+                    'draft_id' => $draft->id,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
     }
 }

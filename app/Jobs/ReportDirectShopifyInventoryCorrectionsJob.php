@@ -19,6 +19,9 @@ class ReportDirectShopifyInventoryCorrectionsJob implements ShouldQueue
 
     public function handle(DirectShopifyInventoryCorrectionReport $report): void
     {
-        $report->send();
+        $result = $report->send();
+        if ($result['errors'] !== []) {
+            throw new \RuntimeException(implode(' | ', $result['errors']));
+        }
     }
 }

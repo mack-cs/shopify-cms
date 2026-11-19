@@ -18,6 +18,10 @@ use Spatie\Permission\Models\Permission;
 
 uses(RefreshDatabase::class);
 
+beforeEach(function (): void {
+    $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-23 07:30:00', 'Africa/Johannesburg'));
+});
+
 it('emails direct shopify corrections and copies every active user', function (): void {
     Mail::fake();
     coverCorrectionDays();
@@ -25,7 +29,7 @@ it('emails direct shopify corrections and copies every active user', function ()
     User::factory()->create(['name' => 'Former Clerk', 'email' => 'former.clerk@leighavenue.co.za', 'is_active' => false]);
     ShopifyInventoryAdjustment::query()->create([
         'adjustment_id' => 'direct-1',
-        'occurred_at' => now(),
+        'occurred_at' => now()->subDay(),
         'sku' => 'LA0544',
         'product_title' => 'Pearls by the Baltic Necklace',
         'inventory_state' => 'available',
@@ -37,7 +41,7 @@ it('emails direct shopify corrections and copies every active user', function ()
     ]);
     ShopifyInventoryAdjustment::query()->create([
         'adjustment_id' => 'cms-1',
-        'occurred_at' => now(),
+        'occurred_at' => now()->subDay(),
         'sku' => 'CMSONLY',
         'product_title' => 'CMS correction',
         'inventory_state' => 'available',
@@ -49,7 +53,7 @@ it('emails direct shopify corrections and copies every active user', function ()
     ]);
     ShopifyInventoryAdjustment::query()->create([
         'adjustment_id' => 'sale-1',
-        'occurred_at' => now(),
+        'occurred_at' => now()->subDay(),
         'sku' => 'SALEONLY',
         'reason' => 'purchase',
         'app_name' => 'Online Store',
@@ -85,7 +89,7 @@ it('loads a missing day from shopify on the queue path and still skips cms corre
         'shopifyqlQuery' => [
             'parseErrors' => [],
             'tableData' => ['rows' => [[
-                'second' => now()->toIso8601String(),
+                'second' => now()->subDay()->toIso8601String(),
                 'inventory_adjustment_id' => 'shopify-9',
                 'inventory_adjustment_change' => '-3',
                 'inventory_state' => 'available',
@@ -95,7 +99,7 @@ it('loads a missing day from shopify on the queue path and still skips cms corre
                 'product_variant_sku' => 'LRB0138',
                 'product_variant_title' => 'Evening Protea Bracelet',
             ], [
-                'second' => now()->toIso8601String(),
+                'second' => now()->subDay()->toIso8601String(),
                 'inventory_adjustment_id' => 'cms-9',
                 'inventory_adjustment_change' => '-8',
                 'inventory_state' => 'available',
@@ -134,7 +138,7 @@ it('shows the stored 7-day report from the audit page without calling shopify', 
     $user->givePermissionTo(PermissionEnum::InventoryUpdate->value);
     ShopifyInventoryAdjustment::query()->create([
         'adjustment_id' => 'direct-button',
-        'occurred_at' => now(),
+        'occurred_at' => now()->subDay(),
         'sku' => 'LA0544',
         'product_title' => 'Pearls by the Baltic Necklace',
         'inventory_state' => 'available',
@@ -169,8 +173,8 @@ it('sends nothing when the last 7 days have no direct correction', function (): 
 
 function coverCorrectionDays(bool $exceptToday = false): void
 {
-    for ($day = 0; $day < 7; $day++) {
-        if ($exceptToday && $day === 0) {
+    for ($day = 1; $day <= 7; $day++) {
+        if ($exceptToday && $day === 1) {
             continue;
         }
         ShopifyInventoryHistorySync::query()->create([
@@ -181,3 +185,67 @@ function coverCorrectionDays(bool $exceptToday = false): void
         ]);
     }
 }
+
+it('sends the complete previous Monday to Sunday only once even after repeated jobs', function (): void {
+    Mail::fake(); coverCorrectionDays();
+    foreach ([now()->subDays(7)->startOfDay(), now()->subDay()->endOfDay(), now(), now()->subDays(8)] as $index => $date) {
+        ShopifyInventoryAdjustment::create(['adjustment_id' => 'boundary-'.$index, 'occurred_at' => $date, 'reason' => 'correction', 'app_name' => 'Shopify', 'synced_at' => now()]);
+    }
+    $report = app(DirectShopifyInventoryCorrectionReport::class);
+    expect($report->send()['corrections'])->toBe(2)
+        ->and($report->send()['email_sent'])->toBeFalse();
+    Mail::assertSentCount(1);
+    Mail::assertSent(DirectShopifyInventoryCorrectionMail::class, fn ($mail) => $mail->periodStart->toDateString() === '2026-11-16' && $mail->periodEnd->toDateString() === '2026-11-22');
+});
+
+it('does not email on other weekdays even for old queued or manual requests', function (): void {
+    Mail::fake();
+    $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-24 07:30:00', 'Africa/Johannesburg'));
+    expect(app(DirectShopifyInventoryCorrectionReport::class)->send()['email_sent'])->toBeFalse();
+    Mail::assertNothingSent();
+});
+
+it('does not repeat previously reserved or cutover corrections', function (): void {
+    Mail::fake(); coverCorrectionDays();
+    $row = ShopifyInventoryAdjustment::create(['adjustment_id' => 'already-reported', 'occurred_at' => now()->subDay(), 'reason' => 'correction', 'synced_at' => now()]);
+    \Illuminate\Support\Facades\DB::table('direct_inventory_correction_report_items')->insert(['adjustment_id' => $row->adjustment_id, 'status' => 'cutover_baseline', 'created_at' => now(), 'updated_at' => now()]);
+    $result = app(DirectShopifyInventoryCorrectionReport::class)->send();
+    expect($result['email_sent'])->toBeFalse()->and($result['errors'])->not->toBeEmpty();
+    expect(fn () => (new \App\Jobs\ReportDirectShopifyInventoryCorrectionsJob)->handle(app(DirectShopifyInventoryCorrectionReport::class)))
+        ->toThrow(RuntimeException::class, 'historical correction');
+    Mail::assertNothingSent();
+});
+
+it('does not queue the email from the audit page outside Monday', function (): void {
+    Queue::fake();
+    $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-24 07:30:00', 'Africa/Johannesburg'));
+    (new InventoryAuditHistory)->emailDirectCorrectionReport();
+    Queue::assertNothingPushed();
+});
+
+it('reports old unreported corrections without claiming delivery or sending email', function (): void {
+    Mail::fake();
+    ShopifyInventoryAdjustment::create(['adjustment_id' => 'old-unreported', 'occurred_at' => now()->subDays(30), 'reason' => 'correction', 'app_name' => 'Shopify', 'synced_at' => now()]);
+    $path = tempnam(sys_get_temp_dir(), 'delivery-review-');
+    try {
+        $this->artisan('inventory:correction-delivery-review-report', ['--output' => $path])->assertExitCode(0);
+        expect(file_get_contents($path))->toContain('old-unreported', 'not_in_delivery_ledger')
+            ->and(\Illuminate\Support\Facades\DB::table('direct_inventory_correction_report_items')->count())->toBe(0);
+        Mail::assertNothingSent();
+        \Illuminate\Support\Facades\Http::assertNothingSent();
+    } finally {
+        unlink($path);
+    }
+});
+
+it('never automatically replays an email after an uncertain transport failure', function (): void {
+    coverCorrectionDays();
+    ShopifyInventoryAdjustment::create(['adjustment_id' => 'uncertain-mail', 'occurred_at' => now()->subDay(), 'reason' => 'correction', 'synced_at' => now()]);
+    $pending = Mockery::mock(\Illuminate\Mail\PendingMail::class);
+    Mail::shouldReceive('to')->once()->andReturn($pending);
+    $pending->shouldReceive('send')->once()->andThrow(new RuntimeException('Connection lost after possible acceptance'));
+    $report = app(DirectShopifyInventoryCorrectionReport::class);
+    expect($report->send()['errors'])->not->toBeEmpty()
+        ->and($report->send()['email_sent'])->toBeFalse()
+        ->and(\Illuminate\Support\Facades\DB::table('direct_inventory_correction_reports')->value('status'))->toBe('needs_review');
+});

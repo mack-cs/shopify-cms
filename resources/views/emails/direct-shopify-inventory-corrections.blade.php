@@ -15,7 +15,7 @@
             </tr>
         </thead>
         <tbody>
-            @foreach (array_slice($group['rows'], 0, 20) as $row)
+            @foreach ($group['rows'] as $row)
                 <tr>
                     <td>{{ $row['occurred_at'] }}</td>
                     <td>{{ $row['sku'] }}</td>
@@ -26,7 +26,4 @@
             @endforeach
         </tbody>
     </table>
-    @if (count($group['rows']) > 20)
-        <p>{{ count($group['rows']) - 20 }} more correction(s) for {{ $group['user'] }} are not listed in this email.</p>
-    @endif
 @endforeach

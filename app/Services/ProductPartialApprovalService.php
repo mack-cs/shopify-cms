@@ -22,7 +22,7 @@ class ProductPartialApprovalService
 {
     public function hasApprovedTitleForCurrentVersion(Product $product): bool
     {
-        return ProductPartialApprovalRequest::query()
+        return ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $product->id)
             ->where('approval_version', $product->approval_version)
             ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
@@ -43,7 +43,7 @@ class ProductPartialApprovalService
 
     public function visiblePendingRequestsQuery(): Builder
     {
-        return ProductPartialApprovalRequest::query()
+        return ProductPartialApprovalRequest::query()->useWritePdo()
             ->with(['product', 'requester', 'targetApprover'])
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
             ->where(function (Builder $query): void {
@@ -234,7 +234,7 @@ class ProductPartialApprovalService
                 continue;
             }
 
-            $existing = ProductPartialApprovalRequest::query()
+            $existing = ProductPartialApprovalRequest::query()->useWritePdo()
                 ->where('product_id', $product->id)
                 ->where('approval_version', $product->approval_version)
                 ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
@@ -304,7 +304,7 @@ class ProductPartialApprovalService
                 continue;
             }
 
-            $requests = ProductPartialApprovalRequest::query()
+            $requests = ProductPartialApprovalRequest::query()->useWritePdo()
                 ->where('product_id', $product->id)
                 ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
                 ->where(function (Builder $query) use ($product): void {
@@ -520,7 +520,7 @@ class ProductPartialApprovalService
      */
     public function allowedSelections(Product $product, array $requestedScopes = [], array $requestedCoreFields = []): array
     {
-        $approved = ProductPartialApprovalRequest::query()
+        $approved = ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $product->id)
             ->where('approval_version', $product->approval_version)
             ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
@@ -583,7 +583,7 @@ class ProductPartialApprovalService
 
     public function clearRequestsForCurrentVersion(Product $product): void
     {
-        $pendingRequests = ProductPartialApprovalRequest::query()
+        $pendingRequests = ProductPartialApprovalRequest::query()->useWritePdo()
             ->with('product')
             ->where('product_id', $product->id)
             ->where('approval_version', $product->approval_version)
@@ -593,11 +593,18 @@ class ProductPartialApprovalService
         $approvedAt = $product->latestApprovalAt() ?? now();
         foreach ($pendingRequests as $request) {
             $this->notifyRequestApprovedByFullApproval($request, $approvedAt);
+            if ($this->includesImageAlt($request) && $this->imageAltSnapshotIsCurrent($request)) {
+                $request->forceFill(['status' => ProductPartialApprovalRequest::STATUS_APPROVED,
+                    'approved_at' => $approvedAt,
+                    'approved_by' => $product->approvalsForCurrentVersion()->latest('id')->value('user_id'),
+                ])->save();
+            }
         }
 
-        ProductPartialApprovalRequest::query()
+        ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $product->id)
             ->where('approval_version', $product->approval_version)
+            ->whereJsonDoesntContain('scopes', ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT)
             ->delete();
     }
 
@@ -701,7 +708,7 @@ class ProductPartialApprovalService
 
     public function pendingStatusLabel(Product $product): string
     {
-        $pending = ProductPartialApprovalRequest::query()
+        $pending = ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $product->id)
             ->where('approval_version', $product->approval_version)
             ->where('status', ProductPartialApprovalRequest::STATUS_PENDING)
@@ -1018,11 +1025,10 @@ class ProductPartialApprovalService
 
     public function invalidatePendingImageAlt(Product $product): void
     {
-        $requests = ProductPartialApprovalRequest::query()
+        $requests = ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $product->id)
             ->whereIn('status', [
                 ProductPartialApprovalRequest::STATUS_PENDING,
-                ProductPartialApprovalRequest::STATUS_APPROVED,
             ])
             ->get();
 
@@ -1037,6 +1043,9 @@ class ProductPartialApprovalService
 
     public function approvedAlt(Image $image): ?string
     {
+        if ($image->is_duplicate_hidden || in_array($image->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)) {
+            return null;
+        }
         if ($this->inheritedStackImage($image)) {
             return null;
         }
@@ -1046,7 +1055,11 @@ class ProductPartialApprovalService
             return null;
         }
 
-        $requests = ProductPartialApprovalRequest::query()
+        if (($recorded = app(ImageAltApprovalEvidence::class)->recorded($image)) !== null) {
+            return $recorded;
+        }
+
+        $requests = ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $image->product_id)
             ->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
             ->orderByDesc('approved_at')
@@ -1054,17 +1067,18 @@ class ProductPartialApprovalService
             ->get();
 
         foreach ($requests as $request) {
-            if (! $this->includesImageAlt($request) || ! $this->imageAltSnapshotIsCurrent($request)) {
+            if (! $this->includesImageAlt($request)) {
                 continue;
             }
             foreach ($this->snapshotImages($request) as $row) {
-                if ((int) ($row['image_id'] ?? 0) !== (int) $image->id || ! empty($row['inherited'])) {
+                if ((int) ($row['image_id'] ?? 0) !== (int) $image->id || ! empty($row['inherited'])
+                    || ! app(ImageAltApprovalEvidence::class)->snapshotMatches($image, $row, $request)) {
                     continue;
                 }
                 if (trim((string) ($row['proposed_alt'] ?? '')) !== $proposed) {
                     continue;
                 }
-                if (empty($row['changed']) && ! in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_FAILED, Image::ALT_PENDING_REVIEW], true)) {
+                if (empty($row['changed']) && ! in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_FAILED, Image::ALT_PENDING_REVIEW, Image::ALT_AWAITING_CONFIRMATION], true)) {
                     return null;
                 }
 
@@ -1105,7 +1119,8 @@ class ProductPartialApprovalService
         $currentById = collect($current)->keyBy('image_id');
         foreach ($saved as $row) {
             $live = $currentById->get((int) ($row['image_id'] ?? 0));
-            if (! is_array($live) || trim((string) ($live['proposed_alt'] ?? '')) !== trim((string) ($row['proposed_alt'] ?? ''))) {
+            $image = Image::find((int) ($row['image_id'] ?? 0));
+            if (! is_array($live) || ! $image || ! app(ImageAltApprovalEvidence::class)->snapshotMatches($image, $row, $request)) {
                 return false;
             }
         }
@@ -1134,6 +1149,7 @@ class ProductPartialApprovalService
 
                 return [
                     'image_id' => (int) $image->id,
+                    'image_asset_id' => (int) $image->image_asset_id,
                     'position' => $image->position === null ? null : (int) $image->position,
                     'src' => trim((string) $image->src),
                     'proposed_alt' => $proposed,
@@ -1177,7 +1193,7 @@ class ProductPartialApprovalService
             if ($image->alt_text_status === Image::ALT_PUBLISHED && trim((string) $image->shopify_alt_text) === trim((string) $image->alt_text)) {
                 continue;
             }
-            if ($image->alt_text_status === Image::ALT_FAILED) {
+            if (in_array($image->alt_text_status, [Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true)) {
                 continue;
             }
 
@@ -1216,7 +1232,7 @@ class ProductPartialApprovalService
         $previousStatus = (string) $request->status;
         $request->forceFill([
             'scopes' => $scopes,
-            'image_alt_snapshot' => null,
+            'image_alt_snapshot' => $request->image_alt_snapshot,
             'status' => $scopes === [] ? ProductPartialApprovalRequest::STATUS_REJECTED : $request->status,
         ])->save();
 
@@ -1234,12 +1250,7 @@ class ProductPartialApprovalService
 
     private function inheritedStackImage(Image $image, ?Product $product = null): bool
     {
-        $product ??= $image->product;
-        if (! $product instanceof Product || ! $product->isStackProduct()) {
-            return false;
-        }
-
-        return $image->position !== null && (int) $image->position >= 2;
+        return ImageOwnership::blocksOwnAltApproval($image);
     }
 
     private function notifyRequestRejected(ProductPartialApprovalRequest $request, ?string $reason): void

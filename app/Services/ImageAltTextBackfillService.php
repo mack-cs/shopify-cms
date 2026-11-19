@@ -3,9 +3,9 @@
 namespace App\Services;
 
 use App\Models\Image;
-use App\Models\NewProductDraft;
 use App\Models\Product;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -35,14 +35,6 @@ final class ImageAltTextBackfillService
         }
         foreach ($products->lazyById(100) as $product) {
             $images = $product->allImages()->active()->with('imageAsset');
-            if ($product->isStackProduct()) {
-                $owned = $images->whereNull('source_image_id')->where('position', 1)->orderBy('id')->first();
-                if ($owned instanceof Image) {
-                    yield $this->csvRow($product, $owned);
-                }
-
-                continue;
-            }
             foreach ($images->lazyById(100) as $image) {
                 yield $this->csvRow($product, $image);
             }
@@ -134,7 +126,7 @@ final class ImageAltTextBackfillService
             }
             $seen[$imageId] = true;
 
-            $image = Image::query()->with('product')->find($imageId);
+            $image = Image::query()->useWritePdo()->with('product')->find($imageId);
             if (! $image instanceof Image || ! $image->product instanceof Product) {
                 $failed[] = $this->failure($rowNumber, $imageId, 'No image matches image id '.$imageId.'.');
 
@@ -148,7 +140,7 @@ final class ImageAltTextBackfillService
                 continue;
             }
 
-            if ($this->inheritedStackImage($image)) {
+            if ($this->notDirectlyEditable($image)) {
                 $excluded++;
                 $failed[] = $this->failure($rowNumber, $imageId, 'Stack image '.$imageId.' is inherited from a component. Update the component image instead.');
 
@@ -166,7 +158,7 @@ final class ImageAltTextBackfillService
                 continue;
             }
 
-            $this->writeReviewState($image, $altText, Image::ALT_PENDING_REVIEW);
+            $this->markPendingReview($image, $altText);
         }
 
         return [
@@ -187,13 +179,22 @@ final class ImageAltTextBackfillService
     public function markPendingReview(Image $image, string $altText): void
     {
         $altText = trim($altText);
-        if ($this->inheritedStackImage($image)) {
+        if ($this->notDirectlyEditable($image)) {
             throw new RuntimeException('Stack image '.$image->id.' is inherited from a component. Update the component image instead.');
         }
         if ($altText === '') {
             throw new RuntimeException('Blank alt text is not saved.');
         }
 
+        if (mb_strlen($altText) > 255) {
+            throw new RuntimeException('Alt text exceeds the 255 character limit.');
+        }
+        if ($image->alt_confirmation_media_id !== null && $image->alt_confirmation_text !== $altText) {
+            throw new RuntimeException('Resolve the pending Shopify confirmation before changing its sentence.');
+        }
+        if ($this->inheritedStackImage($image)) {
+            Image::withoutEvents(fn () => $image->forceFill(['alt_inheritance_mode' => 'independent'])->save());
+        }
         $this->writeReviewState($image, $altText, Image::ALT_PENDING_REVIEW);
     }
 
@@ -214,7 +215,7 @@ final class ImageAltTextBackfillService
         if (mb_strlen($altText) > 255) {
             throw new RuntimeException('Alt text exceeds the 255 character limit.');
         }
-        if ($this->inheritedStackImage($image)) {
+        if ($this->notDirectlyEditable($image)) {
             throw new RuntimeException('Stack image '.$image->id.' is inherited from a component. Update the component image instead.');
         }
 
@@ -237,15 +238,47 @@ final class ImageAltTextBackfillService
 
     public function approvedUploadAlt(Image $image): ?string
     {
-        if (! $this->inheritedStackImage($image)) {
-            return $this->approvals->approvedAlt($image);
+        $own = $this->approvals->approvedAlt($image);
+        if (! $this->inheritedStackImage($image) || $image->alt_inheritance_mode === 'independent') {
+            return $own;
         }
-        if (! $this->copyHasCurrentSource($image)) {
+        if (! $this->copyHasCurrentSource($image) || $this->inheritedAltConflicts($image)) {
             return null;
         }
-        $source = Image::query()->find((int) $image->source_image_id);
+        $source = Image::query()->useWritePdo()->find((int) $image->source_image_id);
 
-        return $source instanceof Image ? $this->approvals->approvedAlt($source) : null;
+        if (($resolution = app(InheritedAltResolution::class)->current($image)) !== null) {
+            return $resolution;
+        }
+
+        return ($source instanceof Image ? $this->approvals->approvedAlt($source) : null) ?? $own;
+    }
+
+    /**
+     * Publishes an inherited stack description with fileUpdate. An unapproved
+     * source sentence is left in the CMS and is not presented as approved.
+     *
+     * @return array{published:int, failed:array<int, array{row:int, image_id:int, reason:string}>}
+     */
+    public function publishInheritedCopy(Image $image): array
+    {
+        $image = $image->fresh(['product', 'imageAsset']) ?? $image;
+        if (! $this->inheritedStackImage($image)) {
+            return ['published' => 0, 'failed' => []];
+        }
+        $approved = $this->approvedUploadAlt($image);
+        if ($approved === null) {
+            return ['published' => 0, 'failed' => []];
+        }
+        if (trim((string) $image->alt_text) !== $approved) {
+            return ['published' => 0, 'failed' => [$this->failure(0, (int) $image->id, 'Inherited image '.$image->id.' does not contain the approved source description.')]];
+        }
+        if (trim((string) $image->shopify_id) === '') {
+            return ['published' => 0, 'failed' => [$this->failure(0, (int) $image->id, 'Inherited image '.$image->id.' has no Shopify media for its approved description.')]];
+        }
+        $result = $this->deliver($image, false);
+
+        return ['published' => $result['published'], 'failed' => $result['failed']];
     }
 
     /**
@@ -270,17 +303,28 @@ final class ImageAltTextBackfillService
         if ($ids === []) {
             return ['published' => 0, 'propagated' => 0, 'shopify_failed' => []];
         }
-        Image::query()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$published, &$propagated, &$failed): void {
-            if ($this->approvals->approvedAlt($image) === null) {
-                return;
-            }
-            if ($this->inheritedStackImage($image)) {
-                $failed[] = $this->failure(0, (int) $image->id, 'Stack image '.$image->id.' is inherited. Push the approved component image instead.');
+        Image::query()->useWritePdo()->active()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$published, &$propagated, &$failed): void {
+            $image = $image->fresh(['product', 'imageAsset']) ?? $image;
+            $approved = $this->approvedUploadAlt($image);
+            if ($approved === null) {
+                if (in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED, Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true)) {
+                    $reason = 'Approval evidence or ownership is unresolved. Review this image before publishing.';
+                    $this->recordAltFailure($image, trim((string) $image->alt_text), new RuntimeException($reason), $image->alt_confirmation_media_id !== null);
+                    $failed[] = $this->failure(0, (int) $image->id, $reason);
+                }
 
                 return;
             }
+            if ($this->inheritedStackImage($image) && $image->alt_inheritance_mode !== 'independent' && trim((string) $image->alt_text) !== $approved) {
+                if ($image->alt_confirmation_media_id !== null) {
+                    $failed[] = $this->failure(0, (int) $image->id, 'Resolve the pending alt confirmation first.');
 
-            $result = $this->deliver($image, true);
+                    return;
+                }
+                app(ImagePhotographEvidence::class)->archive($image, 'Approved component description copied before alt publication');
+                Image::withoutEvents(fn () => $image->forceFill(['alt_text' => $approved])->save());
+            }
+            $result = $this->deliver($image, ! $this->inheritedStackImage($image));
             $published += $result['published'];
             $propagated += $result['propagated'];
             $failed = array_merge($failed, $result['failed']);
@@ -295,7 +339,10 @@ final class ImageAltTextBackfillService
      */
     public function retryFailed(array $collectionGids = []): array
     {
-        return $this->retryIds($this->idsForStatus($collectionGids, Image::ALT_FAILED));
+        return $this->retryIds(array_merge(
+            $this->idsForStatus($collectionGids, Image::ALT_FAILED),
+            $this->idsForStatus($collectionGids, Image::ALT_AWAITING_CONFIRMATION),
+        ));
     }
 
     /**
@@ -310,11 +357,12 @@ final class ImageAltTextBackfillService
         if ($ids === []) {
             return ['retried' => 0, 'shopify_failed' => []];
         }
-        Image::query()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$failed, &$retried): void {
-            if ($image->alt_text_status !== Image::ALT_FAILED) {
+        Image::query()->useWritePdo()->active()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$failed, &$retried): void {
+            $image = $image->fresh(['product', 'imageAsset']) ?? $image;
+            if (! in_array($image->alt_text_status, [Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true)) {
                 return;
             }
-            if ($this->approvals->approvedAlt($image) === null && ! $this->inheritedStackImage($image)) {
+            if ($this->approvedUploadAlt($image) === null) {
                 $failed[] = $this->failure(0, (int) $image->id, 'Image '.$image->id.' is no longer an approved description. It was not pushed.');
 
                 return;
@@ -324,16 +372,6 @@ final class ImageAltTextBackfillService
 
                 return;
             }
-            if ($this->inheritedStackImage($image)) {
-                $source = Image::query()->find((int) $image->source_image_id);
-                $approved = $source instanceof Image ? $this->approvals->approvedAlt($source) : null;
-                if ($approved === null || $approved !== trim((string) $image->alt_text)) {
-                    $failed[] = $this->failure(0, (int) $image->id, 'Stack image '.$image->id.' no longer matches an approved component description. It was not pushed.');
-
-                    return;
-                }
-            }
-
             $retried++;
             $result = $this->deliver($image, ! $this->inheritedStackImage($image));
             $failed = array_merge($failed, $result['failed']);
@@ -373,12 +411,13 @@ final class ImageAltTextBackfillService
                 return;
             }
 
-            $owned = $images->first(fn (Image $image): bool => $image->source_image_id === null && ($image->position === null || (int) $image->position <= 1));
-            if ($owned instanceof Image) {
-                $rows[] = $this->csvRow($product, $owned);
+            $ownedImages = $images->filter(fn (Image $image): bool => ImageOwnership::isStackOwned($image)
+                || (ImageOwnership::isInherited($image) && $image->alt_inheritance_mode === 'independent'))->values();
+            foreach ($images as $image) {
+                $rows[] = $this->csvRow($product, $image);
             }
             foreach ($images as $image) {
-                if ($owned instanceof Image && $image->id === $owned->id) {
+                if ($ownedImages->contains(fn (Image $owned): bool => (int) $owned->id === (int) $image->id)) {
                     continue;
                 }
                 $exception = $this->stackException($product, $image);
@@ -425,6 +464,8 @@ final class ImageAltTextBackfillService
             (string) (int) ($image->position ?? 1),
             $this->imageUrl($image),
             (string) ($image->alt_text ?? ''),
+            (string) (ImageOwnership::effective($image) ?? 'product'),
+            app(ImageAltRecovery::class)->issues($image),
         ];
     }
 
@@ -450,7 +491,7 @@ final class ImageAltTextBackfillService
 
         $assetId = (int) ($image->image_asset_id ?? 0);
         $matches = $assetId > 0
-            ? Image::query()->active()->where('image_asset_id', $assetId)->whereIn('product_id', $this->componentIds($product))->orderBy('id')->get()
+            ? Image::query()->useWritePdo()->active()->where('image_asset_id', $assetId)->whereIn('product_id', $this->componentIds($product))->orderBy('id')->get()
             : collect();
 
         return [
@@ -459,7 +500,7 @@ final class ImageAltTextBackfillService
             'image_id' => $image->id,
             'sku' => $this->sku($product),
             'message' => $matches->isEmpty()
-                ? 'Stack image '.$image->id.' is after the stack-owned image and has no verified component source. It was not exported or changed.'
+                ? 'Stack image '.$image->id.' has no verified ownership. It is exported for review; classify it in Image Alt Review before approving or publishing.'
                 : 'Stack image '.$image->id.' shares an asset with component image '.$matches->pluck('id')->implode(', ').', but no source link is stored. It was not linked or changed.',
         ];
     }
@@ -469,40 +510,17 @@ final class ImageAltTextBackfillService
      */
     private function componentIds(Product $stack): array
     {
-        $shopifyId = trim((string) ($stack->shopify_id ?? ''));
-        $handle = trim((string) ($stack->handle ?? ''));
-        if ($shopifyId === '' && $handle === '') {
-            return [];
-        }
-
-        $draft = NewProductDraft::query()
-            ->where(function ($query) use ($shopifyId, $handle): void {
-                if ($shopifyId !== '') {
-                    $query->where('shopify_id', $shopifyId);
-                }
-                if ($handle !== '') {
-                    $shopifyId !== '' ? $query->orWhere('handle', $handle) : $query->where('handle', $handle);
-                }
-            })
-            ->orderByDesc('updated_at')
-            ->first(['bundle_product_ids']);
-
-        return collect(is_array($draft?->bundle_product_ids) ? $draft->bundle_product_ids : [])
-            ->map(fn ($id): int => (int) $id)
-            ->filter(fn (int $id): bool => $id > 0)
-            ->unique()
-            ->values()
-            ->all();
+        return app(StackComponentCatalog::class)->componentIds($stack);
     }
 
     private function inheritedStackImage(Image $image): bool
     {
-        $product = $image->product;
-        if (! $product instanceof Product || ! $product->isStackProduct()) {
-            return false;
-        }
+        return ImageOwnership::isInherited($image);
+    }
 
-        return $image->position !== null && (int) $image->position >= 2;
+    private function notDirectlyEditable(Image $image): bool
+    {
+        return ImageOwnership::blocksOwnAltApproval($image);
     }
 
     /**
@@ -512,31 +530,79 @@ final class ImageAltTextBackfillService
     {
         $copies = Image::query()
             ->active()
+            ->where(fn ($query) => $query->whereNull('alt_inheritance_mode')->orWhere('alt_inheritance_mode', '!=', 'independent'))
             ->with('product')
-            ->where('source_image_id', $componentImage->id)
+            ->where(function ($query) use ($componentImage): void {
+                $linked = DB::table('inherited_image_sources')->where('component_image_id', $componentImage->id)->whereNull('removed_at')->pluck('image_id');
+                $query->where('source_image_id', $componentImage->id);
+                if ($linked->isNotEmpty()) {
+                    $query->orWhereIn('id', $linked);
+                }
+            })
             ->whereKeyNot($componentImage->id)
             ->orderBy('id')
             ->get();
 
+        $conflicted = $copies->filter(fn (Image $copy): bool => $this->inheritedAltConflicts($copy))->values();
+        $eligible = $copies->reject(fn (Image $copy): bool => $conflicted->contains(fn (Image $item): bool => (int) $item->id === (int) $copy->id));
+
         return [
-            $copies->filter(fn (Image $copy): bool => $this->copyHasCurrentSource($copy))->values(),
-            $copies->reject(fn (Image $copy): bool => $this->copyHasCurrentSource($copy))->values(),
+            $eligible->filter(fn (Image $copy): bool => $this->copyHasCurrentSource($copy))->values(),
+            $eligible->reject(fn (Image $copy): bool => $this->copyHasCurrentSource($copy))
+                ->merge($conflicted)
+                ->values(),
         ];
     }
 
-    private function copyHasCurrentSource(Image $copy): bool
+    public function copyHasCurrentSource(Image $copy): bool
     {
         $product = $copy->product;
         if (! $product instanceof Product || ! $product->isStackProduct() || ! $this->inheritedStackImage($copy)) {
             return false;
         }
 
-        $source = Image::query()->find((int) $copy->source_image_id);
+        $source = Image::query()->useWritePdo()->find((int) $copy->source_image_id);
         if (! $source instanceof Image) {
             return false;
         }
 
-        return in_array((int) $source->product_id, $this->componentIds($product), true);
+        return in_array((int) $source->product_id, $this->componentIds($product), true)
+            && ! in_array($source->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)
+            && ! $source->is_duplicate_hidden
+            && (int) $source->image_asset_id > 0
+            && (int) $copy->image_asset_id === (int) $source->image_asset_id
+            && ! $source->shopify_identity_unresolved;
+    }
+
+    /** Manual stack publishing is separate from automatic propagation. */
+    public function canPublishInheritedPhotograph(Image $copy): bool
+    {
+        if (! $this->copyHasCurrentSource($copy) || ! $copy->product?->isApprovedByTwo()) {
+            return false;
+        }
+        $source = Image::query()->with('product')->find($copy->source_image_id);
+        if (! $source || ! $source->product?->isApprovedByTwo() || ! app(ComponentPhotographSelector::class)->confirmed($source)) {
+            return false;
+        }
+
+        return in_array($this->media->diagnose($source)['classification'], ['verified_current_media', 'recoverable_historical'], true);
+    }
+
+    private function inheritedAltConflicts(Image $copy): bool
+    {
+        $ids = DB::table('inherited_image_sources')->where('image_id', $copy->id)->whereNull('removed_at')->pluck('component_image_id');
+        if ($ids->count() < 2) {
+            return false;
+        }
+        $alts = Image::query()->active()->whereIn('id', $ids)->where('image_asset_id', $copy->image_asset_id)->get()
+            ->filter(fn (Image $source): bool => in_array((int) $source->product_id, $this->componentIds($copy->product), true))
+            ->map(fn (Image $source): string => trim((string) $this->approvals->approvedAlt($source)))
+            ->filter()
+            ->unique();
+
+        $resolution = app(InheritedAltResolution::class)->current($copy);
+
+        return $alts->count() > 1 && (! is_string($resolution) || ! $alts->contains($resolution));
     }
 
     /**
@@ -574,9 +640,9 @@ final class ImageAltTextBackfillService
         }
 
         $ids = [];
-        Image::query()->active()->with('product')->whereIn('product_id', $products->select('id'))->orderBy('id')
+        Image::query()->useWritePdo()->active()->with('product')->whereIn('product_id', $products->select('id'))->orderBy('id')
             ->each(function (Image $image) use (&$ids): void {
-                if ($this->approvals->approvedAlt($image) !== null) {
+                if ($this->approvedUploadAlt($image) !== null) {
                     $ids[] = (int) $image->id;
                 }
             });
@@ -636,7 +702,11 @@ final class ImageAltTextBackfillService
                 'failed' => [$this->failure(0, (int) $image->id, 'Image '.$image->id.' has no alt text to publish.')],
             ];
         }
-        $targets = collect([$image]);
+        // Dependent copies are published before the source. Publishing the source
+        // marks its alt as already on Shopify, and the copy still has to read that
+        // same approval while its own file is updated.
+        $targets = collect();
+        $targetSentences = [];
         $propagated = 0;
         $failed = [];
         if ($propagate) {
@@ -645,22 +715,40 @@ final class ImageAltTextBackfillService
                 $failed[] = $this->failure(0, (int) $copy->id, 'Stack image '.$copy->id.' points at component image '.$image->id.', which is missing or not a linked component. It was not changed.');
             }
             foreach ($copies as $copy) {
-                if (trim((string) $copy->alt_text) !== $altText) {
-                    Image::withoutEvents(function () use ($copy, $altText): void {
-                        $copy->forceFill(['alt_text' => $altText])->save();
+                if ($copy->alt_inheritance_mode === 'independent') {
+                    continue;
+                }
+                $copySentence = $this->approvedUploadAlt($copy);
+                if ($copySentence === null) {
+                    $failed[] = $this->failure(0, (int) $copy->id, 'No current approved component sentence is available for this inherited photograph.');
+
+                    continue;
+                }
+                if ($copy->alt_confirmation_media_id !== null && $copy->alt_confirmation_text !== $copySentence) {
+                    $failed[] = $this->failure(0, (int) $copy->id, 'Resolve the previous confirmation before applying the new component sentence.');
+
+                    continue;
+                }
+                if (trim((string) $copy->alt_text) !== $copySentence) {
+                    app(ImagePhotographEvidence::class)->archive($copy, 'Component alt text propagation');
+                    Image::withoutEvents(function () use ($copy, $copySentence): void {
+                        $copy->forceFill(['alt_text' => $copySentence])->save();
                     });
                 }
+                $targetSentences[$copy->id] = $copySentence;
                 $targets->push($copy);
                 $propagated++;
             }
         }
+        $targets->push($image);
 
         $published = 0;
         foreach ($targets as $target) {
-            if ($target->alt_text_status === Image::ALT_PUBLISHED && trim((string) $target->shopify_alt_text) === $altText) {
+            $targetAlt = $targetSentences[$target->id] ?? $altText;
+            if ($this->shopifyAlreadyHasApprovedAlt($target, $targetAlt)) {
                 continue;
             }
-            $failure = $this->pushAlt($target, $altText);
+            $failure = $this->pushAlt($target, $targetAlt);
             if ($failure === null) {
                 $published++;
 
@@ -672,40 +760,133 @@ final class ImageAltTextBackfillService
         return ['published' => $published, 'propagated' => $propagated, 'failed' => $failed];
     }
 
+    private function shopifyAlreadyHasApprovedAlt(Image $image, string $altText): bool
+    {
+        if ($image->alt_text_status !== Image::ALT_PUBLISHED || trim((string) $image->shopify_alt_text) !== $altText) {
+            return false;
+        }
+
+        $image->loadMissing('product');
+        $productGid = trim((string) ($image->product?->shopify_id ?? ''));
+        $mediaId = trim((string) $image->shopify_id);
+        if ($productGid === '' || preg_match('~^gid://shopify/MediaImage/\d+$~', $mediaId) !== 1) {
+            return false;
+        }
+
+        try {
+            $decision = $this->media->diagnose($image->fresh(['product', 'imageAsset']) ?? $image);
+            if (! in_array($decision['classification'], ['verified_current_media', 'recoverable_historical'], true)
+                || $decision['proposed_media_id'] !== $mediaId) {
+                return false;
+            }
+
+            return $this->shopify->attachedAlt($productGid, $mediaId) === $altText;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
     /**
      * @return array{row:int, image_id:int, reason:string}|null
      */
     private function pushAlt(Image $image, string $altText): ?array
     {
+        $mutex = new ImageSyncMutex;
+        if (! $mutex->acquire((int) $image->product_id)) {
+            return $this->failure(0, $image->id, 'Another image operation is running.');
+        }
         try {
-            $mediaId = $this->media->resolve($image->fresh(['product']) ?? $image);
-            $this->shopify->update($mediaId, $altText);
-            Image::withoutEvents(function () use ($image, $altText): void {
-                $image->forceFill([
+            if (DB::transactionLevel() > 0 && ! app()->environment('testing')) {
+                throw new RuntimeException('Alt publication must start outside an enclosing database transaction so confirmation state is durable.');
+            }
+            $fresh = $image->fresh(['product', 'imageAsset']) ?? $image;
+            $productGid = trim((string) ($fresh->product?->shopify_id ?? ''));
+            $mediaId = $this->media->resolve($fresh);
+            if (Image::query()->active()->whereKeyNot($fresh->id)->where('shopify_id', $mediaId)->exists()) {
+                throw new RuntimeException('This Shopify file is shared by multiple CMS images. Review separate media identities before publishing independent descriptions.');
+            }
+            if ($this->inheritedStackImage($fresh)) {
+                $sourceIds = DB::table('inherited_image_sources')->where('image_id', $fresh->id)->whereNull('removed_at')->pluck('component_image_id')->push($fresh->source_image_id)->filter();
+                if (Image::query()->whereIn('id', $sourceIds)->where('shopify_id', $mediaId)->exists()) {
+                    throw new RuntimeException('This inherited image shares a component Shopify file. Rebuild its separate stack media before publishing alt text.');
+                }
+            }
+            $mutex->assertOwned();
+            if ((int) $fresh->source_image_id > 0 && ! $this->copyHasCurrentSource($fresh)) {
+                throw new RuntimeException('The stack photograph no longer matches its component.');
+            }
+            $pending = $fresh->alt_confirmation_media_id !== null;
+            if ($pending && ($fresh->alt_confirmation_media_id !== $mediaId || $fresh->alt_confirmation_text !== $altText)) {
+                throw new AltTextAwaitingConfirmation('A previous alt update must be reconciled before changing its media or description.');
+            }
+            Image::withoutEvents(fn () => $fresh->forceFill([
+                'alt_confirmation_media_id' => $mediaId,
+                'alt_confirmation_text' => $altText,
+                'alt_text_status' => Image::ALT_AWAITING_CONFIRMATION,
+            ])->save());
+            $assertCurrent = function () use ($mutex, $fresh, $altText): void {
+                $mutex->assertOwned();
+                $live = $fresh->fresh(['product', 'imageAsset']);
+                if (! $live || $live->image_asset_id !== $fresh->image_asset_id || $live->shopify_id !== $fresh->shopify_id
+                    || $live->shopify_identity_unresolved || $this->approvedUploadAlt($live) !== $altText) {
+                    throw new RuntimeException('Photograph identity or approval changed during publication.');
+                }
+            };
+            $assertCurrent();
+            // Network work uses the session mutex and durable pending marker, not row locks.
+            $this->shopify->update($mediaId, $altText, $productGid, $pending, $assertCurrent);
+            $confirmed = $this->media->diagnose($fresh->fresh(['product', 'imageAsset']));
+            if (! in_array($confirmed['classification'], ['verified_current_media', 'recoverable_historical'], true)
+                || $confirmed['proposed_media_id'] !== $mediaId) {
+                throw new AltTextAwaitingConfirmation('Alt text read-back succeeded but photograph identity changed or could not be confirmed. Review before publishing again.');
+            }
+            DB::transaction(function () use ($fresh, $altText, $assertCurrent): void {
+                $ids = array_filter([$fresh->id, $fresh->source_image_id]);
+                Image::query()->useWritePdo()->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get();
+                $assertCurrent();
+                Image::withoutEvents(fn () => $fresh->refresh()->forceFill([
                     'alt_text_status' => Image::ALT_PUBLISHED,
-                    'shopify_alt_pending' => false,
-                    'shopify_alt_sync_error' => null,
+                    'alt_confirmation_media_id' => null, 'alt_confirmation_text' => null,
+                    'shopify_alt_pending' => false, 'shopify_alt_sync_error' => null,
                     'shopify_alt_text' => $altText,
-                ])->save();
+                ])->save());
             });
 
             return null;
-        } catch (\Throwable $exception) {
-            Image::withoutEvents(function () use ($image, $exception): void {
-                $image->forceFill([
-                    'alt_text_status' => Image::ALT_FAILED,
-                    'shopify_alt_pending' => true,
-                    'shopify_alt_sync_error' => $exception->getMessage(),
-                ])->save();
-            });
+        } catch (AltTextAwaitingConfirmation $exception) {
+            $this->recordAltFailure($image, $altText, $exception, true);
 
             return $this->failure(0, (int) $image->id, $exception->getMessage());
+        } catch (\Throwable $exception) {
+            $uncertain = $image->fresh()?->alt_confirmation_media_id !== null && ! $exception instanceof AltTextRejected;
+            $this->recordAltFailure($image, $altText, $exception, $uncertain);
+
+            return $this->failure(0, (int) $image->id, $exception->getMessage());
+        } finally {
+            $mutex->release();
         }
     }
 
     /**
      * @param  array<string, string>  $row
      */
+    private function recordAltFailure(Image $image, string $altText, \Throwable $exception, bool $uncertain): void
+    {
+        $updates = [
+            'alt_text_status' => $uncertain ? Image::ALT_AWAITING_CONFIRMATION : Image::ALT_FAILED,
+            'shopify_alt_pending' => true, 'shopify_alt_sync_error' => $exception->getMessage(),
+        ];
+        if (! $uncertain) {
+            $updates['alt_confirmation_media_id'] = null;
+            $updates['alt_confirmation_text'] = null;
+        }
+        // Never overwrite a newer photograph, review state, or successful worker.
+        Image::query()->useWritePdo()->whereKey($image->id)
+            ->where('image_asset_id', $image->image_asset_id)->where('alt_text', $altText)
+            ->whereIn('alt_text_status', [Image::ALT_APPROVED, Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION, Image::ALT_PENDING_REVIEW, Image::ALT_PUBLISHED])
+            ->update($updates);
+    }
+
     private function mismatch(Image $image, array $row): ?string
     {
         $productId = (int) ($row['product_id'] ?? 0);
@@ -805,7 +986,7 @@ final class ImageAltTextBackfillService
             if ($out === false) {
                 return;
             }
-            fputcsv($out, ['image_id', 'product_id', 'shopify_product_id', 'shopify_media_id', 'sku', 'product_title', 'position', 'image_url', 'alt_text']);
+            fputcsv($out, ImageAltTextExportService::HEADERS);
             foreach ($rows as $row) {
                 fputcsv($out, $row);
             }
@@ -925,7 +1106,7 @@ final class ImageAltTextBackfillService
     {
         $out = fopen('php://temp', 'r+');
         if ($header) {
-            fputcsv($out, ['image_id', 'product_id', 'shopify_product_id', 'shopify_media_id', 'sku', 'product_title', 'position', 'image_url', 'alt_text']);
+            fputcsv($out, ImageAltTextExportService::HEADERS);
         }
         foreach ($rows as $row) {
             fputcsv($out, $row);
