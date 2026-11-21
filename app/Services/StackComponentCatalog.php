@@ -18,6 +18,27 @@ final class StackComponentCatalog
         return $this->ids($draft?->bundle_product_ids);
     }
 
+    /** A missing draft is unknown membership, not an empty component list. */
+    public function membershipIsKnown(Product $stack): bool
+    {
+        return $this->membershipState($stack) !== 'unknown';
+    }
+
+    /**
+     * known: a draft lists at least one component.
+     * empty: a draft lists no components.
+     * unknown: no membership draft exists.
+     */
+    public function membershipState(Product $stack): string
+    {
+        $draft = $this->draftForStack($stack);
+        if (! $draft instanceof NewProductDraft) {
+            return 'unknown';
+        }
+
+        return $this->ids($draft->bundle_product_ids) === [] ? 'empty' : 'known';
+    }
+
     /**
      * @return array<int, int>
      */

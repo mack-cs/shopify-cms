@@ -48,7 +48,7 @@ class RebuildStackImageBaseline extends Command
                 continue;
             }
             $plan = $sync->synchronizeStack((int) $stack->id);
-            if (($plan['outcome'] ?? '') === 'verified' || ($plan['outcome'] ?? '') === 'no_changes_required') {
+            if (($plan['outcome'] ?? '') === 'verified') {
                 $sync->note($stack, null, null, 'baseline_verified', 'Shopify read-back matched the authorized gallery.', true);
                 $this->info("{$stack->handle}: baseline verified.");
             } else {

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Contracts\ShopifyGraphqlGateway;
 use App\Jobs\RebuildDependentStackImagesJob;
 use App\Jobs\SynchronizeAuthorizedStackImagesJob;
 use App\Models\Approval;
@@ -254,7 +255,10 @@ final class StackImageSync
         if ($stack instanceof Product) {
             app(ComponentStackPropagation::class)->stageStack($stack);
             $stack = $stack->fresh() ?? $stack;
-            if (! $this->stackIsActive($stack)) {
+            if (app(StackComponentCatalog::class)->membershipState($stack) === 'unknown') {
+                $plan = $this->emptyPlan('uncertain', 'Stack membership is unknown. Inherited photographs were left in place and Shopify was not changed.');
+                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+            } elseif (! $this->stackIsActive($stack)) {
                 $plan = ['outcome' => 'deferred_inactive', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'Stack is draft or inactive. The local gallery was rebuilt and Shopify was not changed.'];
                 $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
             } elseif (! $this->blindPublicationEnabled() && ! $stack->isApprovedByTwo()) {
@@ -290,6 +294,9 @@ final class StackImageSync
     public function plan(Product $stack): array
     {
         $stack = $stack->fresh() ?? $stack;
+        if (app(StackComponentCatalog::class)->membershipState($stack) === 'unknown') {
+            return $this->emptyPlan('uncertain', 'Stack membership is unknown. Inherited photographs were left in place and Shopify was not changed.');
+        }
         if (! $this->stackIsActive($stack) && ! $stack->isApprovedByTwo()) {
             return $this->emptyPlan('deferred_inactive', 'Stack is draft or inactive and has no publication authorization.');
         }
@@ -310,6 +317,12 @@ final class StackImageSync
                 }
                 continue;
             }
+            if ((int) $image->image_asset_id !== (int) $source->image_asset_id) {
+                if (trim((string) $image->shopify_id) !== '' && $image->sync_state !== Image::SYNC_STATE_LOCAL_DELETED) {
+                    $retire[] = (int) $image->id;
+                }
+                continue;
+            }
             $photoAuthorized = $this->photographAuthorized($source) || $this->stackCapturedPhotograph($image);
             $publishedHere = trim((string) $image->shopify_id) !== ''
                 && (int) $image->image_asset_id === (int) $source->image_asset_id
@@ -325,6 +338,9 @@ final class StackImageSync
                 || $verifiedPhoto === null
                 || $verifiedPhoto !== $photoVersion;
             $altTarget = $this->authorizedAltTarget($image, $source);
+            if ($altTarget === null && $this->altAuthorized($source)) {
+                $altTarget = trim((string) $source->alt_text);
+            }
             $altChanged = $altTarget !== null && trim((string) $image->shopify_alt_text) !== $altTarget;
             if ($photoChanged && $photoAuthorized) {
                 $uploads[] = (int) $image->id;
@@ -335,7 +351,7 @@ final class StackImageSync
             }
         }
         if ($uploads === [] && $altOnly === [] && $retire === [] && ! $reorder) {
-            return $this->emptyPlan('no_changes_required', 'Shopify already has the latest authorized photograph and alt text versions.');
+            return $this->emptyPlan('no_changes_required', 'Local authorization receipts match the current CMS photograph and alt versions. Shopify has not been read.');
         }
         $outcome = $uploads !== [] ? 'shopify_changes_required' : ($altOnly !== [] ? 'alt_text_only' : ($reorder ? 'order_only' : 'retirement_required'));
 
@@ -449,8 +465,10 @@ final class StackImageSync
             $phase = 'shopify_synchronization_verified';
         } elseif (in_array($outcome, ['failed', 'uncertain'], true)) {
             $phase = 'failed_or_uncertain_synchronization';
-        } elseif ($outcome === 'shopify_authorization_pending' || $outcome === 'deferred_inactive') {
+        } elseif (in_array($outcome, ['shopify_authorization_pending', 'deferred_inactive', 'no_eligible_work', 'retirement_pending'], true)) {
             $phase = 'shopify_update_pending_authorization';
+        } elseif ($outcome === 'retirement_confirmed') {
+            $phase = 'retirement_confirmed';
         } elseif ($outcome === 'local_rebuilt') {
             $phase = 'local_cms_rebuild_completed';
         }
@@ -542,8 +560,9 @@ final class StackImageSync
         return array_values($rows);
     }
 
-    public function note(Product $stack, ?Image $image, ?Image $source, string $outcome, string $detail, bool $verified, ?int $approvalRequestId = null): void
+    public function note(Product $stack, ?Image $image, ?Image $source, string $outcome, string $detail, bool $verified, ?int $approvalRequestId = null, bool $photographVerified = false, bool $altVerified = false): void
     {
+        $altImage = $image instanceof Image && $image->alt_inheritance_mode === 'independent' ? $image : $source;
         DB::table('stack_image_sync_ledger')->insert([
             'stack_product_id' => $stack->id,
             'image_id' => $image?->id,
@@ -553,8 +572,8 @@ final class StackImageSync
             'cms_alt_version' => $source ? $this->version($source, 'alt_text_version') : ($image ? $this->version($image, 'alt_text_version') : null),
             'authorized_photograph_version' => $source && $this->photographAuthorized($source) ? $this->version($source, 'photograph_version') : null,
             'authorized_alt_version' => $source && $this->altAuthorized($source) ? $this->version($source, 'alt_text_version') : null,
-            'verified_photograph_version' => $verified && $source ? $this->version($source, 'photograph_version') : null,
-            'verified_alt_version' => $verified && $source && $this->altAuthorized($source) ? $this->version($source, 'alt_text_version') : null,
+            'verified_photograph_version' => $verified && $photographVerified && $source ? $this->version($source, 'photograph_version') : null,
+            'verified_alt_version' => $verified && $altVerified && $altImage ? $this->version($altImage, 'alt_text_version') : null,
             'shopify_media_id' => $image ? trim((string) $image->shopify_id) : null,
             'verified_at' => $verified ? now() : null,
             'approval_request_id' => $approvalRequestId,
@@ -702,9 +721,7 @@ final class StackImageSync
     {
         $plan = $this->plan($stack);
         if ($plan['outcome'] === 'no_changes_required') {
-            $this->note($stack, null, null, 'no_changes_required', $plan['detail'], true);
-
-            return $plan;
+            return $this->verifyUnchangedGallery($stack);
         }
         $updater = app(ProductShopifyUpdater::class);
         $writer = app(ImageAltTextBackfillService::class);
@@ -738,6 +755,9 @@ final class StackImageSync
                     $confirmed ? 'verified' : 'uncertain',
                     $confirmed ? 'Photograph verified on Shopify.' : collect($result['warnings'] ?? [])->pluck('warning')->implode(' '),
                     $confirmed,
+                    null,
+                    $confirmed,
+                    false,
                 );
                 if ($confirmed) {
                     $this->completeVerifiedPublication($image, $source, 'images');
@@ -762,7 +782,7 @@ final class StackImageSync
             $failed = ($result['failed'] ?? []) !== [];
             $target = $this->authorizedAltTarget($image, $source instanceof Image ? $source : null);
             $verified = ! $failed && $target !== null && trim((string) $image->shopify_alt_text) === $target;
-            $this->note($stack, $image, $source, $verified ? 'verified' : 'failed', $verified ? 'Alt text verified without a new photograph upload.' : 'Alt text was not verified.', $verified);
+            $this->note($stack, $image, $source, $verified ? 'verified' : 'failed', $verified ? 'Alt text verified without a new photograph upload.' : 'Alt text was not verified.', $verified, null, false, $verified);
             if ($verified) {
                 $this->completeVerifiedPublication($image, $source instanceof Image ? $source : null, 'image_alt');
             }
@@ -773,15 +793,280 @@ final class StackImageSync
         if ($plan['reorder']) {
             $warnings = $updater->reorderStackMedia($stack->fresh() ?? $stack);
             $this->note($stack, null, null, $warnings === [] ? 'verified' : 'failed', $warnings === [] ? 'Image order verified.' : collect($warnings)->pluck('warning')->implode(' '), $warnings === []);
+            if ($warnings !== []) {
+                $plan['outcome'] = 'failed';
+            }
         }
-        if ($plan['outcome'] === 'shopify_changes_required' || $plan['outcome'] === 'alt_text_only' || $plan['outcome'] === 'order_only') {
+        [$retirement, $retiredMediaIds] = $this->applyPlannedRetirements($stack, $plan['retire']);
+        if ($retirement === 'failed' || $plan['outcome'] === 'failed') {
+            $plan['outcome'] = 'failed';
+        } elseif ($retirement === 'uncertain' || $plan['outcome'] === 'uncertain') {
+            $plan['outcome'] = 'uncertain';
+        } elseif ($retirement === 'deferred') {
+            $plan['outcome'] = 'retirement_pending';
+        } elseif ($retirement === 'confirmed' && ! in_array($plan['outcome'], ['failed', 'uncertain'], true) && $plan['uploads'] === [] && $plan['alt_only'] === []) {
+            $plan['outcome'] = 'retirement_confirmed';
+        } elseif (in_array($plan['outcome'], ['shopify_changes_required', 'alt_text_only', 'order_only'], true)) {
             $latest = DB::table('stack_image_sync_ledger')->where('stack_product_id', $stack->id)->orderByDesc('id')->value('outcome');
             if ($latest === 'verified') {
                 $plan['outcome'] = 'verified';
             }
         }
+        if (in_array($plan['outcome'], ['verified', 'retirement_confirmed'], true)) {
+            $plan = $this->requireCompleteGallery($stack->fresh() ?? $stack, $plan, $retiredMediaIds);
+        }
 
         return $plan;
+    }
+
+    /**
+     * @param  array<int, int>  $imageIds
+     * @return array{0: 'none'|'confirmed'|'deferred'|'failed'|'uncertain'|'preserved', 1: array<int, string>}
+     */
+    private function applyPlannedRetirements(Product $stack, array $imageIds): array
+    {
+        $result = 'none';
+        $retiredMediaIds = [];
+        $propagation = app(ComponentStackPropagation::class);
+        foreach ($imageIds as $imageId) {
+            $image = Image::query()->find($imageId);
+            if (! $image instanceof Image) {
+                continue;
+            }
+            $source = Image::query()->find((int) $image->source_image_id);
+            $mediaId = trim((string) $image->shopify_id);
+            $status = $propagation->retirePlannedAssociation($stack, $image);
+            if ($status === 'confirmed' && $mediaId !== '') {
+                $retiredMediaIds[] = $mediaId;
+            }
+            $this->note(
+                $stack,
+                $image->fresh() ?? $image,
+                $source instanceof Image ? $source : null,
+                $status === 'confirmed' ? 'retirement_confirmed' : ($status === 'uncertain' ? 'uncertain' : ($status === 'preserved' ? 'preserved' : ($status === 'deferred' ? 'retirement_pending' : 'failed'))),
+                match ($status) {
+                    'confirmed' => 'Shopify read-back confirmed the obsolete association is gone.',
+                    'uncertain' => 'Retirement mutation is uncertain and will not be replayed.',
+                    'preserved' => 'A current component still requires this photograph. It was not removed.',
+                    'deferred' => 'Retirement waited for a confirmed replacement or an active stack.',
+                    default => 'Shopify retirement did not complete. Published media was left unchanged.',
+                },
+                $status === 'confirmed',
+            );
+            if ($status === 'failed') {
+                $result = 'failed';
+            } elseif ($status === 'uncertain' && $result !== 'failed') {
+                $result = 'uncertain';
+            } elseif ($status === 'deferred' && ! in_array($result, ['failed', 'uncertain'], true)) {
+                $result = 'deferred';
+            } elseif ($status === 'confirmed' && ! in_array($result, ['failed', 'uncertain', 'deferred'], true)) {
+                $result = 'confirmed';
+            }
+        }
+
+        return [$result, $retiredMediaIds];
+    }
+
+    /**
+     * A photograph receipt or retirement mutation is not a verified gallery.
+     * Overall success waits for one complete remote read.
+     *
+     * @param  array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}  $plan
+     * @param  array<int, string>  $retiredMediaIds
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function requireCompleteGallery(Product $stack, array $plan, array $retiredMediaIds): array
+    {
+        $check = $this->verifyRequiredGallery($stack, $retiredMediaIds);
+        if ($check['outcome'] === 'uncertain') {
+            $plan['outcome'] = 'uncertain';
+            $plan['detail'] = $check['detail'];
+
+            return $plan;
+        }
+        if ($check['outcome'] === 'failed') {
+            $plan['outcome'] = 'failed';
+            $plan['detail'] = $check['detail'];
+
+            return $plan;
+        }
+        if ($plan['outcome'] === 'verified' && $check['outcome'] !== 'verified') {
+            $plan['outcome'] = 'failed';
+            $plan['detail'] = 'Shopify read-back did not confirm the authorized photograph and alt text.';
+        }
+
+        return $plan;
+    }
+
+    /**
+     * @param  array<int, string>  $retiredMediaIds
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function verifyRequiredGallery(Product $stack, array $retiredMediaIds): array
+    {
+        $productId = trim((string) $stack->shopify_id);
+        try {
+            if ($productId === '') {
+                throw new \RuntimeException('The stack has no Shopify product id to read.');
+            }
+            $nodes = (new ShopifyProductMediaReader(app(ShopifyGraphqlGateway::class)))->media($productId, 'StackGalleryVerification');
+        } catch (\Throwable $exception) {
+            $plan = $this->emptyPlan('uncertain', 'Shopify gallery evidence is incomplete. Nothing was marked verified. '.$exception->getMessage());
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+
+            return $plan;
+        }
+        foreach ($retiredMediaIds as $mediaId) {
+            if (collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId)) {
+                $plan = $this->emptyPlan('failed', 'Shopify still shows media that was supposed to be retired. The gallery was not marked verified.');
+                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+
+                return $plan;
+            }
+        }
+        $images = $stack->allImages()->with('imageAsset')->active()->where('ownership', ImageOwnership::COMPONENT_INHERITED)->orderBy('id')->get()
+            ->filter(function (Image $image): bool {
+                $source = Image::query()->find((int) $image->source_image_id);
+
+                return ($source instanceof Image && $this->photographAuthorized($source)) || $this->stackCapturedPhotograph($image);
+            })
+            ->values();
+        if ($images->isEmpty()) {
+            return $this->emptyPlan('read_complete', 'Shopify gallery read completed. No authorized photograph remained to verify.');
+        }
+        $matched = true;
+        foreach ($images as $image) {
+            $source = Image::query()->find((int) $image->source_image_id);
+            $node = collect($nodes)->first(fn (array $candidate): bool => ($candidate['id'] ?? null) === $image->shopify_id);
+            $photographMatches = is_array($node)
+                && ShopifyProductMediaReader::ready($node)
+                && app(ImagePhotographEvidence::class)->matchesMedia($image, $node);
+            $altTarget = $source instanceof Image || $image->alt_inheritance_mode === 'independent'
+                ? $this->authorizedAltTarget($image, $source instanceof Image ? $source : null)
+                : null;
+            if ($altTarget === null && $source instanceof Image && $this->altAuthorized($source)) {
+                $altTarget = trim((string) $source->alt_text);
+            }
+            $altRequired = $image->alt_inheritance_mode === 'independent'
+                ? $altTarget !== null
+                : ($source instanceof Image && $this->altAuthorized($source));
+            $altMatches = ! $altRequired || (is_array($node) && trim((string) ($node['alt'] ?? '')) === $altTarget);
+            if (! $photographMatches || ! $altMatches) {
+                $matched = false;
+                if (! $photographMatches) {
+                    Image::withoutEvents(fn () => $image->forceFill(['needs_shopify_image_sync' => true])->save());
+                } elseif (is_array($node)) {
+                    Image::withoutEvents(fn () => $image->forceFill([
+                        'shopify_alt_text' => trim((string) ($node['alt'] ?? '')),
+                        'shopify_alt_pending' => true,
+                    ])->save());
+                }
+                $this->note($stack, $image, $source instanceof Image ? $source : null, 'failed', 'Shopify read-back did not match the authorized photograph and alt text. The gallery was not marked verified.', false, null, $photographMatches, false);
+
+                continue;
+            }
+            $this->note(
+                $stack,
+                $image,
+                $source instanceof Image ? $source : null,
+                'verified',
+                $altRequired ? 'Shopify read-back matched the authorized photograph and alt text.' : 'Shopify read-back matched the authorized photograph. Alt text was not part of this verification.',
+                true,
+                null,
+                true,
+                $altRequired && $altMatches,
+            );
+        }
+        if (! $matched) {
+            return $this->emptyPlan('failed', 'Shopify read-back did not match the authorized photograph and alt text.');
+        }
+
+        return $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
+    }
+
+    /**
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function verifyUnchangedGallery(Product $stack): array
+    {
+        $images = $stack->allImages()->with('imageAsset')->active()->where('ownership', ImageOwnership::COMPONENT_INHERITED)->orderBy('id')->get();
+        if ($images->isEmpty()) {
+            $plan = $this->emptyPlan('no_eligible_work', 'The stack has no inherited photographs to verify.');
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+
+            return $plan;
+        }
+        $unauthorized = $images->contains(function (Image $image): bool {
+            $source = Image::query()->find((int) $image->source_image_id);
+
+            return ! ($source instanceof Image && $this->photographAuthorized($source)) && ! $this->stackCapturedPhotograph($image);
+        });
+        if ($unauthorized) {
+            $plan = $this->emptyPlan('shopify_authorization_pending', 'The gallery has no current photograph authorization, so it was not marked verified.');
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+
+            return $plan;
+        }
+        $productId = trim((string) $stack->shopify_id);
+        try {
+            if ($productId === '') {
+                throw new \RuntimeException('The stack has no Shopify product id to read.');
+            }
+            $nodes = (new ShopifyProductMediaReader(app(ShopifyGraphqlGateway::class)))->media($productId, 'StackGalleryVerification');
+        } catch (\Throwable $exception) {
+            $plan = $this->emptyPlan('uncertain', 'Shopify gallery evidence is incomplete. Nothing was marked verified. '.$exception->getMessage());
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+
+            return $plan;
+        }
+        $matched = true;
+        foreach ($images as $image) {
+            $source = Image::query()->find((int) $image->source_image_id);
+            $node = collect($nodes)->first(fn (array $candidate): bool => ($candidate['id'] ?? null) === $image->shopify_id);
+            $photographMatches = is_array($node)
+                && ShopifyProductMediaReader::ready($node)
+                && app(ImagePhotographEvidence::class)->matchesMedia($image, $node);
+            $altTarget = $source instanceof Image || $image->alt_inheritance_mode === 'independent'
+                ? $this->authorizedAltTarget($image, $source instanceof Image ? $source : null)
+                : null;
+            if ($altTarget === null && $source instanceof Image && $this->altAuthorized($source)) {
+                $altTarget = trim((string) $source->alt_text);
+            }
+            $altRequired = $image->alt_inheritance_mode === 'independent'
+                ? $altTarget !== null
+                : ($source instanceof Image && $this->altAuthorized($source));
+            $altMatches = ! $altRequired || (is_array($node) && trim((string) ($node['alt'] ?? '')) === $altTarget);
+            if (! $photographMatches || ! $altMatches) {
+                $matched = false;
+                if (! $photographMatches) {
+                    Image::withoutEvents(fn () => $image->forceFill(['needs_shopify_image_sync' => true])->save());
+                } elseif (is_array($node)) {
+                    Image::withoutEvents(fn () => $image->forceFill([
+                        'shopify_alt_text' => trim((string) ($node['alt'] ?? '')),
+                        'shopify_alt_pending' => true,
+                    ])->save());
+                }
+                $this->note($stack, $image, $source instanceof Image ? $source : null, 'failed', 'Shopify read-back did not match the authorized gallery. It was not marked verified.', false);
+
+                continue;
+            }
+            $this->note(
+                $stack,
+                $image,
+                $source instanceof Image ? $source : null,
+                'verified',
+                $altRequired ? 'Shopify read-back matched the authorized photograph and alt text.' : 'Shopify read-back matched the authorized photograph. Alt text was not part of this verification.',
+                true,
+                null,
+                true,
+                $altRequired && $altMatches,
+            );
+        }
+        if (! $matched) {
+            return $this->emptyPlan('failed', 'Shopify read-back did not match the authorized gallery.');
+        }
+
+        return $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
     }
 
     private function sourceStillMember(Product $stack, Image $source): bool

@@ -346,12 +346,39 @@ it('makes no shopify change when an authorized stack is already current', functi
         'stack_product_id' => $stack->id, 'desired_generation' => 1, 'working_generation' => 0,
         'status' => 'queued', 'created_at' => now(), 'updated_at' => now(),
     ]);
+    $mutations = 0;
+    config([
+        'services.shopify.shop' => 'stack-verification.myshopify.com',
+        'services.shopify.admin_access_token' => 'test-token',
+        'services.shopify.api_version' => '2026-01',
+    ]);
+    Http::fake(function ($request) use (&$mutations) {
+        if ($request->method() === 'GET') {
+            return Http::response('quiet-bytes');
+        }
+        $query = (string) ($request->data()['query'] ?? '');
+        if (str_contains($query, 'mutation')) {
+            $mutations++;
+        }
+        $node = [
+            'id' => 'gid://shopify/MediaImage/92',
+            'status' => 'READY',
+            'fileStatus' => 'READY',
+            'alt' => 'Quiet sentence',
+            'image' => ['url' => 'https://cdn.shopify.com/s/files/quiet.jpg'],
+            'originalSource' => ['url' => 'https://cdn.shopify.com/s/files/quiet.jpg'],
+        ];
+
+        return Http::response(['data' => ['product' => ['media' => ['nodes' => [$node], 'pageInfo' => ['hasNextPage' => false, 'endCursor' => null]]]]]);
+    });
 
     $first = app(StackImageSync::class)->synchronizeStack((int) $stack->id);
     $second = app(StackImageSync::class)->synchronizeStack((int) $stack->id);
 
-    expect($first['outcome'])->toBe('no_changes_required')
-        ->and($second['outcome'])->toBe('no_changes_required')
+    expect($first['outcome'])->toBe('verified')
+        ->and($second['outcome'])->toBe('verified')
+        ->and($mutations)->toBe(0)
         ->and($copy->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/92')
-        ->and($copy->fresh()->needs_shopify_image_sync)->toBeFalse();
+        ->and($copy->fresh()->needs_shopify_image_sync)->toBeFalse()
+        ->and(DB::table('stack_image_sync_ledger')->where('image_id', $copy->id)->where('outcome', 'verified')->whereNotNull('verified_at')->exists())->toBeTrue();
 });

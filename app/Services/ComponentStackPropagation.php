@@ -410,9 +410,20 @@ final class ComponentStackPropagation
 
     private function stageStackWhileLocked(Product $stack): array
     {
-        $componentIds = $this->catalog->componentIds($stack);
-        if ($componentIds === []) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: no linked components found.", 'created' => [], 'unavailable' => []];
+        $membership = $this->catalog->membershipState($stack);
+        $componentIds = $membership === 'known' ? $this->catalog->componentIds($stack) : [];
+        if ($membership === 'unknown') {
+            return ['rebuilt' => false, 'message' => "{$stack->handle}: component membership is unknown. Inherited photographs and Shopify media were left unchanged.", 'created' => [], 'unavailable' => []];
+        }
+        if ($membership === 'empty') {
+            $this->retireInheritedAbsentFromGallery($stack, [], []);
+
+            return [
+                'rebuilt' => true,
+                'message' => "{$stack->handle}: component membership is empty. Unpublished inherited photographs were removed locally. Published Shopify media was left for authorized retirement.",
+                'created' => [],
+                'unavailable' => [],
+            ];
         }
         $unavailable = [];
         $ready = [];
@@ -822,6 +833,128 @@ final class ComponentStackPropagation
             ->get();
     }
 
+    /**
+     * Execute one planned retirement through the existing intent, identity and variant checks.
+     * A superseded photograph is removed only after its replacement is already confirmed.
+     *
+     * @return 'confirmed'|'deferred'|'failed'|'uncertain'|'preserved'
+     */
+    public function retirePlannedAssociation(Product $stack, Image $image): string
+    {
+        $stack = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+        $image = Image::query()->useWritePdo()->with('imageAsset')->find($image->id);
+        if (! $image instanceof Image || ! ImageOwnership::isInherited($image)) {
+            return 'deferred';
+        }
+        if ($this->catalog->membershipState($stack) === 'unknown') {
+            return 'deferred';
+        }
+        if ($this->photographStillRequired($stack, $image)) {
+            return 'preserved';
+        }
+        $source = Image::query()->find((int) $image->source_image_id);
+        $superseded = $source instanceof Image
+            && $this->componentIsMember($stack, (int) $source->product_id)
+            && (int) $image->image_asset_id !== (int) $source->image_asset_id;
+        $replacement = $superseded ? $this->confirmedReplacement($stack, $image, $source) : null;
+        if ($superseded && ! $replacement instanceof Image) {
+            return 'deferred';
+        }
+        $mediaId = trim((string) $image->shopify_id);
+        if ($mediaId === '') {
+            $this->finishLocalRemoval($stack, $image, (int) ($source?->product_id ?? 0));
+
+            return 'confirmed';
+        }
+        if ($this->anotherActiveImageUsesMedia($stack, $image, $mediaId)) {
+            return 'preserved';
+        }
+        if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            return 'deferred';
+        }
+        $replacementMediaId = $replacement instanceof Image ? trim((string) $replacement->shopify_id) : '';
+        $intent = $this->persistRetirementIntent($stack, $image, $mediaId, $replacementMediaId, (int) ($replacement->id ?? 0), 0, null);
+        if (! $intent) {
+            return 'failed';
+        }
+        if ($intent->status === 'retained') {
+            return 'preserved';
+        }
+        if ($intent->status === 'mutating') {
+            return 'uncertain';
+        }
+        if ($intent->status === 'confirmed') {
+            $this->completePlannedLocalRemoval($stack, $image, $source, $replacement);
+
+            return 'confirmed';
+        }
+        try {
+            $this->updater->retireStackProductMedia($stack, $mediaId, $replacementMediaId, function () use ($stack, $image, $source, $replacement, $superseded, $mediaId, $replacementMediaId): void {
+                $freshStack = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+                if ($this->catalog->membershipState($freshStack) === 'unknown') {
+                    throw new RuntimeException('Stack membership is unknown. Shopify media was not removed.');
+                }
+                if (! $this->stackAllowsAutomaticShopifyDestruction($freshStack)) {
+                    throw new RuntimeException('Stack is not active. Shopify media was not removed.');
+                }
+                $fresh = Image::query()->useWritePdo()->find($image->id);
+                if (! $fresh instanceof Image || trim((string) $fresh->shopify_id) !== $mediaId || $this->photographStillRequired($freshStack, $fresh)) {
+                    throw new RuntimeException('A current component still requires this photograph. It was not removed.');
+                }
+                if (! $superseded) {
+                    return;
+                }
+                $freshSource = $source instanceof Image ? Image::query()->useWritePdo()->find($source->id) : null;
+                $freshReplacement = $replacement instanceof Image ? Image::query()->useWritePdo()->find($replacement->id) : null;
+                if (! $freshSource instanceof Image || ! $freshReplacement instanceof Image
+                    || (int) $fresh->image_asset_id === (int) $freshSource->image_asset_id
+                    || (int) $freshReplacement->image_asset_id !== (int) $freshSource->image_asset_id
+                    || trim((string) $freshReplacement->shopify_id) !== $replacementMediaId) {
+                    throw new RuntimeException('The replacement photograph changed before the old association could be removed.');
+                }
+            }, (int) $image->id);
+        } catch (\Throwable $exception) {
+            $freshIntent = DB::table('inherited_media_retirements')->where('id', $intent->id)->first();
+            if ($freshIntent && $freshIntent->status === 'mutating') {
+                return 'uncertain';
+            }
+            $this->noteRetirementFailure($intent, $exception);
+
+            return 'failed';
+        }
+        $this->confirmRetirementAbsent($intent);
+        $this->completePlannedLocalRemoval($stack, $image, $source, $replacement);
+
+        return 'confirmed';
+    }
+
+    private function confirmedReplacement(Product $stack, Image $obsolete, Image $source): ?Image
+    {
+        $replacement = Image::query()->active()
+            ->where('product_id', $stack->id)
+            ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+            ->where('id', '!=', $obsolete->id)
+            ->where('source_image_id', $source->id)
+            ->where('image_asset_id', $source->image_asset_id)
+            ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+            ->orderByDesc('id')
+            ->first();
+        if (! $replacement instanceof Image || trim((string) $replacement->shopify_id) === ''
+            || $replacement->needs_shopify_image_sync || $replacement->shopify_media_create_uncertain) {
+            return null;
+        }
+
+        return $replacement;
+    }
+
+    private function completePlannedLocalRemoval(Product $stack, Image $image, ?Image $source, ?Image $replacement): void
+    {
+        if ($replacement instanceof Image) {
+            Variant::query()->where('product_id', $stack->id)->where('image_id', $image->id)->update(['image_id' => $replacement->id]);
+        }
+        $this->finishLocalRemoval($stack, $image, (int) ($source?->product_id ?? 0));
+    }
+
     private function retireOlderInherited(Product $stack, Image $replacement, int $componentProductId, string $replacementMediaId, int $generationId): void
     {
         if (! $this->generationIsCurrent($componentProductId, $generationId)) {
@@ -917,14 +1050,14 @@ final class ComponentStackPropagation
             'old_media_id' => $oldMedia,
             'replacement_media_id' => $replacementMediaId !== '' ? $replacementMediaId : null,
             'replacement_image_id' => $replacementImageId > 0 ? $replacementImageId : null,
-            'component_product_id' => $generation->component_product_id ?? null,
-            'component_image_id' => $generation->component_image_id ?? $image->source_image_id,
+            'component_product_id' => $generation?->component_product_id,
+            'component_image_id' => $generation?->component_image_id ?? $image->source_image_id,
             'image_asset_id' => $image->image_asset_id,
             'asset_sha256' => $image->imageAsset?->sha256,
             'membership_evidence' => json_encode([
                 'component_ids' => $members,
                 'generation_id' => $generationId,
-                'selection_revision' => $generation->selection_revision ?? null,
+                'selection_revision' => $generation?->selection_revision,
                 'stack_status' => $stack->status,
             ], JSON_THROW_ON_ERROR),
             'deferral_reason' => $deferralReason,
