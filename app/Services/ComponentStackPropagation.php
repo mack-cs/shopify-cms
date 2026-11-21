@@ -779,17 +779,13 @@ final class ComponentStackPropagation
         if ($altConflict || $hasResolution || $existing->alt_inheritance_mode === 'independent') {
             return;
         }
-        $sentence = null;
-        if ($raw->count() === 1) {
+        $published = in_array($existing->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)
+            && trim((string) $existing->alt_text) !== '';
+        $sentence = $approved->count() === 1 ? (string) $approved->first() : null;
+        if ($sentence === null && ! $published && $raw->count() === 1) {
             $sentence = (string) $raw->first();
-        } elseif ($approved->count() === 1) {
-            $sentence = (string) $approved->first();
         }
         if ($sentence === null || trim((string) $existing->alt_text) === $sentence) {
-            return;
-        }
-        if (in_array($existing->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)
-            && trim((string) $existing->alt_text) !== '') {
             return;
         }
         if (trim((string) $existing->alt_text) !== '') {

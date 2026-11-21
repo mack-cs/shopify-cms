@@ -24,8 +24,29 @@ final class ImageAltApprovalEvidence
         return DB::table('image_alt_approvals')->useWritePdo()
             ->where('image_id', $image->id)->where('image_asset_id', $image->image_asset_id)
             ->where('asset_sha256', $image->imageAsset->sha256)
-            ->where('alt_text', $sentence)->orderByDesc('id')->pluck('alt_text')
-            ->first(fn (string $approved): bool => hash_equals($approved, $sentence));
+            ->where('alt_text', $sentence)->orderByDesc('id')->get()
+            ->first(function (object $row) use ($image, $sentence): bool {
+                if (! hash_equals((string) $row->alt_text, $sentence)) {
+                    return false;
+                }
+                $snapshot = json_decode((string) ($row->snapshot ?? ''), true);
+                if (! $this->legacyEvidenceBindsCurrent($image, is_array($snapshot) ? $snapshot : null, $row->approved_at ?? null)) {
+                    return false;
+                }
+                if (! is_array($snapshot)) {
+                    return true;
+                }
+                if (array_key_exists('alt_text_version', $snapshot)
+                    && (int) $snapshot['alt_text_version'] !== max(1, (int) ($image->alt_text_version ?? 1))) {
+                    return false;
+                }
+                if (array_key_exists('photograph_version', $snapshot)
+                    && (int) $snapshot['photograph_version'] !== max(1, (int) ($image->photograph_version ?? 1))) {
+                    return false;
+                }
+
+                return true;
+            })?->alt_text;
     }
 
     public function approve(Image $image, int $userId, string $reason, ?string $reviewedSentence = null, ?int $reviewedAssetId = null): void
@@ -56,12 +77,58 @@ final class ImageAltApprovalEvidence
         if (! $product->isApprovedByTwo()) {
             return;
         }
-        foreach ($product->allImages()->active()->with('imageAsset', 'product')->get() as $image) {
+        $snapshot = app(StackImageSync::class)->publicationSnapshot($product);
+        $rows = is_array($snapshot) ? ($snapshot['images'] ?? null) : null;
+        if (! is_array($rows)) {
+            return;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $image = Image::query()->with('imageAsset', 'product')->find((int) ($row['image_id'] ?? 0));
+            if (! $image instanceof Image || ! $this->sentenceMatchesSnapshot($image, $row)) {
+                continue;
+            }
             if ($image->imageAsset && $image->imageAsset->isAvailable() && trim((string) $image->alt_text) !== '' && mb_strlen(trim((string) $image->alt_text)) <= 255
                 && ImageOwnership::effective($image) !== ImageOwnership::UNRESOLVED) {
                 $this->record($image, $userId, 'full_product_approval', 'Sentence and photograph captured at full product approval.');
             }
         }
+    }
+
+    /**
+     * A version-less historical approval can authorize only content that has
+     * never moved to another photograph or sentence version.
+     *
+     * @param  array<string, mixed>|null  $snapshot
+     */
+    private function legacyEvidenceBindsCurrent(Image $image, ?array $snapshot, mixed $approvedAt): bool
+    {
+        $hasVersions = is_array($snapshot)
+            && array_key_exists('alt_text_version', $snapshot)
+            && array_key_exists('photograph_version', $snapshot);
+        if ($hasVersions) {
+            return true;
+        }
+        if (max(1, (int) ($image->photograph_version ?? 1)) > 1 || max(1, (int) ($image->alt_text_version ?? 1)) > 1) {
+            return false;
+        }
+        if ($approvedAt === null) {
+            return false;
+        }
+
+        return ! DB::table('image_revisions')->where('image_id', $image->id)->where('created_at', '>', $approvedAt)->exists();
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function sentenceMatchesSnapshot(Image $image, array $row): bool
+    {
+        return trim((string) $image->alt_text) === trim((string) ($row['alt_text'] ?? ''))
+            && max(1, (int) ($image->alt_text_version ?? 1)) === (int) ($row['alt_text_version'] ?? 0)
+            && trim((string) ($row['alt_text'] ?? '')) !== '';
     }
 
     private function record(Image $image, int $userId, string $context, string $reason): void
@@ -84,6 +151,18 @@ final class ImageAltApprovalEvidence
     {
         if ((int) ($row['image_id'] ?? 0) !== (int) $image->id
             || trim((string) ($row['proposed_alt'] ?? '')) !== trim((string) $image->alt_text)) {
+            return false;
+        }
+        if ((! array_key_exists('alt_text_version', $row) || ! array_key_exists('photograph_version', $row))
+            && (max(1, (int) ($image->alt_text_version ?? 1)) > 1 || max(1, (int) ($image->photograph_version ?? 1)) > 1)) {
+            return false;
+        }
+        if (array_key_exists('alt_text_version', $row)
+            && (int) $row['alt_text_version'] !== max(1, (int) ($image->alt_text_version ?? 1))) {
+            return false;
+        }
+        if (array_key_exists('photograph_version', $row)
+            && (int) $row['photograph_version'] !== max(1, (int) ($image->photograph_version ?? 1))) {
             return false;
         }
         if (array_key_exists('image_asset_id', $row)) {

@@ -691,6 +691,11 @@ it('omits unapproved CMS alt text from ordinary photograph uploads', function ()
     $image = verificationManagedSource($product, 1, 'Unreviewed description');
     Image::withoutEvents(fn () => $image->update(['shopify_id' => null, 'alt_text_status' => Image::ALT_PENDING_REVIEW,
         'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now()]));
+    Bus::fake([SendProductPartialApprovalSlackReminderJob::class]);
+    $partial = app(ProductPartialApprovalService::class);
+    $partial->request(collect([$product->fresh()]), User::factory()->create()->id, [ProductShopifyUpdater::SYNC_SCOPE_IMAGES], []);
+    $request = ProductPartialApprovalRequest::query()->where('product_id', $product->id)->latest('id')->first();
+    expect($partial->approveRequests(collect([$request]), User::factory()->create()->id)['approved'])->toBe(1);
     config()->set('services.shopify.shop', 'verification.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     $uploads = [];

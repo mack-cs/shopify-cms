@@ -39,6 +39,7 @@ class Image extends Model
 
     public function save(array $options = [])
     {
+        $this->trackContentVersions();
         $held = $this->galleryChangeAffectsDependentStacks()
             ? app(\App\Services\StackSynchronizationBoundary::class)->prepareGalleryWrite((int) $this->product_id)
             : null;
@@ -71,6 +72,37 @@ class Image extends Model
         }
 
         return $this->isDirty(['image_asset_id', 'sync_state', 'position', 'is_duplicate_hidden']);
+    }
+
+    /**
+     * Runs inside save(), including withoutEvents writers. An explicit version
+     * in the same save is kept. An unchanged sentence or file does not advance.
+     */
+    private function trackContentVersions(): void
+    {
+        if (! $this->exists) {
+            if ((int) ($this->photograph_version ?? 0) < 1) {
+                $this->photograph_version = 1;
+            }
+            if ((int) ($this->alt_text_version ?? 0) < 1) {
+                $this->alt_text_version = 1;
+            }
+
+            return;
+        }
+        $photographChanged = $this->isDirty('image_asset_id') || $this->isDirty('image_path');
+        if (! $photographChanged && $this->isDirty('src')) {
+            $photographChanged = \App\Services\ShopifyMediaPath::canonical($this->getOriginal('src'))
+                !== \App\Services\ShopifyMediaPath::canonical($this->src);
+        }
+        if ($photographChanged && ! $this->isDirty('photograph_version')) {
+            $this->photograph_version = max(1, (int) $this->getOriginal('photograph_version')) + 1;
+        }
+        if ($this->isDirty('alt_text')
+            && trim((string) $this->alt_text) !== trim((string) $this->getOriginal('alt_text'))
+            && ! $this->isDirty('alt_text_version')) {
+            $this->alt_text_version = max(1, (int) $this->getOriginal('alt_text_version')) + 1;
+        }
     }
 
     public const ALT_APPROVED = 'approved';

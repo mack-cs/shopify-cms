@@ -2,6 +2,7 @@
 
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
+use App\Models\Approval;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -235,6 +236,13 @@ it('honors the synchronization mutex for confirmation recovery', function () {
 it('uploads a different photograph despite unrelated processing media', function () {
     $i = recoveryImage();
     Image::withoutEvents(fn () => $i->forceFill(['shopify_id' => null, 'alt_confirmation_media_id' => null, 'alt_confirmation_text' => null])->save());
+    foreach ([1, 2] as $ignored) {
+        Approval::create([
+            'product_id' => $i->product_id,
+            'user_id' => User::factory()->create()->id,
+            'approval_version' => $i->product->fresh()->approval_version ?? 1,
+        ]);
+    }
     $remote = new RecoveryShopifyFake;
     $unrelated = $remote->node('gid://shopify/MediaImage/88');
     $unrelated['status'] = 'PROCESSING';

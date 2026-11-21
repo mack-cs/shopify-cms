@@ -97,7 +97,7 @@ function approveEligibleProduct(Product $product): Product
 
 it('uploads every backed-up image and does not upload the same photographs again', function () {
     Storage::fake('public');
-    $product = approveEligibleProduct(createImageImportProduct('FIVE-UPLOAD'));
+    $product = createImageImportProduct('FIVE-UPLOAD');
     $nodes = [];
     $bytesBySha = [];
     $images = [];
@@ -114,6 +114,7 @@ it('uploads every backed-up image and does not upload the same photographs again
             'approved_filename' => "upload-{$position}.jpg",
         ]));
     }
+    $product = approveEligibleProduct($product->fresh());
     $state = fakeEligibleImageShopify($product, $nodes, $bytesBySha);
 
     $first = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product->fresh()]));
@@ -207,9 +208,9 @@ it('synchronizes all five eligible images and does not upload them again', funct
         ->and($images[0]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/51');
 });
 
-it('uploads only the changed photograph and reports failure while eligible images are missing', function () {
+it('does not upload a photograph replaced after approval and preserves the published file', function () {
     Storage::fake('public');
-    $product = approveEligibleProduct(createImageImportProduct('FIVE-REPLACE'));
+    $product = createImageImportProduct('FIVE-REPLACE');
     $nodes = [];
     $bytesBySha = [];
     $kept = [];
@@ -240,6 +241,7 @@ it('uploads only the changed photograph and reports failure while eligible image
             'originalSource' => ['url' => "https://cdn.shopify.com/s/files/1/keep-{$position}.jpg"],
         ];
     }
+    $product = approveEligibleProduct($product->fresh());
     $replacement = createImportTestAsset('replacement-three', 'jpg', 'three-new.jpg');
     $bytesBySha[$replacement->sha256] = 'replacement-three';
     $state = fakeEligibleImageShopify($product, $nodes, $bytesBySha);
@@ -250,14 +252,16 @@ it('uploads only the changed photograph and reports failure while eligible image
 
     $result = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product->fresh()]));
 
-    expect($result['synced'])->toBe(1)
-        ->and($result['failed'])->toBe(0)
-        ->and($state->creates)->toBe(1)
-        ->and($kept[3]->fresh()->shopify_id)->not->toBe('gid://shopify/MediaImage/43')
+    expect($result['synced'])->toBe(0)
+        ->and($result['failed'])->toBe(1)
+        ->and($state->creates)->toBe(0)
+        ->and($kept[3]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/43')
+        ->and($kept[3]->fresh()->needs_shopify_image_sync)->toBeTrue()
         ->and($kept[1]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/41')
         ->and($kept[2]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/42')
         ->and($kept[4]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/44')
-        ->and($kept[5]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/45');
+        ->and($kept[5]->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/45')
+        ->and(collect($result['warnings'])->pluck('warning')->implode(' '))->toContain('not an authorized photograph');
 
     $missing = approveEligibleProduct(createImageImportProduct('FIVE-MISSING'));
     $onlyFirst = [[
@@ -288,7 +292,7 @@ it('uploads only the changed photograph and reports failure while eligible image
 
 it('reuses a lost upload response and does not repeat an uncertain create', function () {
     Storage::fake('public');
-    $product = approveEligibleProduct(createImageImportProduct('LOST-UPLOAD'));
+    $product = createImageImportProduct('LOST-UPLOAD');
     $asset = createImportTestAsset('lost-bytes', 'jpg', 'lost.jpg');
     $image = Image::withoutEvents(fn () => Image::create([
         'product_id' => $product->id,
@@ -324,6 +328,7 @@ it('reuses a lost upload response and does not repeat an uncertain create', func
         'originalSource' => ['url' => $url],
     ]];
     $state = fakeEligibleImageShopify($product, $nodes, [$asset->sha256 => 'lost-bytes'], [$url => 'lost-bytes']);
+    $product = approveEligibleProduct($product->fresh());
 
     $recovered = app(ProductShopifyUpdater::class)->syncProductImages(collect([$product->fresh()]));
     expect($recovered['synced'])->toBe(1)

@@ -619,6 +619,105 @@ it('does not confirm a component generation without shopify evidence or product 
         ->and($unapproved->fresh()->isApprovedByTwo())->toBeFalse();
 });
 
+it('uploads an approved cms photograph to the stack when the component has no shopify identity', function () {
+    config([
+        'images.component_stack_propagation' => false,
+        'images.component_stack_local_rebuild' => false,
+        'images.component_stack_blind_publication' => false,
+    ]);
+    Storage::fake('public');
+    Bus::fake();
+    $component = createImageImportProduct('H2COMP');
+    $asset = createImportTestAsset('approved-stack-bytes', 'jpg', 'H2COMP.jpg');
+    $source = Image::withoutEvents(fn () => Image::create([
+        'product_id' => $component->id, 'position' => 1, 'image_asset_id' => $asset->id,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now(),
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW, 'shopify_id' => null,
+        'shopify_identity_unresolved' => true, 'needs_shopify_image_sync' => true,
+        'alt_text' => 'Component sentence',
+    ]));
+    $stack = propagationStack('H2STACK', [$component->id]);
+    $partial = app(\App\Services\ProductPartialApprovalService::class);
+    $partial->request(collect([$component->fresh()]), User::factory()->create()->id, ['images'], []);
+    $request = \App\Models\ProductPartialApprovalRequest::query()->where('product_id', $component->id)->first();
+    expect($partial->approveRequests(collect([$request]), User::factory()->create()->id)['approved'])->toBe(1)
+        ->and(app(ComponentPhotographSelector::class)->publicationAllowed($source->fresh()))->toBeFalse()
+        ->and(app(\App\Services\StackImageSync::class)->photographAuthorized($source->fresh()))->toBeTrue();
+    app(ComponentStackPropagation::class)->stageStack($stack);
+    $copy = Image::query()->where('product_id', $stack->id)->where('ownership', ImageOwnership::COMPONENT_INHERITED)->first();
+    $http = new PropagationHttp;
+    $http->bytes = 'approved-stack-bytes';
+    $http->install();
+    $published = app(\App\Services\ProductShopifyUpdater::class)->synchronizeInheritedStackImage($stack->fresh(), $copy->id);
+    expect($published['confirmed'])->toBeTrue()
+        ->and($http->creates)->toBeGreaterThan(0)
+        ->and($copy->fresh()->shopify_id)->not->toBeNull()
+        ->and($source->fresh()->shopify_id)->toBeNull()
+        ->and((int) $copy->fresh()->image_asset_id)->toBe((int) $asset->id);
+
+    $approvedMediaId = $copy->fresh()->shopify_id;
+    $replacement = createImportTestAsset('unapproved-replacement', 'jpg', 'H2COMP-new.jpg');
+    $source->fresh()->forceFill(['image_asset_id' => $replacement->id])->save();
+    app(ComponentStackPropagation::class)->stageStack($stack->fresh());
+    $unapproved = Image::query()->where('product_id', $stack->id)->where('image_asset_id', $replacement->id)->first();
+    $http->creates = 0;
+    $http->bytes = 'unapproved-replacement';
+    $http->install();
+    $blocked = app(\App\Services\ProductShopifyUpdater::class)->synchronizeInheritedStackImage($stack->fresh(), $unapproved->id);
+    expect($blocked['confirmed'])->toBeFalse()
+        ->and($http->creates)->toBe(0)
+        ->and($copy->fresh()->shopify_id)->toBe($approvedMediaId)
+        ->and(collect($blocked['warnings'])->pluck('warning')->implode(' '))->toContain('not approved and confirmed');
+});
+
+it('publishes a newly approved inherited sentence without uploading the photograph', function () {
+    config([
+        'images.component_stack_propagation' => false,
+        'images.component_stack_local_rebuild' => false,
+        'images.component_stack_blind_publication' => false,
+    ]);
+    Storage::fake('public');
+    Bus::fake();
+    $component = createImageImportProduct('ALTCOMP');
+    $asset = createImportTestAsset('stable-photograph', 'jpg', 'ALTCOMP.jpg');
+    $source = Image::withoutEvents(fn () => Image::create([
+        'product_id' => $component->id, 'position' => 1, 'image_asset_id' => $asset->id,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now(),
+        'sync_state' => Image::SYNC_STATE_SYNCED, 'shopify_id' => 'gid://shopify/MediaImage/15',
+        'last_shopify_synced_image_asset_id' => $asset->id, 'needs_shopify_image_sync' => false,
+        'alt_text' => 'First sentence',
+    ]));
+    $stack = propagationStack('ALTSTACK', [$component->id]);
+    app(ImageAltTextBackfillService::class)->markPendingReview($source->fresh(), 'Second sentence');
+    $partial = app(ProductPartialApprovalService::class);
+    $partial->request(collect([$component->fresh()]), User::factory()->create()->id, ['image_alt'], []);
+    $request = ProductPartialApprovalRequest::query()->where('product_id', $component->id)->first();
+    expect($partial->approveRequests(collect([$request]), User::factory()->create()->id)['approved'])->toBe(1);
+    app(ComponentStackPropagation::class)->stageStack($stack);
+    $copy = Image::query()->where('product_id', $stack->id)->where('ownership', ImageOwnership::COMPONENT_INHERITED)->first();
+    $copy->forceFill([
+        'shopify_id' => 'gid://shopify/MediaImage/77',
+        'shopify_alt_text' => 'First sentence',
+        'needs_shopify_image_sync' => false,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'alt_text_status' => Image::ALT_PUBLISHED,
+    ])->save();
+    $http = new PropagationHttp;
+    $http->bytes = 'stable-photograph';
+    $http->nodesByProduct[$stack->shopify_id] = [$http->node('gid://shopify/MediaImage/77')];
+    $http->install();
+    $result = app(ImageAltTextBackfillService::class)->publishInheritedCopy($copy->fresh());
+
+    expect($result['published'])->toBe(1)
+        ->and($result['failed'])->toBe([])
+        ->and($http->creates)->toBe(0)
+        ->and($http->fileUpdates)->toBe(1)
+        ->and($copy->fresh()->shopify_alt_text)->toBe('Second sentence')
+        ->and($copy->fresh()->needs_shopify_image_sync)->toBeFalse()
+        ->and($copy->fresh()->image_asset_id)->toBe($asset->id);
+});
+
 it('does not upload an inherited stack photograph before its component generation is approved and confirmed', function () {
     $component = createImageImportProduct('PLAIN');
     $asset = createImportTestAsset('photo-bytes', 'jpg', 'plain.jpg');
@@ -857,6 +956,8 @@ it('archives inherited alt text when approved source descriptions conflict', fun
             'image_alt_snapshot' => ['images' => [[
                 'image_id' => $source->id, 'image_asset_id' => $source->image_asset_id,
                 'proposed_alt' => $sentence, 'changed' => true,
+                'photograph_version' => max(1, (int) $source->fresh()->photograph_version),
+                'alt_text_version' => max(1, (int) $source->fresh()->alt_text_version),
             ]]],
             'approved_at' => now(),
         ]));
@@ -1165,6 +1266,8 @@ it('keeps an operator alt resolution when the inherited photograph is staged aga
             'image_alt_snapshot' => ['images' => [[
                 'image_id' => $source->id, 'image_asset_id' => $source->image_asset_id,
                 'proposed_alt' => $sentence, 'changed' => true,
+                'photograph_version' => max(1, (int) $source->fresh()->photograph_version),
+                'alt_text_version' => max(1, (int) $source->fresh()->alt_text_version),
             ]]],
             'approved_at' => now(),
         ]));

@@ -192,6 +192,10 @@ final class ImageAltTextBackfillService
         if ($image->alt_confirmation_media_id !== null && $image->alt_confirmation_text !== $altText) {
             throw new RuntimeException('Resolve the pending Shopify confirmation before changing its sentence.');
         }
+        if (trim((string) $image->alt_text) === $altText
+            && in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)) {
+            return;
+        }
         if ($this->inheritedStackImage($image)) {
             Image::withoutEvents(fn () => $image->forceFill(['alt_inheritance_mode' => 'independent'])->save());
         }
@@ -266,12 +270,19 @@ final class ImageAltTextBackfillService
         if (! $this->inheritedStackImage($image)) {
             return ['published' => 0, 'failed' => []];
         }
-        $approved = $this->approvedUploadAlt($image);
+        $approved = app(StackImageSync::class)->authorizedAltTarget($image);
         if ($approved === null) {
             return ['published' => 0, 'failed' => []];
         }
         if (trim((string) $image->alt_text) !== $approved) {
-            return ['published' => 0, 'failed' => [$this->failure(0, (int) $image->id, 'Inherited image '.$image->id.' does not contain the approved source description.')]];
+            if ($image->alt_inheritance_mode === 'independent' || $image->alt_confirmation_media_id !== null) {
+                return ['published' => 0, 'failed' => [$this->failure(0, (int) $image->id, 'Inherited image '.$image->id.' does not contain the approved source description.')]];
+            }
+            Image::withoutEvents(fn () => $image->forceFill([
+                'alt_text' => $approved,
+                'alt_text_version' => max(1, (int) $image->alt_text_version) + 1,
+            ])->save());
+            $image = $image->fresh(['product', 'imageAsset']) ?? $image;
         }
         if (trim((string) $image->shopify_id) === '') {
             return ['published' => 0, 'failed' => [$this->failure(0, (int) $image->id, 'Inherited image '.$image->id.' has no Shopify media for its approved description.')]];
@@ -570,8 +581,7 @@ final class ImageAltTextBackfillService
             && ! in_array($source->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)
             && ! $source->is_duplicate_hidden
             && (int) $source->image_asset_id > 0
-            && (int) $copy->image_asset_id === (int) $source->image_asset_id
-            && ! $source->shopify_identity_unresolved;
+            && (int) $copy->image_asset_id === (int) $source->image_asset_id;
     }
 
     /** Manual stack publishing is separate from automatic propagation. */

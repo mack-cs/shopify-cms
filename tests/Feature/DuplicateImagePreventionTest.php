@@ -2,7 +2,9 @@
 
 use App\Console\Commands\ReportDuplicateImagePositions;
 use App\Contracts\ShopifyGraphqlGateway;
+use App\Models\Approval;
 use App\Models\Image;
+use App\Models\User;
 use App\Models\ImageAsset;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -337,6 +339,7 @@ it('does not upload again after Shopify accepts a create without a media id', fu
         'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
         'needs_shopify_image_sync' => true,
     ]));
+    authorizeUncertainPhotograph($product);
     $creates = 0;
     Http::fake(function ($request) use (&$creates, &$details) {
         if ($request->method() === 'GET') {
@@ -512,6 +515,17 @@ function reconcileCatalogueImage(Product $product, string $src, string $shopifyI
 
     (new ReflectionMethod(Normalizer::class, 'reconcileImages'))
         ->invoke(app(Normalizer::class), $product->fresh(), collect([$row]), app(\App\Services\CatalogImageMatcher::class)->prepareEvidence($product->allImages()->with('imageAsset')->get(), [$src]));
+}
+
+function authorizeUncertainPhotograph(Product $product): void
+{
+    foreach ([1, 2] as $ignored) {
+        Approval::create([
+            'product_id' => $product->id,
+            'user_id' => User::factory()->create()->id,
+            'approval_version' => $product->fresh()->approval_version ?? 1,
+        ]);
+    }
 }
 
 /**

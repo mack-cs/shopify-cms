@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Jobs\RebuildDependentStackImagesJob;
 use App\Jobs\SynchronizeAuthorizedStackImagesJob;
+use App\Models\Approval;
 use App\Models\Image;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
@@ -66,8 +67,101 @@ final class StackImageSync
         if (! $product->isApprovedByTwo()) {
             return;
         }
-        $this->recordAuthorizations($product, 'full', null, $userId);
+        $snapshot = $this->publicationSnapshot($product);
+        if (! is_array($snapshot)) {
+            return;
+        }
+        $this->authorizePublicationSnapshot($product, $snapshot, $userId);
         $this->queueBlindPublication($product, null);
+    }
+
+    /**
+     * The first approval of a product version is the publication request.
+     * Later edits must not rewrite it.
+     */
+    public function capturePublicationSnapshot(Product $product, Approval $approval): void
+    {
+        $version = (int) ($approval->approval_version ?? $product->approval_version ?? 1);
+        if (DB::table('publication_authorization_snapshots')
+            ->where('product_id', $product->id)
+            ->where('approval_version', $version)
+            ->exists()) {
+            return;
+        }
+        $images = [];
+        foreach ($product->allImages()->active()->with('imageAsset')->orderBy('id')->get() as $image) {
+            $image->loadMissing('imageAsset');
+            $images[] = [
+                'image_id' => (int) $image->id,
+                'product_id' => (int) $product->id,
+                'image_asset_id' => (int) ($image->image_asset_id ?? 0),
+                'asset_sha256' => (string) ($image->imageAsset->sha256 ?? ''),
+                'photograph_version' => $this->version($image, 'photograph_version'),
+                'alt_text' => (string) $image->alt_text,
+                'alt_text_version' => $this->version($image, 'alt_text_version'),
+            ];
+        }
+        DB::table('publication_authorization_snapshots')->insertOrIgnore([
+            'product_id' => $product->id,
+            'approval_version' => $version,
+            'approval_id' => $approval->id,
+            'snapshot' => json_encode([
+                'product_id' => (int) $product->id,
+                'approval_version' => $version,
+                'images' => $images,
+            ], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function publicationSnapshot(Product $product): ?array
+    {
+        $row = DB::table('publication_authorization_snapshots')
+            ->where('product_id', $product->id)
+            ->where('approval_version', (int) ($product->approval_version ?? 1))
+            ->first();
+        if ($row === null) {
+            return null;
+        }
+        $decoded = json_decode((string) $row->snapshot, true);
+
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Closes the publication cycle for one target image after the authorized
+     * content was verified. Authorization rows and other stacks are left intact.
+     */
+    public function completeVerifiedPublication(Image $published, ?Image $source, string $scope): void
+    {
+        $published = $published->fresh() ?? $published;
+        $updates = [];
+        if (in_array($scope, ['images', 'full'], true)
+            && $source instanceof Image
+            && $this->photographAuthorized($source)
+            && (int) $published->image_asset_id === (int) $source->image_asset_id
+            && (int) $published->image_asset_id > 0) {
+            $updates['needs_shopify_image_sync'] = false;
+        }
+        if (in_array($scope, ['image_alt', 'full'], true)) {
+            $target = $this->authorizedAltTarget($published, $source);
+            if ($target !== null
+                && trim((string) $published->alt_text) === $target
+                && trim((string) $published->shopify_alt_text) === $target) {
+                $updates['shopify_alt_pending'] = false;
+                $updates['alt_text_status'] = Image::ALT_PUBLISHED;
+                $updates['alt_confirmation_media_id'] = null;
+                $updates['alt_confirmation_text'] = null;
+            }
+        }
+        if ($updates === []) {
+            return;
+        }
+        Image::withoutEvents(fn () => $published->forceFill($updates)->save());
     }
 
     public function afterPartialApproval(ProductPartialApprovalRequest $request): void
@@ -78,10 +172,10 @@ final class StackImageSync
         }
         $scopes = is_array($request->scopes) ? $request->scopes : [];
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true)) {
-            $this->recordAuthorizations($product, 'images', (int) $request->id, (int) $request->approved_by);
+            $this->recordAuthorizations($product, 'images', (int) $request->id, (int) $request->approved_by, $request);
         }
         if (in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, $scopes, true)) {
-            $this->recordAuthorizations($product, 'image_alt', (int) $request->id, (int) $request->approved_by);
+            $this->recordAuthorizations($product, 'image_alt', (int) $request->id, (int) $request->approved_by, $request);
         }
         if (array_intersect($scopes, [ProductShopifyUpdater::SYNC_SCOPE_IMAGES, ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT]) !== []) {
             $this->queueBlindPublication($product, (int) $request->id);
@@ -216,21 +310,23 @@ final class StackImageSync
                 }
                 continue;
             }
-            if (! $this->photographAuthorized($source) && ! $this->stackCapturedPhotograph($image)) {
+            $photoAuthorized = $this->photographAuthorized($source) || $this->stackCapturedPhotograph($image);
+            $publishedHere = trim((string) $image->shopify_id) !== ''
+                && (int) $image->image_asset_id === (int) $source->image_asset_id
+                && ! $image->needs_shopify_image_sync;
+            if (! $photoAuthorized && ! $publishedHere) {
                 continue;
             }
             $photoVersion = $this->version($source, 'photograph_version');
-            $altVersion = $this->version($source, 'alt_text_version');
             $verifiedPhoto = $this->verified($image, 'verified_photograph_version');
-            $verifiedAlt = $this->verified($image, 'verified_alt_version');
             $photoChanged = $image->needs_shopify_image_sync
                 || trim((string) $image->shopify_id) === ''
                 || (int) $image->image_asset_id !== (int) $source->image_asset_id
                 || $verifiedPhoto === null
                 || $verifiedPhoto !== $photoVersion;
-            $altAuthorized = $this->altAuthorized($source);
-            $altChanged = $altAuthorized && ($verifiedAlt === null || $verifiedAlt !== $altVersion || trim((string) $image->shopify_alt_text) !== trim((string) $source->alt_text));
-            if ($photoChanged && $this->photographAuthorized($source)) {
+            $altTarget = $this->authorizedAltTarget($image, $source);
+            $altChanged = $altTarget !== null && trim((string) $image->shopify_alt_text) !== $altTarget;
+            if ($photoChanged && $photoAuthorized) {
                 $uploads[] = (int) $image->id;
             } elseif ($altChanged && trim((string) $image->shopify_id) !== '') {
                 $altOnly[] = (int) $image->id;
@@ -256,7 +352,7 @@ final class StackImageSync
     public function photographAuthorized(Image $source): bool
     {
         $source->loadMissing('imageAsset');
-        if (! $source->imageAsset || $source->shopify_identity_unresolved) {
+        if (! $source->imageAsset) {
             return false;
         }
         $version = $this->version($source, 'photograph_version');
@@ -268,6 +364,27 @@ final class StackImageSync
             ->where('photograph_version', $version)
             ->whereIn('scope', ['images', 'full'])
             ->exists();
+    }
+
+    /**
+     * The sentence this inherited row may publish. Following rows use the
+     * approved source sentence. Independent rows use their own approval.
+     */
+    public function authorizedAltTarget(Image $image, ?Image $source = null): ?string
+    {
+        $approvals = app(ProductPartialApprovalService::class);
+        if ($image->alt_inheritance_mode === 'independent') {
+            return $approvals->approvedAlt($image);
+        }
+        if (! $source instanceof Image) {
+            $source = Image::query()->find((int) $image->source_image_id);
+        }
+        if (! $source instanceof Image) {
+            return null;
+        }
+        $approved = $approvals->approvedAlt($source);
+
+        return $approved !== null && trim($approved) === trim((string) $source->alt_text) ? $approved : null;
     }
 
     public function altAuthorized(Image $source): bool
@@ -456,8 +573,83 @@ final class StackImageSync
         return $value > 0 ? $value : 1;
     }
 
-    private function recordAuthorizations(Product $product, string $scope, ?int $approvalRequestId, ?int $userId): void
+    /**
+     * @param  array<string, mixed>  $snapshot
+     */
+    private function authorizePublicationSnapshot(Product $product, array $snapshot, ?int $userId): void
     {
+        $rows = $snapshot['images'] ?? null;
+        if (! is_array($rows)) {
+            return;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $image = Image::query()->with('imageAsset')->find((int) ($row['image_id'] ?? 0));
+            if (! $image instanceof Image || (int) $image->product_id !== (int) $product->id) {
+                continue;
+            }
+            $photoMatches = (int) ($row['image_asset_id'] ?? 0) > 0
+                && (string) ($row['asset_sha256'] ?? '') !== ''
+                && (int) $image->image_asset_id === (int) $row['image_asset_id']
+                && (string) ($image->imageAsset->sha256 ?? '') === (string) $row['asset_sha256']
+                && $this->version($image, 'photograph_version') === (int) ($row['photograph_version'] ?? 0);
+            $altMatches = trim((string) ($row['alt_text'] ?? '')) !== ''
+                && trim((string) $image->alt_text) === trim((string) $row['alt_text'])
+                && $this->version($image, 'alt_text_version') === (int) ($row['alt_text_version'] ?? 0);
+            if ($photoMatches && $altMatches) {
+                $this->insertAuthorization($product, $image, 'full', null, $userId, trim((string) $row['alt_text']));
+
+                continue;
+            }
+            if ($photoMatches) {
+                $this->insertAuthorization($product, $image, 'images', null, $userId, (string) $image->alt_text);
+            }
+            if ($altMatches) {
+                $this->insertAuthorization($product, $image, 'image_alt', null, $userId, trim((string) $row['alt_text']));
+            }
+        }
+    }
+
+    private function recordAuthorizations(Product $product, string $scope, ?int $approvalRequestId, ?int $userId, ?ProductPartialApprovalRequest $request = null): void
+    {
+        if ($request instanceof ProductPartialApprovalRequest && $scope === 'image_alt') {
+            foreach ($this->reviewedAltRows($request) as $row) {
+                $image = Image::query()->with('imageAsset')->find((int) ($row['image_id'] ?? 0));
+                if (! $image instanceof Image || ! app(ImageAltApprovalEvidence::class)->snapshotMatches($image, $row, $request)) {
+                    continue;
+                }
+                $this->insertAuthorization($product, $image, $scope, $approvalRequestId, $userId, trim((string) ($row['proposed_alt'] ?? '')));
+            }
+
+            return;
+        }
+        if ($request instanceof ProductPartialApprovalRequest && $scope === 'images') {
+            $rows = is_array($request->image_alt_snapshot) ? ($request->image_alt_snapshot['photographs'] ?? null) : null;
+            if (! is_array($rows)) {
+                return;
+            }
+            if (is_array($rows)) {
+                foreach ($rows as $row) {
+                    if (! is_array($row)) {
+                        continue;
+                    }
+                    $image = Image::query()->with('imageAsset')->find((int) ($row['image_id'] ?? 0));
+                    if (! $image instanceof Image || ! $image->imageAsset) {
+                        continue;
+                    }
+                    if ((int) $image->image_asset_id !== (int) ($row['image_asset_id'] ?? 0)
+                        || (string) $image->imageAsset->sha256 !== (string) ($row['asset_sha256'] ?? '')
+                        || $this->version($image, 'photograph_version') !== (int) ($row['photograph_version'] ?? 0)) {
+                        continue;
+                    }
+                    $this->insertAuthorization($product, $image, $scope, $approvalRequestId, $userId, (string) $image->alt_text);
+                }
+
+                return;
+            }
+        }
         foreach ($product->allImages()->active()->with('imageAsset')->get() as $image) {
             if ($scope === 'image_alt' && trim((string) $image->alt_text) === '') {
                 continue;
@@ -465,21 +657,42 @@ final class StackImageSync
             if (in_array($scope, ['images', 'full'], true) && ! $image->imageAsset) {
                 continue;
             }
-            DB::table('component_image_authorizations')->insert([
-                'product_id' => $product->id,
-                'image_id' => $image->id,
-                'image_asset_id' => $image->image_asset_id,
-                'asset_sha256' => $image->imageAsset?->sha256,
-                'photograph_version' => $this->version($image, 'photograph_version'),
-                'alt_text_version' => $this->version($image, 'alt_text_version'),
-                'alt_text' => $image->alt_text,
-                'scope' => $scope,
-                'approval_request_id' => $approvalRequestId,
-                'user_id' => $userId,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
+            $this->insertAuthorization($product, $image, $scope, $approvalRequestId, $userId, (string) $image->alt_text);
         }
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function reviewedAltRows(ProductPartialApprovalRequest $request): array
+    {
+        $images = $request->image_alt_snapshot['images'] ?? null;
+        if (! is_array($images)) {
+            return [];
+        }
+
+        return array_values(array_filter($images, function ($row): bool {
+            return is_array($row) && empty($row['inherited']) && ! empty($row['changed']);
+        }));
+    }
+
+    private function insertAuthorization(Product $product, Image $image, string $scope, ?int $approvalRequestId, ?int $userId, string $altText): void
+    {
+        $image->loadMissing('imageAsset');
+        DB::table('component_image_authorizations')->insert([
+            'product_id' => $product->id,
+            'image_id' => $image->id,
+            'image_asset_id' => $image->image_asset_id,
+            'asset_sha256' => $image->imageAsset?->sha256,
+            'photograph_version' => $this->version($image, 'photograph_version'),
+            'alt_text_version' => $this->version($image, 'alt_text_version'),
+            'alt_text' => $altText,
+            'scope' => $scope,
+            'approval_request_id' => $approvalRequestId,
+            'user_id' => $userId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     /**
@@ -503,6 +716,17 @@ final class StackImageSync
 
                 return $this->emptyPlan('deferred_inactive', 'Stack status changed before the photograph mutation.');
             }
+            $source?->loadMissing('imageAsset');
+            if (! $source instanceof Image || ! $source->imageAsset?->isAvailable() || (int) $image->image_asset_id !== (int) $source->image_asset_id) {
+                $reason = (int) $image->image_asset_id !== (int) ($source?->image_asset_id ?? 0)
+                    ? 'The stack photograph is not the authorized component photograph. Shopify was not changed.'
+                    : 'The authorized photograph backup is missing. Shopify was not changed.';
+                $this->note($stack, $image, $source, 'failed', $reason, false);
+                $plan['outcome'] = 'failed';
+                $plan['detail'] = $reason;
+
+                continue;
+            }
             try {
                 $result = $updater->synchronizeInheritedStackImage($stack, $imageId);
                 $image->refresh();
@@ -515,6 +739,9 @@ final class StackImageSync
                     $confirmed ? 'Photograph verified on Shopify.' : collect($result['warnings'] ?? [])->pluck('warning')->implode(' '),
                     $confirmed,
                 );
+                if ($confirmed) {
+                    $this->completeVerifiedPublication($image, $source, 'images');
+                }
                 if (! $confirmed) {
                     $plan['outcome'] = 'uncertain';
                 }
@@ -533,8 +760,12 @@ final class StackImageSync
             $result = $writer->publishInheritedCopy($image);
             $image->refresh();
             $failed = ($result['failed'] ?? []) !== [];
-            $verified = ! $failed && ((int) ($result['published'] ?? 0) > 0 || trim((string) $image->shopify_alt_text) === trim((string) $source?->alt_text));
+            $target = $this->authorizedAltTarget($image, $source instanceof Image ? $source : null);
+            $verified = ! $failed && $target !== null && trim((string) $image->shopify_alt_text) === $target;
             $this->note($stack, $image, $source, $verified ? 'verified' : 'failed', $verified ? 'Alt text verified without a new photograph upload.' : 'Alt text was not verified.', $verified);
+            if ($verified) {
+                $this->completeVerifiedPublication($image, $source instanceof Image ? $source : null, 'image_alt');
+            }
             if (! $verified) {
                 $plan['outcome'] = 'failed';
             }

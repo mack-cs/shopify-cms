@@ -261,9 +261,7 @@ class ProductPartialApprovalService
                 'scopes' => $scopes,
                 'core_fields' => $coreFields,
                 'request_note' => $requestNote,
-                'image_alt_snapshot' => in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, $scopes, true)
-                    ? $this->imageAltSnapshot($product)
-                    : null,
+                'image_alt_snapshot' => $this->reviewSnapshot($product, $scopes),
             ]);
 
             $summary['requested']++;
@@ -1048,7 +1046,7 @@ class ProductPartialApprovalService
         if ($image->is_duplicate_hidden || in_array($image->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)) {
             return null;
         }
-        if ($this->inheritedStackImage($image)) {
+        if ($this->inheritedStackImage($image) && $image->alt_inheritance_mode !== 'independent') {
             return null;
         }
 
@@ -1073,7 +1071,8 @@ class ProductPartialApprovalService
                 continue;
             }
             foreach ($this->snapshotImages($request) as $row) {
-                if ((int) ($row['image_id'] ?? 0) !== (int) $image->id || ! empty($row['inherited'])
+                if ((int) ($row['image_id'] ?? 0) !== (int) $image->id
+                    || (! empty($row['inherited']) && $image->alt_inheritance_mode !== 'independent')
                     || ! app(ImageAltApprovalEvidence::class)->snapshotMatches($image, $row, $request)) {
                     continue;
                 }
@@ -1149,9 +1148,14 @@ class ProductPartialApprovalService
                 $shopify = $image->shopify_alt_text === null ? null : trim((string) $image->shopify_alt_text);
                 $inherited = $this->inheritedStackImage($image, $product);
 
+                $image->loadMissing('imageAsset');
+
                 return [
                     'image_id' => (int) $image->id,
                     'image_asset_id' => (int) $image->image_asset_id,
+                    'asset_sha256' => $image->imageAsset?->sha256,
+                    'photograph_version' => max(1, (int) ($image->photograph_version ?? 1)),
+                    'alt_text_version' => max(1, (int) ($image->alt_text_version ?? 1)),
                     'position' => $image->position === null ? null : (int) $image->position,
                     'src' => trim((string) $image->src),
                     'proposed_alt' => $proposed,
@@ -1162,6 +1166,46 @@ class ProductPartialApprovalService
                 ];
             })->values()->all(),
         ];
+    }
+
+    /**
+     * @param  array<int, string>  $scopes
+     * @return array<string, mixed>|null
+     */
+    private function reviewSnapshot(Product $product, array $scopes): ?array
+    {
+        $alt = in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGE_ALT, $scopes, true);
+        $photographs = in_array(ProductShopifyUpdater::SYNC_SCOPE_IMAGES, $scopes, true);
+        if (! $alt && ! $photographs) {
+            return null;
+        }
+        $snapshot = $alt ? $this->imageAltSnapshot($product) : ['images' => []];
+        if ($photographs) {
+            $snapshot['photographs'] = $this->photographSnapshot($product);
+        }
+
+        return $snapshot;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function photographSnapshot(Product $product): array
+    {
+        return $product->allImages()->active()->with('imageAsset')
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->map(function (Image $image): array {
+                return [
+                    'image_id' => (int) $image->id,
+                    'image_asset_id' => (int) $image->image_asset_id,
+                    'asset_sha256' => (string) ($image->imageAsset?->sha256 ?? ''),
+                    'photograph_version' => max(1, (int) ($image->photograph_version ?? 1)),
+                ];
+            })
+            ->all();
     }
 
     /**

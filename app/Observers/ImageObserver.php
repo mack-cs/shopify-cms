@@ -51,7 +51,6 @@ class ImageObserver
     public function updating(Image $image): void
     {
         $dirty = array_keys($image->getDirty());
-        $this->bumpImageVersions($image);
         $this->syncImageAttention($image);
         $meaningful = array_diff($dirty, $this->nonContentFields());
         if (empty($meaningful)) {
@@ -417,20 +416,6 @@ class ImageObserver
             'alt_text_version',
             'image_attention_since',
         ];
-    }
-
-    private function bumpImageVersions(Image $image): void
-    {
-        $photographChanged = $image->isDirty('image_asset_id') || $image->isDirty('image_path');
-        if (! $photographChanged && $image->isDirty('src')) {
-            $photographChanged = ShopifyMediaPath::canonical($image->getOriginal('src')) !== ShopifyMediaPath::canonical($image->src);
-        }
-        if ($photographChanged) {
-            $image->photograph_version = max(1, (int) $image->getOriginal('photograph_version')) + 1;
-        }
-        if ($image->isDirty('alt_text') && trim((string) $image->alt_text) !== trim((string) $image->getOriginal('alt_text'))) {
-            $image->alt_text_version = max(1, (int) $image->getOriginal('alt_text_version')) + 1;
-        }
     }
 
     private function syncImageAttention(Image $image): void

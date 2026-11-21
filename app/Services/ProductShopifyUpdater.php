@@ -5099,13 +5099,36 @@ GQL;
             }
             if (ImageOwnership::isInherited($image)) {
                 $source = Image::query()->find((int) $image->source_image_id);
-                $blindAuthorized = (bool) config('images.component_stack_blind_publication', false)
-                    && app(StackImageSync::class)->stackIsActive($product)
-                    && app(StackImageSync::class)->photographAuthorized($source);
+                $sync = app(StackImageSync::class);
+                if ($source instanceof Image && $sync->photographAuthorized($source)) {
+                    $source->loadMissing('imageAsset');
+                    if (! $source->imageAsset?->isAvailable() || (int) $source->image_asset_id !== (int) $image->image_asset_id) {
+                        $row['blocked'] = true;
+                        $existingId = trim((string) $image->shopify_id);
+                        $attached = $existingId !== '' && collect($details['media']['nodes'] ?? [])->contains(
+                            fn ($node): bool => is_array($node) && ($node['id'] ?? null) === $existingId
+                        );
+                        if ($attached && ! $row['requires_republish']) {
+                            $row['matched_media_id'] = $existingId;
+                            $matchedExistingIds[] = $existingId;
+                        }
+                        $warnings[] = ['product_id' => $product->id, 'warning' => (int) $source->image_asset_id !== (int) $image->image_asset_id
+                            ? "Stack image {$image->id} no longer has the authorized photograph. Its current file was not substituted and published Shopify media was left unchanged."
+                            : "Stack image {$image->id} has an authorized photograph but the CMS backup is missing. Published Shopify media was left unchanged."];
+
+                        return $row;
+                    }
+                }
+                $cmsAuthorized = $source instanceof Image
+                    && $sync->stackIsActive($product)
+                    && $sync->photographAuthorized($source)
+                    && (int) $source->image_asset_id === (int) $image->image_asset_id;
+                $blindAuthorized = (bool) config('images.component_stack_blind_publication', false) && $cmsAuthorized;
                 $publishable = $source instanceof Image
                     && (int) $source->image_asset_id === (int) $image->image_asset_id
                     && (app(ComponentPhotographSelector::class)->publicationAllowed($source)
                         || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image)
+                        || $cmsAuthorized
                         || $blindAuthorized)
                     && app(ImageAltTextBackfillService::class)->copyHasCurrentSource($image);
                 if (! $publishable) {
@@ -5128,12 +5151,14 @@ GQL;
             $operation = $operations->active($image);
             if ($operation !== null) {
                 $node = $operations->reconcile($image, $operation, $details['media']['nodes']);
-                if ($node !== null) {
+                if ($node !== null && ! $this->photographReplacementIsUnauthorized($image)) {
                     $this->imageSyncMutex->assertOwned();
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url']);
                     $operations->complete($operation, $node['id']);
                     $row['matched_media_id'] = $node['id'];
                     $matchedExistingIds[] = $node['id'];
+                } elseif ($node !== null) {
+                    $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
                 }
                 $row['blocked'] = true;
 
@@ -5142,6 +5167,22 @@ GQL;
             if ($image->shopify_media_create_uncertain) {
                 $row['blocked'] = true;
                 $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} requires manual reconciliation of a legacy uncertain upload."];
+
+                return $row;
+            }
+            if (! ImageOwnership::isInherited($image) && $this->photographReplacementIsUnauthorized($image)) {
+                $row['blocked'] = true;
+                $existingId = trim((string) $image->shopify_id);
+                $attached = $existingId !== '' && collect($details['media']['nodes'] ?? [])->contains(
+                    fn ($node): bool => is_array($node) && ($node['id'] ?? null) === $existingId
+                );
+                if ($attached) {
+                    $row['matched_media_id'] = $existingId;
+                    $matchedExistingIds[] = $existingId;
+                }
+                if ($row['requires_republish'] || ! $attached) {
+                    $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
+                }
 
                 return $row;
             }
@@ -5184,11 +5225,14 @@ GQL;
                 $proven = $image->image_asset_id
                     ? app(ImagePhotographEvidence::class)->matchesMedia($image, $node)
                     : ($node['id'] === $image->shopify_id && ! $row['requires_republish']);
-                if ($proven && ShopifyProductMediaReader::ready($node)) {
+                if ($proven && ShopifyProductMediaReader::ready($node) && ! $this->photographReplacementIsUnauthorized($image)) {
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'] ?? null);
                     $row['matched_media_id'] = $node['id'];
                     $row['requires_republish'] = false;
                     $matchedExistingIds[] = $node['id'];
+                } elseif ($proven && ShopifyProductMediaReader::ready($node) && $this->photographReplacementIsUnauthorized($image)) {
+                    $row['blocked'] = true;
+                    $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
                 } else {
                     $row['blocked'] = true;
                 }
@@ -5221,6 +5265,12 @@ GQL;
             }
             if ($row['sync_url'] === null) {
                 $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} has no immutable backed-up source."];
+
+                return $row;
+            }
+            if (! $this->photographReadyToPublish($image)) {
+                $row['blocked'] = true;
+                $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
 
                 return $row;
             }
@@ -5605,6 +5655,55 @@ GQL;
             );
         });
         $image->refresh();
+    }
+
+    /**
+     * A recorded photograph authorization names one asset, hash and version.
+     * A later replacement still has that record and must not be published in its place.
+     * Creating remote media requires photographReadyToPublish even when no record exists.
+     * Keeping media already verified on Shopify does not require a new record.
+     */
+    private function photographReplacementIsUnauthorized(Image $image): bool
+    {
+        $ids = [(int) $image->id];
+        if (ImageOwnership::isInherited($image) && (int) $image->source_image_id > 0) {
+            $ids[] = (int) $image->source_image_id;
+        }
+        $recorded = DB::table('component_image_authorizations')
+            ->whereIn('image_id', $ids)
+            ->whereIn('scope', ['images', 'full'])
+            ->exists();
+
+        return $recorded && ! $this->photographReadyToPublish($image);
+    }
+
+    private function photographReadyToPublish(Image $image): bool
+    {
+        $sync = app(StackImageSync::class);
+        if (ImageOwnership::isInherited($image)) {
+            $source = Image::query()->find((int) $image->source_image_id);
+            $owner = $image->product()->first();
+            if (! $source instanceof Image || ! $owner instanceof Product || (int) $source->image_asset_id !== (int) $image->image_asset_id) {
+                return false;
+            }
+            $cmsAuthorized = $sync->stackIsActive($owner)
+                && $sync->photographAuthorized($source);
+            $blindAuthorized = (bool) config('images.component_stack_blind_publication', false) && $cmsAuthorized;
+
+            return (app(ComponentPhotographSelector::class)->publicationAllowed($source)
+                    || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image)
+                    || $cmsAuthorized
+                    || $blindAuthorized
+                    || $sync->stackCapturedPhotograph($image))
+                && app(ImageAltTextBackfillService::class)->copyHasCurrentSource($image);
+        }
+
+        return $sync->photographAuthorized($image);
+    }
+
+    private function unauthorizedPhotographWarning(Image $image): string
+    {
+        return "Image {$image->id} is not an authorized photograph. It was not uploaded and published Shopify media was left unchanged.";
     }
 
     private function imageBytesChangedSinceShopifySync(Image $image): bool

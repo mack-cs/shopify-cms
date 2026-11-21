@@ -12,6 +12,7 @@ use App\Models\RequiredField;
 use App\Models\ShopifyCollection;
 use App\Models\Variant;
 use App\Observers\ApprovalObserver;
+use App\Observers\PublicationSnapshotObserver;
 use App\Observers\DropdownOptionObserver;
 use App\Observers\ImageObserver;
 use App\Observers\NewProductDraftObserver;
@@ -80,6 +81,7 @@ class AppServiceProvider extends ServiceProvider
                 logger()->error('Inventory recovery monitor callback failed.', ['error' => $error->getMessage()]);
             }
         });
+        Approval::observe(PublicationSnapshotObserver::class);
         Approval::observe(ApprovalObserver::class);
         Product::observe(ProductObserver::class);
         Variant::observe(VariantObserver::class);

@@ -2,6 +2,7 @@
 
 use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
+use App\Models\Approval;
 use App\Models\Image;
 use App\Models\NewProductDraft;
 use App\Models\User;
@@ -126,6 +127,17 @@ function lifecycleImage(string $sku = 'AUDIT', string $bytes = 'upload bytes'): 
     return Image::withoutEvents(fn () => Image::create(['product_id' => $p->id, 'position' => 1, 'sync_state' => Image::SYNC_STATE_LOCAL_NEW, 'image_asset_id' => $a->id, 'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'needs_shopify_image_sync' => true]));
 }
 
+function authorizeLifecyclePhotograph(Image $image): void
+{
+    foreach ([1, 2] as $ignored) {
+        Approval::create([
+            'product_id' => $image->product_id,
+            'user_id' => User::factory()->create()->id,
+            'approval_version' => $image->product->fresh()->approval_version ?? 1,
+        ]);
+    }
+}
+
 function lifecycleSync(Image $image, array $stale = []): array
 {
     return (new ReflectionMethod(ProductShopifyUpdater::class, 'updateImages'))->invoke(app(ProductShopifyUpdater::class), $image->product, $image->product->shopify_id, [], $stale, null, false);
@@ -151,6 +163,7 @@ it('rejects stale historical URL evidence when current Shopify bytes differ', fu
 
 it('requires explicit independent file adoption after a lost creation response and never creates twice', function () {
     $i = lifecycleImage();
+    authorizeLifecyclePhotograph($i);
     $remote = new LifecycleShopifyFake;
     $remote->loseCreateResponse = true;
     $remote->onCreate = function ($variables) use ($i) {
@@ -193,6 +206,7 @@ it('rejects a stack copy of an obsolete component photograph', function () {
 
 it('refreshes media inside the mutex rather than trusting prelock snapshots', function () {
     $i = lifecycleImage();
+    authorizeLifecyclePhotograph($i);
     $remote = new LifecycleShopifyFake;
     lifecycleHttp($remote);
     lifecycleSync($i, ['media' => ['nodes' => []]]);
@@ -224,6 +238,7 @@ it('retains a killed workers durable claim and never replays creation without ev
 
 it('does not mark processing media synced or upload it again', function () {
     $i = lifecycleImage();
+    authorizeLifecyclePhotograph($i);
     $remote = new LifecycleShopifyFake;
     $remote->processing = true;
     lifecycleHttp($remote);
