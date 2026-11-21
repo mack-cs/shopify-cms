@@ -37,6 +37,42 @@ class Image extends Model
 
     public const ALT_PENDING_REVIEW = 'pending_review';
 
+    public function save(array $options = [])
+    {
+        $held = $this->galleryChangeAffectsDependentStacks()
+            ? app(\App\Services\StackSynchronizationBoundary::class)->prepareGalleryWrite((int) $this->product_id)
+            : null;
+        try {
+            return parent::save($options);
+        } finally {
+            $held?->release();
+        }
+    }
+
+    public function delete()
+    {
+        $held = (int) $this->product_id > 0
+            ? app(\App\Services\StackSynchronizationBoundary::class)->prepareGalleryWrite((int) $this->product_id)
+            : null;
+        try {
+            return parent::delete();
+        } finally {
+            $held?->release();
+        }
+    }
+
+    private function galleryChangeAffectsDependentStacks(): bool
+    {
+        if ((int) $this->product_id < 1) {
+            return false;
+        }
+        if (! $this->exists) {
+            return true;
+        }
+
+        return $this->isDirty(['image_asset_id', 'sync_state', 'position', 'is_duplicate_hidden']);
+    }
+
     public const ALT_APPROVED = 'approved';
 
     public const ALT_PUBLISHED = 'published';
@@ -87,6 +123,9 @@ class Image extends Model
         'shopify_alt_text',
         'ownership',
         'alt_inheritance_mode',
+        'photograph_version',
+        'alt_text_version',
+        'image_attention_since',
     ];
 
     protected $casts = [
@@ -102,6 +141,7 @@ class Image extends Model
         'shopify_media_create_uncertain' => 'boolean',
         'shopify_identity_unresolved' => 'boolean',
         'shopify_alt_pending' => 'boolean',
+        'image_attention_since' => 'datetime',
     ];
 
     public function scopeActive(Builder $query): Builder

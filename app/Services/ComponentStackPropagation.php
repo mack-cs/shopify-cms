@@ -269,6 +269,12 @@ final class ComponentStackPropagation
 
             return;
         }
+        if (! app(StackImageSync::class)->stackIsActive($stack)) {
+            $this->stageStack($stack);
+            $this->deferTask($taskId, 'Stack is not active. The inherited gallery was rebuilt locally and was not sent to Shopify.', 'blocked');
+
+            return;
+        }
         if (! $this->selector->publicationAllowed($selected)) {
             $this->deferTask($taskId, 'The component generation is not approved and confirmed on Shopify. The inherited image was not published.', 'blocked');
 
@@ -394,35 +400,56 @@ final class ComponentStackPropagation
      */
     public function stageStack(Product $stack): array
     {
+        $boundary = app(StackSynchronizationBoundary::class)->acquireForStacks([(int) $stack->id]);
+        try {
+            return $this->stageStackWhileLocked($stack);
+        } finally {
+            $boundary->release();
+        }
+    }
+
+    private function stageStackWhileLocked(Product $stack): array
+    {
         $componentIds = $this->catalog->componentIds($stack);
         if ($componentIds === []) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: no linked components found.", 'created' => []];
+            return ['rebuilt' => false, 'message' => "{$stack->handle}: no linked components found.", 'created' => [], 'unavailable' => []];
         }
-        $reasons = [];
+        $unavailable = [];
         $ready = [];
+        $protectedSourceIds = [];
+        $blockers = [];
         foreach ($componentIds as $componentId) {
             $component = Product::query()->find($componentId);
             if (! $component instanceof Product) {
-                $reasons[] = 'Component #'.$componentId.' was not found.';
+                $blockers[] = 'Component #'.$componentId.' was not found.';
 
                 continue;
             }
-            $selected = $this->selector->selected($component);
-            if (! $selected instanceof Image) {
-                $reasons[] = ($component->handle ?: 'Product #'.$component->id).' has no single current primary photograph with a backup asset.';
+            $images = $component->allImages()->active()->with('imageAsset')->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')->orderBy('position')->orderBy('id')->get();
+            if ($images->isEmpty()) {
+                $blockers[] = ($component->handle ?: 'Product #'.$component->id).' has no current photographs.';
 
                 continue;
             }
-            $selected->loadMissing('imageAsset');
-            if (! $selected->imageAsset instanceof ImageAsset) {
-                $reasons[] = ($component->handle ?: 'Product #'.$component->id).' image '.$selected->id.' has no retrievable managed asset.';
+            foreach ($images as $selected) {
+                $reason = $this->unavailablePhotographReason($selected);
+                if ($reason !== null) {
+                    $protectedSourceIds[] = (int) $selected->id;
+                    $sku = $component->variants()->orderBy('id')->value('sku') ?: $component->handle;
+                    $unavailable[] = 'Image '.$selected->id.' on '.$sku.' was not copied: '.$reason;
 
-                continue;
+                    continue;
+                }
+                $ready[] = [$component, $selected];
             }
-            $ready[] = [$component, $selected];
         }
-        if ($reasons !== []) {
-            return ['rebuilt' => false, 'message' => "{$stack->handle}: rebuild stopped before replacing images. ".implode(' ', $reasons), 'created' => []];
+        if ($blockers !== []) {
+            return [
+                'rebuilt' => false,
+                'message' => "{$stack->handle}: rebuild stopped before replacing images. ".implode(' ', $blockers),
+                'created' => [],
+                'unavailable' => $blockers,
+            ];
         }
         $created = [];
         $conflicts = [];
@@ -433,7 +460,7 @@ final class ComponentStackPropagation
                 'component_product_id' => $component->id,
                 'image_asset_id' => $selected->image_asset_id,
                 'asset_sha256' => $selected->imageAsset->sha256,
-                'status' => $this->selector->confirmed($selected) ? 'confirmed' : 'staged',
+                'status' => 'staged',
             ];
             $staged = $this->stageComponentOnStack($stack, $component, $generation);
             $created[] = (int) $staged['image']->id;
@@ -441,13 +468,17 @@ final class ComponentStackPropagation
                 $conflicts[] = $selected->imageAsset->sha256;
             }
         }
+        $this->retireInheritedAbsentFromGallery($stack, array_values(array_unique($created)), $protectedSourceIds);
 
         $conflictNote = $conflicts !== [] ? ' Conflicting inherited alt text needs review; previous descriptions were preserved.' : '';
+        $missingNote = $unavailable !== [] ? ' Unavailable: '.implode(' ', $unavailable) : '';
+        $rebuilt = $ready !== [] || $unavailable === [];
 
         return [
-            'rebuilt' => true,
-            'message' => "{$stack->handle}: staged ".count(array_unique($created)).' inherited photograph(s). Stack-owned images were left in place. Shopify sync waits for a confirmed component publication.'.$conflictNote,
+            'rebuilt' => $rebuilt,
+            'message' => "{$stack->handle}: rebuilt the local inherited gallery (".count(array_unique($created)).' photograph(s)). Stack-owned images were left in place. Shopify was not updated.'.$conflictNote.$missingNote,
             'created' => array_values(array_unique($created)),
+            'unavailable' => $unavailable,
         ];
     }
 
@@ -470,6 +501,7 @@ final class ComponentStackPropagation
             $this->fanOut((int) $row->id);
             $dispatched++;
         }
+        $dispatched += $this->dispatchEligibleBlockedRetirements();
         $tasks = DB::table('stack_image_sync_tasks')
             ->whereIn('phase', ['pending', 'staging', 'uploading', 'confirming', 'retiring', 'failed'])
             ->where('attempts', '<', 8)
@@ -485,6 +517,64 @@ final class ComponentStackPropagation
                 $dispatched++;
             } catch (\Throwable $exception) {
                 $this->deferTask((int) $task->id, 'Queue dispatch failed: '.$exception->getMessage(), (string) $task->phase);
+            }
+        }
+
+        return $dispatched;
+    }
+
+    /**
+     * Queue blocked removal tasks that still have a pending retirement intent.
+     * Uncertain mutating intents are left for operator confirmation.
+     */
+    public function dispatchEligibleBlockedRetirements(?int $stackProductId = null): int
+    {
+        if (! $this->enabled()) {
+            return 0;
+        }
+        $query = DB::table('stack_image_sync_tasks')
+            ->where('phase', 'blocked')
+            ->where('purpose', 'remove')
+            ->where('attempts', '<', 8)
+            ->where(function ($available): void {
+                $available->whereNull('available_at')->orWhere('available_at', '<=', now());
+            });
+        if ($stackProductId !== null) {
+            $query->where('stack_product_id', $stackProductId);
+        }
+        $dispatched = 0;
+        foreach ($query->orderBy('id')->limit(50)->get() as $task) {
+            $stack = Product::query()->useWritePdo()->find($task->stack_product_id);
+            if (! $stack instanceof Product || strtolower(trim((string) $stack->status)) !== 'active') {
+                continue;
+            }
+            $intents = DB::table('inherited_media_retirements')
+                ->where('stack_product_id', $stack->id)
+                ->where('generation_id', $task->generation_id)
+                ->whereIn('status', ['pending', 'mutating'])
+                ->pluck('status');
+            if ($intents->contains('mutating') || ! $intents->contains('pending')) {
+                continue;
+            }
+            $claimed = DB::table('stack_image_sync_tasks')
+                ->where('id', $task->id)
+                ->where('phase', 'blocked')
+                ->where(function ($available): void {
+                    $available->whereNull('available_at')->orWhere('available_at', '<=', now());
+                })
+                ->update(['available_at' => now()->addSeconds(600), 'updated_at' => now()]);
+            if ($claimed !== 1) {
+                continue;
+            }
+            try {
+                SynchronizeStackInheritedImagesJob::dispatch((int) $task->id);
+                $dispatched++;
+            } catch (\Throwable $exception) {
+                DB::table('stack_image_sync_tasks')->where('id', $task->id)->where('phase', 'blocked')->update([
+                    'available_at' => now(),
+                    'last_error' => 'Queue dispatch failed: '.$exception->getMessage(),
+                    'updated_at' => now(),
+                ]);
             }
         }
 
@@ -530,6 +620,8 @@ final class ComponentStackPropagation
                     'needs_shopify_image_sync' => true,
                     'position' => max(1, $position),
                     'alt_text' => $altConflict ? null : ($alts->first() ?: null),
+                    'photograph_version' => max(1, (int) ($componentImage->photograph_version ?? 1)),
+                    'alt_text_version' => max(1, (int) ($componentImage->alt_text_version ?? 1)),
                     'approved_filename' => $componentImage?->preferredFilename(),
                     'filename_mode' => Image::FILENAME_MODE_MANUAL,
                 ])->save();
@@ -550,7 +642,7 @@ final class ComponentStackPropagation
                 ->where('image_asset_id', $asset->id)
                 ->first();
             if ($match) {
-                $updates = [];
+                $updates = $this->provenanceSnapshot($source, $asset);
                 if ($sourceGenerationId && (int) $match->generation_id !== (int) $sourceGenerationId) {
                     $updates['generation_id'] = $sourceGenerationId;
                 }
@@ -565,7 +657,7 @@ final class ComponentStackPropagation
 
                 continue;
             }
-            DB::table('inherited_image_sources')->insertOrIgnore([
+            DB::table('inherited_image_sources')->insertOrIgnore(array_merge([
                 'image_id' => $existing->id,
                 'component_image_id' => $source->id,
                 'component_product_id' => $source->product_id,
@@ -573,7 +665,7 @@ final class ComponentStackPropagation
                 'image_asset_id' => $asset->id,
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ], $this->provenanceSnapshot($source, $asset)));
         }
         if ($existing->alt_inheritance_mode === 'independent') {
             return ['image' => $existing, 'alt_conflict' => false];
@@ -594,8 +686,85 @@ final class ComponentStackPropagation
             app(ImagePhotographEvidence::class)->archive($existing, 'Inherited alt conflict preserved the previous description');
         }
         $this->copyInheritedAlt($existing, $approved, $raw, $altConflict, is_string($resolution) && $resolution !== '');
+        $fresh = $existing->fresh() ?? $existing;
+        $desiredPosition = (int) ($componentImage?->position ?? 0);
+        if ($desiredPosition > 0 && (int) $fresh->position !== $desiredPosition) {
+            $occupied = Image::query()->active()->where('product_id', $stack->id)->where('id', '!=', $fresh->id)->where('position', $desiredPosition)->exists();
+            if (! $occupied) {
+                Image::withoutEvents(fn () => $fresh->forceFill(['position' => $desiredPosition])->save());
+            }
+        }
 
-        return ['image' => $existing->fresh() ?? $existing, 'alt_conflict' => $altConflict];
+        return ['image' => $fresh->fresh() ?? $fresh, 'alt_conflict' => $altConflict];
+    }
+
+    private function unavailablePhotographReason(Image $image): ?string
+    {
+        $image->loadMissing('imageAsset');
+        if (! $image->imageAsset instanceof ImageAsset) {
+            return 'no managed backup asset is stored for this image.';
+        }
+        if (! $image->imageAsset->isAvailable()) {
+            return 'the backup file is not readable on the CMS disk.';
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<int, int>  $keptIds
+     * @param  array<int, int>  $protectedSourceIds
+     */
+    private function retireInheritedAbsentFromGallery(Product $stack, array $keptIds, array $protectedSourceIds): void
+    {
+        $query = $stack->allImages()->active()->where('ownership', ImageOwnership::COMPONENT_INHERITED);
+        if ($keptIds !== []) {
+            $query->whereNotIn('id', $keptIds);
+        }
+        foreach ($query->get() as $image) {
+            $provenance = DB::table('inherited_image_sources')->where('image_id', $image->id)->whereNull('removed_at')->pluck('component_image_id')->map(fn ($id): int => (int) $id);
+            if ($provenance->isEmpty() && (int) $image->source_image_id < 1) {
+                continue;
+            }
+            if ((int) $image->source_image_id > 0 && in_array((int) $image->source_image_id, $protectedSourceIds, true)) {
+                continue;
+            }
+            if ($provenance->intersect($protectedSourceIds)->isNotEmpty()) {
+                continue;
+            }
+            if (trim((string) $image->shopify_id) !== '') {
+                app(StackImageSync::class)->note($stack, $image, null, 'retirement_pending', 'Inherited photograph '.$image->id.' is no longer in the component gallery. Its Shopify media was not deleted by the local rebuild.', false);
+
+                continue;
+            }
+            foreach (DB::table('inherited_image_sources')->where('image_id', $image->id)->whereNull('removed_at')->get() as $link) {
+                app(ImagePhotographEvidence::class)->archiveSource($link, 'local_rebuild_absent');
+            }
+            DB::table('inherited_image_sources')->where('image_id', $image->id)->whereNull('removed_at')->update(['removed_at' => now(), 'updated_at' => now()]);
+            app(ImagePhotographEvidence::class)->archive($image, 'Inherited photograph is no longer in the component gallery');
+            Image::withoutEvents(fn () => $image->forceFill([
+                'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+                'needs_shopify_image_sync' => false,
+            ])->save());
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function provenanceSnapshot(Image $source, ImageAsset $asset): array
+    {
+        $sku = Variant::query()->where('product_id', $source->product_id)->orderBy('id')->value('sku');
+
+        return [
+            'source_sku' => $sku,
+            'source_filename' => $source->preferredFilename(),
+            'source_position' => $source->position,
+            'photograph_version' => max(1, (int) ($source->photograph_version ?? 1)),
+            'alt_text_version' => max(1, (int) ($source->alt_text_version ?? 1)),
+            'alt_fingerprint' => hash('sha256', trim((string) $source->alt_text)),
+            'asset_sha256' => $asset->sha256,
+        ];
     }
 
     /**
@@ -607,27 +776,33 @@ final class ComponentStackPropagation
      */
     private function copyInheritedAlt(Image $existing, Collection $approved, Collection $raw, bool $altConflict, bool $hasResolution): void
     {
-        if ($altConflict || $hasResolution || $existing->alt_inheritance_mode === 'independent' || $existing->alt_confirmation_media_id !== null) {
+        if ($altConflict || $hasResolution || $existing->alt_inheritance_mode === 'independent') {
             return;
         }
         $sentence = null;
-        $clearApproval = false;
-        if ($approved->count() === 1) {
-            $sentence = (string) $approved->first();
-        } elseif ($approved->count() === 0 && $raw->count() === 1 && trim((string) $existing->alt_text) === '') {
+        if ($raw->count() === 1) {
             $sentence = (string) $raw->first();
-            $clearApproval = true;
+        } elseif ($approved->count() === 1) {
+            $sentence = (string) $approved->first();
         }
         if ($sentence === null || trim((string) $existing->alt_text) === $sentence) {
+            return;
+        }
+        if (in_array($existing->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)
+            && trim((string) $existing->alt_text) !== '') {
             return;
         }
         if (trim((string) $existing->alt_text) !== '') {
             app(ImagePhotographEvidence::class)->archive($existing, 'Inherited alt text followed its component description');
         }
-        Image::withoutEvents(function () use ($existing, $sentence, $clearApproval): void {
-            $updates = ['alt_text' => $sentence];
-            if ($clearApproval) {
+        Image::withoutEvents(function () use ($existing, $sentence): void {
+            $updates = [
+                'alt_text' => $sentence,
+                'alt_text_version' => max(1, (int) $existing->alt_text_version) + (trim((string) $existing->alt_text) === '' ? 0 : 1),
+            ];
+            if (in_array($existing->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)) {
                 $updates['alt_text_status'] = null;
+                $updates['shopify_alt_pending'] = false;
             }
             $existing->forceFill($updates)->save();
         });
@@ -646,7 +821,7 @@ final class ComponentStackPropagation
         return Image::query()->active()
             ->whereIn('product_id', $ids)
             ->where('image_asset_id', $asset->id)
-            ->where('position', 1)
+            ->orderBy('position')
             ->orderBy('id')
             ->get();
     }
@@ -656,9 +831,17 @@ final class ComponentStackPropagation
         if (! $this->generationIsCurrent($componentProductId, $generationId)) {
             return;
         }
+        if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            return;
+        }
+        $sourceImageId = (int) DB::table('component_photograph_generations')->where('id', $generationId)->value('component_image_id');
+        if ($sourceImageId < 1) {
+            return;
+        }
         $olderIds = DB::table('inherited_image_sources')
-            ->where('component_product_id', $componentProductId)
+            ->where('component_image_id', $sourceImageId)
             ->where('image_id', '!=', $replacement->id)
+            ->whereNull('removed_at')
             ->pluck('image_id');
         $older = Image::query()->active()
             ->where('product_id', $stack->id)
@@ -666,6 +849,11 @@ final class ComponentStackPropagation
             ->whereIn('id', $olderIds)
             ->get();
         foreach ($older as $image) {
+            if ($this->photographStillRequired($stack, $image)) {
+                $this->reconcileSharedProvenance($stack, $image);
+
+                continue;
+            }
             if (DB::table('inherited_media_retirements')->where('image_id', $image->id)->where('old_media_id', $image->shopify_id)->where('status', 'retained')->exists()) {
                 continue;
             }
@@ -675,25 +863,28 @@ final class ComponentStackPropagation
             if (! $this->generationIsCurrent($componentProductId, $generationId)) {
                 return;
             }
-            $stillShared = DB::table('inherited_image_sources')
-                ->where('image_id', $image->id)
-                ->where('component_product_id', '!=', $componentProductId)
-                ->whereNull('removed_at')
-                ->exists();
-            if ($stillShared) {
-                $this->closeComponentProvenance($image, $componentProductId);
-
-                continue;
-            }
             $oldMedia = trim((string) $image->shopify_id);
             if ($oldMedia !== '' && $oldMedia !== $replacementMediaId) {
                 if ($this->anotherActiveImageUsesMedia($stack, $image, $oldMedia)) {
                     continue;
                 }
-                $this->persistRetirementIntent($stack, $image, $oldMedia, $replacementMediaId, (int) $replacement->id, $generationId);
-                $this->updater->retireStackProductMedia($stack, $oldMedia, $replacementMediaId, function () use ($componentProductId, $generationId, $replacement): void {
+                if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+                    return;
+                }
+                $this->persistRetirementIntent($stack, $image, $oldMedia, $replacementMediaId, (int) $replacement->id, $generationId, null);
+                $this->updater->retireStackProductMedia($stack, $oldMedia, $replacementMediaId, function () use ($stack, $componentProductId, $generationId, $replacement, $image, $sourceImageId): void {
                     if (! $this->generationIsCurrent($componentProductId, $generationId)) {
                         throw new RuntimeException('A newer component generation superseded retirement. The newer photograph was kept.');
+                    }
+                    if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+                        throw new RuntimeException('Stack is not active. Shopify media was not removed.');
+                    }
+                    $source = Image::query()->useWritePdo()->find($sourceImageId);
+                    if (! $source instanceof Image || ! $this->selector->publicationAllowed($source)) {
+                        throw new RuntimeException('Retirement is no longer authorized. The superseded photograph was kept.');
+                    }
+                    if ($this->photographStillRequired($stack, $image)) {
+                        throw new RuntimeException('A current component still requires this photograph. It was not removed.');
                     }
                     $current = Image::query()->find($replacement->id);
                     if ($current instanceof Image && trim((string) $current->shopify_id) !== '' && trim((string) $current->shopify_id) === trim((string) $replacement->shopify_id)) {
@@ -718,8 +909,11 @@ final class ComponentStackPropagation
         }
     }
 
-    private function persistRetirementIntent(Product $stack, Image $image, string $oldMedia, string $replacementMediaId, int $replacementImageId, int $generationId): void
+    private function persistRetirementIntent(Product $stack, Image $image, string $oldMedia, string $replacementMediaId, int $replacementImageId, int $generationId, ?string $deferralReason): ?object
     {
+        $image->loadMissing('imageAsset');
+        $generation = DB::table('component_photograph_generations')->where('id', $generationId)->first();
+        $members = $this->catalog->componentIds($stack);
         DB::table('inherited_media_retirements')->insertOrIgnore([
             'stack_product_id' => $stack->id,
             'image_id' => $image->id,
@@ -727,10 +921,35 @@ final class ComponentStackPropagation
             'old_media_id' => $oldMedia,
             'replacement_media_id' => $replacementMediaId !== '' ? $replacementMediaId : null,
             'replacement_image_id' => $replacementImageId > 0 ? $replacementImageId : null,
+            'component_product_id' => $generation->component_product_id ?? null,
+            'component_image_id' => $generation->component_image_id ?? $image->source_image_id,
+            'image_asset_id' => $image->image_asset_id,
+            'asset_sha256' => $image->imageAsset?->sha256,
+            'membership_evidence' => json_encode([
+                'component_ids' => $members,
+                'generation_id' => $generationId,
+                'selection_revision' => $generation->selection_revision ?? null,
+                'stack_status' => $stack->status,
+            ], JSON_THROW_ON_ERROR),
+            'deferral_reason' => $deferralReason,
             'status' => 'pending',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+        $intent = DB::table('inherited_media_retirements')
+            ->where('image_id', $image->id)
+            ->where('old_media_id', $oldMedia)
+            ->where('generation_id', $generationId)
+            ->first();
+        if ($intent && $intent->status === 'pending' && $deferralReason && trim((string) $intent->deferral_reason) === '') {
+            DB::table('inherited_media_retirements')->where('id', $intent->id)->update([
+                'deferral_reason' => $deferralReason,
+                'updated_at' => now(),
+            ]);
+            $intent->deferral_reason = $deferralReason;
+        }
+
+        return $intent;
     }
 
     private function generationIsCurrent(int $componentProductId, int $generationId): bool
@@ -854,7 +1073,7 @@ final class ComponentStackPropagation
         DB::table('stack_image_sync_tasks')->where('id', $taskId)->whereNotIn('phase', ['verified', 'superseded'])->update([
             'phase' => $phase,
             'last_error' => $error,
-            'available_at' => now()->addSeconds($seconds),
+            'available_at' => $seconds > 0 ? now()->addSeconds($seconds) : now()->subSecond(),
             'updated_at' => now(),
         ]);
     }
@@ -1116,66 +1335,78 @@ final class ComponentStackPropagation
 
     private function removeInheritedComponent(object $task): void
     {
-        $stack = Product::query()->find($task->stack_product_id);
+        $mutex = new ImageSyncMutex;
+        if ((int) $task->stack_product_id < 1 || ! $mutex->acquire((int) $task->stack_product_id)) {
+            $this->deferTask((int) $task->id, 'Another image operation is running.', 'pending', 30);
+            throw new RuntimeException('Another image operation is running for stack '.$task->stack_product_id.'.');
+        }
+        try {
+            $this->removeInheritedComponentWhileLocked($task);
+        } finally {
+            $mutex->release();
+        }
+    }
+
+    private function removeInheritedComponentWhileLocked(object $task): void
+    {
+        $stack = Product::query()->useWritePdo()->find($task->stack_product_id);
         if (! $stack instanceof Product) {
             $this->deferTask((int) $task->id, 'The stack no longer exists.', 'failed');
 
             return;
         }
-        if (in_array((int) $task->component_product_id, $this->catalog->componentIds($stack), true)) {
-            DB::table('stack_image_sync_tasks')->where('id', $task->id)->update([
-                'phase' => 'superseded',
-                'last_error' => 'The component is a current stack member. Removal was not applied.',
-                'updated_at' => now(),
-            ]);
+        if ($this->componentIsMember($stack, (int) $task->component_product_id)) {
+            $this->preserveRetirementsForReturnedMember($stack, $task);
+            $this->supersedeRemoval($task, 'The component is a current stack member. Removal was not applied.');
 
             return;
         }
-        $imageIds = DB::table('inherited_image_sources')
-            ->where('component_product_id', $task->component_product_id)
-            ->whereNull('removed_at')
-            ->pluck('image_id');
-        $images = Image::query()->active()
-            ->where('product_id', $stack->id)
-            ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
-            ->whereIn('id', $imageIds)
-            ->get();
-        foreach ($images as $image) {
-            $stillShared = DB::table('inherited_image_sources')
-                ->where('image_id', $image->id)
-                ->where('component_product_id', '!=', $task->component_product_id)
+        $stopped = $this->resumeDeferredRetirements($stack, $task);
+        if ($stopped === null) {
+            $imageIds = DB::table('inherited_image_sources')
+                ->where('component_product_id', $task->component_product_id)
                 ->whereNull('removed_at')
-                ->exists();
-            if ($stillShared) {
-                $this->closeComponentProvenance($image, (int) $task->component_product_id);
-
-                continue;
+                ->pluck('image_id');
+            $images = Image::query()->active()
+                ->where('product_id', $stack->id)
+                ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+                ->whereIn('id', $imageIds)
+                ->get();
+            foreach ($images as $image) {
+                $stopped = $this->retireOrDeferRemovedPhotograph($stack, $task, $image);
+                if ($stopped !== null) {
+                    break;
+                }
             }
-            $oldMedia = trim((string) $image->shopify_id);
-            if ($oldMedia !== '' && ! $this->anotherActiveImageUsesMedia($stack, $image, $oldMedia)) {
-                $this->persistRetirementIntent($stack, $image, $oldMedia, '', 0, (int) $task->generation_id);
-                $this->updater->retireStackProductMedia($stack, $oldMedia, '', function () use ($stack, $task): void {
-                    $current = Product::query()->find($stack->id);
-                    if ($current instanceof Product && in_array((int) $task->component_product_id, $this->catalog->componentIds($current), true)) {
-                        throw new RuntimeException('The component returned to the stack. The photograph was kept.');
-                    }
-                }, (int) $image->id);
-                DB::table('inherited_media_retirements')
-                    ->where('image_id', $image->id)
-                    ->where('old_media_id', $oldMedia)
-                    ->whereIn('status', ['pending', 'mutating'])
-                    ->update(['status' => 'confirmed', 'resolution' => 'shopify_absent', 'last_error' => null, 'updated_at' => now()]);
-            }
-            $this->closeComponentProvenance($image, (int) $task->component_product_id);
-            app(ImagePhotographEvidence::class)->archive($image, 'Component removed from the stack');
-            Variant::query()->where('product_id', $stack->id)->where('image_id', $image->id)->update(['image_id' => null]);
-            Image::withoutEvents(fn () => $image->forceFill([
-                'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
-                'needs_shopify_image_sync' => false,
-            ])->save());
         }
-        if (DB::table('inherited_media_retirements')->where('stack_product_id', $stack->id)->where('generation_id', $task->generation_id)->whereIn('status', ['pending', 'mutating'])->exists()) {
-            $this->deferTask((int) $task->id, 'A stack retirement is still unconfirmed.', 'failed');
+        if ($stopped === 'preserved') {
+            $this->supersedeRemoval($task, 'A current component still requires this photograph. Retirement was not applied.');
+
+            return;
+        }
+        if ($stopped === 'failed') {
+            return;
+        }
+        $unresolved = DB::table('inherited_media_retirements')
+            ->where('stack_product_id', $stack->id)
+            ->where('generation_id', $task->generation_id)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->exists();
+        if ($unresolved) {
+            $active = $this->stackAllowsAutomaticShopifyDestruction($stack);
+            $this->deferTask(
+                (int) $task->id,
+                $active
+                    ? 'A stack retirement is still unconfirmed.'
+                    : 'Stack is not active. Inherited photographs were reconciled locally and were not removed from Shopify.',
+                $active ? 'failed' : 'blocked',
+                $active ? 60 : 0
+            );
+
+            return;
+        }
+        if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            $this->deferTask((int) $task->id, 'Stack is not active. Inherited photographs were reconciled locally and were not removed from Shopify.', 'blocked', 0);
 
             return;
         }
@@ -1184,6 +1415,314 @@ final class ComponentStackPropagation
             'last_error' => null,
             'updated_at' => now(),
         ]);
+    }
+
+    private function retireOrDeferRemovedPhotograph(Product $stack, object $task, Image $image): ?string
+    {
+        $stack = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+        if ($this->componentIsMember($stack, (int) $task->component_product_id)) {
+            $this->preserveInheritedPhotograph($stack, $image, (int) $task->generation_id);
+
+            return 'preserved';
+        }
+        if ($this->photographStillRequired($stack, $image)) {
+            $this->preserveInheritedPhotograph($stack, $image, (int) $task->generation_id);
+
+            return null;
+        }
+        $oldMedia = trim((string) $image->shopify_id);
+        if ($oldMedia !== '' && $this->anotherActiveImageUsesMedia($stack, $image, $oldMedia)) {
+            return null;
+        }
+        $deferral = $this->stackAllowsAutomaticShopifyDestruction($stack)
+            ? null
+            : 'Stack is not active. Shopify association removal was deferred.';
+        $intent = $oldMedia !== ''
+            ? $this->persistRetirementIntent($stack, $image, $oldMedia, '', 0, (int) $task->generation_id, $deferral)
+            : null;
+        if ($intent && $intent->status === 'retained') {
+            return null;
+        }
+        if ($intent && $intent->status === 'mutating') {
+            $this->deferTask((int) $task->id, 'Uncertain retirement mutation still requires confirmation. It will not be replayed; use images:resolve-media-retirement.', 'failed');
+
+            return 'failed';
+        }
+        if ($intent && $intent->status === 'pending' && $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            try {
+                $this->updater->retireStackProductMedia($stack, $oldMedia, '', function () use ($stack, $task, $image): void {
+                    $this->assertRemovalStillCurrent($stack, $task, $image);
+                }, (int) $image->id);
+            } catch (\Throwable $exception) {
+                if (str_contains($exception->getMessage(), 'Another image operation is running')) {
+                    return 'failed';
+                }
+                $fresh = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+                if ($this->componentIsMember($fresh, (int) $task->component_product_id)) {
+                    $this->preserveInheritedPhotograph($fresh, $image, (int) $task->generation_id);
+
+                    return 'preserved';
+                }
+                if ($this->photographStillRequired($fresh, $image)) {
+                    $this->preserveInheritedPhotograph($fresh, $image, (int) $task->generation_id);
+
+                    return null;
+                }
+                $this->noteRetirementFailure($intent, $exception);
+                $this->deferTask((int) $task->id, $exception->getMessage(), 'failed');
+
+                return 'failed';
+            }
+            $this->confirmRetirementAbsent($intent);
+        }
+        if ($intent && DB::table('inherited_media_retirements')->where('id', $intent->id)->where('status', 'mutating')->exists()) {
+            $this->deferTask((int) $task->id, 'Uncertain retirement mutation still requires confirmation. It will not be replayed; use images:resolve-media-retirement.', 'failed');
+
+            return 'failed';
+        }
+        if ($intent && DB::table('inherited_media_retirements')->where('id', $intent->id)->where('status', 'pending')->exists()
+            && $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            $this->deferTask((int) $task->id, 'A stack retirement is still unconfirmed.', 'failed');
+
+            return 'failed';
+        }
+        $this->finishLocalRemoval($stack, $image, (int) $task->component_product_id);
+
+        return null;
+    }
+
+    private function resumeDeferredRetirements(Product $stack, object $task): ?string
+    {
+        $intents = DB::table('inherited_media_retirements')
+            ->where('stack_product_id', $stack->id)
+            ->where('generation_id', $task->generation_id)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->orderBy('id')
+            ->get();
+        foreach ($intents as $intent) {
+            $image = Image::query()->find($intent->image_id);
+            if (! $image instanceof Image) {
+                continue;
+            }
+            if ($intent->status === 'mutating') {
+                $this->deferTask((int) $task->id, 'Uncertain retirement mutation still requires confirmation. It will not be replayed; use images:resolve-media-retirement.', 'failed');
+
+                return 'failed';
+            }
+            $stopped = $this->retireOrDeferRemovedPhotograph($stack, $task, $image);
+            if ($stopped !== null) {
+                return $stopped;
+            }
+        }
+
+        return null;
+    }
+
+    private function stackAllowsAutomaticShopifyDestruction(Product $stack): bool
+    {
+        $fresh = Product::query()->useWritePdo()->find($stack->id);
+
+        return $fresh instanceof Product && strtolower(trim((string) $fresh->status)) === 'active';
+    }
+
+    private function componentIsMember(Product $stack, int $componentProductId): bool
+    {
+        $fresh = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+
+        return in_array($componentProductId, $this->catalog->componentIds($fresh), true);
+    }
+
+    /**
+     * @return Collection<int, Image>
+     */
+    private function currentSourcesForPhotograph(Product $stack, Image $image): Collection
+    {
+        $image->loadMissing('imageAsset');
+        $assetId = (int) $image->image_asset_id;
+        $sha = (string) $image->imageAsset?->sha256;
+        $members = $this->catalog->componentIds($stack);
+        if ($members === [] || ($assetId < 1 && $sha === '')) {
+            return collect();
+        }
+
+        return Image::query()->active()->with('imageAsset')
+            ->whereIn('product_id', $members)
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->filter(function (Image $source) use ($assetId, $sha): bool {
+                if ($assetId > 0 && (int) $source->image_asset_id === $assetId) {
+                    return true;
+                }
+                $sourceSha = (string) $source->imageAsset?->sha256;
+
+                return $sha !== '' && $sourceSha !== '' && hash_equals($sha, $sourceSha);
+            })
+            ->values();
+    }
+
+    private function photographStillRequired(Product $stack, Image $image): bool
+    {
+        $fresh = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+
+        return $this->currentSourcesForPhotograph($fresh, $image)->isNotEmpty();
+    }
+
+    private function reconcileSharedProvenance(Product $stack, Image $image): void
+    {
+        $image->loadMissing('imageAsset');
+        $sources = $this->currentSourcesForPhotograph($stack, $image);
+        $sourceIds = $sources->map(fn (Image $source): int => (int) $source->id)->all();
+        foreach (DB::table('inherited_image_sources')->where('image_id', $image->id)->whereNull('removed_at')->get() as $link) {
+            if (in_array((int) $link->component_image_id, $sourceIds, true)) {
+                continue;
+            }
+            app(ImagePhotographEvidence::class)->archiveSource($link, 'remove_source');
+            DB::table('inherited_image_sources')->where('id', $link->id)->update([
+                'removed_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+        foreach ($sources as $source) {
+            $source->loadMissing('imageAsset');
+            $asset = $source->imageAsset;
+            if (! $asset instanceof ImageAsset) {
+                continue;
+            }
+            $existing = DB::table('inherited_image_sources')
+                ->where('image_id', $image->id)
+                ->where('component_image_id', $source->id)
+                ->where('image_asset_id', $asset->id)
+                ->first();
+            $snapshot = $this->provenanceSnapshot($source, $asset);
+            if ($existing) {
+                DB::table('inherited_image_sources')->where('id', $existing->id)->update(array_merge($snapshot, [
+                    'removed_at' => null,
+                    'component_product_id' => $source->product_id,
+                    'updated_at' => now(),
+                ]));
+
+                continue;
+            }
+            DB::table('inherited_image_sources')->insertOrIgnore(array_merge([
+                'image_id' => $image->id,
+                'component_image_id' => $source->id,
+                'component_product_id' => $source->product_id,
+                'generation_id' => null,
+                'image_asset_id' => $asset->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ], $snapshot));
+        }
+        $survivor = $sources->first();
+        if ($survivor instanceof Image && (int) $image->source_image_id !== (int) $survivor->id) {
+            Image::withoutEvents(fn () => $image->forceFill(['source_image_id' => $survivor->id])->save());
+        }
+    }
+
+    private function preserveInheritedPhotograph(Product $stack, Image $image, int $generationId): void
+    {
+        $this->reconcileSharedProvenance($stack, $image);
+        if ($image->sync_state === Image::SYNC_STATE_LOCAL_DELETED && $this->photographStillRequired($stack, $image)) {
+            Image::withoutEvents(fn () => $image->forceFill([
+                'sync_state' => Image::SYNC_STATE_SYNCED,
+                'needs_shopify_image_sync' => false,
+            ])->save());
+        }
+        DB::table('inherited_media_retirements')
+            ->where('image_id', $image->id)
+            ->where('generation_id', $generationId)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->update([
+                'status' => 'retained',
+                'resolution' => 'preserved_current_source',
+                'last_error' => null,
+                'updated_at' => now(),
+            ]);
+    }
+
+    private function preserveRetirementsForReturnedMember(Product $stack, object $task): void
+    {
+        $intents = DB::table('inherited_media_retirements')
+            ->where('stack_product_id', $stack->id)
+            ->where('generation_id', $task->generation_id)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->get();
+        foreach ($intents as $intent) {
+            $image = Image::query()->find($intent->image_id);
+            if ($image instanceof Image) {
+                $this->preserveInheritedPhotograph($stack, $image, (int) $task->generation_id);
+            }
+        }
+    }
+
+    private function supersedeRemoval(object $task, string $reason): void
+    {
+        DB::table('stack_image_sync_tasks')->where('id', $task->id)->update([
+            'phase' => 'superseded',
+            'last_error' => $reason,
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function assertRemovalStillCurrent(Product $stack, object $task, Image $image): void
+    {
+        if (! $this->stackAllowsAutomaticShopifyDestruction($stack)) {
+            throw new RuntimeException('Stack is not active. Shopify media was not removed.');
+        }
+        $fresh = Product::query()->useWritePdo()->find($stack->id) ?? $stack;
+        if ($this->componentIsMember($fresh, (int) $task->component_product_id)) {
+            throw new RuntimeException('The component returned to the stack. The photograph was kept.');
+        }
+        if ($this->photographStillRequired($fresh, $image)) {
+            throw new RuntimeException('A current component still requires this photograph. It was not removed.');
+        }
+    }
+
+    private function confirmRetirementAbsent(?object $intent): void
+    {
+        if (! $intent) {
+            return;
+        }
+        DB::table('inherited_media_retirements')
+            ->where('id', $intent->id)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->update([
+                'status' => 'confirmed',
+                'resolution' => 'shopify_absent',
+                'deferral_reason' => null,
+                'last_error' => null,
+                'updated_at' => now(),
+            ]);
+    }
+
+    private function noteRetirementFailure(?object $intent, \Throwable $exception): void
+    {
+        if (! $intent) {
+            return;
+        }
+        DB::table('inherited_media_retirements')
+            ->where('id', $intent->id)
+            ->whereIn('status', ['pending', 'mutating'])
+            ->update([
+                'last_error' => $exception->getMessage(),
+                'updated_at' => now(),
+            ]);
+    }
+
+    private function finishLocalRemoval(Product $stack, Image $image, int $componentProductId): void
+    {
+        if ($image->fresh()?->sync_state === Image::SYNC_STATE_LOCAL_DELETED) {
+            return;
+        }
+        $this->closeComponentProvenance($image, $componentProductId);
+        app(ImagePhotographEvidence::class)->archive($image, 'Component removed from the stack');
+        Variant::query()->where('product_id', $stack->id)->where('image_id', $image->id)->update(['image_id' => null]);
+        Image::withoutEvents(fn () => $image->forceFill([
+            'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
+            'needs_shopify_image_sync' => false,
+        ])->save());
     }
 
     private function anotherActiveImageUsesMedia(Product $stack, Image $image, string $mediaId): bool

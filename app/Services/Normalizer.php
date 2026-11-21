@@ -30,7 +30,11 @@ final class Normalizer
             ->whereIn('handle', $incoming->pluck('handle')->unique())->select('id'))->get();
         $evidence = app(CatalogImageMatcher::class)->prepareEvidence($images, $incoming
             ->map(fn (ShopifyRow $row): string => (string) $row->get(HeaderStore::IMAGE_SRC, ''))->filter()->all());
+        $galleryBoundary = app(StackSynchronizationBoundary::class)->acquireForProducts(
+            Product::query()->whereIn('handle', $incoming->pluck('handle')->unique()->filter()->all())->pluck('id')->all()
+        );
 
+        try {
         DB::transaction(function () use ($import, $stageExistingProductUpdates, $evidence, &$imageIdsNeedingBackup) {
             $rows = ShopifyRow::where('import_id', $import->id)
                 ->whereNotNull('handle')
@@ -210,6 +214,9 @@ final class Normalizer
                 });
             }
         });
+        } finally {
+            $galleryBoundary->release();
+        }
 
         $imageIdsNeedingBackup = array_values(array_unique(array_map('intval', $imageIdsNeedingBackup)));
         foreach (array_chunk($imageIdsNeedingBackup, 100) as $chunk) {

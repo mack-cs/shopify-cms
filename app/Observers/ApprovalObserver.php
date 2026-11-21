@@ -24,5 +24,6 @@ class ApprovalObserver implements ShouldHandleEventsAfterCommit
             null,
             StyleProfileSeoTimelineService::APPROVAL_SOURCE_FULL
         );
+        app(\App\Services\StackImageSync::class)->afterFullApproval($product, (int) $approval->user_id);
     }
 }

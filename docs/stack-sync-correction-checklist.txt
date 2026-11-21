@@ -1,0 +1,22 @@
+Component-to-stack image synchronization correction checklist
+Source: docs/independent-stack-sync-audit-2026-11-20.txt
+Status values: open, in progress, corrected. A finding is corrected only after the original execution path no longer reproduces.
+
+C1  open         Durable retirement intent, shared per-stack lock through Shopify dispatch, and blocked-intent recovery are implemented. Awaiting independent re-audit.
+C2  open         Current gallery identity is rechecked under the same stack lock immediately before a destructive mutation. Awaiting independent re-audit.
+H1  open         Real edit paths bypass photograph and alt versions, so authorization can cover a later sentence.
+H2  open         shopify_identity_unresolved blocks publication of an approved local replacement.
+H3  open         Planned retirement is never applied, and empty membership returns before reconciliation.
+H4  open         Ledger and baseline can be marked verified without a Shopify read-back.
+H5  open         A following published alt stays frozen, and independent overrides are planned as alt updates.
+H6  open         stageStack is not serialized per stack; concurrent workers can insert duplicate inherited rows.
+H7  open         A failed synchronization job can leave the cursor running.
+H8  open         A no-op provenance rewrite invalidates an operator alt resolution.
+H9  open         Queued jobs ignore disabled flags and can publish after blind publication is turned off.
+H10 open         A shared photograph stays bound to a removed source and is planned for retirement.
+M1  open         Occupied gallery positions are not swapped, so reorder can remain outstanding.
+M2  open         Reminder timers miss real edits and suppress a reopened issue.
+M3  open         Reminder deduplication happens after send, so a nested send can deliver twice.
+M4  open         Baseline and the operator page exclude stacks recognized only by tags.
+M5  open         Migration rollback drops authorization and reminder tables.
+L1  open         A failed local rebuild is reported as completed.

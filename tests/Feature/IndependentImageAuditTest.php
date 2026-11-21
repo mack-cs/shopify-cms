@@ -238,6 +238,11 @@ it('detects lock expiry and ownership loss before another request', function () 
     expect($mutex->acquire($i->product_id))->toBeTrue();
     Cache::lock(ProductShopifyUpdater::IMAGE_SYNC_LOCK_PREFIX.$i->product_id)->forceRelease();
     expect(fn () => $mutex->assertOwned())->toThrow(RuntimeException::class, 'ownership was lost');
+    expect((new ImageSyncMutex)->acquire($i->product_id))->toBeFalse();
+    $mutex->release();
+    $next = new ImageSyncMutex;
+    expect($next->acquire($i->product_id))->toBeTrue();
+    $next->release();
 });
 
 it('retries delayed readback without resending fileUpdate and skips already current alt', function () {
@@ -300,12 +305,15 @@ it('rejects conflicting historical candidates instead of choosing a URL', functi
 
 it('blocks a concurrent import and then reuses the same photograph across reordered positions', function () {
     $i = lifecycleImage();
-    $mutex = new ImageSyncMutex;
-    expect($mutex->acquire($i->product_id))->toBeTrue();
+    $lock = Cache::lock(ProductShopifyUpdater::IMAGE_SYNC_LOCK_PREFIX.$i->product_id, 3600);
+    expect($lock->get())->toBeTrue();
     $method = new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport');
-    expect(fn () => $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed.jpg', 2))
-        ->toThrow(RuntimeException::class, 'operation is running');
-    $mutex->release();
+    try {
+        expect(fn () => $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed.jpg', 2))
+            ->toThrow(RuntimeException::class, 'operation is running');
+    } finally {
+        $lock->release();
+    }
     $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed.jpg', 2);
     $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed-again.jpg', 3);
     expect($i->product->allImages()->count())->toBe(1)->and($i->fresh()->position)->toBe(3);

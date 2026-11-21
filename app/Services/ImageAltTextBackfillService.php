@@ -581,7 +581,13 @@ final class ImageAltTextBackfillService
             return false;
         }
         $source = Image::query()->with('product')->find($copy->source_image_id);
-        if (! $source || ! $source->product?->isApprovedByTwo() || ! app(ComponentPhotographSelector::class)->confirmed($source)) {
+        if (! $source || ! $source->imageAsset?->isAvailable()) {
+            return false;
+        }
+        if (app(StackImageSync::class)->stackCapturedPhotograph($copy)) {
+            return true;
+        }
+        if (! $source->product?->isApprovedByTwo() || ! app(ComponentPhotographSelector::class)->confirmed($source)) {
             return false;
         }
 

@@ -196,9 +196,14 @@ final class NewProductDraftCsvImporter
 
         $pricingBatch = $pricingImport ? 'import_batch_'.now()->format('Y_m_d_His') : null;
         $this->csvProductReferenceLookup = $this->csvProductReferenceLookup($csv, $draftMap);
+        $records = iterator_to_array($csv->getRecords());
+        $membershipBoundary = app(StackSynchronizationBoundary::class)->acquireForStacks(
+            $this->stackIdsForCsvRecords($records, $draftMap)
+        );
 
+        try {
         DB::transaction(function () use (
-            $csv,
+            $records,
             $draftMap,
             $seoDraftMap,
             &$total,
@@ -222,7 +227,7 @@ final class NewProductDraftCsvImporter
             $pricingBatch,
             $unlistedLaunch
         ): void {
-            foreach ($csv->getRecords() as $row) {
+            foreach ($records as $row) {
                 $total++;
 
                 $data = [];
@@ -530,6 +535,9 @@ final class NewProductDraftCsvImporter
                 }
             }
         });
+        } finally {
+            $membershipBoundary->release();
+        }
 
         return [
             'total' => $total,
@@ -676,6 +684,77 @@ final class NewProductDraftCsvImporter
         }
 
         return [$data, true];
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $records
+     * @param  array<string, string>  $draftMap
+     * @return list<int>
+     */
+    private function stackIdsForCsvRecords(array $records, array $draftMap): array
+    {
+        $boundary = app(StackSynchronizationBoundary::class);
+        $ids = [];
+        foreach ($records as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $data = [];
+            foreach ($row as $header => $value) {
+                $field = $draftMap[$this->normalizeHeader((string) $header)] ?? null;
+                if (! is_string($field) || $field === '') {
+                    continue;
+                }
+                $trimmed = trim((string) $value);
+                if ($trimmed !== '') {
+                    $data[$field] = $trimmed;
+                }
+            }
+            $sku = $data['sku'] ?? null;
+            $draft = $this->findDraftForImport(
+                is_string($sku) ? $sku : null,
+                isset($data['shopify_id']) ? (string) $data['shopify_id'] : null,
+                isset($data['handle']) ? (string) $data['handle'] : null
+            );
+            $product = null;
+            if (is_string($sku) && $sku !== '') {
+                $owners = $this->productIdsForSku($sku);
+                if (count($owners) === 1) {
+                    $product = Product::query()->find($owners[0]);
+                    if (! $draft && $product instanceof Product) {
+                        $draft = $this->findDraftForLinkedProduct($product);
+                    }
+                }
+            }
+            if (! $draft instanceof NewProductDraft && (filled($data['shopify_id'] ?? null) || filled($data['handle'] ?? null))) {
+                $draft = new NewProductDraft;
+                $draft->forceFill([
+                    'shopify_id' => $data['shopify_id'] ?? null,
+                    'handle' => $data['handle'] ?? null,
+                ]);
+            }
+            if ($draft instanceof NewProductDraft) {
+                $stackId = $boundary->stackIdForDraft($draft);
+                if ($stackId !== null) {
+                    $ids[] = $stackId;
+                }
+                if (! $product instanceof Product) {
+                    $shopifyId = trim((string) $draft->shopify_id);
+                    $handle = trim((string) $draft->handle);
+                    $product = $shopifyId !== '' ? Product::query()->where('shopify_id', $shopifyId)->first() : null;
+                    if (! $product instanceof Product && $handle !== '') {
+                        $product = Product::query()->where('handle', $handle)->first();
+                    }
+                }
+            }
+            if ($product instanceof Product) {
+                foreach ($boundary->stackIdsForComponent((int) $product->id) as $stackId) {
+                    $ids[] = $stackId;
+                }
+            }
+        }
+
+        return $ids;
     }
 
     private function findDraftForImport(?string $sku, ?string $shopifyId, ?string $handle): ?NewProductDraft
@@ -1358,9 +1437,16 @@ final class NewProductDraftCsvImporter
         unset($authoritativeAttributes['payload']);
 
         if ($authoritativeAttributes !== []) {
-            NewProductDraft::query()
-                ->whereKey($draft->getKey())
-                ->update($authoritativeAttributes);
+            $boundary = array_key_exists('bundle_product_ids', $authoritativeAttributes)
+                ? app(StackSynchronizationBoundary::class)->prepareMembershipWrite($draft)
+                : null;
+            try {
+                NewProductDraft::query()
+                    ->whereKey($draft->getKey())
+                    ->update($authoritativeAttributes);
+            } finally {
+                $boundary?->release();
+            }
             $draft->refresh();
         }
 

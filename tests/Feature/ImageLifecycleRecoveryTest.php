@@ -8,11 +8,11 @@ use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use App\Models\User;
 use App\Services\ImagePhotographEvidence;
-use App\Services\ImageSyncMutex;
 use App\Services\ImageUploadOperations;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductShopifyUpdater;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -220,14 +220,14 @@ it('does not resolve a different current sentence or photograph as published', f
 it('honors the synchronization mutex for confirmation recovery', function () {
     $i = recoveryImage();
     $operator = recoveryOperator();
-    $mutex = new ImageSyncMutex;
-    expect($mutex->acquire($i->product_id))->toBeTrue();
+    $lock = Cache::lock(ProductShopifyUpdater::IMAGE_SYNC_LOCK_PREFIX.$i->product_id, 3600);
+    expect($lock->get())->toBeTrue();
     $remote = new RecoveryShopifyFake;
     recoveryHttp($remote);
     try {
         $this->artisan('images:resolve-alt-confirmation', ['image' => $i->id, '--operator' => $operator->id])->assertFailed();
     } finally {
-        $mutex->release();
+        $lock->release();
     }
     expect($remote->queries)->toBe([])->and($i->fresh()->alt_confirmation_text)->toBe('approved sentence');
 });

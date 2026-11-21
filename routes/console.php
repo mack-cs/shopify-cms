@@ -57,6 +57,7 @@ Artisan::command('alt-text-exports:cleanup', function (): void {
 
 Schedule::command('alt-text-exports:cleanup')->hourly()->withoutOverlapping();
 Schedule::command('images:recover-component-stack-propagation')->everyFiveMinutes()->withoutOverlapping()->runInBackground();
+Schedule::command('images:remind-publication')->everyFifteenMinutes()->withoutOverlapping()->runInBackground();
 
 Schedule::call(fn () => app(StackSellabilityShopifyPushService::class)->retryPending())
     ->everyFiveMinutes()->name('stack-sellability-retries')->withoutOverlapping(2)->onOneServer();

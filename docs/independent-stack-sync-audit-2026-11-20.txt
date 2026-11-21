@@ -1,0 +1,350 @@
+INDEPENDENT AUDIT: COMPONENT-TO-STACK IMAGE SYNCHRONIZATION
+20 November 2026, Africa/Johannesburg
+
+VERDICT: NOT READY FOR PRODUCTION ACTIVATION.
+Read-only or deliberately isolated diagnostic staging is appropriate. Do not activate
+automatic Shopify publication or combine legacy propagation with the new workflow.
+
+The actual working tree was inspected independently, including all new services, jobs,
+observers, commands, operator page, configuration, scheduler, migration and tests. Passing
+tests and previous implementation reports were not treated as correctness evidence.
+No application source was changed. Temporary diagnostic tests/harnesses were removed after
+archiving their reproducible source as text under storage/logs. No deployment, feature-flag
+change, commit, production data change or live Shopify mutation was performed.
+
+READINESS BY WORKFLOW
+Manual CMS stack rebuilding: NOT READY for the complete stated workflow. Simple initial
+copying now works without component approval or Shopify publication, with all automatic
+flags disabled. Replacement/removal, shared provenance and occupied-position reordering
+still have confirmed defects.
+Automatic local rebuilding: NOT READY. Normal alt/import editing paths bypass the event
+hooks, concurrent staging is not serialized, and queued jobs ignore disabled flags.
+Automatic blind Shopify publication: NOT READY. Retirement is not executed by the new
+planner; authorization/version, confirmation, cursor recovery and flag handling are unsafe.
+Legacy baseline initialization: NOT READY. --publish can report baseline_verified without
+one Shopify read; tag-only stacks are excluded.
+Publication reminders: NOT READY. Nominal timing works, but real edit paths are missed,
+resolved/reopened issues are suppressed, and concurrent delivery can send duplicates.
+
+VERIFICATION EVIDENCE
+Existing complete repository suite: 1,532 passed, 9,205 assertions, 283.76 seconds.
+Log: storage/logs/independent-stack-audit-full.log
+Focused existing suites: 219 passed, 975 assertions, 90.95 seconds; includes
+ProductWorkflowSyncTest, StackImageSynchronizationTest, ComponentStackPropagationTest,
+ImageAltPublicationPriorityTest, ImageLifecycleRecoveryTest and IndependentImageAuditTest.
+Log: storage/logs/independent-stack-audit-existing.log
+Temporary diagnostics: 24 passed, 64 assertions, 3.63 seconds. THESE ASSERT DEFECTIVE
+OUTCOMES. Their passing result confirms reproductions; it does not certify safe behavior.
+Log: storage/logs/independent-stack-audit-diagnostics.log
+Source: storage/logs/independent-stack-audit-diagnostics-source.txt
+
+Actual local MySQL: the guarded harness created only disposable image_audit_* databases,
+ran the migration chain and legacy-record checks, and exercised real separate workers.
+The new November 20 migration applied and retried successfully. Two concurrent calls to
+the actual stageStack service, coordinated after both observed no inherited row, produced
+TWO inherited rows for one unchanged photograph (one active, one locally retired).
+The new migration's down/up cycle changed authorization row count from 1 to 0 on MySQL.
+The final disposable database image_audit_b0078fff651147c3 was removed. Earlier disposable
+databases were also removed. No configured CMS database was selected.
+Log: storage/logs/independent-stack-audit-mysql-final.log
+Harness sources: storage/logs/independent-stack-audit-mysql-source.txt and
+storage/logs/independent-stack-audit-mysql-runtime-source.txt
+
+No development-store session was performed. API request evidence below uses mocked
+Shopify, whereas database concurrency and rollback evidence explicitly labelled MySQL is
+real MySQL evidence. The audit does not claim real media processing, scopes, eventual
+consistency, attachment removal or variant behavior has passed integration testing.
+
+CONFIRMED FINDINGS: 2 CRITICAL, 10 HIGH, 5 MEDIUM, 1 LOW
+
+C1 CRITICAL - Legacy removal bypasses the inactive/draft stack guard.
+References: app/Services/ComponentStackPropagation.php:220,272,1223;
+app/Services/ProductShopifyUpdater.php:1141.
+Path: synchronizeTask handles purpose=remove and returns before the newly added active
+stack guard. removeInheritedComponent calls remote retirement for a draft stack.
+Reproduction: stage one inherited photograph, attach its independent MediaImage, make the
+stack draft, remove the member, then execute a legacy remove task. The diagnostic observes
+one fileUpdate association-removal request and the CMS copy becomes local_deleted while
+the stack remains draft. Expected: local-only reconciliation and zero Shopify mutations.
+Correction: enforce current active status and authorization on every destructive entry
+point and again at mutation boundaries, including removal tasks and shared helpers.
+Coverage: existing draft test exercises the new synchronizer, not legacy removal. The
+diagnostic 'legacy removal task deleting a draft stacks association' detects this.
+
+C2 CRITICAL - Legacy primary propagation retires another CURRENT component photograph.
+References: app/Services/ComponentStackPropagation.php:401,458,760-817 (retireOlderInherited).
+Path: new staging copies ALL component photographs, but legacy retirement still selects
+all other inherited images by component_product_id and a different asset. It assumes every
+other asset is an obsolete generation of the primary image, including current secondary
+photographs introduced by the new local rebuild.
+Reproduction: component has current A at position 1 and B at position 2; both stack copies
+are independently attached. Execute confirmed primary-A legacy publication with both
+mechanisms enabled. B's association is removed and its CMS copy retired although source B
+is still active/current. Expected: retain both current desired photographs.
+Correction: make the mechanisms mutually exclusive until retirement operates against the
+complete desired gallery and exact source-image/generation identity, not component ID.
+Coverage: old retirement tests use one selected component photograph; new tests copy all
+photographs locally without executing legacy retirement. The diagnostic reproduces the
+actual removal request with different original bytes for A and B.
+
+H1 HIGH - Version and authorization capture bypass actual approval snapshots/edit paths.
+References: app/Observers/ImageObserver.php:50,422;
+app/Services/ImageAltTextBackfillService.php:182,668;
+app/Services/ShopifyImageImportService.php:479-565;
+app/Services/StackImageSync.php:73-88,256-291,459-481;
+app/Services/ProductPartialApprovalService.php:362,449.
+Path: version increments/local-rebuild hooks live in ImageObserver, but normal CMS/CSV alt
+edits and S3 replacements save without events. recordAuthorizations reads every CURRENT
+image instead of the reviewed request snapshot/version. altAuthorized omits asset/hash.
+Reproductions: A -> B -> A through markPendingReview leaves alt_text_version=1 and reuses
+the old authorization. An approved snapshot of A followed by an intervening B edit, before
+the approval hook captures authorizations, records B as authorized. A real import replacement
+also leaves photograph_version=1. Expected: content changes advance versions through the
+real services, and immutable reviewed state is the only authorization source.
+Correction: maintain versions and queue events in shared write services used by every
+writer; capture snapshot-bound image, asset, hash, sentence and version, with stale-state
+checks. Avoid authorizing unrelated pending images while approving one scope.
+Coverage: current new tests seed versions manually or call ordinary save; they do not
+exercise these observer-bypassing service paths. Three diagnostics expose this.
+
+H2 HIGH - Approved local replacements still depend on component Shopify identity.
+References: app/Services/StackImageSync.php:256-260;
+app/Services/ImageAltTextBackfillService.php:565-592;
+app/Services/ProductShopifyUpdater.php:5067-5079.
+Path: local photograph replacement deliberately sets source.shopify_identity_unresolved.
+photographAuthorized rejects that flag even with an exact current-asset approval record;
+copyHasCurrentSource also rejects it. This flag describes Shopify identity, not whether
+the approved immutable CMS backup can be independently uploaded to the stack.
+Reproduction: replace component bytes through prepareImageForImport, authorize the new
+photo, rebuild. Source authorization returns false and plan reports no_changes_required
+instead of publishing the approved replacement. Expected: component publication is not
+required when current CMS photograph/approval evidence is sufficient.
+Correction: separate CMS photograph authorization from component remote-identity state;
+verify and publish the stack's own identity independently.
+Coverage: source-with-no-Shopify-ID staging test does not test replacement publication.
+
+H3 HIGH - New synchronization never applies retirements and misplans replacements.
+References: app/Services/StackImageSync.php:210-221,227-239,488-558;
+app/Services/ComponentStackPropagation.php:404,649-682.
+Path: plan populates retire, but applyAuthorizedPlan has no retirement loop. A replaced
+image whose source row is still active is instead placed in uploads using the new source's
+authorization despite retaining the old asset. Last-member removal exits local stageStack
+before reconciling the former gallery.
+Reproductions: remove a published member; synchronize returns its retirement ID but issues
+no Shopify requests and leaves it active. Replace source bytes; both the new and obsolete
+copy are upload candidates and retire is empty. Remove the final member; its unpublished
+copy also remains active. Expected: distinguish current desired copies from obsolete
+associations and complete safe, authorized retirement after replacement confirmation.
+Correction: apply the existing safe retirement machinery to explicit desired-state diffs,
+including empty membership, with source/asset identity and variant verification.
+Coverage: new removal test only removes an unpublished image while another member remains.
+
+H4 HIGH - Ledger and baseline claim verification without the required remote evidence.
+References: app/Services/StackImageSync.php:196-253,428-454,488-495,506-539,571-579;
+app/Console/Commands/RebuildStackImageBaseline.php:44-53.
+Path: plan compares cached CMS values/versions, never current Shopify state. Skipping all
+unauthorized images produces no_changes_required. --publish turns that into baseline_verified
+without a Shopify read. note(verified=true) also populates verified_alt_version for a
+photograph-only result; alt fallback can accept cached shopify_alt_text.
+Reproductions: a fully approved legacy stack with no new authorization rows, all automatic
+flags OFF, reports a verified baseline with Http::assertNothingSent. A photo-only ledger
+entry marks alt version verified; matching cached data yields no_changes_required without
+any current remote observation. Shopify deletion/drift therefore cannot be detected here.
+Correction: distinguish authorization pending, no eligible work and actually verified
+unchanged state. Bind receipts separately to photo/alt, media ID, asset, versions and fresh
+read-back. Require complete gallery evidence before baseline verification.
+Coverage: the existing noop test deliberately asserts a plan from seeded local receipts;
+the existing baseline test only runs without --publish. Neither proves live verification.
+
+H5 HIGH - Existing published inherited descriptions cannot follow new source alt text;
+independent overrides are incorrectly planned as source updates.
+References: app/Services/ComponentStackPropagation.php:708-739;
+app/Services/StackImageSync.php:229-239,530-546;
+app/Services/ImageAltTextBackfillService.php:265-288.
+Path: staging refuses to update any previously approved/published inherited sentence,
+even when it is still in component-following mode. The new synchronizer then calls
+publishInheritedCopy, which rejects a copy whose saved sentence differs from the newly
+approved source. Conversely, plan ignores alt_inheritance_mode and compares intentional
+independent stack overrides against the source sentence, causing perpetual alt plans or
+failure for an already-correct override.
+Reproductions: published copy A, source changed to B, rebuild leaves A; publication's
+sentence-equality gate rejects it. A correct independent override is planned in alt_only.
+Expected: following copies advance safely after approval; independent overrides remain
+independent and can reach a verified/no-change result.
+Correction: use one mode-aware authorized alt target in staging, planning, delivery and
+receipts. Preserve old text/history without freezing component-following copies forever.
+Coverage: new edit test uses an unapproved copy; independent-alt tests exercise another
+publisher rather than this new planner/executor combination.
+
+H6 HIGH - Concurrent local rebuilds are not serialized per destination stack.
+References: app/Services/StackImageSync.php:45-57,167;
+app/Services/ComponentStackPropagation.php:401,533-565;
+app/Jobs/RebuildDependentStackImagesJob.php:26;
+app/Filament/Pages/StackImageSyncStatus.php:63.
+Path: those entry points call stageStack without a stack mutex or row transaction. The
+local-job cache key is per component, so two components feeding the same stack do not
+exclude each other. Staging performs select-then-insert and can retire the competing row.
+Real MySQL reproduction: two separate actual stageStack workers both observe no row, then
+both insert. Expected total=1/active=1; observed total=2/active=1 on two runs. The source
+photograph was unchanged. This is not a SQLite locking inference.
+Correction: serialize the entire local desired-gallery operation per stack using the
+existing non-expiring session-mutex contract, with fresh state and transactional writes.
+Coverage: existing coalescing tests fake job dispatch and run serially; legacy MySQL
+generation tests do not exercise this new staging path.
+
+H7 HIGH - Synchronization exceptions can strand the cursor permanently in running.
+References: app/Services/StackImageSync.php:101-134,142-191;
+app/Jobs/SynchronizeAuthorizedStackImagesJob.php:20-33; routes/console.php:59.
+Path: running is persisted before staging; staging/planning/alt exceptions can escape
+before cursor finalization. There is no finally/failed handler or new-cursor recovery scan.
+Later approvals increment desired_generation but queueStack dispatches nothing for running.
+Reproduction: throw a query/storage failure during staging, then queue another approval.
+Cursor remains running and Bus::assertNothingDispatched. Expected: recoverable failed state
+and eventually processed latest desired generation. Ordinary returned failed plans also
+do not schedule a retry unless another change happens.
+Correction: recover outer operation state durably on failure/termination, with owner checks,
+retry policy and a scan for abandoned queued/running cursors. Never replay uncertain RPCs.
+Coverage: no current test kills/fails the new outer synchronization lifecycle.
+
+H8 HIGH - No-op staging invalidates generation-bound operator conflict resolutions.
+References: app/Services/ComponentStackPropagation.php:576-586;
+app/Services/InheritedAltResolution.php:24-25,43.
+Path: provenanceSnapshot always produces a nonempty update, so every rebuild rewrites
+updated_at and archives another revision. Resolution context includes that timestamp.
+Reproduction: resolve two approved current descriptions; after one second, rebuild with
+no photograph, alt or membership changes. current(resolution) changes from selected text
+to null. Expected: decision remains valid until semantic authorization context changes.
+Correction: avoid no-op provenance writes and bind decisions to stable content/membership
+generations, not rebuild timestamps. Preserve audit history for real changes only.
+Coverage: same-second restaging tests do not advance time and miss this defect.
+
+H9 HIGH - Already queued automatic jobs continue after their feature flags are disabled.
+References: app/Jobs/RebuildDependentStackImagesJob.php:31;
+app/Jobs/SynchronizeAuthorizedStackImagesJob.php:31;
+app/Services/StackImageSync.php:28,89,168-176.
+Path: flags guard enqueueing, not job execution. The synchronization service allows an
+approved stack through while blind publication is false, which is also used by automatic
+jobs. That does not distinguish an explicitly authorized manual action from old queued work.
+Reproductions: local job runs with local flag false and creates a copy. A queued authorized
+job with all automatic flags false creates one Shopify media record for an approved stack
+in the mocked API. Expected: automatic jobs become no-ops after their flag is disabled.
+Correction: recheck the relevant flag in automatic handle paths and before RPCs; keep
+manual publication explicitly distinguishable. Account for configuration-cached workers.
+Coverage: existing flag-off test only asserts that new jobs are not enqueued.
+
+H10 HIGH - Shared photograph remains bound to a removed source and is planned for retirement.
+References: app/Services/ComponentStackPropagation.php:533-537,649-682;
+app/Services/StackImageSync.php:210-218.
+Path: a shared asset reuses one copy. Removing its original component while another current
+component still uses that photograph keeps the copy but does not close/reconcile its old
+source association. plan consults only source_image_id instead of active desired provenance.
+Reproduction: A and B share a photograph; copy originally points to A. Remove A and rebuild.
+Copy still points to A and appears in retire despite B still needing it.
+Correction: resolve desired/current authorization from surviving provenance while retaining
+immutable origin history. Retire only after no current desired source needs the association.
+Coverage: existing shared-source removal test executes legacy recovery, not this local path.
+
+M1 MEDIUM - Occupied-position swaps fail and merged galleries produce perpetual reorders.
+References: app/Services/ComponentStackPropagation.php:620-628;
+app/Services/StackImageSync.php:238;
+app/Services/ProductShopifyUpdater.php:1111-1136.
+Path: moving one image at a time skips any desired position already occupied. Swapping two
+source positions leaves both stack positions unchanged. Comparing a stack position against
+the component's standalone position also misclassifies valid stack-owned/multi-component
+offsets as reorder work. Reorder receipts do not establish async completion on Shopify.
+Reproduction: swap source positions 1 and 2 and rebuild; stack retains old order 1,2.
+Expected: correct complete merged gallery order, stable IDs and no repeat mutations.
+Correction: calculate one deterministic desired stack order and apply/verify it as a unit.
+Coverage: current tests do not execute occupied swaps or merged-gallery order verification.
+
+M2 MEDIUM - Reminder timers miss real edits and suppress new issues after resolution.
+References: app/Observers/ImageObserver.php:50-53,436-448;
+app/Services/ImageAltTextBackfillService.php:668-682;
+app/Services/StackImageSync.php:355-425.
+Path: normal service edits/staging bypass observer timers. Publication also writes without
+events and does not clear attention time. A reopened issue can reuse the old reminder key.
+New cursor/ledger failures are not included by the old-task-only failure query.
+Reproductions: real markPendingReview then two hours produces no reminder and null timer.
+Send initial/follow-up for an issue, resolve it through publication-style quiet writes,
+then reopen it: no new reminder is sent because both old keys remain accepted.
+Correction: maintain explicit attention episodes in all real write/recovery paths and
+query the new failed/uncertain synchronization state. Distinguish approval from push needs.
+Coverage: current reminder tests seed attention_since manually and never resolve/reopen.
+
+M3 MEDIUM - Reminder deduplication occurs after sending and cannot prevent duplicates.
+References: app/Services/ImagePublicationReminderService.php:29-35,59-73,78-108.
+Path: two senders can both see no accepted row, send, then deduplicate the database record.
+A transport exception after possible acceptance is labelled failed and automatically retried.
+Reproduction: enter a second sendDue while the first send has not recorded acceptance;
+two messages are sent by the mock mailer and only one accepted receipt exists.
+Expected: one initial and one follow-up per unresolved episode, including concurrent calls.
+Correction: durable delivery claim before send, safe outcome reconciliation and explicit
+uncertain handling. A unique index after delivery and scheduler overlap alone are insufficient.
+Coverage: current test performs sequential successful sends only.
+
+M4 MEDIUM - Baseline command and operator page omit tag-only stacks.
+References: app/Console/Commands/RebuildStackImageBaseline.php:20;
+app/Filament/Pages/StackImageSyncStatus.php:42; app/Models/Product.php:223.
+Reproduction: is_bundle=false, tags=stack, isStackProduct()=true; baseline command with its
+explicit product ID says no stack products matched. Same query excludes it from the page.
+Expected: every stack recognized by the actual domain predicate is reviewable.
+Correction: use consistent stack identification for discovery, baseline and operator views.
+Coverage: new fixtures always set is_bundle=true.
+
+M5 MEDIUM - New migration rollback destroys evidence; SQLite also fails partway through.
+Reference: database/migrations/2026_11_20_120000_add_stack_image_sync_versions_and_ledger.php:117-145.
+Path: down drops reminders, cursors, verified ledger and authorizations, then provenance
+and image versions. Real MySQL down/up changed authorization rows from 1 to 0. SQLite
+also throws while dropping indexed image_attention_since, after tables were already dropped.
+Expected: application rollback retains approval/publication/reminder evidence or uses a
+separately reviewed archival procedure, as earlier lifecycle migrations already require.
+Correction: refuse destructive routine down or implement archival retention; rehearse
+interrupted rollback. Up/retry success does not establish rollback safety.
+Coverage: current new tests do not execute down or prove evidence retention.
+
+L1 LOW - Operator status can report local rebuilding completed when it failed.
+References: app/Services/StackImageSync.php:45-58;
+app/Filament/Pages/StackImageSyncStatus.php:63-65.
+Reproduction: all source files unavailable; stageStack reports rebuilt=false, but
+rebuildDependents counts one success, writes local_rebuilt, and describe says completed
+with zero inherited images. The page also always displays a success notification.
+Expected: failed/partial status with actionable missing-file details.
+Correction: preserve the structured result and report success only when it actually succeeded.
+Coverage: current missing-file case still has another available image; all-unavailable is absent.
+
+POSITIVE / VERIFIED LIMITS
+Simple local creation copies all readable current source photographs with separate CMS
+rows and no component Shopify/approval requirement. Managed asset/provenance data is stored,
+stack-owned images are retained, and missing files are reported/protected from automatic
+local removal. Basic repeated staging reuses existing active assets serially. Existing
+per-image upload claims, READY/SHA checks and low-level session mutexes still provide useful
+defenses, but do not cover the new whole-stack orchestration. Legacy ambiguous ownership is
+not silently classified by the new baseline command. Feature defaults are all false.
+The reminder query implements a 90-minute cutoff, its scheduler runs every 15 minutes, and
+nominal follow-up is 24 hours after initial acceptance. Recipient configuration is
+services.slack.missing_alt_recipient_email / MISSING_ALT_RECIPIENT_EMAIL, defaulting to
+nick@leighavenue.co.za; the rendered mail includes SKU-filter instructions. These timing and
+format checks do not establish complete issue detection or duplicate-free delivery.
+
+REQUIRED CORRECTIONS / RELEASE PRECAUTIONS
+Keep all three automatic flags false. Fix C1/C2 before any mixed legacy/new publication
+test outside a disposable development store. Establish one desired-state/approval contract
+across real edit services, local staging, planner, executor and receipt writer. Execute
+retirement through the existing guarded machinery. Serialize destination-stack staging,
+recover cursor failures durably, preserve operator decisions on no-op rebuilds, and repair
+mode-aware alt propagation. Add the missing execution-path regression cases above, not
+just extra planner assertions. Retain the new metadata on application rollback.
+No broad rewrite is justified by this audit; the defects identify specific missing gates,
+state transitions and executor branches in the current architecture.
+
+After corrections: apply/retry the new migration on a disposable production-shaped MySQL
+copy, stop old workers during deployment, restart matching-version workers, and verify
+effective cached flags. Test whole-stack parallel jobs, worker termination/connection loss,
+stale approval interleavings, lease expiry and coalesced arrivals using actual new jobs.
+In an authorized development store test full multi-photo publish, alt-only changes,
+replacements, removal/re-add/removal, variant reassignment, external media deletion/alt
+drift, delayed readiness and lost responses. Verify exact separate component/stack media
+IDs and shared-file behavior with complete pagination and fresh read-backs. Test legacy
+and new flags together only after their destructive conflict is fixed, or enforce mutual
+exclusion. Verify reminder concurrency, acceptance uncertainty, resolution and reopening.
+Do not infer production readiness from SQLite mocks or from the reproduced MySQL tests.

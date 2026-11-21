@@ -28,6 +28,13 @@ class ImageObserver
         $this->applyManagedApprovedFilename($image);
         $image->needs_shopify_image_sync = true;
         $image->shopify_image_sync_error = null;
+        if ((int) ($image->photograph_version ?? 0) < 1) {
+            $image->photograph_version = 1;
+        }
+        if ((int) ($image->alt_text_version ?? 0) < 1) {
+            $image->alt_text_version = 1;
+        }
+        $this->syncImageAttention($image);
         $this->applyLocalSyncState($image, isCreating: true);
     }
 
@@ -38,11 +45,14 @@ class ImageObserver
         if ($product) {
             app(Normalizer::class)->recalculateErrorsForProduct($product);
         }
+        $this->queueDependentStackRebuild($image);
     }
 
     public function updating(Image $image): void
     {
         $dirty = array_keys($image->getDirty());
+        $this->bumpImageVersions($image);
+        $this->syncImageAttention($image);
         $meaningful = array_diff($dirty, $this->nonContentFields());
         if (empty($meaningful)) {
             return;
@@ -105,6 +115,10 @@ class ImageObserver
                     'message' => $exception->getMessage(),
                 ]);
             }
+        }
+
+        if ($image->wasChanged(['alt_text', 'position', 'image_asset_id', 'image_path', 'src', 'sync_state', 'is_duplicate_hidden'])) {
+            $this->queueDependentStackRebuild($image);
         }
 
         $product = $image->product_id ? Product::find($image->product_id) : null;
@@ -399,7 +413,54 @@ class ImageObserver
             'source_image_id',
             'ownership',
             'alt_inheritance_mode',
+            'photograph_version',
+            'alt_text_version',
+            'image_attention_since',
         ];
+    }
+
+    private function bumpImageVersions(Image $image): void
+    {
+        $photographChanged = $image->isDirty('image_asset_id') || $image->isDirty('image_path');
+        if (! $photographChanged && $image->isDirty('src')) {
+            $photographChanged = ShopifyMediaPath::canonical($image->getOriginal('src')) !== ShopifyMediaPath::canonical($image->src);
+        }
+        if ($photographChanged) {
+            $image->photograph_version = max(1, (int) $image->getOriginal('photograph_version')) + 1;
+        }
+        if ($image->isDirty('alt_text') && trim((string) $image->alt_text) !== trim((string) $image->getOriginal('alt_text'))) {
+            $image->alt_text_version = max(1, (int) $image->getOriginal('alt_text_version')) + 1;
+        }
+    }
+
+    private function syncImageAttention(Image $image): void
+    {
+        $outstanding = (bool) $image->needs_shopify_image_sync
+            || (bool) $image->shopify_alt_pending
+            || (bool) $image->shopify_media_create_uncertain
+            || in_array($image->alt_text_status, [Image::ALT_PENDING_REVIEW, Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true);
+        if (! $outstanding) {
+            $image->image_attention_since = null;
+
+            return;
+        }
+        $existing = $image->image_attention_since ?: $image->getOriginal('image_attention_since');
+        $image->image_attention_since = $existing ?: now();
+    }
+
+    private function queueDependentStackRebuild(Image $image): void
+    {
+        if ($image->ownership === \App\Services\ImageOwnership::COMPONENT_INHERITED) {
+            return;
+        }
+        try {
+            app(\App\Services\StackImageSync::class)->queueLocalRebuild((int) $image->product_id);
+        } catch (\Throwable $exception) {
+            logger()->warning('Dependent stack rebuild was not queued.', [
+                'image_id' => $image->id,
+                'message' => $exception->getMessage(),
+            ]);
+        }
     }
 
     private function deleteShopifyRow(Image $image, ?array $original = null): void

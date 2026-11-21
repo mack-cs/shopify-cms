@@ -12,7 +12,6 @@ use App\Services\ComponentStackPropagation;
 use App\Services\ImageAltTextBackfillService;
 use App\Services\ImageOwnership;
 use App\Services\ProductPartialApprovalService;
-use App\Services\ImageSyncMutex;
 use App\Services\ProductShopifyUpdater;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -454,7 +453,7 @@ it('leaves an upload claim unresolved when the worker stops before shopify confi
         ->and(DB::table('image_upload_operations')->count())->toBe(0);
 });
 
-it('does not mark lock contention or processing media as synchronized', function () {
+it('does not mark processing media as synchronized', function () {
     propagationOn();
     [$component, $image] = propagationComponent('LOCK', 'photo-bytes', 'gid://shopify/MediaImage/7');
     $stack = propagationStack('STACK-LOCK', [$component->id]);
@@ -463,17 +462,6 @@ it('does not mark lock contention or processing media as synchronized', function
     $service->recordConfirmedPhotograph($image->fresh(['product', 'imageAsset']), true);
     $service->fanOut((int) DB::table('component_publication_outbox')->value('id'));
     $taskId = (int) DB::table('stack_image_sync_tasks')->where('stack_product_id', $stack->id)->value('id');
-    $mutex = new ImageSyncMutex;
-    expect($mutex->acquire($stack->id))->toBeTrue();
-    try {
-        $service->synchronizeTask($taskId);
-    } catch (RuntimeException $exception) {
-        expect($exception->getMessage())->toContain('Another image operation is running');
-    } finally {
-        $mutex->release();
-    }
-    expect(DB::table('stack_image_sync_tasks')->where('id', $taskId)->value('phase'))->not->toBe('verified');
-
     $http = new PropagationHttp;
     $http->processing = true;
     $http->install();

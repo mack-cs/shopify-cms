@@ -463,11 +463,14 @@ class ShopifyImageImportService
         if (! $mutex->acquire((int) $product->id)) {
             throw new \RuntimeException('An image operation is running for this product. Retry the import later.');
         }
+        $boundary = null;
         try {
             $mutex->assertOwned();
+            $boundary = app(StackSynchronizationBoundary::class)->acquireForComponent((int) $product->id);
 
             return $this->prepareImageForImportLocked($product, $asset, $filename, $position);
         } finally {
+            $boundary?->release();
             $mutex->release();
         }
     }

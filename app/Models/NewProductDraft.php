@@ -35,6 +35,19 @@ class NewProductDraft extends Model
 
     public const ORIGIN_PRODUCT_MIRROR = 'product_mirror';
 
+    public function save(array $options = [])
+    {
+        $held = null;
+        if ($this->isDirty('bundle_product_ids') || (! $this->exists && filled($this->bundle_product_ids))) {
+            $held = app(\App\Services\StackSynchronizationBoundary::class)->prepareMembershipWrite($this);
+        }
+        try {
+            return parent::save($options);
+        } finally {
+            $held?->release();
+        }
+    }
+
     public const SHOPIFY_MISSING_PENDING_REVIEW = 'pending_review';
 
     public const SHOPIFY_MISSING_INVESTIGATING = 'investigating';

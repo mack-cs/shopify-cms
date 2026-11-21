@@ -874,12 +874,12 @@ it('verifies legacy rebuild source image order exact alt and description preserv
     Http::preventStrayRequests();
     $a = altTextProduct('VERIFY-COMP-A');
     $a1 = verificationManagedSource($a, 1, 'A front');
-    verificationManagedSource($a, 2, 'A side must not be copied');
+    $aSide = verificationManagedSource($a, 2, 'A side');
     app(ImageAltTextBackfillService::class)->markPendingReview($a1, 'A front');
     altTextApprove($a1);
     $b = altTextProduct('VERIFY-COMP-B');
     $b1 = verificationManagedSource($b, 1, null);
-    verificationManagedSource($b, 2, 'B side must not be copied');
+    $bSide = verificationManagedSource($b, 2, 'B side');
     $stack = altTextProduct('VERIFY-LEGACY', 'gid://shopify/Product/301', true);
     $owned = altTextImage($stack, 1, 'Approved lifestyle', 'gid://shopify/MediaImage/3011');
     $legacy = altTextImage($stack, 2, 'Old legacy', 'gid://shopify/MediaImage/3012');
@@ -889,9 +889,9 @@ it('verifies legacy rebuild source image order exact alt and description preserv
         ->invoke(app(ShopifyImageImportService::class), $stack);
     $images = $stack->allImages()->active()->whereKeyNot($legacy->id)->orderBy('position')->get();
     expect($result['rebuilt'])->toBeTrue()
-        ->and($images->pluck('source_image_id')->all())->toBe([null, $b1->id, $a1->id])
-        ->and($images->pluck('alt_text')->all())->toBe(['Approved lifestyle', null, 'A front'])
-        ->and($images->pluck('position')->all())->toBe([1, 3, 4])
+        ->and($images->pluck('source_image_id')->all())->toBe([null, $b1->id, $bSide->id, $a1->id, $aSide->id])
+        ->and($images->pluck('alt_text')->all())->toBe(['Approved lifestyle', null, 'B side', 'A front', 'A side'])
+        ->and($images->pluck('position')->all())->toBe([1, 3, 4, 5, 6])
         ->and($owned->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/3011')
         ->and($legacy->fresh()->sync_state)->toBe(Image::SYNC_STATE_SYNCED)
         ->and($stack->fresh()->getAttributes())->toBe($before);
@@ -932,9 +932,11 @@ it('verifies legacy rebuild source image order exact alt and description preserv
     altTextApprove($a1);
     $result = app(ImageAltTextBackfillService::class)->publishIds([$a1->id]);
     $mutations = collect($gateway->variables)->filter(fn (array $variables): bool => isset($variables['files']))->values();
+    $front = $images->first(fn (Image $image): bool => (int) $image->source_image_id === (int) $a1->id);
     expect($result['propagated'])->toBe(1)
-        ->and($images[2]->fresh()->alt_text)->toBe('New exact front')
-        ->and($images[2]->fresh()->shopify_id)->toBeNull()->and($images[2]->fresh()->needs_shopify_image_sync)->toBeTrue();
+        ->and($front->fresh()->alt_text)->toBe('New exact front')
+        ->and($front->fresh()->shopify_id)->toBeNull()->and($front->fresh()->needs_shopify_image_sync)->toBeTrue()
+        ->and($images->first(fn (Image $image): bool => (int) $image->source_image_id === (int) $aSide->id)->fresh()->alt_text)->toBe('A side');
 });
 
 it('rejects legacy stack CSV rows without source ids and skips unchanged repeated imports', function (): void {

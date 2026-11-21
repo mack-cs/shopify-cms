@@ -30,6 +30,8 @@ final class NewProductDraftStackAssociationImporter
     public function importFromPath(string $absolutePath): array
     {
         $csv = $this->readerForPath($absolutePath);
+        $records = iterator_to_array($csv->getRecords());
+        $boundary = app(StackSynchronizationBoundary::class)->acquireForStacks($this->stackIdsForRecords($records));
 
         $result = [
             'total' => 0,
@@ -44,8 +46,10 @@ final class NewProductDraftStackAssociationImporter
             'warnings' => [],
         ];
 
-        DB::transaction(function () use ($csv, &$result): void {
-            foreach ($csv->getRecords() as $row) {
+        $reconcileIds = [];
+        try {
+        DB::transaction(function () use ($records, &$result, &$reconcileIds): void {
+            foreach ($records as $row) {
                 $result['total']++;
                 $rowNumber = $result['total'] + 1;
                 $data = $this->normalizeRow($row);
@@ -111,20 +115,58 @@ final class NewProductDraftStackAssociationImporter
                         'bundle_component_quantities' => $componentQuantities,
                     ])->save();
                 });
-                try {
-                    app(ComponentStackPropagation::class)->reconcileDraftMembership($draft->fresh());
-                } catch (\Throwable $exception) {
-                    logger()->warning('Stack component membership was not reconciled.', [
-                        'draft_id' => $draft->id,
-                        'message' => $exception->getMessage(),
-                    ]);
-                }
+                $reconcileIds[] = (int) $draft->id;
 
                 $result['updated']++;
             }
         });
+        foreach ($reconcileIds as $draftId) {
+            try {
+                $fresh = NewProductDraft::query()->find($draftId);
+                if ($fresh instanceof NewProductDraft) {
+                    app(ComponentStackPropagation::class)->reconcileDraftMembership($fresh);
+                }
+            } catch (\Throwable $exception) {
+                logger()->warning('Stack component membership was not reconciled.', [
+                    'draft_id' => $draftId,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+        } finally {
+            $boundary->release();
+        }
 
         return $result;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $records
+     * @return list<int>
+     */
+    private function stackIdsForRecords(array $records): array
+    {
+        $boundary = app(StackSynchronizationBoundary::class);
+        $ids = [];
+        foreach ($records as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $stackSku = $this->firstValue($this->normalizeRow($row), ['stack sku', 'bundle sku', 'sku']);
+            if ($stackSku === null || $stackSku === '0') {
+                continue;
+            }
+            $draft = $this->resolveDraftByStackSku($stackSku);
+            if (! $draft instanceof NewProductDraft) {
+                continue;
+            }
+            $stackId = $boundary->stackIdForDraft($draft);
+            if ($stackId !== null) {
+                $ids[] = $stackId;
+            }
+        }
+
+        return $ids;
     }
 
     private function readerForPath(string $absolutePath): Reader

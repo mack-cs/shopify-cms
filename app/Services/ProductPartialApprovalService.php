@@ -359,6 +359,7 @@ class ProductPartialApprovalService
                 ])->save();
 
                 $this->grantReviewedAltText($request);
+                app(\App\Services\StackImageSync::class)->afterPartialApproval($request->fresh() ?? $request);
                 $this->syncApprovedHandleWhenTitleApproved($request);
                 $this->markSeoApprovedWhenApplicable($request, $userId);
                 $this->notifyRequestApproved($request, $approvedAt);
@@ -445,6 +446,7 @@ class ProductPartialApprovalService
             ])->save();
 
             $this->grantReviewedAltText($request);
+            app(\App\Services\StackImageSync::class)->afterPartialApproval($request->fresh() ?? $request);
             $this->syncApprovedHandleWhenTitleApproved($request);
             $this->markSeoApprovedWhenApplicable($request, $userId);
             $this->notifyRequestApproved($request, $approvedAt);

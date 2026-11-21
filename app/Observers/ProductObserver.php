@@ -121,6 +121,7 @@ class ProductObserver
 
     public function updated(Product $product): void
     {
+        $becameActive = $product->wasChanged('status') && strtolower(trim((string) $product->status)) === 'active';
         if ($product->wasChanged('tags')) {
             $normalized = TagNormalizer::normalizeString($product->tags);
             if ($normalized !== $product->tags) {
@@ -141,6 +142,16 @@ class ProductObserver
 
         app(Normalizer::class)->recalculateErrorsForProduct($product);
         $this->syncTagsForProduct($product);
+        if ($becameActive) {
+            try {
+                app(\App\Services\ComponentStackPropagation::class)->dispatchEligibleBlockedRetirements((int) $product->id);
+            } catch (\Throwable $exception) {
+                logger()->warning('Blocked stack retirement was not queued.', [
+                    'product_id' => $product->id,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
 
         $this->syncDraftForProduct($product);
     }

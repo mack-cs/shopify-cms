@@ -1102,6 +1102,41 @@ final class ProductShopifyUpdater
         return ['confirmed' => $confirmed, 'warnings' => $warnings];
     }
 
+    /**
+     * Reorder this product's existing media to the local gallery order.
+     * It does not upload or delete photographs.
+     *
+     * @return array<int, array{product_id:int, warning:string}>
+     */
+    public function reorderStackMedia(Product $product): array
+    {
+        $productId = $this->resolveProductId($product);
+        if (! $productId) {
+            return [['product_id' => $product->id, 'warning' => 'Unable to resolve Shopify product ID for handle.']];
+        }
+        $desired = $product->allImages()->active()->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')->orderBy('position')->orderBy('id')->get()
+            ->filter(fn (Image $image): bool => trim((string) $image->shopify_id) !== '')
+            ->values()
+            ->map(fn (Image $image): array => ['image' => $image, 'matched_media_id' => trim((string) $image->shopify_id)]);
+        if (! $this->imageSyncLockHeld) {
+            $lock = new ImageSyncMutex;
+            if (! $lock->acquire((int) $product->id)) {
+                return [['product_id' => $product->id, 'warning' => 'Another image operation is running.']];
+            }
+            $this->imageSyncLockHeld = true;
+            $this->imageSyncMutex = $lock;
+            try {
+                return $this->reorderProductImages($product, $productId, $desired);
+            } finally {
+                $this->imageSyncLockHeld = false;
+                $this->imageSyncMutex = null;
+                $lock->release();
+            }
+        }
+
+        return $this->reorderProductImages($product, $productId, $desired);
+    }
+
     /** Removes one superseded media attachment from this stack product. It does not delete a file globally. */
     public function retireStackProductMedia(Product $stack, string $mediaId, string $replacementMediaId, ?callable $assertCurrent = null, int $retiringImageId = 0): void
     {
@@ -1112,6 +1147,7 @@ final class ProductShopifyUpdater
         if (! $productId) {
             throw new \RuntimeException('Unable to resolve Shopify product ID for handle.');
         }
+        $this->assertAutomaticRetirementAllowed($stack);
         $lock = new ImageSyncMutex;
         $acquired = false;
         if ($this->imageSyncLockHeld && $this->imageSyncMutex instanceof ImageSyncMutex) {
@@ -1140,10 +1176,19 @@ final class ProductShopifyUpdater
                 throw new \RuntimeException('The obsolete file is not READY for association removal.');
             }
             $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
-            $retiring = Image::query()->active()->with('imageAsset')->where('product_id', $stack->id)->find($retiringImageId);
+            $retiring = Image::query()->with('imageAsset')->where('product_id', $stack->id)->find($retiringImageId);
+            $deferredRetirement = $retiring instanceof Image
+                && $retiring->sync_state === Image::SYNC_STATE_LOCAL_DELETED
+                && DB::table('inherited_media_retirements')
+                    ->where('image_id', $retiring->id)
+                    ->where('old_media_id', $mediaId)
+                    ->whereIn('status', ['pending', 'mutating'])
+                    ->exists();
             $oldNode = collect($nodes)->first(fn (array $node): bool => ($node['id'] ?? null) === $mediaId);
             if (! $retiring || ! ImageOwnership::isInherited($retiring) || $retiring->shopify_id !== $mediaId
-                || $retiring->shopify_identity_unresolved || ! app(ImagePhotographEvidence::class)->matchesMedia($retiring, $oldNode)) {
+                || $retiring->shopify_identity_unresolved
+                || (! Image::query()->active()->whereKey($retiring->id)->exists() && ! $deferredRetirement)
+                || ! app(ImagePhotographEvidence::class)->matchesMedia($retiring, $oldNode)) {
                 throw new \RuntimeException('Retirement requires a verified obsolete inherited photograph; no association was changed.');
             }
             if ($replacementMediaId !== '') {
@@ -1173,6 +1218,7 @@ final class ProductShopifyUpdater
                     throw new \RuntimeException('The replacement is not attached to the variant. The previous photograph was kept.');
                 }
                 $this->guardRetirementCurrent($assertCurrent);
+                $this->assertAutomaticRetirementAllowed($stack);
                 $this->noteRetirement($retiringImageId, $mediaId, 'detach', $variantId);
                 $this->requireMutationPayload($this->graphql($this->productVariantDetachMediaMutation(), [
                     'productId' => $productId,
@@ -1191,7 +1237,10 @@ final class ProductShopifyUpdater
             }
             $this->guardRetirementCurrent($assertCurrent);
             $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
+            $this->assertAutomaticRetirementAllowed($stack);
             $this->noteRetirement($retiringImageId, $mediaId, 'delete', $productId);
+            $this->guardRetirementCurrent($assertCurrent);
+            $this->assertAutomaticRetirementAllowed($stack);
             $this->requireMutationPayload($this->graphql($this->detachProductMediaMutation(), [
                 'files' => [['id' => $mediaId, 'referencesToRemove' => [$productId]]],
             ]), 'fileUpdate');
@@ -1222,6 +1271,23 @@ final class ProductShopifyUpdater
         }
     }
 
+    private function assertAutomaticRetirementAllowed(Product $stack): void
+    {
+        $fresh = Product::query()->useWritePdo()->find($stack->id);
+        if (! $fresh instanceof Product || strtolower(trim((string) $fresh->status)) !== 'active') {
+            throw new \RuntimeException('Stack is not active. Shopify media was not removed.');
+        }
+    }
+
+    private function assertAutomaticRetirementAllowedForShopifyProduct(string $productId): void
+    {
+        $stack = Product::query()->useWritePdo()->where('shopify_id', $productId)->first();
+        if (! $stack instanceof Product) {
+            throw new \RuntimeException('Stack is not active. Shopify media was not removed.');
+        }
+        $this->assertAutomaticRetirementAllowed($stack);
+    }
+
     /** Read-only confirmation used by operator recovery; API failures propagate. */
     public function stackMediaAbsent(Product $stack, string $mediaId): bool
     {
@@ -1244,6 +1310,7 @@ final class ProductShopifyUpdater
             return;
         }
         $this->guardRetirementCurrent($assertCurrent);
+        $this->assertAutomaticRetirementAllowedForShopifyProduct($productId);
         $this->noteRetirement($imageId, $oldMediaId, 'append', $variantId);
         try {
             $this->requireMutationPayload($this->graphql($this->productVariantAppendMediaMutation(), [
@@ -5032,10 +5099,14 @@ GQL;
             }
             if (ImageOwnership::isInherited($image)) {
                 $source = Image::query()->find((int) $image->source_image_id);
+                $blindAuthorized = (bool) config('images.component_stack_blind_publication', false)
+                    && app(StackImageSync::class)->stackIsActive($product)
+                    && app(StackImageSync::class)->photographAuthorized($source);
                 $publishable = $source instanceof Image
                     && (int) $source->image_asset_id === (int) $image->image_asset_id
                     && (app(ComponentPhotographSelector::class)->publicationAllowed($source)
-                        || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image))
+                        || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image)
+                        || $blindAuthorized)
                     && app(ImageAltTextBackfillService::class)->copyHasCurrentSource($image);
                 if (! $publishable) {
                     $existingId = trim((string) $image->shopify_id);
@@ -5493,6 +5564,16 @@ GQL;
     private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null, ?string $cdnUrl = null): void
     {
         $this->imageSyncMutex?->assertOwned();
+        $boundary = app(StackSynchronizationBoundary::class)->acquireForComponent((int) $image->product_id);
+        try {
+            $this->markImageSyncedWhileLocked($image, $shopifyId, $filename, $cdnUrl);
+        } finally {
+            $boundary->release();
+        }
+    }
+
+    private function markImageSyncedWhileLocked(Image $image, ?string $shopifyId, ?string $filename, ?string $cdnUrl): void
+    {
         DB::transaction(function () use ($image, $shopifyId, $filename, $cdnUrl): void {
             $current = Image::query()->lockForUpdate()->findOrFail($image->id);
             if ($current->image_asset_id !== $image->image_asset_id
