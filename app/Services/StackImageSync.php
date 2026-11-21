@@ -50,6 +50,9 @@ final class StackImageSync
 
     public function rebuildDependents(int $componentProductId): int
     {
+        if (! $this->localRebuildEnabled() || $componentProductId < 1) {
+            return 0;
+        }
         $count = 0;
         foreach (app(StackComponentCatalog::class)->stackIdsForComponent($componentProductId) as $stackId) {
             $stack = Product::query()->find($stackId);
@@ -510,9 +513,8 @@ final class StackImageSync
             if (! ImageOwnership::isInherited($image)) {
                 continue;
             }
-            $source = Image::query()->with('imageAsset', 'product')->find((int) $image->source_image_id);
-            $desired = $source instanceof Image && $this->sourceStillMember($stack, $source);
-            if (! $desired || in_array($source->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true) || $source->is_duplicate_hidden) {
+            $source = $this->desiredInheritedSource($stack, $image);
+            if (! $source instanceof Image) {
                 if (trim((string) $image->shopify_id) !== '' && $image->sync_state !== Image::SYNC_STATE_LOCAL_DELETED) {
                     $retire[] = (int) $image->id;
                 }
@@ -1273,6 +1275,48 @@ final class StackImageSync
     private function sourceStillMember(Product $stack, Image $source): bool
     {
         return in_array((int) $source->product_id, app(StackComponentCatalog::class)->componentIds($stack), true);
+    }
+
+    /**
+     * The stored source wins when it still supplies this photograph.
+     * Otherwise a current component that uses the same asset keeps the copy.
+     */
+    private function desiredInheritedSource(Product $stack, Image $image): ?Image
+    {
+        $members = app(StackComponentCatalog::class)->componentIds($stack);
+        $stored = Image::query()->with('imageAsset', 'product')->find((int) $image->source_image_id);
+        if ($this->sourceSuppliesPhotograph($stored, $image, $members)) {
+            return $stored;
+        }
+        if ($members === [] || (int) $image->image_asset_id < 1) {
+            return null;
+        }
+
+        return Image::query()->active()->with('imageAsset', 'product')
+            ->whereIn('product_id', $members)
+            ->where('image_asset_id', $image->image_asset_id)
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->first(fn (Image $source): bool => $this->sourceSuppliesPhotograph($source, $image, $members));
+    }
+
+    /**
+     * @param  array<int, int>  $members
+     */
+    private function sourceSuppliesPhotograph(?Image $source, Image $image, array $members): bool
+    {
+        if (! $source instanceof Image || (int) $image->image_asset_id < 1) {
+            return false;
+        }
+        if (! in_array((int) $source->product_id, $members, true)) {
+            return false;
+        }
+        if (in_array($source->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true) || $source->is_duplicate_hidden) {
+            return false;
+        }
+
+        return (int) $source->image_asset_id === (int) $image->image_asset_id;
     }
 
     private function verified(Image $image, string $column): ?int

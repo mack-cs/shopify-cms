@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Services\ComponentStackPropagation;
 use App\Services\StackImageSync;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -30,6 +31,11 @@ class SynchronizeAuthorizedStackImagesJob implements ShouldQueue
 
     public function handle(StackImageSync $sync): void
     {
+        if (! app(ComponentStackPropagation::class)->enabled() || ! $sync->blindPublicationEnabled()) {
+            $sync->abandonRunningCursor($this->stackId);
+
+            return;
+        }
         $sync->synchronizeStack($this->stackId);
     }
 

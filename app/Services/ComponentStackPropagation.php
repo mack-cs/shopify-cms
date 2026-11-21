@@ -683,6 +683,7 @@ final class ComponentStackPropagation
                 'updated_at' => now(),
             ], $this->provenanceSnapshot($source, $asset)));
         }
+        $this->closeStaleProvenanceAndRetarget($existing, $sources);
         if ($existing->alt_inheritance_mode === 'independent') {
             return ['image' => $existing, 'alt_conflict' => false];
         }
@@ -712,6 +713,31 @@ final class ComponentStackPropagation
         }
 
         return ['image' => $fresh->fresh() ?? $fresh, 'alt_conflict' => $altConflict];
+    }
+
+    /**
+     * @param  Collection<int, Image>  $sources
+     */
+    private function closeStaleProvenanceAndRetarget(Image $existing, Collection $sources): void
+    {
+        $currentIds = $sources->map(fn (Image $source): int => (int) $source->id)->all();
+        foreach (DB::table('inherited_image_sources')->where('image_id', $existing->id)->whereNull('removed_at')->get() as $link) {
+            if (in_array((int) $link->component_image_id, $currentIds, true)) {
+                continue;
+            }
+            app(ImagePhotographEvidence::class)->archiveSource($link, 'remove_source');
+            DB::table('inherited_image_sources')->where('id', $link->id)->update([
+                'removed_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+        if (in_array((int) $existing->source_image_id, $currentIds, true)) {
+            return;
+        }
+        $survivor = $sources->sort(fn (Image $left, Image $right): int => [(int) $left->position, (int) $left->id] <=> [(int) $right->position, (int) $right->id])->first();
+        if ($survivor instanceof Image) {
+            Image::withoutEvents(fn () => $existing->forceFill(['source_image_id' => $survivor->id])->save());
+        }
     }
 
     private function unavailablePhotographReason(Image $image): ?string

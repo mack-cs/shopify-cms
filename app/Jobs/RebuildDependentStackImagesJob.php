@@ -30,6 +30,9 @@ class RebuildDependentStackImagesJob implements ShouldQueue
 
     public function handle(StackImageSync $sync): void
     {
+        if (! $sync->localRebuildEnabled()) {
+            return;
+        }
         $sync->rebuildDependents($this->componentProductId);
     }
 }
