@@ -32,4 +32,9 @@ class SynchronizeAuthorizedStackImagesJob implements ShouldQueue
     {
         $sync->synchronizeStack($this->stackId);
     }
+
+    public function failed(\Throwable $exception): void
+    {
+        app(StackImageSync::class)->abandonRunningCursor($this->stackId);
+    }
 }

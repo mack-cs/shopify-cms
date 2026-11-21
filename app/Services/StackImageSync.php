@@ -10,6 +10,8 @@ use App\Models\Image;
 use App\Models\Product;
 use App\Models\ProductPartialApprovalRequest;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
+use Throwable;
 
 /**
  * Local stack galleries, approval-scoped Shopify decisions, and the sync ledger.
@@ -236,6 +238,160 @@ final class StackImageSync
      */
     public function synchronizeStack(int $stackId): array
     {
+        try {
+            $boundary = app(StackSynchronizationBoundary::class)->acquireForStacks([$stackId]);
+        } catch (RuntimeException $exception) {
+            if (str_contains($exception->getMessage(), 'was not saved')) {
+                return $this->emptyPlan('deferred', 'Another image operation is running. Shopify was not changed.');
+            }
+            throw $exception;
+        }
+        try {
+            return $this->synchronizeStackWhileLocked($stackId);
+        } finally {
+            $boundary->release();
+        }
+    }
+
+    /**
+     * A killed worker leaves the cursor running and releases its session lock.
+     * Uncertain Shopify evidence stays in place and is not dispatched again.
+     * While either automatic switch is off, this scan does not read or write cursors.
+     */
+    public function recoverAbandonedCursors(): int
+    {
+        if (! $this->abandonedSynchronizationDispatchEnabled()) {
+            return 0;
+        }
+        $recovered = 0;
+        $cursors = DB::table('stack_image_sync_cursors')->where('status', 'running')->orderBy('id')->get();
+        foreach ($cursors as $cursor) {
+            $stackId = (int) $cursor->stack_product_id;
+            if ($this->synchronizationLockHeld($stackId)) {
+                continue;
+            }
+            if ($this->stackHasUncertainShopifyOperation($stackId)) {
+                DB::table('stack_image_sync_cursors')->where('id', $cursor->id)->where('status', 'running')->update([
+                    'status' => 'failed',
+                    'updated_at' => now(),
+                ]);
+
+                continue;
+            }
+            $claimed = DB::table('stack_image_sync_cursors')->where('id', $cursor->id)->where('status', 'running')->update([
+                'status' => 'queued',
+                'updated_at' => now(),
+            ]);
+            if ($claimed !== 1) {
+                continue;
+            }
+            $outcome = $this->dispatchAbandonedSynchronization($stackId);
+            if ($outcome === 'rejected') {
+                DB::table('stack_image_sync_cursors')->where('id', $cursor->id)->where('status', 'queued')->update([
+                    'status' => 'running',
+                    'updated_at' => now(),
+                ]);
+
+                continue;
+            }
+            $recovered++;
+        }
+
+        return $recovered;
+    }
+
+    /**
+     * Recovery may enqueue the authorized synchronization job only when both automatic switches
+     * that already govern that job are on. Manual publication does not use this path.
+     */
+    private function abandonedSynchronizationDispatchEnabled(): bool
+    {
+        return app(ComponentStackPropagation::class)->enabled()
+            && $this->blindPublicationEnabled();
+    }
+
+    /**
+     * A database insert that did not commit is a definite rejection and can be retried.
+     * Any other exception may mean the queue already accepted the job, so it is not sent again.
+     *
+     * @return 'accepted'|'rejected'|'uncertain'
+     */
+    private function dispatchAbandonedSynchronization(int $stackId): string
+    {
+        try {
+            SynchronizeAuthorizedStackImagesJob::dispatch($stackId);
+
+            return 'accepted';
+        } catch (Throwable) {
+            try {
+                $waiting = $this->queueDriver() === 'database'
+                    ? $this->waitingSynchronizationJobIds($stackId)
+                    : null;
+            } catch (Throwable) {
+                return 'uncertain';
+            }
+            if ($waiting === []) {
+                return 'rejected';
+            }
+
+            return 'uncertain';
+        }
+    }
+
+    private function queueDriver(): string
+    {
+        $connection = (string) config('queue.default');
+
+        return (string) config('queue.connections.'.$connection.'.driver', $connection);
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function waitingSynchronizationJobIds(int $stackId): array
+    {
+        $connection = (string) config('queue.default');
+        $table = (string) config('queue.connections.'.$connection.'.table', 'jobs');
+        $database = config('queue.connections.'.$connection.'.connection');
+        $query = is_string($database) && $database !== ''
+            ? DB::connection($database)->table($table)
+            : DB::table($table);
+        $ids = [];
+        $rows = $query->where('payload', 'like', '%SynchronizeAuthorizedStackImagesJob%')->orderBy('id')->get(['id', 'payload']);
+        foreach ($rows as $row) {
+            $decoded = json_decode((string) $row->payload, true);
+            $command = is_array($decoded) ? ($decoded['data']['command'] ?? null) : null;
+            if (! is_string($command)) {
+                throw new RuntimeException('A synchronization job is waiting but its payload could not be read.');
+            }
+            $job = unserialize($command, ['allowed_classes' => [SynchronizeAuthorizedStackImagesJob::class]]);
+            if ($job instanceof SynchronizeAuthorizedStackImagesJob && (int) $job->stackId === $stackId) {
+                $ids[] = (int) $row->id;
+            }
+        }
+
+        return $ids;
+    }
+
+    public function abandonRunningCursor(int $stackId): void
+    {
+        DB::transaction(function () use ($stackId): void {
+            $cursor = DB::table('stack_image_sync_cursors')->where('stack_product_id', $stackId)->lockForUpdate()->first();
+            if (! $cursor || ! in_array((string) $cursor->status, ['running', 'queued'], true)) {
+                return;
+            }
+            DB::table('stack_image_sync_cursors')->where('id', $cursor->id)->update([
+                'status' => 'failed',
+                'updated_at' => now(),
+            ]);
+        });
+    }
+
+    /**
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function synchronizeStackWhileLocked(int $stackId): array
+    {
         $target = 0;
         DB::transaction(function () use ($stackId, &$target): void {
             $cursor = DB::table('stack_image_sync_cursors')->where('stack_product_id', $stackId)->lockForUpdate()->first();
@@ -250,29 +406,42 @@ final class StackImageSync
             ]);
         });
 
-        $stack = Product::query()->useWritePdo()->find($stackId);
-        $plan = ['outcome' => 'failed', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'The stack no longer exists.'];
-        if ($stack instanceof Product) {
-            app(ComponentStackPropagation::class)->stageStack($stack);
-            $stack = $stack->fresh() ?? $stack;
-            if (app(StackComponentCatalog::class)->membershipState($stack) === 'unknown') {
-                $plan = $this->emptyPlan('uncertain', 'Stack membership is unknown. Inherited photographs were left in place and Shopify was not changed.');
-                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
-            } elseif (! $this->stackIsActive($stack)) {
-                $plan = ['outcome' => 'deferred_inactive', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'Stack is draft or inactive. The local gallery was rebuilt and Shopify was not changed.'];
-                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
-            } elseif (! $this->blindPublicationEnabled() && ! $stack->isApprovedByTwo()) {
-                $plan = ['outcome' => 'shopify_authorization_pending', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'Local gallery is current. Shopify publication is not authorized.'];
-                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
-            } else {
-                $plan = $this->applyAuthorizedPlan($stack);
+        try {
+            $stack = Product::query()->useWritePdo()->find($stackId);
+            $plan = ['outcome' => 'failed', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'The stack no longer exists.'];
+            if ($stack instanceof Product) {
+                app(ComponentStackPropagation::class)->stageStack($stack);
+                $stack = $stack->fresh() ?? $stack;
+                if (app(StackComponentCatalog::class)->membershipState($stack) === 'unknown') {
+                    $plan = $this->emptyPlan('uncertain', 'Stack membership is unknown. Inherited photographs were left in place and Shopify was not changed.');
+                    $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+                } elseif (! $this->stackIsActive($stack)) {
+                    $plan = ['outcome' => 'deferred_inactive', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'Stack is draft or inactive. The local gallery was rebuilt and Shopify was not changed.'];
+                    $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+                } elseif (! $this->blindPublicationEnabled() && ! $stack->isApprovedByTwo()) {
+                    $plan = ['outcome' => 'shopify_authorization_pending', 'uploads' => [], 'alt_only' => [], 'retire' => [], 'reorder' => false, 'detail' => 'Local gallery is current. Shopify publication is not authorized.'];
+                    $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+                } else {
+                    $plan = $this->applyAuthorizedPlan($stack);
+                }
             }
+        } catch (Throwable $exception) {
+            $uncertain = $this->stackHasUncertainShopifyOperation($stackId);
+            $this->markCursorFailed($stackId);
+            $stack = Product::query()->find($stackId);
+            if ($stack instanceof Product) {
+                $this->note($stack, null, null, $uncertain ? 'uncertain' : 'failed', $exception->getMessage(), false);
+            }
+            if ($uncertain) {
+                return $this->emptyPlan('uncertain', 'A Shopify operation is uncertain and will not be retried. '.$exception->getMessage());
+            }
+            throw $exception;
         }
 
         $again = false;
         DB::transaction(function () use ($stackId, $target, &$again): void {
             $cursor = DB::table('stack_image_sync_cursors')->where('stack_product_id', $stackId)->lockForUpdate()->first();
-            if (! $cursor) {
+            if (! $cursor || (string) $cursor->status !== 'running') {
                 return;
             }
             $again = (int) $cursor->desired_generation > $target;
@@ -286,6 +455,38 @@ final class StackImageSync
         }
 
         return $plan;
+    }
+
+    private function markCursorFailed(int $stackId): void
+    {
+        DB::table('stack_image_sync_cursors')->where('stack_product_id', $stackId)->where('status', 'running')->update([
+            'status' => 'failed',
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function stackHasUncertainShopifyOperation(int $stackId): bool
+    {
+        if (Image::query()->where('product_id', $stackId)->where('shopify_media_create_uncertain', true)->exists()) {
+            return true;
+        }
+        if (Image::query()->where('product_id', $stackId)->whereNotNull('alt_confirmation_media_id')->exists()) {
+            return true;
+        }
+
+        return DB::table('inherited_media_retirements')->where('stack_product_id', $stackId)->where('status', 'mutating')->exists();
+    }
+
+    private function synchronizationLockHeld(int $stackId): bool
+    {
+        $name = ProductShopifyUpdater::IMAGE_SYNC_LOCK_PREFIX.$stackId;
+        if (DB::connection()->getDriverName() === 'mysql') {
+            $holder = DB::selectOne('SELECT IS_USED_LOCK(?) AS holder', [$name]);
+
+            return $holder !== null && $holder->holder !== null;
+        }
+
+        return ImageSyncMutex::ownsProduct($stackId);
     }
 
     /**

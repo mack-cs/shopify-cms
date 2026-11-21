@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Services\ComponentStackPropagation;
+use App\Services\StackImageSync;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -13,8 +14,14 @@ final class RecoverComponentStackPropagation extends Command
 
     protected $description = 'Recover pending component-to-stack image tasks. No work is done while automatic propagation is disabled.';
 
-    public function handle(ComponentStackPropagation $propagation): int
+    public function handle(ComponentStackPropagation $propagation, StackImageSync $sync): int
     {
+        if (! $this->option('report')) {
+            $recovered = $sync->recoverAbandonedCursors();
+            if ($recovered > 0) {
+                $this->info('Requeued '.$recovered.' abandoned stack synchronization cursor(s).');
+            }
+        }
         if ($this->option('report')) {
             $db = DB::class;
             $this->table(['scan', 'last draft', 'upper draft', 'completed passes'], $db::table('image_relationship_scan_state')->get()

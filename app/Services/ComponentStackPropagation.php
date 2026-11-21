@@ -653,7 +653,12 @@ final class ComponentStackPropagation
                 ->where('image_asset_id', $asset->id)
                 ->first();
             if ($match) {
-                $updates = $this->provenanceSnapshot($source, $asset);
+                $updates = [];
+                foreach ($this->provenanceSnapshot($source, $asset) as $column => $value) {
+                    if ((string) ($match->{$column} ?? '') !== (string) ($value ?? '')) {
+                        $updates[$column] = $value;
+                    }
+                }
                 if ($sourceGenerationId && (int) $match->generation_id !== (int) $sourceGenerationId) {
                     $updates['generation_id'] = $sourceGenerationId;
                 }
