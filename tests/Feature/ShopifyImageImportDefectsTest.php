@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\ImportShopifyProductImagesJob;
+use App\Services\ComponentStackPropagation;
 use App\Jobs\RebuildShopifyStackImagesJob;
 use App\Models\Image;
 use App\Models\NewProductDraft;
@@ -143,7 +144,7 @@ it('does not apply a description after a newer photograph has replaced the impor
         ->and($image->photograph_version)->toBe($newerVersion);
 });
 
-it('rejects a direct upload into an inherited stack slot and still replaces a stack owned photograph', function (): void {
+it('places a stack upload beside an inherited photograph and still replaces a stack owned photograph', function (): void {
     $stack = createImageImportProduct('STACK100', [
         'type' => 'Bundle',
         'is_bundle' => true,
@@ -190,17 +191,223 @@ it('rejects a direct upload into an inherited stack slot and still replaces a st
     $inherited->refresh();
     $owned->refresh();
 
-    expect($result['failed_count'])->toBe(1)
-        ->and($result['updated_count'])->toBe(1)
-        ->and(ShopifyImageImportItem::query()->where('s3_key', 'incoming/inherited/STACK100-1.jpg')->first()->message)->toContain('inherited component photograph')
+    $imported = $stack->allImages()->active()->where('position', 2)->first();
+
+    expect($result['failed_count'])->toBe(0)
+        ->and($result['updated_count'])->toBe(2)
+        ->and($inherited->position)->toBe(3)
         ->and($inherited->ownership)->toBe(ImageOwnership::COMPONENT_INHERITED)
         ->and($inherited->source_image_id)->toBe($source->id)
         ->and($inherited->image_asset_id)->toBe($source->image_asset_id)
         ->and($inherited->alt_text)->toBe('Inherited sentence')
+        ->and($inherited->approved_filename)->toBe('COMP100.jpg')
+        ->and($inherited->s3_filename)->toBeNull()
         ->and($owned->ownership)->toBe(ImageOwnership::STACK_OWNED)
+        ->and($owned->approved_filename)->toBe('stack100-1-v2.png')
+        ->and($owned->s3_filename)->toBe('STACK100-v2.png')
         ->and($owned->source_image_id)->toBeNull()
         ->and($owned->filename_version)->toBe(2)
-        ->and($owned->imageAsset?->original_filename)->toBe('STACK100-v2.png');
+        ->and($owned->imageAsset?->original_filename)->toBe('STACK100-v2.png')
+        ->and($imported?->ownership)->toBe(ImageOwnership::STACK_OWNED)
+        ->and($imported?->source_image_id)->toBeNull()
+        ->and($imported?->approved_filename)->toBe('stack100-2-v1.jpg')
+        ->and($imported?->s3_filename)->toBe('STACK100-1.jpg');
+});
+
+it('imports a stack photograph at position 1 without replacing the inherited component photograph', function (): void {
+    $component = createImageImportProduct('COMP23');
+    $stack = createImageImportProduct('EBB23TEST', [
+        'handle' => 'the-test-escape-bracelet-test-stack',
+        'type' => 'Bundle',
+        'is_bundle' => true,
+    ]);
+    $source = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $component->id,
+        'position' => 1,
+        'image_asset_id' => createImportTestAsset('component-photo', 'jpg', 'COMP23.jpg')->id,
+        'alt_text' => 'Component sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 4,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    $inherited = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $stack->id,
+        'position' => 1,
+        'image_asset_id' => $source->image_asset_id,
+        'ownership' => ImageOwnership::COMPONENT_INHERITED,
+        'source_image_id' => $source->id,
+        'approved_filename' => 'COMP23.jpg',
+        'alt_text' => 'Component sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 4,
+        'shopify_id' => 'gid://shopify/MediaImage/10396',
+        'shopify_cdn_url' => 'https://cdn.shopify.com/s/files/1/inherited.jpg',
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'needs_shopify_image_sync' => false,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'EBB23TEST',
+        'shopify_id' => $stack->shopify_id,
+        'handle' => $stack->handle,
+        'title' => $stack->title,
+        'type' => 'Bundle',
+        'tags' => 'bundles',
+        'status' => 'draft',
+        'bundle_product_ids' => [$component->id],
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/Test-Stack/EBB23TEST.jpg', 'stack-lifestyle');
+    Storage::disk('shopify_product_images')->put(
+        'incoming/Test-Stack/alt-text.csv',
+        "filename,alt_text\nEBB23TEST.jpg,The test escape stack\n",
+    );
+
+    $first = importDefectPrefix('incoming/Test-Stack');
+    $second = importDefectPrefix('incoming/Test-Stack');
+    $inherited->refresh();
+    $owned = $stack->allImages()->active()->where('ownership', ImageOwnership::STACK_OWNED)->first();
+
+    expect($first['failed_count'])->toBe(0)
+        ->and($first['updated_count'])->toBe(1)
+        ->and($first['alt_text_applied'])->toBe(1)
+        ->and($second['failed_count'])->toBe(0)
+        ->and($stack->allImages()->active()->count())->toBe(2)
+        ->and($owned?->position)->toBe(1)
+        ->and($owned?->filename_version)->toBe(1)
+        ->and($owned?->approved_filename)->toBe('the-test-escape-bracelet-test-stack-1-v1.jpg')
+        ->and($owned?->s3_filename)->toBe('EBB23TEST.jpg')
+        ->and($owned?->alt_text)->toBe('The test escape stack')
+        ->and($owned?->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($owned?->needs_shopify_image_sync)->toBeTrue()
+        ->and($owned?->source_image_id)->toBeNull()
+        ->and($inherited->position)->toBe(2)
+        ->and($inherited->ownership)->toBe(ImageOwnership::COMPONENT_INHERITED)
+        ->and($inherited->source_image_id)->toBe($source->id)
+        ->and($inherited->shopify_id)->toBe('gid://shopify/MediaImage/10396')
+        ->and($inherited->alt_text)->toBe('Component sentence')
+        ->and($inherited->alt_text_status)->toBe(Image::ALT_APPROVED)
+        ->and($inherited->photograph_version)->toBe(4)
+        ->and($inherited->needs_shopify_image_sync)->toBeFalse();
+    Http::assertNothingSent();
+
+    $batch = ShopifyImageImportBatch::query()->latest('id')->first();
+    $rebuilt = app(ShopifyImageImportService::class)->rebuildStacksForBatch($batch, [$stack->id]);
+    $again = app(ComponentStackPropagation::class)->stageStack($stack->fresh());
+    $images = $stack->allImages()->active()->orderBy('position')->get();
+
+    expect($rebuilt['rebuilt'])->toBe(1)
+        ->and($again['rebuilt'])->toBeTrue()
+        ->and($images)->toHaveCount(2)
+        ->and($images[0]->id)->toBe($owned?->id)
+        ->and($images[0]->ownership)->toBe(ImageOwnership::STACK_OWNED)
+        ->and($images[0]->alt_text)->toBe('The test escape stack')
+        ->and($images[1]->id)->toBe($inherited->id)
+        ->and($images[1]->ownership)->toBe(ImageOwnership::COMPONENT_INHERITED)
+        ->and($images[1]->source_image_id)->toBe($source->id)
+        ->and($images[1]->shopify_id)->toBe('gid://shopify/MediaImage/10396');
+    Http::assertNothingSent();
+});
+
+it('keeps several stack owned photographs ahead of inherited component photographs', function (): void {
+    $firstComponent = createImageImportProduct('COMPA');
+    $secondComponent = createImageImportProduct('COMPB');
+    $stack = createImageImportProduct('EBBMULTI', [
+        'handle' => 'multi-stack',
+        'type' => 'Bundle',
+        'is_bundle' => true,
+    ]);
+    $firstSource = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $firstComponent->id,
+        'position' => 1,
+        'image_asset_id' => createImportTestAsset('component-a', 'jpg', 'COMPA.jpg')->id,
+        'alt_text' => 'Component A',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    $secondSource = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $secondComponent->id,
+        'position' => 1,
+        'image_asset_id' => createImportTestAsset('component-b', 'jpg', 'COMPB.jpg')->id,
+        'alt_text' => 'Component B',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    $firstInherited = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $stack->id,
+        'position' => 1,
+        'image_asset_id' => $firstSource->image_asset_id,
+        'ownership' => ImageOwnership::COMPONENT_INHERITED,
+        'source_image_id' => $firstSource->id,
+        'alt_text' => 'Component A',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'shopify_id' => 'gid://shopify/MediaImage/501',
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    $secondInherited = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $stack->id,
+        'position' => 2,
+        'image_asset_id' => $secondSource->image_asset_id,
+        'ownership' => ImageOwnership::COMPONENT_INHERITED,
+        'source_image_id' => $secondSource->id,
+        'alt_text' => 'Component B',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'shopify_id' => 'gid://shopify/MediaImage/502',
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    NewProductDraft::withoutEvents(fn (): NewProductDraft => NewProductDraft::create([
+        'sku' => 'EBBMULTI',
+        'shopify_id' => $stack->shopify_id,
+        'handle' => $stack->handle,
+        'title' => $stack->title,
+        'type' => 'Bundle',
+        'tags' => 'bundles',
+        'status' => 'draft',
+        'bundle_product_ids' => [$firstComponent->id, $secondComponent->id],
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/multi-stack/EBBMULTI.jpg', 'owned-front');
+    Storage::disk('shopify_product_images')->put('incoming/multi-stack/EBBMULTI-1.jpg', 'owned-second');
+    Storage::disk('shopify_product_images')->put(
+        'incoming/multi-stack/alt-text.csv',
+        "filename,alt_text\nEBBMULTI.jpg,Owned front\nEBBMULTI-1.jpg,Owned second\n",
+    );
+
+    importDefectPrefix('incoming/multi-stack');
+    $batch = ShopifyImageImportBatch::query()->latest('id')->first();
+    app(ShopifyImageImportService::class)->rebuildStacksForBatch($batch, [$stack->id]);
+    importDefectPrefix('incoming/multi-stack');
+    app(ComponentStackPropagation::class)->stageStack($stack->fresh());
+    $images = $stack->allImages()->active()->orderBy('position')->get();
+
+    expect($images)->toHaveCount(4)
+        ->and($images->pluck('ownership')->all())->toBe([
+            ImageOwnership::STACK_OWNED,
+            ImageOwnership::STACK_OWNED,
+            ImageOwnership::COMPONENT_INHERITED,
+            ImageOwnership::COMPONENT_INHERITED,
+        ])
+        ->and($images[0]->s3_filename)->toBe('EBBMULTI.jpg')
+        ->and($images[0]->alt_text)->toBe('Owned front')
+        ->and($images[0]->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($images[1]->s3_filename)->toBe('EBBMULTI-1.jpg')
+        ->and($images[1]->approved_filename)->toBe('multi-stack-2-v1.jpg')
+        ->and($images[2]->id)->toBe($firstInherited->id)
+        ->and($images[2]->source_image_id)->toBe($firstSource->id)
+        ->and($images[2]->shopify_id)->toBe('gid://shopify/MediaImage/501')
+        ->and($images[3]->id)->toBe($secondInherited->id)
+        ->and($images[3]->source_image_id)->toBe($secondSource->id)
+        ->and($images[3]->shopify_id)->toBe('gid://shopify/MediaImage/502');
+    Http::assertNothingSent();
 });
 
 it('rejects duplicate filename versions for one product slot even when the filenames use different skus', function (): void {
@@ -548,6 +755,249 @@ it('stops the batch before changing an image when the filename version column is
             });
         }
     }
+});
+
+it('stores the exact s3 basename and matches alt text without renaming the object', function (): void {
+    $product = createImageImportProduct('SKU SPACE');
+    Storage::disk('shopify_product_images')->put('incoming/spaced/SKU SPACE-v2.png', 'spaced-photo');
+    Storage::disk('shopify_product_images')->put(
+        'incoming/spaced/alt-text.csv',
+        "filename,alt_text\nSKU SPACE-v2.png,Spaced description\n",
+    );
+
+    $result = importDefectPrefix('incoming/spaced');
+    $image = $product->allImages()->first();
+
+    expect($result['failed_count'])->toBe(0)
+        ->and($result['alt_text_applied'])->toBe(1)
+        ->and(Storage::disk('shopify_product_images')->exists('incoming/spaced/SKU SPACE-v2.png'))->toBeTrue()
+        ->and($image->s3_filename)->toBe('SKU SPACE-v2.png')
+        ->and($image->approved_filename)->toBe('sku-space-1-v2.png')
+        ->and($image->filename_version)->toBe(2)
+        ->and($image->alt_text)->toBe('Spaced description')
+        ->and($image->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('does not treat identical bytes as a new photograph when the filename version increases', function (): void {
+    $managed = createImageImportProduct('MANAGED1');
+    $managedAsset = createImportTestAsset('managed-bytes', 'png', 'MANAGED1.png');
+    $managedImage = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $managed->id,
+        'position' => 1,
+        'image_asset_id' => $managedAsset->id,
+        'approved_filename' => 'manually-approved.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'filename_version' => 1,
+        'alt_text' => 'Managed sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 4,
+        'alt_text_version' => 2,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => 'gid://shopify/MediaImage/701',
+        'needs_shopify_image_sync' => false,
+        'alt_confirmation_media_id' => 'gid://shopify/MediaImage/701',
+        'alt_confirmation_text' => 'Managed sentence',
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/same-managed/MANAGED1-v3.png', 'managed-bytes');
+
+    importDefectPrefix('incoming/same-managed');
+    $managedImage->refresh();
+
+    expect($managedImage->filename_version)->toBe(3)
+        ->and($managedImage->s3_filename)->toBe('MANAGED1-v3.png')
+        ->and($managedImage->approved_filename)->toBe('manually-approved.png')
+        ->and($managedImage->filename_mode)->toBe(Image::FILENAME_MODE_MANUAL)
+        ->and($managedImage->image_asset_id)->toBe($managedAsset->id)
+        ->and($managedImage->photograph_version)->toBe(4)
+        ->and($managedImage->alt_text_version)->toBe(2)
+        ->and($managedImage->alt_text)->toBe('Managed sentence')
+        ->and($managedImage->alt_text_status)->toBe(Image::ALT_APPROVED)
+        ->and($managedImage->shopify_id)->toBe('gid://shopify/MediaImage/701')
+        ->and($managedImage->alt_confirmation_media_id)->toBe('gid://shopify/MediaImage/701')
+        ->and($managedImage->needs_shopify_image_sync)->toBeFalse();
+
+    $legacy = createImageImportProduct('LEGACYPATH');
+    Storage::disk('public')->put('product-images/legacy-path.png', 'legacy-bytes');
+    $legacyImage = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $legacy->id,
+        'position' => 1,
+        'image_path' => 'product-images/legacy-path.png',
+        'approved_filename' => 'manually-approved.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'filename_version' => 1,
+        'alt_text' => 'Legacy sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 4,
+        'alt_text_version' => 2,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => 'gid://shopify/MediaImage/702',
+        'needs_shopify_image_sync' => false,
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/same-legacy/LEGACYPATH-v2.png', 'legacy-bytes');
+
+    importDefectPrefix('incoming/same-legacy');
+    $legacyImage->refresh();
+
+    expect($legacyImage->filename_version)->toBe(2)
+        ->and($legacyImage->image_path)->toBe('product-images/legacy-path.png')
+        ->and($legacyImage->image_asset_id)->toBeNull()
+        ->and($legacyImage->approved_filename)->toBe('manually-approved.png')
+        ->and($legacyImage->photograph_version)->toBe(4)
+        ->and($legacyImage->shopify_id)->toBe('gid://shopify/MediaImage/702')
+        ->and($legacyImage->needs_shopify_image_sync)->toBeFalse();
+
+    $both = createImageImportProduct('BOTHREF');
+    $bothAsset = createImportTestAsset('both-bytes', 'png', 'BOTHREF.png');
+    Storage::disk('public')->put('product-images/both-ref.png', 'both-bytes');
+    $bothImage = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $both->id,
+        'position' => 1,
+        'image_asset_id' => $bothAsset->id,
+        'image_path' => 'product-images/both-ref.png',
+        'approved_filename' => 'manually-approved.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'filename_version' => 1,
+        'alt_text' => 'Both sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 6,
+        'alt_text_version' => 3,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => 'gid://shopify/MediaImage/703',
+        'needs_shopify_image_sync' => false,
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/same-both/BOTHREF-v4.png', 'both-bytes');
+
+    importDefectPrefix('incoming/same-both');
+    $bothImage->refresh();
+
+    expect($bothImage->filename_version)->toBe(4)
+        ->and($bothImage->image_asset_id)->toBe($bothAsset->id)
+        ->and($bothImage->image_path)->toBe('product-images/both-ref.png')
+        ->and($bothImage->approved_filename)->toBe('manually-approved.png')
+        ->and($bothImage->photograph_version)->toBe(6)
+        ->and($bothImage->alt_text_version)->toBe(3)
+        ->and($bothImage->shopify_id)->toBe('gid://shopify/MediaImage/703');
+
+    $disagree = createImageImportProduct('DISAGREE');
+    $disagreeAsset = createImportTestAsset('asset-bytes', 'png', 'DISAGREE.png');
+    Storage::disk('public')->put('product-images/disagree.png', 'path-bytes');
+    $disagreeImage = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $disagree->id,
+        'position' => 1,
+        'image_asset_id' => $disagreeAsset->id,
+        'image_path' => 'product-images/disagree.png',
+        'approved_filename' => 'manually-approved.png',
+        'filename_version' => 1,
+        'photograph_version' => 2,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => 'gid://shopify/MediaImage/704',
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/disagree/DISAGREE-v2.png', 'asset-bytes');
+
+    $unverified = importDefectPrefix('incoming/disagree');
+    $disagreeImage->refresh();
+
+    expect($unverified['failed_count'])->toBe(1)
+        ->and(ShopifyImageImportItem::query()->where('s3_key', 'incoming/disagree/DISAGREE-v2.png')->first()->message)->toContain('could not be read')
+        ->and($disagreeImage->filename_version)->toBe(1)
+        ->and($disagreeImage->image_path)->toBe('product-images/disagree.png')
+        ->and($disagreeImage->photograph_version)->toBe(2)
+        ->and($disagreeImage->shopify_id)->toBe('gid://shopify/MediaImage/704');
+
+    $missing = createImageImportProduct('UNREAD2');
+    $missingImage = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $missing->id,
+        'position' => 1,
+        'shopify_id' => 'gid://shopify/MediaImage/705',
+        'approved_filename' => 'manually-approved.png',
+        'filename_version' => 1,
+        'photograph_version' => 3,
+        'alt_text' => 'Remote only',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'needs_shopify_image_sync' => false,
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/unreadable-higher/UNREAD2-v2.png', 'new-bytes');
+
+    $closed = importDefectPrefix('incoming/unreadable-higher');
+    $missingImage->refresh();
+
+    expect($closed['failed_count'])->toBe(1)
+        ->and($missingImage->filename_version)->toBe(1)
+        ->and($missingImage->photograph_version)->toBe(3)
+        ->and($missingImage->shopify_id)->toBe('gid://shopify/MediaImage/705')
+        ->and($missingImage->approved_filename)->toBe('manually-approved.png');
+});
+
+it('keeps a manual filename on an unchanged reimport and replaces it only for a new photograph', function (): void {
+    $product = createImageImportProduct('KEEPNAME');
+    $asset = createImportTestAsset('kept-bytes', 'png', 'KEEPNAME.png');
+    $image = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'position' => 1,
+        'image_asset_id' => $asset->id,
+        'approved_filename' => 'manually-approved.png',
+        'filename_mode' => Image::FILENAME_MODE_MANUAL,
+        'filename_version' => 1,
+        'alt_text' => 'Approved sentence',
+        'alt_text_status' => Image::ALT_APPROVED,
+        'photograph_version' => 4,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => 'gid://shopify/MediaImage/801',
+        'last_shopify_synced_image_asset_id' => $asset->id,
+        'needs_shopify_image_sync' => false,
+    ]));
+    Storage::disk('shopify_product_images')->put('incoming/keep-name/KEEPNAME.png', 'kept-bytes');
+
+    importDefectPrefix('incoming/keep-name');
+    $image->refresh();
+
+    expect($image->approved_filename)->toBe('manually-approved.png')
+        ->and($image->s3_filename)->toBe('KEEPNAME.png')
+        ->and($image->photograph_version)->toBe(4)
+        ->and($image->needs_shopify_image_sync)->toBeFalse()
+        ->and($image->shopify_id)->toBe('gid://shopify/MediaImage/801');
+
+    Storage::disk('shopify_product_images')->put('incoming/replace-name/KEEPNAME-v2.png', 'new-photograph');
+    importDefectPrefix('incoming/replace-name');
+    $image->refresh();
+
+    expect($image->approved_filename)->toBe('keepname-1-v2.png')
+        ->and($image->s3_filename)->toBe('KEEPNAME-v2.png')
+        ->and($image->filename_version)->toBe(2)
+        ->and($image->photograph_version)->toBe(5)
+        ->and($image->shopify_id)->toBeNull()
+        ->and($image->alt_text)->toBeNull()
+        ->and($image->needs_shopify_image_sync)->toBeTrue();
+});
+
+it('does not advance the photograph version when a spare local path is cleared', function (): void {
+    $product = createImageImportProduct('SPAREPATH');
+    $asset = createImportTestAsset('spare-bytes', 'png', 'SPAREPATH.png');
+    Storage::disk('public')->put('product-images/spare.png', 'spare-bytes');
+    $image = Image::withoutEvents(fn (): Image => Image::create([
+        'product_id' => $product->id,
+        'position' => 1,
+        'image_asset_id' => $asset->id,
+        'image_path' => 'product-images/spare.png',
+        'photograph_version' => 4,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+    ]));
+
+    Image::withoutEvents(fn () => $image->forceFill(['image_path' => null])->save());
+    $image->refresh();
+
+    expect($image->image_path)->toBeNull()
+        ->and($image->image_asset_id)->toBe($asset->id)
+        ->and($image->photograph_version)->toBe(4);
+
+    Storage::disk('public')->put('product-images/other.png', 'other-bytes');
+    Image::withoutEvents(fn () => $image->forceFill(['image_path' => 'product-images/other.png'])->save());
+    $image->refresh();
+
+    expect($image->photograph_version)->toBe(5);
 });
 
 function importDefectPrefix(string $prefix): array

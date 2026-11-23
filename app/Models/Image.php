@@ -91,7 +91,7 @@ class Image extends Model
 
             return;
         }
-        $photographChanged = $this->isDirty('image_asset_id') || $this->isDirty('image_path');
+        $photographChanged = $this->isDirty('image_asset_id') || $this->imagePathChangeReplacesPhotograph();
         if (! $photographChanged && $this->isDirty('src')) {
             $photographChanged = \App\Services\ShopifyMediaPath::canonical($this->getOriginal('src'))
                 !== \App\Services\ShopifyMediaPath::canonical($this->src)
@@ -105,6 +105,25 @@ class Image extends Model
             && ! $this->isDirty('alt_text_version')) {
             $this->alt_text_version = max(1, (int) $this->getOriginal('alt_text_version')) + 1;
         }
+    }
+
+    /**
+     * Clearing a spare local path does not replace the photograph while the
+     * same managed asset remains. Any other path change does.
+     */
+    private function imagePathChangeReplacesPhotograph(): bool
+    {
+        if (! $this->isDirty('image_path')) {
+            return false;
+        }
+
+        $cleared = trim((string) $this->image_path) === ''
+            && trim((string) $this->getOriginal('image_path')) !== '';
+        $sameAsset = ! $this->isDirty('image_asset_id')
+            && (int) $this->image_asset_id > 0
+            && (int) $this->image_asset_id === (int) $this->getOriginal('image_asset_id');
+
+        return ! ($cleared && $sameAsset);
     }
 
     /**
@@ -164,6 +183,7 @@ class Image extends Model
         'backup_completed_at',
         'backup_error',
         'approved_filename',
+        's3_filename',
         'filename_mode',
         'last_shopify_synced_image_asset_id',
         'last_shopify_synced_filename',

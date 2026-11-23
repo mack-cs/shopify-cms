@@ -41,7 +41,20 @@ it('keeps both gallery positions from the batch 48 filenames', function (): void
             2 => 'LAB0TEST02V1-1.jpg',
         ])
         ->and($first->allImages()->count())->toBe(2)
-        ->and($second->allImages()->count())->toBe(2);
+        ->and($second->allImages()->count())->toBe(2)
+        ->and($first->allImages()->orderBy('position')->pluck('approved_filename')->all())->toBe([
+            'lab02test02v2-1-v1.png',
+            'lab02test02v2-2-v1.jpg',
+        ])
+        ->and($first->allImages()->orderBy('position')->pluck('s3_filename')->all())->toBe([
+            'LAB02TEST02V2.png',
+            'LAB02TEST02V2-1.jpg',
+        ])
+        ->and($second->allImages()->orderBy('position')->pluck('approved_filename')->all())->toBe([
+            'lab0test02v1-1-v1.png',
+            'lab0test02v1-2-v1.jpg',
+        ])
+        ->and($first->allImages()->first()->needs_shopify_image_sync)->toBeTrue();
 
     importPositionPrefix($prefix);
 
@@ -50,7 +63,12 @@ it('keeps both gallery positions from the batch 48 filenames', function (): void
         ->and(positionFilenames($first))->toBe([
             1 => 'LAB02TEST02V2.png',
             2 => 'LAB02TEST02V2-1.jpg',
-        ]);
+        ])
+        ->and($first->allImages()->orderBy('position')->pluck('approved_filename')->all())->toBe([
+            'lab02test02v2-1-v1.png',
+            'lab02test02v2-2-v1.jpg',
+        ])
+        ->and($first->allImages()->orderBy('position')->pluck('photograph_version')->all())->toBe([1, 1]);
 });
 
 it('maps a bare sku to position 1 and each numeric suffix to the next position', function (): void {
@@ -132,7 +150,8 @@ it('replaces only the matching position and keeps the photograph version indepen
         ->and($front->needs_shopify_image_sync)->toBeFalse()
         ->and($second->id)->toBe($secondId)
         ->and($second->imageAsset?->original_filename)->toBe('SKU300-1-v7.jpg')
-        ->and($second->approved_filename)->toBe('SKU300-1-v7.jpg')
+        ->and($second->approved_filename)->toBe('sku300-2-v7.jpg')
+        ->and($second->s3_filename)->toBe('SKU300-1-v7.jpg')
         ->and($second->photograph_version)->toBe(5)
         ->and($second->alt_text_version)->not->toBe(7)
         ->and($second->needs_shopify_image_sync)->toBeTrue()
@@ -190,6 +209,38 @@ it('imports neither file when one position has two copies of the same filename v
         ->and($product->allImages()->count())->toBe(0)
         ->and(ShopifyImageImportItem::query()->where('status', ShopifyImageImportItem::STATUS_UPDATED)->count())->toBe(0)
         ->and(ShopifyImageImportItem::query()->first()->message)->toContain('None were imported');
+});
+
+it('names approved files from the shopify handle and matches alt text by the original s3 filename', function (): void {
+    $product = createImageImportProduct('LAB0185TEST02', ['handle' => 'eb-test-bracelet-2']);
+    Storage::disk('shopify_product_images')->put('incoming/handle-names/LAB0185TEST02.png', 'front');
+    Storage::disk('shopify_product_images')->put('incoming/handle-names/LAB0185TEST02-1.jpg', 'second');
+    Storage::disk('shopify_product_images')->put('incoming/handle-names/LAB0185TEST02-v2.png', 'front-two');
+    Storage::disk('shopify_product_images')->put(
+        'incoming/handle-names/alt-text.csv',
+        "filename,alt_text\nLAB0185TEST02-v2.png,Front version two\nLAB0185TEST02-1.jpg,Second view\n",
+    );
+
+    $result = importPositionPrefix('incoming/handle-names');
+    $images = $product->allImages()->orderBy('position')->get();
+
+    expect($result['updated_count'])->toBe(2)
+        ->and($result['failed_count'])->toBe(1)
+        ->and($result['alt_text_applied'])->toBe(2)
+        ->and($images)->toHaveCount(2)
+        ->and($images[0]->position)->toBe(1)
+        ->and($images[0]->filename_version)->toBe(2)
+        ->and($images[0]->approved_filename)->toBe('eb-test-bracelet-2-1-v2.png')
+        ->and($images[0]->s3_filename)->toBe('LAB0185TEST02-v2.png')
+        ->and($images[0]->preferredFilename())->toBe('eb-test-bracelet-2-1-v2.png')
+        ->and($images[0]->alt_text)->toBe('Front version two')
+        ->and($images[0]->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($images[0]->photograph_version)->toBe(1)
+        ->and($images[0]->needs_shopify_image_sync)->toBeTrue()
+        ->and($images[1]->position)->toBe(2)
+        ->and($images[1]->approved_filename)->toBe('eb-test-bracelet-2-2-v1.jpg')
+        ->and($images[1]->s3_filename)->toBe('LAB0185TEST02-1.jpg')
+        ->and($images[1]->alt_text)->toBe('Second view');
 });
 
 function importPositionPrefix(string $prefix): array

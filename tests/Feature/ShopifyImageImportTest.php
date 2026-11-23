@@ -97,6 +97,7 @@ it('imports only direct image files in the normalized S3 folder and records the 
             'filename' => 'LRB0001.png',
         ]))
         ->and($image->approved_filename)->toBe('LRB0001.png')
+        ->and($image->s3_filename)->toBe('LRB0001.png')
         ->and($image->needs_shopify_image_sync)->toBeFalse()
         ->and($duplicate->sync_state)->toBe(Image::SYNC_STATE_SYNCED)
         ->and($duplicate->is_duplicate_hidden)->toBeFalse()

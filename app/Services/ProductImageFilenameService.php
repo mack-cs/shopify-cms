@@ -37,6 +37,24 @@ class ProductImageFilenameService
         return sprintf('%s-%d.%s', $base, $index, $extension);
     }
 
+    public function generateApprovedImportFilename(Product $product, int $position, int $filenameVersion, string $extension): string
+    {
+        $base = Str::slug(trim((string) $product->handle));
+        if ($base === '') {
+            $base = Str::slug(trim((string) $product->title));
+        }
+        if ($base === '') {
+            $base = 'product-image';
+        }
+
+        $extension = strtolower(preg_replace('/[^a-z0-9]+/', '', strtolower($extension)) ?? '');
+        if ($extension === '') {
+            $extension = 'jpg';
+        }
+
+        return sprintf('%s-%d-v%d.%s', $base, max(1, $position), max(1, $filenameVersion), $extension);
+    }
+
     public function assignFromCurrentTitle(Product $product, bool $manual = false): int
     {
         $product->loadMissing([
