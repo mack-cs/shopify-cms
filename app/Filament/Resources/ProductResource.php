@@ -2587,8 +2587,7 @@ class ProductResource extends Resource
                     ->visible(fn (): bool => Auth::user()?->hasAnyRole([RolesEnum::SuperAdmin->value, RolesEnum::Admin->value]) ?? false),
 
             ]),
-        ])
-            ->selectCurrentPageOnly();
+        ]);
     }
 
     private static function removeDuplicateImagesForProduct(Product $product): int

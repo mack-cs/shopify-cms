@@ -147,9 +147,16 @@ it('preserves approved different photographs at the same position and their rela
     $i = lifecycleImage();
     $keep = Image::withoutEvents(fn () => Image::create(['product_id' => $i->product_id, 'position' => 1, 'sync_state' => Image::SYNC_STATE_SYNCED, 'shopify_id' => 'gid://shopify/MediaImage/1']));
     $i->forceFill(['alt_text' => 'Approved B', 'alt_text_status' => Image::ALT_APPROVED, 'source_image_id' => $keep->id])->save();
-    (new ReflectionMethod(ShopifyImageImportService::class, 'cleanupDuplicatePositionsForPipeline'))->invoke(app(ShopifyImageImportService::class), $i->product);
-    (new ReflectionMethod(ShopifyImageImportService::class, 'removeExtraActiveImagesAtPosition'))->invoke(app(ShopifyImageImportService::class), $i->product, $keep, 1);
-    expect($i->fresh()->alt_text)->toBe('Approved B')->and($i->fresh()->source_image_id)->toBe($keep->id)->and($i->fresh()->is_duplicate_hidden)->toBeFalse();
+    $incoming = createImportTestAsset('different photograph', 'jpg', 'other.jpg');
+    expect(fn () => (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))
+        ->invoke(app(ShopifyImageImportService::class), $i->product, $incoming, 'other-v2.jpg', 1, 2))
+        ->toThrow(RuntimeException::class, 'unresolved photographs');
+    expect($i->fresh()->alt_text)->toBe('Approved B')
+        ->and($i->fresh()->source_image_id)->toBe($keep->id)
+        ->and($i->fresh()->is_duplicate_hidden)->toBeFalse()
+        ->and($keep->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/1')
+        ->and($keep->fresh()->is_duplicate_hidden)->toBeFalse()
+        ->and($i->product->allImages()->count())->toBe(2);
 });
 
 it('rejects stale historical URL evidence when current Shopify bytes differ', function () {
@@ -189,7 +196,7 @@ it('invalidates old media without an asset baseline and archives the approved st
     $i = lifecycleImage();
     Image::withoutEvents(fn () => $i->forceFill(['image_asset_id' => null, 'shopify_id' => 'gid://shopify/MediaImage/11', 'src' => 'https://cdn.shopify.com/old.jpg', 'alt_text' => 'Approved old photo', 'alt_text_status' => Image::ALT_APPROVED])->save());
     $asset = createImportTestAsset('replacement', 'jpg', 'new.jpg');
-    (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))->invoke(app(ShopifyImageImportService::class), $i->product, $asset, 'new.jpg', 1);
+    (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))->invoke(app(ShopifyImageImportService::class), $i->product, $asset, 'new-v2.jpg', 1, 2);
     $snapshot = json_decode(DB::table('image_revisions')->where('image_id', $i->id)->value('snapshot'), true);
     expect($i->fresh()->shopify_id)->toBeNull()->and($i->fresh()->shopify_identity_unresolved)->toBeTrue()->and($i->fresh()->alt_text)->toBeNull()->and($snapshot['alt_text'])->toBe('Approved old photo');
 });
@@ -331,7 +338,9 @@ it('blocks a concurrent import and then reuses the same photograph across reorde
     }
     $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed.jpg', 2);
     $method->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'renamed-again.jpg', 3);
-    expect($i->product->allImages()->count())->toBe(1)->and($i->fresh()->position)->toBe(3);
+    expect($i->product->allImages()->orderBy('position')->pluck('position')->all())->toBe([1, 2, 3])
+        ->and($i->fresh()->position)->toBe(1)
+        ->and($i->product->allImages()->pluck('image_asset_id')->unique()->all())->toBe([$i->image_asset_id]);
 });
 
 it('does not create separate operations for two rows containing the same product photograph', function () {
@@ -440,7 +449,7 @@ it('blocks a duplicate existing photograph from implicit import cleanup', functi
     Image::withoutEvents(fn () => Image::create(['product_id' => $i->product_id, 'position' => 1, 'image_asset_id' => $i->image_asset_id, 'sync_state' => Image::SYNC_STATE_SYNCED, 'alt_text' => 'Other approved text', 'alt_text_status' => Image::ALT_APPROVED]));
     $before = $i->product->allImages()->orderBy('id')->get()->toArray();
     expect(fn () => (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))->invoke(app(ShopifyImageImportService::class), $i->product, $i->imageAsset, 'new-name.jpg', 1))
-        ->toThrow(RuntimeException::class, 'More than one CMS row');
+        ->toThrow(RuntimeException::class, 'unresolved photographs');
     expect($i->product->allImages()->orderBy('id')->get()->toArray())->toBe($before);
 });
 it('reuses a renamed Shopify file by verified original bytes without another upload', function () {

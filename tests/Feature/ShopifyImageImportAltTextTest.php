@@ -48,7 +48,7 @@ it('imports images without a csv and leaves alt text untouched', function (): vo
         ->and($image)->not->toBeNull()
         ->and($image->alt_text)->toBeNull()
         ->and($image->alt_text_status)->toBeNull()
-        ->and($image->approved_filename)->toBe('la0550-1.jpg')
+        ->and($image->approved_filename)->toBe('LA0550.jpg')
         ->and(ShopifyImageImportBatch::formatImportResult($result))->toBe('Images imported or updated: 1. Failed: 0. Files: 1.');
 });
 
@@ -76,7 +76,7 @@ it('imports quoted utf-8 alt text onto the original filename and leaves it pendi
         ->and($image->alt_text)->toBe('Elegant gold necklace, with café detailing')
         ->and($image->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
         ->and($image->imported_alt_text)->toBe('Elegant gold necklace, with café detailing')
-        ->and($image->approved_filename)->toBe('la0550-1.jpg')
+        ->and($image->approved_filename)->toBe('la0550.JPG')
         ->and($image->imageAsset?->original_filename)->toBe('la0550.JPG')
         ->and(app(ProductPartialApprovalService::class)->approvedAlt($image))->toBeNull()
         ->and(app(ImageAltTextBackfillService::class)->approvedUploadAlt($image))->toBeNull()
@@ -143,8 +143,8 @@ it('does not reset approval when the same image and alt text are imported again'
 
 it('replaces a photograph and stores the new alt text for review without the previous shopify alt', function (): void {
     $image = syncedImportImage('LA0550', 'old-photo', 'Old description', Image::ALT_PUBLISHED);
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/LA0550.jpg', 'new-photo');
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nLA0550.jpg,New description\n");
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/LA0550-v2.jpg', 'new-photo');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nLA0550-v2.jpg,New description\n");
 
     runAltTextImport('incoming/2026-11-10');
 
@@ -159,7 +159,7 @@ it('replaces a photograph and stores the new alt text for review without the pre
 it('clears the previous alt text when a replacement has no csv description', function (): void {
     $image = syncedImportImage('LA0550', 'old-photo', 'Old description', Image::ALT_PUBLISHED);
     $image->forceFill(['imported_alt_text' => 'Old description'])->save();
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/LA0550.jpg', 'new-photo');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/LA0550-v2.jpg', 'new-photo');
 
     [$batch] = runAltTextImport('incoming/2026-11-10');
 
@@ -252,7 +252,7 @@ it('saves alt text on stack owned images at every position and does not treat a 
 
     [$batch] = runAltTextImport('incoming/2026-11-10');
     $owned = $stack->images()->where('position', 1)->first();
-    $second = $stack->images()->where('position', 2)->first();
+    $second = $stack->images()->where('position', 3)->first();
 
     expect($batch->alt_text_applied)->toBe(2)
         ->and($batch->alt_text_error_count)->toBe(0)
@@ -285,9 +285,9 @@ it('gives the existing stack rebuild the component alt text imported from the cs
         'status' => 'active',
         'bundle_product_ids' => [$component->id],
     ]));
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/COMP001.jpg', 'new-component');
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/STACK001.jpg', 'new-lifestyle');
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nCOMP001.jpg,Component front\nSTACK001.jpg,Stack lifestyle\n");
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/COMP001-v2.jpg', 'new-component');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/STACK001-v2.jpg', 'new-lifestyle');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-10/alt-text.csv', "filename,alt_text\nCOMP001-v2.jpg,Component front\nSTACK001-v2.jpg,Stack lifestyle\n");
 
     [$batch] = runAltTextImport('incoming/2026-11-10');
     $componentImage = $component->images()->where('position', 1)->first();
@@ -347,18 +347,22 @@ it('keeps the existing filename positions when alt text is imported', function (
     [$batch] = runAltTextImport('incoming/2026-11-10');
     $first = $product->images()->where('position', 1)->first();
     $second = $product->images()->where('position', 2)->first();
+    $third = $product->images()->where('position', 3)->first();
 
-    expect($product->images()->count())->toBe(2)
+    expect($product->images()->count())->toBe(3)
         ->and($first->imageAsset?->original_filename)->toBe('LA0550.jpg')
-        ->and($first->approved_filename)->toBe('la0550-1.jpg')
+        ->and($first->approved_filename)->toBe('LA0550.jpg')
         ->and($first->alt_text)->toBe('First alt')
-        ->and($second->imageAsset?->original_filename)->toBe('LA0550-2.jpg')
-        ->and($second->approved_filename)->toBe('la0550-2.jpg')
-        ->and($second->alt_text)->toBe('Second alt')
+        ->and($second->imageAsset?->original_filename)->toBe('LA0550-1.jpg')
+        ->and($second->approved_filename)->toBe('LA0550-1.jpg')
+        ->and($second->alt_text)->toBe('Discarded alt')
+        ->and($third->imageAsset?->original_filename)->toBe('LA0550-2.jpg')
+        ->and($third->approved_filename)->toBe('LA0550-2.jpg')
+        ->and($third->alt_text)->toBe('Second alt')
         ->and($literal->images()->where('position', 1)->first()->alt_text)->toBe('Literal alt')
         ->and($literal->images()->where('position', 2)->count())->toBe(0)
-        ->and($batch->altTextReportText())->toContain('LA0550-1.jpg')
-        ->and($batch->altTextReportText())->toContain('replaced by LA0550.jpg');
+        ->and($batch->alt_text_applied)->toBe(4)
+        ->and($batch->altTextReportText())->not->toContain('replaced by LA0550.jpg');
 });
 
 it('does not replace a newer manual description with the previous csv text', function (): void {
@@ -388,6 +392,7 @@ it('does not replace a newer manual description with the previous csv text', fun
 });
 
 it('applies alt text before the stack rebuild job is dispatched', function (): void {
+    config(['images.component_stack_local_rebuild' => true]);
     Bus::fake([RebuildShopifyStackImagesJob::class]);
     $component = createImageImportProduct('COMP001', ['handle' => 'component-one']);
     $stack = createImageImportProduct('STACK001', [

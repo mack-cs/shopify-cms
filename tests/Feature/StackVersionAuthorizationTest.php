@@ -152,8 +152,8 @@ it('versions a real csv alt import and a real s3 photograph replacement', functi
     ]));
     $photoVersion = (int) $image->photograph_version;
     $altVersion = (int) $image->alt_text_version;
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/CSVROW.png', 'replacement-csv-bytes');
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/alt-text.csv', "filename,alt_text\nCSVROW.png,Imported bracelet clasp\n");
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/CSVROW-v2.png', 'replacement-csv-bytes');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/alt-text.csv', "filename,alt_text\nCSVROW-v2.png,Imported bracelet clasp\n");
     $batch = ShopifyImageImportBatch::create([
         's3_prefix' => '2026-11-21',
         'status' => ShopifyImageImportBatch::STATUS_PENDING,
@@ -171,7 +171,7 @@ it('versions a real csv alt import and a real s3 photograph replacement', functi
         ->and($image->shopify_id)->toBeNull();
 
     $afterImport = (int) $image->alt_text_version;
-    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/CSVROW.png', 'replacement-csv-bytes');
+    Storage::disk('shopify_product_images')->put('incoming/2026-11-21/CSVROW-v2.png', 'replacement-csv-bytes');
     $second = ShopifyImageImportBatch::create([
         's3_prefix' => '2026-11-21',
         'status' => ShopifyImageImportBatch::STATUS_PENDING,

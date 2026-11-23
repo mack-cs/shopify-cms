@@ -213,7 +213,7 @@ it('requires pending confirmation recovery before replacing a photograph', funct
     $oldAsset = $image->image_asset_id;
     $replacement = createImportTestAsset('replacement while pending', 'jpg', 'pending-replacement.jpg');
     expect(fn () => (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))
-        ->invoke(app(ShopifyImageImportService::class), $p, $replacement, 'pending-replacement.jpg', 1))
+        ->invoke(app(ShopifyImageImportService::class), $p, $replacement, 'pending-replacement-v2.jpg', 1, 2))
         ->toThrow(RuntimeException::class, 'Resolve the pending');
     expect($image->fresh()->image_asset_id)->toBe($oldAsset)->and($image->fresh()->alt_confirmation_text)->toBe('Approved pending description');
 });
@@ -463,7 +463,7 @@ it('publishes five photographs and descriptions then edits replaces and reorders
     $replacement = createImportTestAsset('five gallery replacement', 'jpg', 'third-replacement.jpg');
     $this->gateway->bytes['https://cdn.shopify.com/s/files/replacement-test.jpg'] = 'five gallery replacement';
     (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))
-        ->invoke(app(ShopifyImageImportService::class), $p->fresh(), $replacement, 'third-replacement.jpg', 3);
+        ->invoke(app(ShopifyImageImportService::class), $p->fresh(), $replacement, 'third-replacement-v2.jpg', 3, 2);
     expect(app(ProductPartialApprovalService::class)->approvedAlt($third->fresh()))->toBeNull()->and($third->fresh()->shopify_id)->toBeNull();
     $alt->markPendingReview($third->fresh(), 'Replacement photograph description');
     $approveProduct();

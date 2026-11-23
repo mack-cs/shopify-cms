@@ -11,6 +11,7 @@ use App\Models\ShopifyImageImportItem;
 use App\Models\Variant;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -20,7 +21,6 @@ class ShopifyImageImportService
 
     public function __construct(
         private readonly ProductImageBackupService $backupService,
-        private readonly ProductImageFilenameService $filenameService,
         private readonly ImageAltTextBackfillService $altText,
     ) {}
 
@@ -133,6 +133,8 @@ class ShopifyImageImportService
      */
     public function runBatch(ShopifyImageImportBatch $batch): array
     {
+        $this->assertFilenameVersionColumn($batch);
+
         $prefix = $this->normalizePrefix($batch->s3_prefix);
         $keys = $this->imageKeysForPrefix($prefix);
 
@@ -158,8 +160,12 @@ class ShopifyImageImportService
             'alt_text_report' => null,
         ])->save();
 
+        $rejectedKeys = $this->rejectedFilenameVersions($keys);
+
         foreach ($keys as $key) {
-            $result = $this->processImageKey($batch->fresh() ?? $batch, $key);
+            $result = isset($rejectedKeys[$key])
+                ? $this->rejectImageKey($batch->fresh() ?? $batch, $key, $rejectedKeys[$key])
+                : $this->processImageKey($batch->fresh() ?? $batch, $key);
             $basename = $this->imageBasename($key);
             $outcomes[] = [
                 'item_id' => $result['item_id'],
@@ -167,6 +173,8 @@ class ShopifyImageImportService
                 'basename' => $basename,
                 'match_key' => $this->altTextMatchKey($basename),
                 'image_id' => $result['image_id'],
+                'image_asset_id' => $result['image_asset_id'],
+                'photograph_version' => $result['photograph_version'],
                 'updated' => $result['updated'],
                 'failed' => $result['failed'],
             ];
@@ -390,21 +398,18 @@ class ShopifyImageImportService
 
         try {
             $asset = $this->storeS3ImageAsAsset($key);
-            $prepared = $this->prepareImageForImport($product, $asset, basename($key), $position);
+            $prepared = $this->prepareImageForImport($product, $asset, basename($key), $position, (int) $identity['filename_version']);
             $image = $prepared['image'];
             $alreadySynced = $prepared['already_synced'];
             $product = $product->fresh() ?? $product;
-            $duplicateCleanupCount = $this->cleanupDuplicatePositionsForPipeline($product);
-            $renamedCount = $this->renameActiveProductImagesFromHandle($product);
-            $this->pointActiveManagedImageSrcsAtManagedRoutes($product->fresh() ?? $product);
 
             $this->pointImageSrcAtManagedRoute($image->fresh() ?? $image);
             $this->markProductImportStatus($product, $batch, 'updated');
 
-            $positionLabel = $position <= 1 ? 'First image' : "Image position {$position}";
-            $message = ($alreadySynced && $renamedCount === 0 && $duplicateCleanupCount === 0)
-                ? 'Image already matched the latest imported asset; Shopify sync left pending for approval.'
-                : "{$positionLabel} replaced locally, filenames normalized, and duplicate positions cleaned. Shopify sync left pending for approval.";
+            $positionLabel = "Image position {$position}";
+            $message = $alreadySynced
+                ? "{$positionLabel} already matched the imported file. Shopify was left unchanged."
+                : "{$positionLabel} was saved. Shopify sync is pending approval.";
 
             $this->markItem($item, ShopifyImageImportItem::STATUS_UPDATED, $message);
 
@@ -415,6 +420,8 @@ class ShopifyImageImportService
                 $this->isStackProduct($product) ? (int) $product->id : null,
                 (int) $product->id,
                 (int) $image->id,
+                (int) $image->image_asset_id,
+                (int) $image->photograph_version,
             );
         } catch (\Throwable $e) {
             $this->markItem($item, ShopifyImageImportItem::STATUS_FAILED, $e->getMessage());
@@ -433,7 +440,7 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int, item_id:int, image_id:?int}
+     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int, item_id:int, image_id:?int, image_asset_id:?int, photograph_version:?int}
      */
     private function imageImportResult(
         ShopifyImageImportItem $item,
@@ -442,6 +449,8 @@ class ShopifyImageImportService
         ?int $stackProductId,
         ?int $productId,
         ?int $imageId,
+        ?int $imageAssetId = null,
+        ?int $photographVersion = null,
     ): array {
         return [
             'matched' => $matched,
@@ -451,13 +460,15 @@ class ShopifyImageImportService
             'updated_product_id' => $productId,
             'item_id' => (int) $item->id,
             'image_id' => $imageId,
+            'image_asset_id' => $imageAssetId,
+            'photograph_version' => $photographVersion,
         ];
     }
 
     /**
      * @return array{image:Image, already_synced:bool}
      */
-    private function prepareImageForImport(Product $product, ImageAsset $asset, string $filename, int $position = 1): array
+    private function prepareImageForImport(Product $product, ImageAsset $asset, string $filename, int $position = 1, int $filenameVersion = 1): array
     {
         $mutex = new ImageSyncMutex;
         if (! $mutex->acquire((int) $product->id)) {
@@ -468,28 +479,54 @@ class ShopifyImageImportService
             $mutex->assertOwned();
             $boundary = app(StackSynchronizationBoundary::class)->acquireForComponent((int) $product->id);
 
-            return $this->prepareImageForImportLocked($product, $asset, $filename, $position);
+            return $this->prepareImageForImportLocked($product, $asset, $filename, $position, $filenameVersion);
         } finally {
             $boundary?->release();
             $mutex->release();
         }
     }
 
-    private function prepareImageForImportLocked(Product $product, ImageAsset $asset, string $filename, int $position = 1): array
+    private function prepareImageForImportLocked(Product $product, ImageAsset $asset, string $filename, int $position = 1, int $filenameVersion = 1): array
     {
         $position = max(1, $position);
+        $filenameVersion = max(1, $filenameVersion);
 
-        return DB::transaction(function () use ($product, $asset, $filename, $position): array {
+        return DB::transaction(function () use ($product, $asset, $filename, $position, $filenameVersion): array {
             Product::query()->whereKey($product->id)->lockForUpdate()->firstOrFail();
-            $byAsset = $product->allImages()->active()->where('image_asset_id', $asset->id)->lockForUpdate()->get();
-            if ($byAsset->count() > 1) {
-                throw new \RuntimeException('More than one CMS row contains this photograph. Review without merging approval history.');
-            }
-            $atPosition = $product->allImages()->active()->where('position', $position)->get();
-            if ($byAsset->isEmpty() && $atPosition->count() > 1) {
+            $atPosition = $product->allImages()->active()->where('position', $position)->lockForUpdate()->get();
+            $sameBytes = $atPosition->filter(
+                fn (Image $candidate): bool => (int) $candidate->image_asset_id > 0 && (int) $candidate->image_asset_id === (int) $asset->id
+            );
+            if ($sameBytes->count() > 1) {
                 throw new \RuntimeException('This import position contains different or unresolved photographs. Review the collision explicitly.');
             }
-            $image = $byAsset->first() ?? $this->imageForImportPosition($product, $position);
+            if ($sameBytes->count() === 1) {
+                $image = $sameBytes->first();
+            } elseif ($atPosition->count() > 1) {
+                throw new \RuntimeException('This import position contains different or unresolved photographs. Review the collision explicitly.');
+            } else {
+                $image = $atPosition->first();
+            }
+            if ($image instanceof Image && (\App\Services\ImageOwnership::isInherited($image) || (int) $image->source_image_id > 0)) {
+                throw new \RuntimeException('Image '.$image->id.' at position '.$position.' is an inherited component photograph. The file was not imported and ownership was not changed.');
+            }
+            $photographMatches = false;
+            if ($image instanceof Image) {
+                $acceptedVersion = $image->filename_version === null ? 1 : (int) $image->filename_version;
+                if ($filenameVersion < $acceptedVersion) {
+                    throw new \RuntimeException('Image position '.$position.' already has filename version '.$acceptedVersion.'. '.$filename.' is filename version '.$filenameVersion.' and was not imported.');
+                }
+                if ($filenameVersion === $acceptedVersion) {
+                    $comparison = $this->existingPhotographComparison($image, $asset);
+                    if ($comparison === 'different') {
+                        throw new \RuntimeException('Image position '.$position.' already has different bytes for filename version '.$filenameVersion.'. The current photograph was kept.');
+                    }
+                    if ($comparison === 'unreadable') {
+                        throw new \RuntimeException('Image position '.$position.' has a photograph whose bytes could not be read. '.$filename.' was not imported.');
+                    }
+                    $photographMatches = $comparison === 'match';
+                }
+            }
             $alreadySynced = false;
 
             if (! $image instanceof Image) {
@@ -503,12 +540,18 @@ class ShopifyImageImportService
                     && $image->sync_state === Image::SYNC_STATE_SYNCED
                     && ! $image->needs_shopify_image_sync
                     && filled(trim((string) $image->shopify_id));
+                if (! $alreadySynced && $photographMatches
+                    && $image->sync_state === Image::SYNC_STATE_SYNCED
+                    && ! $image->needs_shopify_image_sync
+                    && filled(trim((string) $image->shopify_id))) {
+                    $alreadySynced = true;
+                }
             }
 
             $hasShopifyId = filled(trim((string) ($image->shopify_id ?? '')));
             $needsSync = ! $alreadySynced;
             $previousAssetId = (int) ($image->image_asset_id ?? 0);
-            $replacedPhotograph = $image->exists && $previousAssetId !== (int) $asset->id;
+            $replacedPhotograph = $image->exists && ! $photographMatches && $previousAssetId !== (int) $asset->id;
 
             if ($replacedPhotograph && ($image->alt_confirmation_media_id !== null || $image->shopify_media_create_uncertain
                 || app(ImageUploadOperations::class)->active($image))) {
@@ -518,7 +561,7 @@ class ShopifyImageImportService
             if ($replacedPhotograph) {
                 app(ImagePhotographEvidence::class)->archive($image, 'S3 photograph replacement');
             }
-            Image::withoutEvents(function () use ($image, $asset, $filename, $hasShopifyId, $needsSync, $alreadySynced, $position, $replacedPhotograph, $product): void {
+            Image::withoutEvents(function () use ($image, $asset, $filename, $filenameVersion, $hasShopifyId, $needsSync, $alreadySynced, $position, $replacedPhotograph, $photographMatches, $product): void {
                 $attributes = [
                     'image_asset_id' => $asset->id,
                     'image_path' => null,
@@ -526,6 +569,7 @@ class ShopifyImageImportService
                     'backup_completed_at' => now(),
                     'backup_error' => null,
                     'approved_filename' => $this->safeFilename($filename),
+                    'filename_version' => $filenameVersion,
                     'filename_mode' => Image::FILENAME_MODE_MANUAL,
                     'position' => $position,
                     'sync_state' => $alreadySynced
@@ -560,16 +604,105 @@ class ShopifyImageImportService
                 if ($product->isStackProduct() && $image->ownership === null && $resultingSource === null) {
                     $attributes['ownership'] = \App\Services\ImageOwnership::STACK_OWNED;
                 }
+                if ($photographMatches) {
+                    unset($attributes['image_asset_id'], $attributes['image_path']);
+                    $attributes['photograph_version'] = max(1, (int) $image->photograph_version);
+                    $attributes['alt_text_version'] = max(1, (int) $image->alt_text_version);
+                }
                 $image->forceFill($attributes)->save();
             });
-
-            $this->removeExtraActiveImagesAtPosition($product, $image, $position);
 
             return [
                 'image' => $image->fresh() ?? $image,
                 'already_synced' => $alreadySynced,
             ];
         });
+    }
+
+    /**
+     * @return 'match'|'different'|'unreadable'|'absent'
+     */
+    private function existingPhotographComparison(Image $image, ImageAsset $incoming): string
+    {
+        $bytes = $this->readExistingPhotographBytes($image);
+        if ($bytes === false) {
+            return 'unreadable';
+        }
+        if ($bytes === null) {
+            return 'absent';
+        }
+
+        $incomingHash = strtolower(trim((string) $incoming->sha256));
+        if (strlen($incomingHash) !== 64) {
+            return 'unreadable';
+        }
+
+        return hash_equals($incomingHash, hash('sha256', $bytes)) ? 'match' : 'different';
+    }
+
+    /**
+     * Read the photograph through its managed asset, then its local upload.
+     * False means a photograph is recorded but its bytes cannot be trusted.
+     */
+    private function readExistingPhotographBytes(Image $image): string|false|null
+    {
+        $image->loadMissing('imageAsset');
+        $asset = $image->imageAsset;
+        if ($asset instanceof ImageAsset && $asset->isAvailable()) {
+            $diskName = trim((string) $asset->storage_disk) !== '' ? $asset->storage_disk : 'public';
+            $path = trim((string) $asset->storage_path);
+            $contents = $path === '' ? null : Storage::disk($diskName)->get($path);
+            if (! is_string($contents) || $contents === '') {
+                return false;
+            }
+            $stored = strtolower(trim((string) $asset->sha256));
+            if ($stored !== '' && ! hash_equals($stored, hash('sha256', $contents))) {
+                return false;
+            }
+
+            return $contents;
+        }
+
+        $localPath = trim((string) $image->image_path);
+        if ($localPath !== '') {
+            if (! Storage::disk('public')->exists($localPath)) {
+                return false;
+            }
+            $contents = Storage::disk('public')->get($localPath);
+            if (! is_string($contents) || $contents === '') {
+                return false;
+            }
+
+            return $contents;
+        }
+
+        if ((int) $image->image_asset_id > 0
+            || trim((string) $image->src) !== ''
+            || trim((string) $image->shopify_cdn_url) !== ''
+            || filled(trim((string) $image->shopify_id))) {
+            return false;
+        }
+
+        return null;
+    }
+
+    private function assertFilenameVersionColumn(ShopifyImageImportBatch $batch): void
+    {
+        if (Schema::hasColumn('images', 'filename_version')) {
+            return;
+        }
+
+        $message = 'The images.filename_version column is missing. Run the filename version migration before importing. No images were changed.';
+        $batch->forceFill([
+            'status' => ShopifyImageImportBatch::STATUS_FAILED,
+            'error_message' => $message,
+            'completed_at' => now(),
+            'matched_count' => 0,
+            'updated_count' => 0,
+            'failed_count' => 0,
+        ])->save();
+
+        throw new \RuntimeException($message);
     }
 
     /**
@@ -768,106 +901,6 @@ class ShopifyImageImportService
             : null;
     }
 
-    private function cleanupDuplicatePositionsForPipeline(Product $product): int
-    {
-        // Position collisions require an explicit reviewed cleanup decision.
-        return 0;
-    }
-
-    private function renameActiveProductImagesFromHandle(Product $product): int
-    {
-        $images = $product->allImages()
-            ->with('imageAsset')
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-            ->orderBy('position')
-            ->orderBy('id')
-            ->get();
-
-        $updated = 0;
-        $position = 0;
-
-        foreach ($images as $image) {
-            if (! $image instanceof Image) {
-                continue;
-            }
-
-            $position++;
-            $filename = $this->filenameService->generateForProductHandle($image, $product, $position);
-            $filenameChanged = trim((string) $image->approved_filename) !== $filename;
-            $modeChanged = trim((string) $image->filename_mode) !== Image::FILENAME_MODE_AUTO;
-            $positionChanged = (int) ($image->position ?? 0) !== $position;
-
-            if (! $filenameChanged && ! $modeChanged && ! $positionChanged) {
-                continue;
-            }
-
-            Image::withoutEvents(function () use ($image, $filename, $position): void {
-                $updates = [
-                    'approved_filename' => $filename,
-                    'filename_mode' => Image::FILENAME_MODE_AUTO,
-                    'position' => $position,
-                    'shopify_image_sync_error' => null,
-                ];
-
-                $image->forceFill($updates)->save();
-            });
-
-            $updated++;
-        }
-
-        return $updated;
-    }
-
-    private function pointActiveManagedImageSrcsAtManagedRoutes(Product $product): void
-    {
-        $product->allImages()
-            ->with('imageAsset')
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->get()
-            ->each(function (Image $image): void {
-                $this->pointImageSrcAtManagedRoute($image);
-            });
-    }
-
-    private function preferredPipelineImageToKeep(Collection $images): ?Image
-    {
-        $first = $images
-            ->sort(function (Image $left, Image $right): int {
-                $leftRank = [
-                    $left->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
-                    $left->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
-                    blank($left->shopify_id) ? 1 : 0,
-                    (int) $left->id,
-                ];
-                $rightRank = [
-                    $right->sync_state === Image::SYNC_STATE_SYNCED ? 0 : 1,
-                    $right->backup_status === Image::BACKUP_STATUS_BACKED_UP ? 0 : 1,
-                    blank($right->shopify_id) ? 1 : 0,
-                    (int) $right->id,
-                ];
-
-                return $leftRank <=> $rightRank;
-            })
-            ->first();
-
-        return $first instanceof Image ? $first : null;
-    }
-
     private function findProductBySku(string $sku): ?Product
     {
         $normalized = mb_strtolower(trim($sku));
@@ -894,61 +927,9 @@ class ShopifyImageImportService
             ->get();
     }
 
-    private function firstActiveImage(Product $product): ?Image
-    {
-        return $product->allImages()
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-            ->orderBy('position')
-            ->orderBy('id')
-            ->first();
-    }
-
     private function firstComponentShopifyImage(Product $product): ?Image
     {
         return app(ComponentPhotographSelector::class)->selected($product);
-    }
-
-    private function imageForImportPosition(Product $product, int $position): ?Image
-    {
-        if ($position <= 1) {
-            $image = $this->firstActiveImage($product);
-            if ($image instanceof Image && ($image->position === null || (int) $image->position <= 1)) {
-                return $image;
-            }
-
-            return $this->activeImageAtPosition($product, 1);
-        }
-
-        return $this->activeImageAtPosition($product, $position);
-    }
-
-    private function activeImageAtPosition(Product $product, int $position): ?Image
-    {
-        return $product->allImages()
-            ->where('position', $position)
-            ->whereNotIn('sync_state', [
-                Image::SYNC_STATE_LOCAL_DELETED,
-                Image::SYNC_STATE_REMOTE_DELETED,
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('is_duplicate_hidden')
-                    ->orWhere('is_duplicate_hidden', false);
-            })
-            ->orderBy('id')
-            ->first();
-    }
-
-    private function removeExtraActiveImagesAtPosition(Product $product, Image $primary, int $position): void
-    {
-        // Retain every row and its approval/source relationships.
     }
 
     private function inheritedComponentAlt(Image $componentImage): ?string
@@ -1169,28 +1150,134 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return array{sku:string, position:int}
+     * A bare filename is position 1. A trailing -N is the next gallery slot, so -1 is position 2.
+     * A trailing -vN is the filename revision and does not change the position.
+     *
+     * @return array{sku:string, position:int, filename_version:int}
      */
     private function imageIdentityFromKey(string $key): array
     {
         $stem = trim((string) pathinfo($key, PATHINFO_FILENAME));
         if ($stem === '') {
-            return ['sku' => '', 'position' => 1];
+            return ['sku' => '', 'position' => 1, 'filename_version' => 1];
         }
 
         if ($this->findProductBySku($stem) instanceof Product) {
-            return ['sku' => $stem, 'position' => 1];
+            return ['sku' => $stem, 'position' => 1, 'filename_version' => 1];
         }
 
-        if (preg_match('/^(.+)-(\d+)$/', $stem, $matches) === 1) {
-            $position = (int) $matches[2];
-            $base = trim($matches[1]);
-            if ($position >= 1 && $base !== '' && $this->findProductBySku($base) instanceof Product) {
-                return ['sku' => $base, 'position' => $position];
+        $filenameVersion = 1;
+        $body = $stem;
+        if (preg_match('/^(.+)-v(\d+)$/i', $stem, $versionMatch) === 1 && (int) $versionMatch[2] >= 1) {
+            $filenameVersion = (int) $versionMatch[2];
+            $body = trim($versionMatch[1]);
+        }
+
+        if ($body !== '' && $this->findProductBySku($body) instanceof Product) {
+            return ['sku' => $body, 'position' => 1, 'filename_version' => $filenameVersion];
+        }
+
+        if (preg_match('/^(.+)-(\d+)$/', $body, $positionMatch) === 1) {
+            $suffix = (int) $positionMatch[2];
+            $base = trim($positionMatch[1]);
+            if ($suffix >= 1 && $base !== '' && $this->findProductBySku($base) instanceof Product) {
+                return ['sku' => $base, 'position' => $suffix + 1, 'filename_version' => $filenameVersion];
             }
         }
 
-        return ['sku' => $stem, 'position' => 1];
+        return ['sku' => $stem, 'position' => 1, 'filename_version' => 1];
+    }
+
+    /**
+     * A repeated claim for any filename version rejects the whole slot.
+     * Unique versions keep the highest one.
+     *
+     * @param  array<int, string>  $keys
+     * @return array<string, string>
+     */
+    private function rejectedFilenameVersions(array $keys): array
+    {
+        $groups = [];
+        foreach ($keys as $key) {
+            $identity = $this->imageIdentityFromKey($key);
+            $product = $this->findProductBySku($identity['sku']);
+            if ($identity['sku'] === '' || ! $product instanceof Product) {
+                continue;
+            }
+            $groups[$product->id.'|'.$identity['position']][$key] = $identity;
+        }
+
+        $rejected = [];
+        foreach ($groups as $members) {
+            if (count($members) < 2) {
+                continue;
+            }
+            $versionCounts = [];
+            foreach ($members as $identity) {
+                $version = (int) $identity['filename_version'];
+                $versionCounts[$version] = ($versionCounts[$version] ?? 0) + 1;
+            }
+            $duplicatedVersions = array_keys(array_filter($versionCounts, fn (int $count): bool => $count > 1));
+            if ($duplicatedVersions !== []) {
+                sort($duplicatedVersions, SORT_NUMERIC);
+                $names = array_map(fn (string $key): string => basename($key), array_keys($members));
+                sort($names, SORT_STRING);
+                $list = implode(', ', $names);
+                $versionList = implode(', ', $duplicatedVersions);
+                foreach ($members as $key => $identity) {
+                    $rejected[$key] = "Position {$identity['position']} has more than one file for filename version {$versionList} ({$list}). None were imported.";
+                }
+
+                continue;
+            }
+            $highest = max(array_map(fn (array $identity): int => $identity['filename_version'], $members));
+            $winners = array_filter($members, fn (array $identity): bool => $identity['filename_version'] === $highest);
+            if (count($winners) > 1) {
+                $names = array_map(fn (string $key): string => basename($key), array_keys($winners));
+                sort($names, SORT_STRING);
+                $list = implode(', ', $names);
+                foreach ($members as $key => $identity) {
+                    $rejected[$key] = "Position {$identity['position']} has more than one file at filename version {$highest} ({$list}). None were imported.";
+                }
+
+                continue;
+            }
+            $winnerKey = (string) array_key_first($winners);
+            $winnerName = basename($winnerKey);
+            foreach ($members as $key => $identity) {
+                if ($key === $winnerKey) {
+                    continue;
+                }
+                $rejected[$key] = "Position {$identity['position']} kept filename version {$highest} from {$winnerName}. ".basename($key)." is filename version {$identity['filename_version']} and was not imported.";
+            }
+        }
+
+        return $rejected;
+    }
+
+    /**
+     * @return array{matched:bool, updated:bool, failed:bool, affected_stack_product_id:?int, updated_product_id:?int, item_id:int, image_id:?int}
+     */
+    private function rejectImageKey(ShopifyImageImportBatch $batch, string $key, string $message): array
+    {
+        $identity = $this->imageIdentityFromKey($key);
+        $product = $this->findProductBySku($identity['sku']);
+        $item = ShopifyImageImportItem::query()->updateOrCreate(
+            [
+                'batch_id' => $batch->id,
+                's3_key' => $key,
+            ],
+            [
+                'sku' => $identity['sku'],
+                'product_id' => $product?->id,
+                'shopify_product_id' => $product?->shopify_id,
+                'status' => ShopifyImageImportItem::STATUS_FAILED,
+                'message' => Str::limit($message, 2000, ''),
+                'alt_message' => null,
+            ],
+        );
+
+        return $this->imageImportResult($item, true, true, null, null, null);
     }
 
     private function diskName(): string
@@ -1465,7 +1552,12 @@ class ShopifyImageImportService
             }
 
             try {
-                $stage = $this->altText->stageImportedAlt($image, $row['alt_text']);
+                $stage = $this->altText->stageImportedAlt(
+                    $image,
+                    $row['alt_text'],
+                    isset($outcome['image_asset_id']) ? (int) $outcome['image_asset_id'] : null,
+                    isset($outcome['photograph_version']) ? (int) $outcome['photograph_version'] : null,
+                );
             } catch (\Throwable $e) {
                 $report[] = [
                     'kind' => 'error',

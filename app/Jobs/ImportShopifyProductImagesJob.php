@@ -51,7 +51,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
                 'completed_at' => now(),
             ])->save();
 
-            if (! empty($result['affected_stack_product_ids'])) {
+            if (! empty($result['affected_stack_product_ids']) && config('images.component_stack_local_rebuild')) {
                 RebuildShopifyStackImagesJob::dispatch(
                     $batch->id,
                     $result['affected_stack_product_ids'],

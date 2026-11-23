@@ -352,7 +352,7 @@ it('clears alt text when a photograph is replaced', function (): void {
     $image->update(['image_asset_id' => $old->id]);
 
     $method = new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport');
-    $method->invoke(app(ShopifyImageImportService::class), $product, $new, 'replacement.jpg', 1);
+    $method->invoke(app(ShopifyImageImportService::class), $product, $new, 'replacement-v2.jpg', 1, 2);
 
     expect($image->fresh()->alt_text)->toBeNull()
         ->and($image->fresh()->position)->toBe(1)

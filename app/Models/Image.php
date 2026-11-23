@@ -94,7 +94,8 @@ class Image extends Model
         $photographChanged = $this->isDirty('image_asset_id') || $this->isDirty('image_path');
         if (! $photographChanged && $this->isDirty('src')) {
             $photographChanged = \App\Services\ShopifyMediaPath::canonical($this->getOriginal('src'))
-                !== \App\Services\ShopifyMediaPath::canonical($this->src);
+                !== \App\Services\ShopifyMediaPath::canonical($this->src)
+                && ! \App\Services\ShopifyMediaPath::isCmsDeliveryUrl($this->src);
         }
         if ($photographChanged && ! $this->isDirty('photograph_version')) {
             $this->photograph_version = max(1, (int) $this->getOriginal('photograph_version')) + 1;
@@ -184,6 +185,7 @@ class Image extends Model
         'alt_inheritance_mode',
         'photograph_version',
         'alt_text_version',
+        'filename_version',
         'image_attention_since',
     ];
 
@@ -201,6 +203,7 @@ class Image extends Model
         'shopify_identity_unresolved' => 'boolean',
         'shopify_alt_pending' => 'boolean',
         'image_attention_since' => 'datetime',
+        'filename_version' => 'integer',
     ];
 
     public function scopeActive(Builder $query): Builder

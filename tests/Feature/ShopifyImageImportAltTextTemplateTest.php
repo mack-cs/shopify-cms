@@ -233,7 +233,7 @@ it('still imports images when the folder has no alt text csv', function (): void
         ->and($image)->not->toBeNull()
         ->and($image->alt_text)->toBeNull()
         ->and($image->alt_text_status)->toBeNull()
-        ->and($image->approved_filename)->toBe('la0550-1.jpg');
+        ->and($image->approved_filename)->toBe('LA0550.jpg');
 });
 
 it('still applies alt text from an existing csv without publishing it', function (): void {

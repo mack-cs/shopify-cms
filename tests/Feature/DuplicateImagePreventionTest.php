@@ -189,7 +189,7 @@ it('clears the Shopify id when a repeated S3 import replaces the photograph', fu
     Http::preventStrayRequests();
 
     $original = 'original-bytes';
-    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/LRB0009.png', 'replacement-bytes');
+    Storage::disk('shopify_product_images')->put('incoming/2026-07-06/LRB0009-v2.png', 'replacement-bytes');
     $asset = createImportTestAsset($original, 'png', 'LRB0009.png');
     $product = createImageImportProduct('LRB0009');
     $image = Image::withoutEvents(fn (): Image => Image::create([

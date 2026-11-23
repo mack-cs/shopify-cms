@@ -94,9 +94,9 @@ it('imports only direct image files in the normalized S3 folder and records the 
         ->and($product->image_import_status)->toBe('updated')
         ->and($image->src)->toBe(route('product-image-backups.show', [
             'image' => $image,
-            'filename' => 'lrb0001-1.png',
+            'filename' => 'LRB0001.png',
         ]))
-        ->and($image->approved_filename)->toBe('lrb0001-1.png')
+        ->and($image->approved_filename)->toBe('LRB0001.png')
         ->and($image->needs_shopify_image_sync)->toBeFalse()
         ->and($duplicate->sync_state)->toBe(Image::SYNC_STATE_SYNCED)
         ->and($duplicate->is_duplicate_hidden)->toBeFalse()
@@ -136,16 +136,16 @@ it('imports a filename position suffix as that image position on the base sku', 
     expect($result['failed_count'])->toBe(0)
         ->and($result['updated_count'])->toBe(3)
         ->and($first)->not->toBeNull()
-        ->and($second)->not->toBeNull()
+        ->and($second)->toBeNull()
         ->and($first->imageAsset?->original_filename)->toBe('LA0550.jpg')
-        ->and($second->imageAsset?->original_filename)->toBe('LA0550-2.jpg')
+        ->and($product->images()->where('position', 3)->first()?->imageAsset?->original_filename)->toBe('LA0550-2.jpg')
         ->and($literal->images()->where('position', 1)->count())->toBe(1)
         ->and($literal->images()->where('position', 2)->count())->toBe(0);
 
     expect(ShopifyImageImportItem::query()->where('s3_key', 'incoming/2026-10-16/LA0550-2.jpg')->first())
         ->sku->toBe('LA0550')
         ->status->toBe(ShopifyImageImportItem::STATUS_UPDATED)
-        ->message->toContain('Image position 2');
+        ->message->toContain('Image position 3');
 });
 
 it('targets parent stacks for rebuild when an imported component image changes', function (): void {

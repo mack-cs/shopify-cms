@@ -209,35 +209,45 @@ final class ImageAltTextBackfillService
      *
      * @return 'applied'|'unchanged'|'preserved'
      */
-    public function stageImportedAlt(Image $image, string $altText): string
+    public function stageImportedAlt(Image $image, string $altText, ?int $expectedAssetId = null, ?int $expectedPhotographVersion = null): string
     {
         $altText = trim($altText);
-        $image = $image->fresh() ?? $image;
         if ($altText === '') {
             throw new RuntimeException('Blank alt text is not saved.');
         }
         if (mb_strlen($altText) > 255) {
             throw new RuntimeException('Alt text exceeds the 255 character limit.');
         }
-        if ($this->notDirectlyEditable($image)) {
-            throw new RuntimeException('Stack image '.$image->id.' is inherited from a component. Update the component image instead.');
-        }
 
-        $current = trim((string) $image->alt_text);
-        if ($current === $altText) {
+        return DB::transaction(function () use ($image, $altText, $expectedAssetId, $expectedPhotographVersion): string {
+            $image = Image::query()->whereKey($image->id)->lockForUpdate()->first();
+            if (! $image instanceof Image) {
+                throw new RuntimeException('The imported image record was not available, so alt text was not applied.');
+            }
+            if (($expectedAssetId !== null && (int) $image->image_asset_id !== $expectedAssetId)
+                || ($expectedPhotographVersion !== null && (int) $image->photograph_version !== $expectedPhotographVersion)) {
+                throw new RuntimeException('This description belongs to an older photograph. The current image was left unchanged.');
+            }
+            if ($this->notDirectlyEditable($image)) {
+                throw new RuntimeException('Stack image '.$image->id.' is inherited from a component. Update the component image instead.');
+            }
+
+            $current = trim((string) $image->alt_text);
+            if ($current === $altText) {
+                $this->rememberImportedAlt($image, $altText);
+
+                return 'unchanged';
+            }
+
+            if ($image->imported_alt_text !== null && trim((string) $image->imported_alt_text) === $altText) {
+                return 'preserved';
+            }
+
+            $this->markPendingReview($image, $altText);
             $this->rememberImportedAlt($image, $altText);
 
-            return 'unchanged';
-        }
-
-        if ($image->imported_alt_text !== null && trim((string) $image->imported_alt_text) === $altText) {
-            return 'preserved';
-        }
-
-        $this->markPendingReview($image, $altText);
-        $this->rememberImportedAlt($image, $altText);
-
-        return 'applied';
+            return 'applied';
+        });
     }
 
     public function approvedUploadAlt(Image $image): ?string
