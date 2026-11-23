@@ -70,7 +70,7 @@ class ListProducts extends ListRecords
                     }),
                 Actions\Action::make('backfillImageAltText')
                     ->label('Import Alt Text CSV')
-                    ->icon('heroicon-o-language')
+                    ->icon('heroicon-o-arrow-up-tray')
                     ->color('info')
                     ->visible(fn (): bool => Auth::user()?->can(PermissionEnum::ProductEdit->value) ?? false)
                     ->modalDescription('Upload the alt text CSV. Rows match on image id. Blank alt text is skipped. Inherited stack images are rejected. Saving writes only to the CMS. Request partial approval for the product before anything can be pushed to Shopify.')
@@ -132,7 +132,7 @@ class ListProducts extends ListRecords
                         session()->forget($previewKey);
                         $this->altTextPreviewHash = null;
                     }),
-            ])->label('Alt Text')->icon('heroicon-o-language')->color('gray')->button(),
+            ])->label('Alt Text')->icon('heroicon-o-document-text')->color('gray')->button(),
             Actions\Action::make('exportDuplicateSkus')
                 ->label('Export Duplicate SKUs')
                 ->icon('heroicon-o-arrow-down-tray')
