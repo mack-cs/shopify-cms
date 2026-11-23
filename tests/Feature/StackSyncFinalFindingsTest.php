@@ -69,7 +69,9 @@ it('discovers a tag-only stack without inventing membership from an unrelated ta
     $this->artisan('images:rebuild-stack-baseline', ['stack' => $unrelated->id])
         ->expectsOutput('No stack products matched.')
         ->assertSuccessful();
-    $this->artisan('images:rebuild-stack-baseline', ['stack' => $tagged->id])->assertSuccessful();
+    $this->artisan('images:rebuild-stack-baseline', ['stack' => $tagged->id])
+        ->expectsOutput('tag-stack: rebuilt the local inherited gallery (1 photograph(s)). Stack-owned images were left in place. Shopify was not updated.')
+        ->assertSuccessful();
     $this->artisan('images:rebuild-stack-baseline', ['stack' => $tagged->id])->assertSuccessful();
     $this->artisan('images:rebuild-stack-baseline', ['stack' => $linked->id])->assertSuccessful();
 
@@ -177,6 +179,13 @@ it('shows a failed local rebuild instead of a shopify success', function (): voi
     ]));
     $stack = createImageImportProduct('MISS-STACK', ['is_bundle' => true]);
     phase7Draft($stack, [$component->id]);
+    $failed = app(ComponentStackPropagation::class)->stageStack($stack);
+    $source = Image::query()->where('product_id', $component->id)->first();
+    expect($failed['rebuilt'])->toBeFalse()
+        ->and($failed['message'])->toContain('local rebuild failed')
+        ->and($failed['message'])->toContain('Image '.$source->id.' on MISS-COMPONENT was not copied: the backup file is not readable on the CMS disk.')
+        ->and($failed['message'])->not->toContain('rebuilt the local inherited gallery');
+
     $sync = app(StackImageSync::class);
     $this->travel(-2)->hours();
     $sync->note($stack, null, null, 'uncertain', 'Shopify gallery evidence is incomplete. Nothing was marked verified. The file read failed.', false, null, false, false, StackImageSync::OPERATION_GALLERY_READ);
@@ -203,6 +212,9 @@ it('shows a failed local rebuild instead of a shopify success', function (): voi
         ->loadTable()
         ->callTableAction('rebuild', $stack)
         ->assertNotified('Local gallery was not rebuilt')
+        ->assertSee('local rebuild failed')
+        ->assertSee('Image '.$source->id.' on MISS-COMPONENT was not copied: the backup file is not readable on the CMS disk.')
+        ->assertNotNotified('Local gallery rebuilt')
         ->assertCanSeeTableRecords([$stack, $held, $verified])
         ->assertSee('local_rebuild_failed')
         ->assertSee('shopify_update_pending_authorization')

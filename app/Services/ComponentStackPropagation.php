@@ -485,10 +485,13 @@ final class ComponentStackPropagation
         $conflictNote = $conflicts !== [] ? ' Conflicting inherited alt text needs review; previous descriptions were preserved.' : '';
         $missingNote = $unavailable !== [] ? ' Unavailable: '.implode(' ', $unavailable) : '';
         $rebuilt = $ready !== [] || $unavailable === [];
+        $message = $rebuilt
+            ? "{$stack->handle}: rebuilt the local inherited gallery (".count(array_unique($created)).' photograph(s)). Stack-owned images were left in place. Shopify was not updated.'.$conflictNote.$missingNote
+            : "{$stack->handle}: local rebuild failed. No photograph was copied.".$missingNote;
 
         return [
             'rebuilt' => $rebuilt,
-            'message' => "{$stack->handle}: rebuilt the local inherited gallery (".count(array_unique($created)).' photograph(s)). Stack-owned images were left in place. Shopify was not updated.'.$conflictNote.$missingNote,
+            'message' => $message,
             'created' => array_values(array_unique($created)),
             'unavailable' => $unavailable,
         ];
