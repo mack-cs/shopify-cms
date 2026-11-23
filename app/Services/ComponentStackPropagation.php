@@ -447,7 +447,9 @@ final class ComponentStackPropagation
                 if ($reason !== null) {
                     $protectedSourceIds[] = (int) $selected->id;
                     $sku = $component->variants()->orderBy('id')->value('sku') ?: $component->handle;
-                    $unavailable[] = 'Image '.$selected->id.' on '.$sku.' was not copied: '.$reason;
+                    $filename = trim((string) ($selected->imageAsset?->original_filename ?? ''));
+                    $filenameNote = $filename !== '' ? ' ('.$filename.')' : '';
+                    $unavailable[] = 'Image '.$selected->id.' on '.$sku.$filenameNote.' was not copied: '.$reason;
 
                     continue;
                 }

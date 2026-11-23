@@ -183,7 +183,7 @@ it('shows a failed local rebuild instead of a shopify success', function (): voi
     $source = Image::query()->where('product_id', $component->id)->first();
     expect($failed['rebuilt'])->toBeFalse()
         ->and($failed['message'])->toContain('local rebuild failed')
-        ->and($failed['message'])->toContain('Image '.$source->id.' on MISS-COMPONENT was not copied: the backup file is not readable on the CMS disk.')
+        ->and($failed['message'])->toContain('Image '.$source->id.' on MISS-COMPONENT (missing.jpg) was not copied: the backup file is not readable on the CMS disk.')
         ->and($failed['message'])->not->toContain('rebuilt the local inherited gallery');
 
     $sync = app(StackImageSync::class);
@@ -213,7 +213,7 @@ it('shows a failed local rebuild instead of a shopify success', function (): voi
         ->callTableAction('rebuild', $stack)
         ->assertNotified('Local gallery was not rebuilt')
         ->assertSee('local rebuild failed')
-        ->assertSee('Image '.$source->id.' on MISS-COMPONENT was not copied: the backup file is not readable on the CMS disk.')
+        ->assertSee('Image '.$source->id.' on MISS-COMPONENT (missing.jpg) was not copied: the backup file is not readable on the CMS disk.')
         ->assertNotNotified('Local gallery rebuilt')
         ->assertCanSeeTableRecords([$stack, $held, $verified])
         ->assertSee('local_rebuild_failed')
