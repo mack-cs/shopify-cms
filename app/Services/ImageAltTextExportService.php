@@ -65,7 +65,9 @@ class ImageAltTextExportService
         DB::transaction(function () use ($user, $export): void {
             User::query()->lockForUpdate()->findOrFail($user->id);
             $export = ImageAltTextExport::lockForUpdate()->findOrFail($export->id);
-            if ($export->status !== 'failed' && ! ($export->status === 'completed' && $export->download_failed > 0)) {
+            $retryable = $export->status === 'failed'
+                || (in_array($export->status, ['partial', 'completed'], true) && $export->download_failed > 0);
+            if (! $retryable) {
                 return;
             }
             $fingerprint = hash('sha256', json_encode([$user->id, $export->criteria['collections'], $export->include_images]));
@@ -89,7 +91,7 @@ class ImageAltTextExportService
     public function process(string $id): bool
     {
         $export = ImageAltTextExport::find($id);
-        if (! $export || in_array($export->status, ['completed', 'failed'], true) || $export->expires_at->isPast()) {
+        if (! $export || in_array($export->status, ['completed', 'partial', 'failed'], true) || $export->expires_at->isPast()) {
             return true;
         }
         $export->update(['status' => 'processing', 'started_at' => $export->started_at ?? now(), 'error' => null]);
@@ -129,12 +131,29 @@ class ImageAltTextExportService
 
     private function snapshot(ImageAltTextExport $export): void
     {
-        $gids = app(ShopifyCollectionMembership::class)->resolveCollectionGids($export->criteria['collections'] ?? []);
+        $collectionGids = app(ShopifyCollectionMembership::class)->resolveCollectionGids($export->criteria['collections'] ?? []);
+        $productGids = null;
+        $report = ['skipped_collections' => [], 'resolved_collections' => [], 'unmapped_products' => 0];
+        if ($collectionGids !== []) {
+            $membership = app(ShopifyCollectionMembership::class)->resolveForExport($collectionGids);
+            $productGids = $membership['product_gids'];
+            $report = [
+                'skipped_collections' => $membership['skipped'],
+                'resolved_collections' => $membership['resolved'],
+                'unmapped_products' => app(ImageAltTextBackfillService::class)->unmappedActiveProductCount($productGids),
+            ];
+        }
         // An interrupted snapshot is discarded. Once snapshot_at is stored, retries never re-resolve it.
         $export->items()->delete();
         $batch = [];
-        foreach (app(ImageAltTextBackfillService::class)->snapshotRows($gids) as $row) {
-            $batch[] = ['export_id' => $export->id, 'image_id' => (int) $row[0], 'csv_row' => json_encode($row), 'status' => 'pending'];
+        $seen = [];
+        foreach (app(ImageAltTextBackfillService::class)->snapshotRows($productGids) as $row) {
+            $imageId = (int) $row[0];
+            if (isset($seen[$imageId])) {
+                continue;
+            }
+            $seen[$imageId] = true;
+            $batch[] = ['export_id' => $export->id, 'image_id' => $imageId, 'csv_row' => json_encode($row), 'status' => 'pending'];
             if (count($batch) === 100) {
                 ImageAltTextExportItem::insert($batch);
                 $batch = [];
@@ -143,7 +162,12 @@ class ImageAltTextExportService
         if ($batch !== []) {
             ImageAltTextExportItem::insert($batch);
         }
-        $export->update(['collection_gids' => $gids, 'snapshot_at' => now(), 'total' => $export->items()->count()]);
+        $export->update([
+            'collection_gids' => $collectionGids,
+            'report' => $report,
+            'snapshot_at' => now(),
+            'total' => $export->items()->count(),
+        ]);
     }
 
     private function download(ImageAltTextExport $export, ImageAltTextExportItem $item): void
@@ -215,20 +239,31 @@ class ImageAltTextExportService
         File::ensureDirectoryExists($directory);
         $csvPath = $directory.'/alt-text.csv';
         $manifestPath = $directory.'/manifest.csv';
+        $exceptionsPath = $directory.'/exceptions.csv';
         $csv = fopen($csvPath, 'wb');
         $manifest = fopen($manifestPath, 'wb');
+        $exceptions = fopen($exceptionsPath, 'wb');
         try {
             fputcsv($csv, self::HEADERS);
             fputcsv($manifest, ['filename', 'image_id', 'product_id', 'sku', 'position', 'image_url', 'status', 'error']);
+            fputcsv($exceptions, ['type', 'reference', 'reason']);
+            foreach ($export->report['skipped_collections'] ?? [] as $skipped) {
+                fputcsv($exceptions, ['skipped_collection', $skipped['gid'] ?? '', $skipped['reason'] ?? '']);
+            }
+            fputcsv($exceptions, ['unmapped_products', (string) ($export->report['unmapped_products'] ?? 0), 'Shopify collection products with no active CMS product']);
             foreach ($export->items()->orderBy('id')->lazyById(100) as $item) {
                 $row = $item->csv_row;
                 fputcsv($csv, $row);
                 fputcsv($manifest, [$this->imageName($item), $item->image_id, $row[1], $row[4], $row[6], $row[7],
                     $export->include_images ? $item->status : 'not_requested', $item->error ?? '']);
+                if ($item->status === 'failed') {
+                    fputcsv($exceptions, ['image_download', (string) $item->image_id, (string) ($item->error ?? '')]);
+                }
             }
         } finally {
             fclose($csv);
             fclose($manifest);
+            fclose($exceptions);
         }
         $artifact = $csvPath;
         $filename = 'alt-text.csv';
@@ -240,8 +275,8 @@ class ImageAltTextExportService
                 throw new RuntimeException('Could not create ZIP.');
             }
             try {
-                if (! $zip->addFile($csvPath, 'alt-text.csv') || ! $zip->addFile($manifestPath, 'manifest.csv')) {
-                    throw new RuntimeException('Could not add CSV and manifest to ZIP.');
+                if (! $zip->addFile($csvPath, 'alt-text.csv') || ! $zip->addFile($manifestPath, 'manifest.csv') || ! $zip->addFile($exceptionsPath, 'exceptions.csv')) {
+                    throw new RuntimeException('Could not add CSV, manifest, and exceptions report to ZIP.');
                 }
                 foreach ($export->items()->where('status', 'downloaded')->lazyById(100) as $item) {
                     $local = $directory.'/image-'.$item->image_id;
@@ -271,8 +306,9 @@ class ImageAltTextExportService
                 throw new RuntimeException('ZIP integrity verification failed.');
             }
             try {
-                if ($check->numFiles !== 2 + $export->items()->where('status', 'downloaded')->count()
-                    || $check->locateName('alt-text.csv') === false || $check->locateName('manifest.csv') === false) {
+                if ($check->numFiles !== 3 + $export->items()->where('status', 'downloaded')->count()
+                    || $check->locateName('alt-text.csv') === false || $check->locateName('manifest.csv') === false
+                    || $check->locateName('exceptions.csv') === false) {
                     throw new RuntimeException('ZIP is missing expected entries.');
                 }
             } finally {
@@ -304,8 +340,14 @@ class ImageAltTextExportService
             if ($bytes !== filesize($artifact) || $sha !== hash_file('sha256', $artifact)) {
                 throw new RuntimeException('Stored export checksum verification failed.');
             }
-            $export->update(['status' => 'completed', 'path' => $path, 'sha256' => $sha, 'bytes' => $bytes,
-                'processed' => $export->total, 'completed_at' => now(), 'fingerprint' => null, 'error' => null]);
+            $downloadFailed = (int) $export->items()->where('status', 'failed')->count();
+            $skipped = $export->report['skipped_collections'] ?? [];
+            $export->update([
+                'status' => ($downloadFailed > 0 || $skipped !== []) ? 'partial' : 'completed',
+                'path' => $path, 'sha256' => $sha, 'bytes' => $bytes,
+                'download_failed' => $downloadFailed,
+                'processed' => $export->total, 'completed_at' => now(), 'fingerprint' => null, 'error' => null,
+            ]);
         } catch (Throwable $exception) {
             $disk->delete($path);
             throw $exception;
@@ -315,7 +357,7 @@ class ImageAltTextExportService
     public function fail(string $id, string $reason): void
     {
         $export = ImageAltTextExport::find($id);
-        if (! $export || $export->status === 'completed') {
+        if (! $export || in_array($export->status, ['completed', 'partial'], true)) {
             return;
         }
         $export->update(['status' => 'failed', 'error' => $reason, 'fingerprint' => null]);

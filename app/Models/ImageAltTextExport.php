@@ -13,7 +13,7 @@ class ImageAltTextExport extends Model
     protected $guarded = [];
 
     protected $casts = [
-        'criteria' => 'array', 'collection_gids' => 'array', 'include_images' => 'boolean',
+        'criteria' => 'array', 'collection_gids' => 'array', 'report' => 'array', 'include_images' => 'boolean',
         'snapshot_at' => 'datetime', 'started_at' => 'datetime', 'completed_at' => 'datetime', 'expires_at' => 'datetime',
     ];
 

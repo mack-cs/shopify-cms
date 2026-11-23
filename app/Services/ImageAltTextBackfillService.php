@@ -25,20 +25,45 @@ final class ImageAltTextBackfillService
         return $this->export()['response'];
     }
 
-    /** Worker-only iterator: bounded model chunks; no catalogue-wide image collection. */
-    public function snapshotRows(array $collectionGids): \Generator
+    /**
+     * Worker-only iterator. Null exports every active product. An array is an explicit membership result:
+     * an empty array matches no products, including products with a blank or null Shopify id.
+     *
+     * @param  array<int, string>|null  $productGids
+     */
+    public function snapshotRows(?array $productGids = null): \Generator
     {
         $products = Product::query()->activeStatus()->with(['variants' => fn ($query) => $query->orderBy('id')]);
-        if ($collectionGids !== []) {
-            $gids = $this->collections->activeProductGids($collectionGids);
-            $products->whereIn('shopify_id', $gids === [] ? [''] : $gids);
+        if ($productGids !== null) {
+            $this->restrictToShopifyProducts($products, $productGids);
         }
         foreach ($products->lazyById(100) as $product) {
             $images = $product->allImages()->active()->with('imageAsset');
             foreach ($images->lazyById(100) as $image) {
+                $image->setRelation('product', $product);
+                if (! $this->includeInAltExport($product, $image)) {
+                    continue;
+                }
                 yield $this->csvRow($product, $image);
             }
         }
+    }
+
+    /**
+     * Shopify collection product IDs that do not belong to an active CMS product.
+     *
+     * @param  array<int, string>  $productGids
+     */
+    public function unmappedActiveProductCount(array $productGids): int
+    {
+        $gids = $this->shopifyProductGids($productGids);
+        if ($gids === []) {
+            return 0;
+        }
+        $known = Product::query()->activeStatus()->whereIn('shopify_id', $gids)->pluck('shopify_id')
+            ->map(fn ($gid): string => (string) $gid)->all();
+
+        return count(array_diff($gids, $known));
     }
 
     /**
@@ -407,8 +432,7 @@ final class ImageAltTextBackfillService
     {
         $products = Product::query()->activeStatus()->with(['variants' => fn ($query) => $query->orderBy('id')]);
         if ($collectionGids !== []) {
-            $gids = $this->collections->activeProductGids($collectionGids);
-            $products->whereIn('shopify_id', $gids === [] ? [''] : $gids);
+            $this->restrictToShopifyProducts($products, $this->collections->activeProductGids($collectionGids));
         }
 
         $included = [];
@@ -530,6 +554,46 @@ final class ImageAltTextBackfillService
     private function componentIds(Product $stack): array
     {
         return app(StackComponentCatalog::class)->componentIds($stack);
+    }
+
+    /**
+     * Normal and component products contribute every eligible image.
+     * A stack contributes only its stack-owned image at position 1.
+     */
+    private function includeInAltExport(Product $product, Image $image): bool
+    {
+        if (! $product->isStackProduct()) {
+            return true;
+        }
+
+        return ImageOwnership::isStackOwned($image) && (int) $image->position === 1;
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<Product>  $products
+     * @param  array<int, string>  $productGids
+     */
+    private function restrictToShopifyProducts($products, array $productGids): void
+    {
+        $gids = $this->shopifyProductGids($productGids);
+        if ($gids === []) {
+            $products->whereRaw('0 = 1');
+
+            return;
+        }
+        $products->whereIn('shopify_id', $gids)->whereNotNull('shopify_id')->where('shopify_id', '!=', '');
+    }
+
+    /**
+     * @param  array<int, mixed>  $productGids
+     * @return array<int, string>
+     */
+    private function shopifyProductGids(array $productGids): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            fn ($gid): string => trim((string) $gid),
+            $productGids
+        ))));
     }
 
     private function inheritedStackImage(Image $image): bool

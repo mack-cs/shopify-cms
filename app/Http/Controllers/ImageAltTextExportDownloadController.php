@@ -13,7 +13,7 @@ class ImageAltTextExportDownloadController
     public function __invoke(Request $request, ImageAltTextExport $export, ImageAltTextExportService $exports): StreamedResponse
     {
         $exports->authorize($request->user(), $export);
-        abort_unless($export->status === 'completed' && $export->path, 409, 'This export is not ready.');
+        abort_unless(in_array($export->status, ['completed', 'partial'], true) && $export->path, 409, 'This export is not ready.');
         $disk = Storage::disk($export->disk);
         abort_unless($disk->exists($export->path), 404, 'The export file is no longer available.');
 
