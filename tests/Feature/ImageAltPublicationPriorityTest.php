@@ -13,10 +13,12 @@ use App\Services\ComponentStackPropagation;
 use App\Services\ImageAltApprovalEvidence;
 use App\Services\ImageAltRecovery;
 use App\Services\ImageAltTextBackfillService;
+use App\Services\ImageUploadOperations;
 use App\Services\InheritedAltResolution;
 use App\Services\ProductPartialApprovalService;
 use App\Services\ProductShopifyUpdater;
 use App\Services\ShopifyImageImportService;
+use App\Services\StackImageSync;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -144,6 +146,29 @@ function priorityImage($product, string $sentence, PriorityAltGateway $gateway, 
         'last_shopify_synced_image_asset_id' => $asset->id, 'needs_shopify_image_sync' => false, 'sync_state' => Image::SYNC_STATE_SYNCED,
         'ownership' => $product->isStackProduct() ? 'stack_owned' : null,
     ], $extra)));
+}
+
+function priorityInterruptedOperation(Image $image, string $mediaId, array $overrides = []): string
+{
+    $image->loadMissing('imageAsset', 'product');
+    $id = (string) Str::uuid();
+    DB::table('image_upload_operations')->insert(array_merge([
+        'id' => $id,
+        'image_id' => $image->id,
+        'active_image_id' => $image->id,
+        'asset_key' => hash('sha256', $image->product->shopify_id.':'.$image->imageAsset->sha256),
+        'image_asset_id' => $image->image_asset_id,
+        'asset_sha256' => $image->imageAsset->sha256,
+        'product_gid' => $image->product->shopify_id,
+        'source_url' => 'https://cdn.shopify.com/s/files/1/interrupted.jpg',
+        'before_media_ids' => json_encode([]),
+        'status' => 'processing',
+        'media_id' => $mediaId,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ], $overrides));
+
+    return $id;
 }
 
 function priorityPartial($product, array $images, bool $legacy = false): ProductPartialApprovalRequest
@@ -420,6 +445,394 @@ it('retains historical snapshots when an approved description is edited', functi
     app(ImageAltTextBackfillService::class)->markPendingReview($a, 'Needs a new review');
     expect($request->fresh()->image_alt_snapshot)->toBe($before)->and($request->fresh()->status)->toBe('approved')
         ->and(app(ProductPartialApprovalService::class)->approvedAlt($a->fresh()))->toBeNull();
+});
+
+it('does not send alt text when automatic sync has no verified photograph', function () {
+    $p = createImageImportProduct('ALT-ONLY-MISSING');
+    $image = priorityImage($p, 'Pending sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => null,
+        'shopify_cdn_url' => null,
+        'needs_shopify_image_sync' => true,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+    ])->save());
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$p->fresh()]), ['image_alt']);
+
+    expect($result['failed'])->toBe(1)
+        ->and($result['updated'])->toBe(0)
+        ->and($result['failures'][0]['details'])->toContain('Photograph publication or reconciliation is required')
+        ->and($result['failures'][0]['details'])->toContain('No verifiable attached media')
+        ->and($result['failures'][0]['details'])->not->toContain('no MediaImage id')
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text)->toBe('Pending sentence')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('reports the photograph authorization blocker instead of a missing media error', function () {
+    $p = createImageImportProduct('ALT-COMBINED-BLOCKED');
+    $image = priorityImage($p, 'Blocked sentence', $this->gateway);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => null,
+        'src' => null,
+        'shopify_cdn_url' => null,
+        'needs_shopify_image_sync' => true,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+    ])->save());
+    $request = priorityPartial($p, [$image->fresh()]);
+    $request->forceFill(['scopes' => ['images', 'image_alt']])->save();
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($result['failed'])->toBe(1)
+        ->and($result['updated'])->toBe(0)
+        ->and($result['failures'][0]['details'])->toContain('Photograph synchronization incomplete')
+        ->and($result['failures'][0]['details'])->toContain('not an authorized photograph')
+        ->and($result['failures'][0]['details'])->not->toContain('no MediaImage id')
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($image->fresh()->shopify_id)->toBeNull();
+});
+
+it('publishes verified alt text when another image is still blocked', function () {
+    $p = createImageImportProduct('ALT-MIXED');
+    $ready = priorityImage($p, 'Ready sentence', $this->gateway, 1);
+    $blocked = priorityImage($p, 'Blocked sentence', $this->gateway, 2);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $blocked->forceFill([
+        'shopify_id' => null,
+        'src' => null,
+        'shopify_cdn_url' => null,
+        'needs_shopify_image_sync' => true,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+    ])->save());
+    $request = priorityPartial($p, [$ready->fresh(), $blocked->fresh()]);
+    $request->forceFill(['scopes' => ['images', 'image_alt']])->save();
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($result['failed'])->toBe(1)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($ready->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($blocked->fresh()->alt_text)->toBe('Blocked sentence')
+        ->and($blocked->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($result['failures'][0]['details'])->toContain('not an authorized photograph')
+        ->and($result['failures'][0]['details'])->not->toContain('no MediaImage id');
+});
+
+it('publishes pending alt text after the photograph itself is authorized', function () {
+    $p = createImageImportProduct('ALT-RETRY');
+    $image = priorityImage($p, 'Retry sentence', $this->gateway);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => null,
+        'shopify_cdn_url' => null,
+        'needs_shopify_image_sync' => true,
+        'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+    ])->save());
+    $request = priorityPartial($p, [$image->fresh()]);
+    $request->forceFill(['scopes' => ['images', 'image_alt']])->save();
+    $updater = app(ProductShopifyUpdater::class);
+
+    $blocked = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+    expect($blocked['failed'])->toBe(1)->and($this->gateway->creates)->toBe(0)->and($this->gateway->updates)->toBe(0);
+
+    $image->refresh()->load('imageAsset');
+    $snapshot = $request->fresh()->image_alt_snapshot;
+    $snapshot['photographs'] = [[
+        'image_id' => $image->id,
+        'image_asset_id' => $image->image_asset_id,
+        'asset_sha256' => $image->imageAsset->sha256,
+        'photograph_version' => max(1, (int) $image->photograph_version),
+    ]];
+    $request->forceFill(['image_alt_snapshot' => $snapshot])->save();
+    app(StackImageSync::class)->afterPartialApproval($request->fresh());
+    $published = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($published['failed'])->toBe(0)
+        ->and($published['updated'])->toBe(1)
+        ->and($this->gateway->creates)->toBe(1)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($image->fresh()->shopify_id)->not->toBeNull();
+});
+
+it('does not repeat an uncertain shopify photograph mutation or publish its alt text', function () {
+    $p = createImageImportProduct('ALT-UNCERTAIN');
+    $image = priorityImage($p, 'Uncertain sentence', $this->gateway);
+    $request = priorityPartial($p, [$image->fresh()]);
+    $request->forceFill(['scopes' => ['images', 'image_alt']])->save();
+    app(StackImageSync::class)->afterPartialApproval($request->fresh());
+    Image::withoutEvents(fn () => $image->fresh()->forceFill(['shopify_media_create_uncertain' => true])->save());
+    $updater = app(ProductShopifyUpdater::class);
+
+    $first = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+    $second = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($first['failed'])->toBe(1)
+        ->and($second['failed'])->toBe(1)
+        ->and($first['failures'][0]['details'])->toContain('Uncertain Shopify mutation awaiting reconciliation')
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($image->fresh()->shopify_media_create_uncertain)->toBeTrue();
+});
+
+it('does not send a direct alt update while the photograph create is uncertain', function () {
+    $p = createImageImportProduct('ALT-DIRECT-UNCERTAIN');
+    $image = priorityImage($p, 'Uncertain direct sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+    Image::withoutEvents(fn () => $image->fresh()->forceFill(['shopify_media_create_uncertain' => true])->save());
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($result['published'])->toBe(0)
+        ->and($result['shopify_failed'][0]['reason'])->toContain('Uncertain Shopify mutation awaiting reconciliation')
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text)->toBe('Uncertain direct sentence')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($image->fresh()->shopify_media_create_uncertain)->toBeTrue();
+});
+
+it('reports the photograph blocker for a direct alt update with no attached media', function () {
+    $p = createImageImportProduct('ALT-DIRECT-MISSING');
+    $image = priorityImage($p, 'Unattached sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => null,
+        'shopify_cdn_url' => null,
+    ])->save());
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($result['published'])->toBe(0)
+        ->and($result['shopify_failed'][0]['reason'])->toContain('Photograph publication or reconciliation is required')
+        ->and($result['shopify_failed'][0]['reason'])->toContain('No verifiable attached media')
+        ->and($result['shopify_failed'][0]['reason'])->not->toContain('no MediaImage id')
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($image->fresh()->alt_text)->toBe('Unattached sentence')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('publishes and verifies a direct alt update when the photograph is attached', function () {
+    $p = createImageImportProduct('ALT-DIRECT-VERIFIED');
+    $image = priorityImage($p, 'Verified direct sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($result['published'])->toBe(1)
+        ->and($result['shopify_failed'])->toBe([])
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($image->fresh()->shopify_alt_text)->toBe('Verified direct sentence');
+});
+
+it('publishes one verified image and leaves a blocked image unchanged in a direct bulk update', function () {
+    $p = createImageImportProduct('ALT-DIRECT-BULK');
+    $ready = priorityImage($p, 'Bulk ready sentence', $this->gateway, 1);
+    $blocked = priorityImage($p, 'Bulk blocked sentence', $this->gateway, 2);
+    priorityPartial($p, [$ready->fresh(), $blocked->fresh()]);
+    array_pop($this->gateway->nodes[$p->shopify_id]);
+    Image::withoutEvents(fn () => $blocked->forceFill(['shopify_id' => null, 'shopify_cdn_url' => null])->save());
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$ready->id, $blocked->id]);
+
+    expect($result['published'])->toBe(1)
+        ->and($result['shopify_failed'])->toHaveCount(1)
+        ->and($result['shopify_failed'][0]['image_id'])->toBe($blocked->id)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($ready->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($blocked->fresh()->alt_text)->toBe('Bulk blocked sentence')
+        ->and($blocked->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('does not publish alt text when a verified receipt outruns a processing upload operation', function () {
+    $p = createImageImportProduct('ALT-INTERRUPTED');
+    $image = priorityImage($p, 'Interrupted sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+    $operationId = priorityInterruptedOperation($image->fresh(), $image->shopify_id);
+    expect($image->fresh()->shopify_media_create_uncertain)->toBeFalse()
+        ->and(DB::table('image_upload_operations')->where('id', $operationId)->value('status'))->toBe('processing');
+
+    $blocked = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($blocked['published'])->toBe(0)
+        ->and($blocked['shopify_failed'][0]['reason'])->toContain('Uncertain Shopify mutation awaiting reconciliation')
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text)->toBe('Interrupted sentence')
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+
+    app(ImageUploadOperations::class)->complete((object) ['id' => $operationId], $image->shopify_id);
+    $published = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($published['published'])->toBe(1)
+        ->and($published['shopify_failed'])->toBe([])
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED);
+});
+
+it('does not let an unrelated historical upload operation block the current photograph', function () {
+    $p = createImageImportProduct('ALT-HISTORICAL-OP');
+    $image = priorityImage($p, 'Current photograph sentence', $this->gateway);
+    priorityPartial($p, [$image->fresh()]);
+    $oldAsset = createImportTestAsset('historical-operation-bytes', 'jpg', 'historical.jpg');
+    priorityInterruptedOperation($image->fresh(), 'gid://shopify/MediaImage/historical', [
+        'active_image_id' => null,
+        'asset_key' => hash('sha256', $p->shopify_id.':'.$oldAsset->sha256),
+        'image_asset_id' => $oldAsset->id,
+        'asset_sha256' => $oldAsset->sha256,
+        'status' => 'processing',
+        'media_id' => 'gid://shopify/MediaImage/historical',
+    ]);
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$image->id]);
+
+    expect($result['published'])->toBe(1)
+        ->and($result['shopify_failed'])->toBe([])
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and(DB::table('image_upload_operations')->where('asset_sha256', $oldAsset->sha256)->value('status'))->toBe('processing');
+});
+
+it('publishes only the closed photograph when a bulk alt update includes an interrupted operation', function () {
+    $p = createImageImportProduct('ALT-BULK-INTERRUPTED');
+    $ready = priorityImage($p, 'Closed operation sentence', $this->gateway, 1);
+    $interrupted = priorityImage($p, 'Open operation sentence', $this->gateway, 2);
+    priorityPartial($p, [$ready->fresh(), $interrupted->fresh()]);
+    priorityInterruptedOperation($interrupted->fresh(), $interrupted->shopify_id);
+
+    $result = app(ImageAltTextBackfillService::class)->publishIds([$ready->id, $interrupted->id]);
+
+    expect($result['published'])->toBe(1)
+        ->and($result['shopify_failed'])->toHaveCount(1)
+        ->and($result['shopify_failed'][0]['image_id'])->toBe($interrupted->id)
+        ->and($result['shopify_failed'][0]['reason'])->toContain('Uncertain Shopify mutation awaiting reconciliation')
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($ready->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($interrupted->fresh()->alt_text)->toBe('Open operation sentence')
+        ->and($interrupted->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('publishes approved alt text in the same sync after a photograph upload reconciles', function () {
+    $p = createImageImportProduct('ALT-RECONCILE');
+    $image = priorityImage($p, 'Reconciled sentence', $this->gateway);
+    $mediaId = $image->shopify_id;
+    $request = priorityPartial($p, [$image->fresh()]);
+    $image->load('imageAsset');
+    $snapshot = $request->image_alt_snapshot;
+    $snapshot['photographs'] = [[
+        'image_id' => $image->id,
+        'image_asset_id' => $image->image_asset_id,
+        'asset_sha256' => $image->imageAsset->sha256,
+        'photograph_version' => max(1, (int) $image->photograph_version),
+    ]];
+    $request->forceFill(['scopes' => ['images', 'image_alt'], 'image_alt_snapshot' => $snapshot])->save();
+    app(StackImageSync::class)->afterPartialApproval($request->fresh());
+    $operation = app(ImageUploadOperations::class)->claim($image->fresh(), $p->shopify_id, []);
+    expect($operation)->not->toBeNull();
+    app(ImageUploadOperations::class)->record($operation, 'processing', $mediaId);
+
+    $result = app(ProductShopifyUpdater::class)->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($result['failed'])->toBe(0)
+        ->and($result['updated'])->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($image->fresh()->shopify_id)->toBe($mediaId)
+        ->and($image->fresh()->shopify_media_create_uncertain)->toBeFalse()
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and(DB::table('image_upload_operations')->where('id', $operation->id)->value('status'))->toBe('confirmed');
+});
+
+it('keeps unresolved photograph reconciliation blocked and completes it later without a duplicate create', function () {
+    $p = createImageImportProduct('ALT-RECONCILE-LATER');
+    $image = priorityImage($p, 'Resolve later sentence', $this->gateway);
+    $mediaId = $image->shopify_id;
+    $request = priorityPartial($p, [$image->fresh()]);
+    $image->load('imageAsset');
+    $snapshot = $request->image_alt_snapshot;
+    $snapshot['photographs'] = [[
+        'image_id' => $image->id,
+        'image_asset_id' => $image->image_asset_id,
+        'asset_sha256' => $image->imageAsset->sha256,
+        'photograph_version' => max(1, (int) $image->photograph_version),
+    ]];
+    $request->forceFill(['scopes' => ['images', 'image_alt'], 'image_alt_snapshot' => $snapshot])->save();
+    app(StackImageSync::class)->afterPartialApproval($request->fresh());
+    $operation = app(ImageUploadOperations::class)->claim($image->fresh(), $p->shopify_id, []);
+    app(ImageUploadOperations::class)->record($operation, 'processing', 'gid://shopify/MediaImage/not-attached');
+    $updater = app(ProductShopifyUpdater::class);
+
+    $blocked = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+    expect($blocked['failed'])->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($this->gateway->updates)->toBe(0)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
+        ->and($image->fresh()->shopify_media_create_uncertain)->toBeTrue();
+
+    app(ImageUploadOperations::class)->record($operation, 'processing', $mediaId);
+    $published = $updater->updateApprovedProducts(collect([$p->fresh()]), ['images', 'image_alt']);
+
+    expect($published['failed'])->toBe(0)
+        ->and($published['updated'])->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
+        ->and($image->fresh()->shopify_id)->toBe($mediaId);
+});
+
+it('publishes verified alt text without a current photograph upload authorization and blocks a stale sentence', function () {
+    $photograph = createImageImportProduct('ALT-STALE-PHOTO');
+    $photo = priorityImage($photograph, 'Current sentence', $this->gateway);
+    app(ImageAltApprovalEvidence::class)->approve($photo, $this->reviewer->id, 'Reviewed the current sentence for this exact photograph.');
+    $photo->load('imageAsset');
+    DB::table('component_image_authorizations')->insert([
+        'product_id' => $photograph->id,
+        'image_id' => $photo->id,
+        'image_asset_id' => $photo->image_asset_id,
+        'asset_sha256' => $photo->imageAsset->sha256,
+        'photograph_version' => 99,
+        'alt_text_version' => 1,
+        'alt_text' => 'Current sentence',
+        'scope' => 'images',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $stalePhotograph = app(ImageAltTextBackfillService::class)->publishIds([$photo->id]);
+
+    expect($stalePhotograph['published'])->toBe(1)
+        ->and($stalePhotograph['shopify_failed'])->toBe([])
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($this->gateway->creates)->toBe(0)
+        ->and($photo->fresh()->alt_text)->toBe('Current sentence')
+        ->and($photo->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED);
+
+    $alt = createImageImportProduct('ALT-STALE-TEXT');
+    $sentence = priorityImage($alt, 'Approved sentence', $this->gateway);
+    priorityPartial($alt, [$sentence->fresh()]);
+    app(ImageAltTextBackfillService::class)->markPendingReview($sentence->fresh(), 'Edited after approval');
+
+    $staleAlt = app(ImageAltTextBackfillService::class)->publishIds([$sentence->id]);
+
+    expect($staleAlt['published'])->toBe(0)
+        ->and($this->gateway->updates)->toBe(1)
+        ->and($sentence->fresh()->alt_text)->toBe('Edited after approval')
+        ->and($sentence->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
 });
 
 it('uploads a newly approved photograph before publishing its alt during combined product sync', function () {

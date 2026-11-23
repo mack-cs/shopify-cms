@@ -27,6 +27,9 @@ final class ProductShopifyUpdater
 
     private array $imageOutcomes = [];
 
+    /** @var array<int, array<int, array{attached:bool, blocker:?string}>> */
+    private array $photographPublication = [];
+
     public const SYNC_SCOPE_PRODUCT = 'product';
 
     public const SYNC_SCOPE_SEO = 'seo';
@@ -507,6 +510,7 @@ final class ProductShopifyUpdater
     public function updateApprovedProducts(Collection $products, ?array $scopes = null, ?array $coreFields = null, ?string $syncBatchId = null, ?int $userId = null): array
     {
         $this->imageOutcomes = [];
+        $this->photographPublication = [];
         $resolvedScopes = $this->normalizeSyncScopes($scopes);
         $resolvedCoreFields = $this->normalizeCoreFields($coreFields);
         $fullSyncScopes = $this->normalizeSyncScopes(null);
@@ -1887,7 +1891,10 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
     {
         $warnings = [];
         if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT) && ! $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGES)) {
-            $this->publishApprovedImageAlt($product);
+            $altMessages = $this->publishApprovedImageAlt($product, false);
+            if ($altMessages !== []) {
+                throw new \RuntimeException('Image Alt Text: '.implode(' ', $altMessages));
+            }
             if ($scopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
                 return [];
             }
@@ -2159,11 +2166,19 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
                 $warnings,
                 $imageWarnings
             );
+            $altMessages = [];
             if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT)) {
-                $this->publishApprovedImageAlt($product->fresh() ?? $product);
+                $altMessages = $this->publishApprovedImageAlt($product->fresh() ?? $product, true, $imageWarnings);
             }
+            $parts = [];
             if ($imageWarnings !== []) {
-                throw new \RuntimeException('Photograph synchronization incomplete: '.collect($imageWarnings)->pluck('warning')->implode(' '));
+                $parts[] = 'Photograph synchronization incomplete: '.collect($imageWarnings)->pluck('warning')->implode(' ');
+            }
+            if ($altMessages !== []) {
+                $parts[] = 'Image Alt Text: '.implode(' ', $altMessages);
+            }
+            if ($parts !== []) {
+                throw new \RuntimeException(implode(' ', $parts));
             }
             if ($this->isUnlistedLaunchProduct($product)) {
                 $publicationError = app(NewProductDraftShopifyCreator::class)->publishUnlistedProductToAllChannels($productId);
@@ -5153,14 +5168,16 @@ GQL;
                 $node = $operations->reconcile($image, $operation, $details['media']['nodes']);
                 if ($node !== null && ! $this->photographReplacementIsUnauthorized($image)) {
                     $this->imageSyncMutex->assertOwned();
-                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url']);
-                    $operations->complete($operation, $node['id']);
+                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'], $operation);
                     $row['matched_media_id'] = $node['id'];
                     $matchedExistingIds[] = $node['id'];
-                } elseif ($node !== null) {
-                    $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
+                    $row['blocked'] = false;
+                } else {
+                    if ($node !== null) {
+                        $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
+                    }
+                    $row['blocked'] = true;
                 }
-                $row['blocked'] = true;
 
                 return $row;
             }
@@ -5299,8 +5316,7 @@ GQL;
                 $node = $operations->reconcile($image, $operation, $media);
                 if ($node !== null) {
                     $this->imageSyncMutex->assertOwned();
-                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url']);
-                    $operations->complete($operation, $node['id']);
+                    $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'], $operation);
                     $row['matched_media_id'] = $node['id'];
                 } else {
                     $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} is awaiting upload reconciliation; it was not marked synced."];
@@ -5321,7 +5337,69 @@ GQL;
                 : $this->reorderProductImages($product, $productId, $desiredImages)
         );
 
+        $this->rememberPhotographOutcomes($product, $desiredImages, $warnings);
+
         return $warnings;
+    }
+
+    /**
+     * @param  Collection<int, array<string, mixed>>  $desiredImages
+     * @param  array<int, array{product_id:int, warning:string}>  $warnings
+     */
+    private function rememberPhotographOutcomes(Product $product, Collection $desiredImages, array $warnings): void
+    {
+        foreach ($desiredImages as $row) {
+            /** @var Image $image */
+            $image = $row['image'];
+            $image->refresh();
+            $matched = is_string($row['matched_media_id'] ?? null) && $row['matched_media_id'] !== '';
+            $blocked = (bool) ($row['blocked'] ?? false);
+            $attached = $matched && ! $blocked && ! $image->shopify_media_create_uncertain;
+            $warning = $this->photographWarningForImage($warnings, (int) $image->id);
+            $this->photographPublication[(int) $product->id][(int) $image->id] = [
+                'attached' => $attached,
+                'blocker' => $attached ? null : $this->classifyPhotographBlocker($image, $warning),
+            ];
+        }
+    }
+
+    /**
+     * @param  array<int, array{product_id:int, warning:string}>  $warnings
+     */
+    private function photographWarningForImage(array $warnings, int $imageId): ?string
+    {
+        foreach ($warnings as $warning) {
+            $text = (string) ($warning['warning'] ?? '');
+            if (preg_match('/\b[Ii]mage '.$imageId.'\b/', $text) === 1) {
+                return $text;
+            }
+        }
+
+        return null;
+    }
+
+    private function classifyPhotographBlocker(Image $image, ?string $warning, ?array $decision = null): string
+    {
+        $warning = trim((string) $warning);
+        $classification = (string) ($decision['classification'] ?? '');
+        $category = match (true) {
+            $image->shopify_media_create_uncertain || str_contains($warning, 'uncertain') => 'Uncertain Shopify mutation awaiting reconciliation.',
+            str_contains($warning, 'not an authorized photograph') || str_contains($warning, 'not approved and confirmed') => 'Missing current photograph approval.',
+            str_contains($warning, 'awaiting upload') || str_contains($warning, 'not marked synced') => 'Photograph upload pending.',
+            $classification === 'processing' || str_contains($warning, 'not ready') => 'Shopify media still processing.',
+            $classification === 'unresolved_provenance' || str_contains($warning, 'backed-up source') || str_contains($warning, 'backup is missing') => 'Photograph source unavailable.',
+            default => 'No verifiable attached media.',
+        };
+        $detail = $warning;
+        if ($detail === '') {
+            $detail = trim((string) ($decision['evidence'] ?? ''));
+        }
+        if (str_contains($detail, 'no MediaImage id')) {
+            $detail = '';
+        }
+        $lead = 'Photograph publication or reconciliation is required. '.$category;
+
+        return $detail !== '' ? $lead.' '.$detail : $lead;
     }
 
     /**
@@ -5611,24 +5689,35 @@ GQL;
         return $warnings;
     }
 
-    private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null, ?string $cdnUrl = null): void
+    private function markImageSynced(Image $image, ?string $shopifyId = null, ?string $filename = null, ?string $cdnUrl = null, ?object $operation = null): void
     {
         $this->imageSyncMutex?->assertOwned();
         $boundary = app(StackSynchronizationBoundary::class)->acquireForComponent((int) $image->product_id);
         try {
-            $this->markImageSyncedWhileLocked($image, $shopifyId, $filename, $cdnUrl);
+            $this->markImageSyncedWhileLocked($image, $shopifyId, $filename, $cdnUrl, $operation);
         } finally {
             $boundary->release();
         }
     }
 
-    private function markImageSyncedWhileLocked(Image $image, ?string $shopifyId, ?string $filename, ?string $cdnUrl): void
+    private function markImageSyncedWhileLocked(Image $image, ?string $shopifyId, ?string $filename, ?string $cdnUrl, ?object $operation = null): void
     {
-        DB::transaction(function () use ($image, $shopifyId, $filename, $cdnUrl): void {
+        DB::transaction(function () use ($image, $shopifyId, $filename, $cdnUrl, $operation): void {
             $current = Image::query()->lockForUpdate()->findOrFail($image->id);
             if ($current->image_asset_id !== $image->image_asset_id
                 || in_array($current->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)) {
                 throw new \RuntimeException('The CMS photograph changed during synchronization; the upload remains unresolved.');
+            }
+            if ($operation !== null) {
+                $live = DB::table('image_upload_operations')->where('id', $operation->id)->lockForUpdate()->first();
+                $current->load('imageAsset');
+                $samePhotograph = $live
+                    && (int) $live->image_id === (int) $current->id
+                    && (int) $live->image_asset_id === (int) $current->image_asset_id
+                    && (string) $live->asset_sha256 === (string) ($current->imageAsset->sha256 ?? '');
+                if (! $samePhotograph) {
+                    throw new \RuntimeException('The upload operation no longer matches this photograph. Reconciliation was not closed.');
+                }
             }
             Image::withoutEvents(function () use ($current, $shopifyId, $filename, $cdnUrl): void {
                 $updates = [
@@ -5648,6 +5737,19 @@ GQL;
                 }
                 $current->forceFill($updates)->save();
             });
+            if ($operation !== null) {
+                $closed = in_array((string) $live->status, ['confirmed', 'resolved_absent', 'resolved_deleted', 'superseded'], true)
+                    && $live->active_image_id === null;
+                if (! $closed) {
+                    DB::table('image_upload_operations')->where('id', $operation->id)->update([
+                        'media_id' => $shopifyId ?: $live->media_id,
+                        'status' => 'confirmed',
+                        'active_image_id' => null,
+                        'error' => null,
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
             app(ComponentStackPropagation::class)->recordConfirmedPhotograph(
                 $current->fresh(['product', 'imageAsset']) ?? $current,
                 true,
@@ -6468,22 +6570,78 @@ GQL;
         return array_values($normalized);
     }
 
-    private function publishApprovedImageAlt(Product $product): void
+    /**
+     * Alt text is published only for a photograph that is already verified on Shopify.
+     * A blocked photograph keeps its approved sentence pending and does not call fileUpdate.
+     *
+     * @param  array<int, array{product_id:int, warning:string}>  $photographWarnings
+     * @return array<int, string>
+     */
+    private function publishApprovedImageAlt(Product $product, bool $afterPhotographs, array $photographWarnings = []): array
     {
         $images = $product->allImages()->active()->get();
         $backfill = app(ImageAltTextBackfillService::class);
-        $published = $backfill->publishIds($images->pluck('id')->all());
+        $resolver = app(ShopifyMediaImageResolver::class);
+        $eligible = [];
+        $deferred = [];
+        foreach ($images as $image) {
+            $fresh = $image->fresh(['product', 'imageAsset']) ?? $image;
+            $approved = $backfill->approvedUploadAlt($fresh);
+            $record = $this->photographPublication[(int) $product->id][(int) $fresh->id] ?? null;
+            if ($afterPhotographs) {
+                if ($approved !== null && ! (bool) ($record['attached'] ?? false)) {
+                    $deferred[] = [
+                        'image_id' => (int) $fresh->id,
+                        'reason' => $record['blocker'] ?? $this->classifyPhotographBlocker($fresh, $this->photographWarningForImage($photographWarnings, (int) $fresh->id)),
+                    ];
+
+                    continue;
+                }
+                $eligible[] = (int) $fresh->id;
+
+                continue;
+            }
+            if ($approved === null) {
+                $eligible[] = (int) $fresh->id;
+
+                continue;
+            }
+            if ($fresh->shopify_media_create_uncertain) {
+                $deferred[] = [
+                    'image_id' => (int) $fresh->id,
+                    'reason' => $this->classifyPhotographBlocker($fresh, 'Image '.$fresh->id.' requires manual reconciliation of a legacy uncertain upload.'),
+                ];
+
+                continue;
+            }
+            $decision = $resolver->diagnose($fresh);
+            if (in_array($decision['classification'], ['verified_current_media', 'recoverable_historical'], true)) {
+                $eligible[] = (int) $fresh->id;
+
+                continue;
+            }
+            $deferred[] = [
+                'image_id' => (int) $fresh->id,
+                'reason' => $this->classifyPhotographBlocker($fresh, null, $decision),
+            ];
+        }
+        $published = $backfill->publishIds($eligible);
         $failures = $published['shopify_failed'];
         $reviewIds = $images->filter(fn (Image $image): bool => $backfill->approvedUploadAlt($image->fresh(['product', 'imageAsset'])) === null)->pluck('id')->all();
-        $this->imageOutcomes[$product->id]['alt_text'] = $failures !== [] ? 'needs_review'
+        $this->imageOutcomes[$product->id]['alt_text'] = ($failures !== [] || $deferred !== []) ? 'needs_review'
             : ($reviewIds !== [] ? 'verified_eligible_with_review_pending' : 'verified_eligible');
         $this->imageOutcomes[$product->id]['alt_review_required_ids'] = $reviewIds;
         $this->imageOutcomes[$product->id]['alt_updates_verified'] = $published['published'];
-        $this->imageOutcomes[$product->id]['alt_failures'] = $failures;
-        if ($failures !== []) {
-            throw new \RuntimeException('Image Alt Text: '.collect($failures)
-                ->map(fn (array $failure): string => 'Image '.$failure['image_id'].': '.$failure['reason'])->implode(' '));
+        $this->imageOutcomes[$product->id]['alt_failures'] = array_merge($failures, $deferred);
+        $messages = [];
+        foreach ($deferred as $failure) {
+            $messages[] = 'Image '.$failure['image_id'].': '.$failure['reason'];
         }
+        foreach ($failures as $failure) {
+            $messages[] = 'Image '.$failure['image_id'].': '.$failure['reason'];
+        }
+
+        return $messages;
     }
 
     /**

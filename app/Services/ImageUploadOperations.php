@@ -14,6 +14,27 @@ final class ImageUploadOperations
         return DB::table('image_upload_operations')->useWritePdo()->where('active_image_id', $image->id)->first();
     }
 
+    /**
+     * An unresolved operation blocks alt publication only when it belongs to the
+     * current photograph. A confirmed or superseded operation for another asset does not.
+     */
+    public function unresolvedForCurrentPhotograph(Image $image): ?object
+    {
+        $image->loadMissing('imageAsset');
+        $sha = (string) ($image->imageAsset?->sha256 ?? '');
+        if ((int) $image->image_asset_id <= 0 || $sha === '') {
+            return null;
+        }
+
+        return DB::table('image_upload_operations')->useWritePdo()
+            ->where('image_id', $image->id)
+            ->where('image_asset_id', $image->image_asset_id)
+            ->where('asset_sha256', $sha)
+            ->whereNotIn('status', ['confirmed', 'resolved_absent', 'resolved_deleted', 'superseded'])
+            ->orderByDesc('updated_at')
+            ->first();
+    }
+
     /** Committed before the HTTP call: a killed worker cannot erase this claim. */
     public function claim(Image $image, string $productId, array $media): ?object
     {

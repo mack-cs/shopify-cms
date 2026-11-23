@@ -334,6 +334,7 @@ it('copies component image alt text onto a rebuilt stack image and keeps the sta
 
 it('clears alt text when a photograph is replaced', function (): void {
     Storage::fake('public');
+    Storage::disk('public')->put('old.jpg', 'history fixture bytes');
     Storage::disk('public')->put('replacement.jpg', 'new-bytes');
     $old = ImageAsset::query()->create([
         'sha256' => hash('sha256', 'history fixture bytes'),
@@ -1227,7 +1228,7 @@ it('keeps approved alt text when the shopify media match is ambiguous', function
         ->and($pushed['shopify_failed'])->toHaveCount(1)
         ->and($gateway->updates)->toBe(0)
         ->and($image->fresh()->alt_text)->toBe('Keep this alt')
-        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_FAILED)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_APPROVED)
         ->and($image->fresh()->shopify_id)->toBe('gid://shopify/ProductImage/78');
 });
 
@@ -1472,7 +1473,7 @@ it('does not publish when the only url is a cms backup route', function (): void
         ->and($pushed['shopify_failed'])->toHaveCount(1)
         ->and($gateway->updates)->toBe(0)
         ->and($image->fresh()->alt_text)->toBe('Stay approved')
-        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_FAILED)
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_APPROVED)
         ->and($image->fresh()->shopify_id)->toBe('gid://shopify/ProductImage/7711');
 });
 
@@ -1547,7 +1548,7 @@ it('does not publish a replaced photograph onto its old shopify file', function 
         ->and($gateway->updates)->toBe(0)
         ->and($image->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/7741')
         ->and($image->fresh()->alt_text)->toBe('New photograph sentence')
-        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_FAILED);
+        ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_APPROVED);
 });
 
 it('classifies failed alt text without publishing or changing the rows', function (): void {

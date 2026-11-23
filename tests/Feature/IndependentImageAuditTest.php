@@ -192,13 +192,33 @@ it('requires explicit independent file adoption after a lost creation response a
         ->and(DB::table('image_upload_operations')->value('resolved_by'))->toBe($operator->id);
 });
 
-it('invalidates old media without an asset baseline and archives the approved state', function () {
+it('rejects a replacement when the current photograph has no readable asset baseline', function () {
     $i = lifecycleImage();
     Image::withoutEvents(fn () => $i->forceFill(['image_asset_id' => null, 'shopify_id' => 'gid://shopify/MediaImage/11', 'src' => 'https://cdn.shopify.com/old.jpg', 'alt_text' => 'Approved old photo', 'alt_text_status' => Image::ALT_APPROVED])->save());
     $asset = createImportTestAsset('replacement', 'jpg', 'new.jpg');
+
+    expect(fn () => (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))
+        ->invoke(app(ShopifyImageImportService::class), $i->product, $asset, 'new-v2.jpg', 1, 2))
+        ->toThrow(RuntimeException::class, 'could not be read');
+
+    expect($i->fresh()->shopify_id)->toBe('gid://shopify/MediaImage/11')
+        ->and($i->fresh()->image_asset_id)->toBeNull()
+        ->and($i->fresh()->alt_text)->toBe('Approved old photo')
+        ->and($i->fresh()->alt_text_status)->toBe(Image::ALT_APPROVED)
+        ->and(DB::table('image_revisions')->where('image_id', $i->id)->count())->toBe(0);
+});
+
+it('invalidates approval when a readable photograph is replaced by a higher filename version', function () {
+    $i = lifecycleImage();
+    Image::withoutEvents(fn () => $i->forceFill(['shopify_id' => 'gid://shopify/MediaImage/11', 'src' => 'https://cdn.shopify.com/old.jpg', 'alt_text' => 'Approved old photo', 'alt_text_status' => Image::ALT_APPROVED])->save());
+    $asset = createImportTestAsset('replacement', 'jpg', 'new.jpg');
     (new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport'))->invoke(app(ShopifyImageImportService::class), $i->product, $asset, 'new-v2.jpg', 1, 2);
     $snapshot = json_decode(DB::table('image_revisions')->where('image_id', $i->id)->value('snapshot'), true);
-    expect($i->fresh()->shopify_id)->toBeNull()->and($i->fresh()->shopify_identity_unresolved)->toBeTrue()->and($i->fresh()->alt_text)->toBeNull()->and($snapshot['alt_text'])->toBe('Approved old photo');
+
+    expect($i->fresh()->shopify_id)->toBeNull()
+        ->and($i->fresh()->shopify_identity_unresolved)->toBeTrue()
+        ->and($i->fresh()->alt_text)->toBeNull()
+        ->and($snapshot['alt_text'])->toBe('Approved old photo');
 });
 
 it('rejects a stack copy of an obsolete component photograph', function () {

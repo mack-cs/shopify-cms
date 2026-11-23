@@ -329,9 +329,7 @@ final class ImageAltTextBackfillService
             $approved = $this->approvedUploadAlt($image);
             if ($approved === null) {
                 if (in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED, Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true)) {
-                    $reason = 'Approval evidence or ownership is unresolved. Review this image before publishing.';
-                    $this->recordAltFailure($image, trim((string) $image->alt_text), new RuntimeException($reason), $image->alt_confirmation_media_id !== null);
-                    $failed[] = $this->failure(0, (int) $image->id, $reason);
+                    $failed[] = $this->failure(0, (int) $image->id, 'Approval evidence or ownership is unresolved. Review this image before publishing.');
                 }
 
                 return;
@@ -813,6 +811,35 @@ final class ImageAltTextBackfillService
     }
 
     /**
+     * Shared by the review action, the publication job, and product sync.
+     * A photograph that is not verified stays unchanged and is not marked failed.
+     */
+    private function photographPublicationBlocker(Image $image): ?string
+    {
+        if ($image->shopify_media_create_uncertain || app(ImageUploadOperations::class)->unresolvedForCurrentPhotograph($image) !== null) {
+            return 'Photograph publication or reconciliation is required. Uncertain Shopify mutation awaiting reconciliation.';
+        }
+        $decision = $this->media->diagnose($image);
+        if (in_array($decision['classification'], ['verified_current_media', 'recoverable_historical'], true)) {
+            return null;
+        }
+        $classification = (string) ($decision['classification'] ?? '');
+        $category = match ($classification) {
+            'processing' => 'Shopify media still processing.',
+            'unresolved_provenance' => 'Photograph source unavailable.',
+            'replaced_or_invalid' => 'Missing current photograph approval.',
+            default => 'No verifiable attached media.',
+        };
+        $detail = trim((string) ($decision['evidence'] ?? ''));
+        if (str_contains($detail, 'no MediaImage id')) {
+            $detail = '';
+        }
+        $lead = 'Photograph publication or reconciliation is required. '.$category;
+
+        return $detail !== '' ? $lead.' '.$detail : $lead;
+    }
+
+    /**
      * @return array{row:int, image_id:int, reason:string}|null
      */
     private function pushAlt(Image $image, string $altText): ?array
@@ -826,6 +853,13 @@ final class ImageAltTextBackfillService
                 throw new RuntimeException('Alt publication must start outside an enclosing database transaction so confirmation state is durable.');
             }
             $fresh = $image->fresh(['product', 'imageAsset']) ?? $image;
+            $blocker = $this->photographPublicationBlocker($fresh);
+            if ($blocker !== null) {
+                return $this->failure(0, (int) $fresh->id, $blocker);
+            }
+            if ($this->approvedUploadAlt($fresh) !== $altText) {
+                return $this->failure(0, (int) $fresh->id, 'Image '.$fresh->id.' is no longer an approved description. It was not pushed.');
+            }
             $productGid = trim((string) ($fresh->product?->shopify_id ?? ''));
             $mediaId = $this->media->resolve($fresh);
             if (Image::query()->active()->whereKeyNot($fresh->id)->where('shopify_id', $mediaId)->exists()) {
