@@ -40,6 +40,7 @@ class Image extends Model
     public function save(array $options = [])
     {
         $this->trackContentVersions();
+        $this->trackAttentionEpisode();
         $held = $this->galleryChangeAffectsDependentStacks()
             ? app(\App\Services\StackSynchronizationBoundary::class)->prepareGalleryWrite((int) $this->product_id)
             : null;
@@ -102,6 +103,32 @@ class Image extends Model
             && trim((string) $this->alt_text) !== trim((string) $this->getOriginal('alt_text'))
             && ! $this->isDirty('alt_text_version')) {
             $this->alt_text_version = max(1, (int) $this->getOriginal('alt_text_version')) + 1;
+        }
+    }
+
+    /**
+     * Runs inside save(), including withoutEvents writers. An explicit
+     * timestamp in the same save is kept. Resolving the issue closes the
+     * episode; the next issue starts a new one.
+     */
+    private function trackAttentionEpisode(): void
+    {
+        if ($this->isDirty('image_attention_since')) {
+            return;
+        }
+        $outstanding = (bool) $this->needs_shopify_image_sync
+            || (bool) $this->shopify_alt_pending
+            || (bool) $this->shopify_media_create_uncertain
+            || in_array($this->alt_text_status, [self::ALT_PENDING_REVIEW, self::ALT_FAILED, self::ALT_AWAITING_CONFIRMATION], true);
+        if (! $outstanding) {
+            if ($this->image_attention_since !== null) {
+                $this->image_attention_since = null;
+            }
+
+            return;
+        }
+        if ($this->image_attention_since === null) {
+            $this->image_attention_since = now();
         }
     }
 

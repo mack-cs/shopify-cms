@@ -231,6 +231,9 @@ it('skips shopify when the authorized versions are already verified', function (
 });
 
 it('sends one reminder after 90 minutes and one follow-up a day later', function () {
+    while (DB::transactionLevel() > 0) {
+        DB::rollBack();
+    }
     Mail::fake();
     config(['services.slack.missing_alt_recipient_email' => 'nick@leighavenue.co.za']);
     $product = createImageImportProduct('REMIND');

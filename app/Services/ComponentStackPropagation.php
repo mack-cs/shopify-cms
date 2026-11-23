@@ -480,6 +480,7 @@ final class ComponentStackPropagation
             }
         }
         $this->retireInheritedAbsentFromGallery($stack, array_values(array_unique($created)), $protectedSourceIds);
+        $this->assignInheritedGalleryOrder($stack);
 
         $conflictNote = $conflicts !== [] ? ' Conflicting inherited alt text needs review; previous descriptions were preserved.' : '';
         $missingNote = $unavailable !== [] ? ' Unavailable: '.implode(' ', $unavailable) : '';
@@ -491,6 +492,95 @@ final class ComponentStackPropagation
             'created' => array_values(array_unique($created)),
             'unavailable' => $unavailable,
         ];
+    }
+
+    /**
+     * Inherited photographs occupy the free positions, in membership and source
+     * order, as one assignment. Stack-owned positions stay where they are, and
+     * two occupied positions can exchange without a second pass.
+     *
+     * @return array<int, int>
+     */
+    public function desiredInheritedPositions(Product $stack): array
+    {
+        $desiredIds = [];
+        foreach ($this->catalog->componentIds($stack) as $componentId) {
+            $sources = Image::query()->active()->where('product_id', $componentId)
+                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('position')
+                ->orderBy('id')
+                ->get(['id', 'image_asset_id']);
+            foreach ($sources as $source) {
+                if ((int) $source->image_asset_id < 1) {
+                    continue;
+                }
+                $copyId = Image::query()->active()
+                    ->where('product_id', $stack->id)
+                    ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+                    ->where('image_asset_id', $source->image_asset_id)
+                    ->orderBy('id')
+                    ->value('id');
+                if ($copyId && ! in_array((int) $copyId, $desiredIds, true)) {
+                    $desiredIds[] = (int) $copyId;
+                }
+            }
+        }
+        $reserved = [];
+        foreach (Image::query()->active()->where('product_id', $stack->id)->where(function ($query): void {
+            $query->whereNull('ownership')->orWhere('ownership', '!=', ImageOwnership::COMPONENT_INHERITED);
+        })->pluck('position') as $position) {
+            if ((int) $position > 0) {
+                $reserved[(int) $position] = true;
+            }
+        }
+        if ($desiredIds !== []) {
+            foreach (Image::query()->active()->where('product_id', $stack->id)
+                ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+                ->whereNotIn('id', $desiredIds)
+                ->pluck('position') as $position) {
+                if ((int) $position > 0) {
+                    $reserved[(int) $position] = true;
+                }
+            }
+        }
+        $slots = [];
+        $cursor = 1;
+        while (count($slots) < count($desiredIds)) {
+            if (! isset($reserved[$cursor])) {
+                $slots[] = $cursor;
+            }
+            $cursor++;
+        }
+        $positions = [];
+        foreach ($desiredIds as $index => $id) {
+            $positions[$id] = $slots[$index];
+        }
+
+        return $positions;
+    }
+
+    private function assignInheritedGalleryOrder(Product $stack): void
+    {
+        $positions = $this->desiredInheritedPositions($stack);
+        if ($positions === []) {
+            return;
+        }
+        DB::transaction(function () use ($positions): void {
+            $temporary = ((int) Image::query()->whereIn('id', array_keys($positions))->max('position')) + 1000;
+            $moves = [];
+            foreach ($positions as $id => $position) {
+                $current = (int) Image::query()->whereKey($id)->value('position');
+                if ($current !== $position) {
+                    $moves[$id] = $position;
+                }
+            }
+            foreach (array_keys($moves) as $offset => $id) {
+                Image::withoutEvents(fn () => Image::query()->find($id)?->forceFill(['position' => $temporary + $offset])->save());
+            }
+            foreach ($moves as $id => $position) {
+                Image::withoutEvents(fn () => Image::query()->find($id)?->forceFill(['position' => $position])->save());
+            }
+        });
     }
 
     public function recoverPending(): int
@@ -704,13 +794,6 @@ final class ComponentStackPropagation
         }
         $this->copyInheritedAlt($existing, $approved, $raw, $altConflict, is_string($resolution) && $resolution !== '');
         $fresh = $existing->fresh() ?? $existing;
-        $desiredPosition = (int) ($componentImage?->position ?? 0);
-        if ($desiredPosition > 0 && (int) $fresh->position !== $desiredPosition) {
-            $occupied = Image::query()->active()->where('product_id', $stack->id)->where('id', '!=', $fresh->id)->where('position', $desiredPosition)->exists();
-            if (! $occupied) {
-                Image::withoutEvents(fn () => $fresh->forceFill(['position' => $desiredPosition])->save());
-            }
-        }
 
         return ['image' => $fresh->fresh() ?? $fresh, 'alt_conflict' => $altConflict];
     }

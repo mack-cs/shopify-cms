@@ -19,6 +19,12 @@ use Throwable;
  */
 final class StackImageSync
 {
+    public const OPERATION_QUEUE_DISPATCH = 'queue_dispatch';
+
+    public const OPERATION_MEDIA_ORDER = 'media_order';
+
+    public const OPERATION_GALLERY_READ = 'gallery_read';
+
     public function localRebuildEnabled(): bool
     {
         return (bool) config('images.component_stack_local_rebuild', false);
@@ -230,8 +236,14 @@ final class StackImageSync
                 ]);
                 $stack = Product::query()->find($stackId);
                 if ($stack instanceof Product) {
-                    $this->note($stack, null, null, 'failed', 'Queue dispatch failed: '.$exception->getMessage(), false);
+                    $this->note($stack, null, null, 'failed', 'Queue dispatch failed: '.$exception->getMessage(), false, null, false, false, self::OPERATION_QUEUE_DISPATCH);
                 }
+
+                return;
+            }
+            $stack = Product::query()->find($stackId);
+            if ($stack instanceof Product) {
+                $this->note($stack, null, null, 'dispatched', 'Queue dispatch succeeded.', false, null, false, false, self::OPERATION_QUEUE_DISPATCH);
             }
         }
     }
@@ -426,6 +438,12 @@ final class StackImageSync
                     $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
                 } else {
                     $plan = $this->applyAuthorizedPlan($stack);
+                    if ($plan['uploads'] === [] && $plan['retire'] === [] && ! in_array($plan['outcome'], ['uncertain', 'failed', 'deferred_inactive'], true)) {
+                        $order = $this->reconcileRemoteMediaOrder($stack->fresh() ?? $stack);
+                        if ($order['outcome'] !== 'unchanged') {
+                            $plan = $order;
+                        }
+                    }
                 }
             }
         } catch (Throwable $exception) {
@@ -549,8 +567,6 @@ final class StackImageSync
                 $uploads[] = (int) $image->id;
             } elseif ($altChanged && trim((string) $image->shopify_id) !== '') {
                 $altOnly[] = (int) $image->id;
-            } elseif (! $photoChanged && (int) $image->position !== (int) $source->position && trim((string) $image->shopify_id) !== '') {
-                $reorder = true;
             }
         }
         if ($uploads === [] && $altOnly === [] && $retire === [] && ! $reorder) {
@@ -715,13 +731,17 @@ final class StackImageSync
                 continue;
             }
             $actions = [];
-            if ($images->contains(fn (Image $image): bool => $image->needs_shopify_image_sync && ! $product->isApprovedByTwo())) {
+            $unapproved = ! $product->isApprovedByTwo();
+            if ($unapproved && $images->contains(fn (Image $image): bool => (bool) $image->needs_shopify_image_sync && ! $image->shopify_media_create_uncertain)) {
                 $actions[] = 'Approve the photograph change';
             }
-            if ($images->contains(fn (Image $image): bool => (bool) $image->shopify_alt_pending || $image->alt_text_status === Image::ALT_PENDING_REVIEW)) {
-                $actions[] = 'Approve or push the alt text';
+            if ($unapproved && $images->contains(fn (Image $image): bool => (bool) $image->shopify_alt_pending || $image->alt_text_status === Image::ALT_PENDING_REVIEW)) {
+                $actions[] = 'Approve the alt text';
             }
-            if ($images->contains(fn (Image $image): bool => $image->alt_text_status === Image::ALT_FAILED || $image->shopify_media_create_uncertain || $image->needs_shopify_image_sync)) {
+            if ($images->contains(fn (Image $image): bool => $image->alt_text_status === Image::ALT_FAILED
+                || $image->alt_text_status === Image::ALT_AWAITING_CONFIRMATION
+                || (bool) $image->shopify_media_create_uncertain
+                || (! $unapproved && ((bool) $image->needs_shopify_image_sync || (bool) $image->shopify_alt_pending)))) {
                 $actions[] = 'Complete the Shopify push or recovery';
             }
             $since = $images->min(fn (Image $image) => $image->image_attention_since);
@@ -760,26 +780,107 @@ final class StackImageSync
             $rows[(int) $product->id] = $existing;
         }
 
+        $failedCursors = DB::table('stack_image_sync_cursors')
+            ->where('status', 'failed')
+            ->where('updated_at', '<=', $cutoff)
+            ->get();
+        foreach ($failedCursors as $cursor) {
+            $product = Product::query()->with('variants')->find($cursor->stack_product_id);
+            if (! $product instanceof Product) {
+                continue;
+            }
+            $rows = $this->rememberSynchronizationReminder($rows, $product, $cursor->updated_at, 'The synchronization cursor failed.');
+        }
+        $ledgers = DB::table('stack_image_sync_ledger')->orderBy('id')->get();
+        $streams = [];
+        foreach ($ledgers as $ledger) {
+            foreach ($this->ledgerStreams($ledger) as $stream) {
+                $streams[(int) $ledger->stack_product_id.'|'.($ledger->image_id ?? '').'|'.$stream][] = $ledger;
+            }
+        }
+        foreach ($streams as $streamRows) {
+            $operative = array_values(array_filter(
+                $streamRows,
+                fn (object $row): bool => ! $this->ledgerOutcomeIsStatus((string) $row->outcome)
+            ));
+            if ($operative === []) {
+                continue;
+            }
+            $latest = $operative[array_key_last($operative)];
+            if (! in_array((string) $latest->outcome, ['failed', 'uncertain'], true)) {
+                continue;
+            }
+            $since = $latest->created_at;
+            for ($index = count($operative) - 1; $index >= 0; $index--) {
+                if (! in_array((string) $operative[$index]->outcome, ['failed', 'uncertain'], true)) {
+                    break;
+                }
+                $since = $operative[$index]->created_at;
+            }
+            if (\Illuminate\Support\Carbon::parse($since)->gt($cutoff)) {
+                continue;
+            }
+            $product = Product::query()->with('variants')->find($latest->stack_product_id);
+            if (! $product instanceof Product) {
+                continue;
+            }
+            $rows = $this->rememberSynchronizationReminder($rows, $product, $since, (string) $latest->detail);
+        }
+
         return array_values($rows);
     }
 
-    public function note(Product $stack, ?Image $image, ?Image $source, string $outcome, string $detail, bool $verified, ?int $approvalRequestId = null, bool $photographVerified = false, bool $altVerified = false): void
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function rememberSynchronizationReminder(array $rows, Product $product, mixed $since, string $reason): array
+    {
+        $existing = $rows[(int) $product->id] ?? [
+            'product_id' => (int) $product->id,
+            'sku' => (string) ($product->variants->sortBy('id')->first()?->sku ?: $product->handle),
+            'title' => (string) $product->title,
+            'actions' => [],
+            'status' => 'stack synchronization outstanding',
+            'reason' => '',
+            'attention_since' => $since,
+        ];
+        $existing['actions'][] = 'Recover the stack image synchronization';
+        $existing['actions'] = array_values(array_unique($existing['actions']));
+        $existing['reason'] = trim($existing['reason'].' '.$reason);
+        $existing['attention_since'] = min($existing['attention_since'], $since);
+        $rows[(int) $product->id] = $existing;
+
+        return $rows;
+    }
+
+    public function note(Product $stack, ?Image $image, ?Image $source, string $outcome, string $detail, bool $verified, ?int $approvalRequestId = null, bool $photographVerified = false, bool $altVerified = false, ?string $operation = null): void
     {
         $altImage = $image instanceof Image && $image->alt_inheritance_mode === 'independent' ? $image : $source;
+        $recordsPhotograph = $operation === 'images' || ($operation === null && $photographVerified);
+        $recordsAlt = $operation === 'image_alt' || ($operation === null && $altVerified);
+        $cmsPhotograph = $source ? $this->version($source, 'photograph_version') : ($image ? $this->version($image, 'photograph_version') : null);
+        $cmsAlt = $source ? $this->version($source, 'alt_text_version') : ($image ? $this->version($image, 'alt_text_version') : null);
+        if ($operation === 'images') {
+            $cmsAlt = null;
+        } elseif ($operation === 'image_alt') {
+            $cmsPhotograph = null;
+        }
         DB::table('stack_image_sync_ledger')->insert([
             'stack_product_id' => $stack->id,
             'image_id' => $image?->id,
             'source_component_product_id' => $source?->product_id,
             'source_image_id' => $source?->id,
-            'cms_photograph_version' => $source ? $this->version($source, 'photograph_version') : ($image ? $this->version($image, 'photograph_version') : null),
-            'cms_alt_version' => $source ? $this->version($source, 'alt_text_version') : ($image ? $this->version($image, 'alt_text_version') : null),
+            'cms_photograph_version' => $cmsPhotograph,
+            'cms_alt_version' => $cmsAlt,
             'authorized_photograph_version' => $source && $this->photographAuthorized($source) ? $this->version($source, 'photograph_version') : null,
             'authorized_alt_version' => $source && $this->altAuthorized($source) ? $this->version($source, 'alt_text_version') : null,
-            'verified_photograph_version' => $verified && $photographVerified && $source ? $this->version($source, 'photograph_version') : null,
-            'verified_alt_version' => $verified && $altVerified && $altImage ? $this->version($altImage, 'alt_text_version') : null,
+            'verified_photograph_version' => $verified && $recordsPhotograph && $source ? $this->version($source, 'photograph_version') : null,
+            'verified_alt_version' => $verified && $recordsAlt && $altImage ? $this->version($altImage, 'alt_text_version') : null,
             'shopify_media_id' => $image ? trim((string) $image->shopify_id) : null,
             'verified_at' => $verified ? now() : null,
             'approval_request_id' => $approvalRequestId,
+            'operation' => $operation,
             'outcome' => $outcome,
             'detail' => $detail,
             'baseline_verified' => $outcome === 'baseline_verified',
@@ -918,6 +1019,194 @@ final class StackImageSync
     }
 
     /**
+     * Local positions are assigned before this runs, so they cannot show whether Shopify still has the previous order.
+     * The mutation is sent only when the published media sequence differs, and the order is confirmed only by a later read.
+     *
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function reconcileRemoteMediaOrder(Product $stack): array
+    {
+        $desired = $stack->allImages()->active()
+            ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('position')
+            ->orderBy('id')
+            ->get()
+            ->map(fn (Image $image): string => trim((string) $image->shopify_id))
+            ->filter(fn (string $id): bool => $id !== '')
+            ->values()
+            ->all();
+        if (count($desired) < 2) {
+            return $this->emptyPlan('unchanged', 'Shopify media order was not compared.');
+        }
+        try {
+            $remote = $this->remoteMediaSequence($stack);
+        } catch (Throwable $exception) {
+            return $this->recordUnconfirmedOrder($stack, 'Shopify media order could not be read. Nothing was marked verified. '.$exception->getMessage());
+        }
+        if ($this->mediaSequencesMatch($desired, $remote)) {
+            $this->resolveOutstandingOperation($stack, self::OPERATION_MEDIA_ORDER, 'Image order verified.');
+
+            return $this->emptyPlan('unchanged', 'Shopify media order already matches.');
+        }
+        try {
+            $warnings = app(ProductShopifyUpdater::class)->reorderStackMedia($stack);
+        } catch (Throwable $exception) {
+            return $this->recordUnconfirmedOrder($stack, 'Shopify media order was not confirmed. '.$exception->getMessage());
+        }
+        if ($warnings !== []) {
+            $detail = collect($warnings)->pluck('warning')->implode(' ');
+            $outcome = str_contains($detail, 'incomplete') ? 'uncertain' : 'failed';
+            $plan = $this->emptyPlan($outcome, $detail);
+            $this->note($stack, null, null, $outcome, $detail, false, null, false, false, self::OPERATION_MEDIA_ORDER);
+
+            return $plan;
+        }
+        try {
+            $confirmed = $this->remoteMediaSequence($stack->fresh() ?? $stack);
+        } catch (Throwable $exception) {
+            return $this->recordUnconfirmedOrder($stack, 'Shopify media order was not confirmed. '.$exception->getMessage());
+        }
+        if (! $this->mediaSequencesMatch($desired, $confirmed)) {
+            return $this->recordUnconfirmedOrder($stack, 'Shopify media order was not confirmed by read-back.');
+        }
+        $plan = $this->emptyPlan('verified', 'Image order verified.');
+        $plan['reorder'] = true;
+        $this->note($stack, null, null, 'verified', $plan['detail'], true, null, false, false, self::OPERATION_MEDIA_ORDER);
+
+        return $plan;
+    }
+
+    /**
+     * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
+     */
+    private function recordUnconfirmedOrder(Product $stack, string $detail): array
+    {
+        $plan = $this->emptyPlan('uncertain', $detail);
+        $this->note($stack, null, null, 'uncertain', $detail, false, null, false, false, self::OPERATION_MEDIA_ORDER);
+
+        return $plan;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function remoteMediaSequence(Product $stack): array
+    {
+        $productId = trim((string) $stack->shopify_id);
+        if ($productId === '') {
+            throw new RuntimeException('The stack has no Shopify product id to read.');
+        }
+        $nodes = (new ShopifyProductMediaReader(app(ShopifyGraphqlGateway::class)))->media($productId, 'StackMediaOrder');
+
+        return collect($nodes)
+            ->map(fn (array $node): string => trim((string) ($node['id'] ?? '')))
+            ->filter(fn (string $id): bool => $id !== '')
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<int, string>  $desired
+     * @param  array<int, string>  $remote
+     */
+    private function mediaSequencesMatch(array $desired, array $remote): bool
+    {
+        $desiredOrder = array_values(array_merge(
+            $desired,
+            array_values(array_filter(
+                $remote,
+                fn (string $id): bool => ! in_array($id, $desired, true)
+            ))
+        ));
+
+        return $desiredOrder === $remote;
+    }
+
+    /**
+     * Explicit operation keys identify recoverable work. An unkeyed stack row stays on its own legacy stream.
+     * A gallery receipt that verifies both photograph and alt versions closes both image streams.
+     *
+     * @return array<int, string>
+     */
+    private function ledgerStreams(object $ledger): array
+    {
+        $operation = trim((string) ($ledger->operation ?? ''));
+        if ($operation !== '') {
+            return [$operation];
+        }
+        $photographVerified = $ledger->verified_photograph_version !== null;
+        $altVerified = $ledger->verified_alt_version !== null;
+        if ($photographVerified && $altVerified) {
+            return ['images', 'image_alt'];
+        }
+        if ($photographVerified || ($ledger->cms_photograph_version !== null && $ledger->cms_alt_version === null)) {
+            return ['images'];
+        }
+        if ($altVerified || ($ledger->cms_alt_version !== null && $ledger->cms_photograph_version === null)) {
+            return ['image_alt'];
+        }
+        if ($ledger->image_id === null) {
+            if ($this->isHistoricalGalleryReadFailure($ledger)) {
+                return [self::OPERATION_GALLERY_READ];
+            }
+
+            return ['legacy_stack'];
+        }
+
+        return ['image'];
+    }
+
+    /** Holds and local status do not close a failed Shopify read or another operation. */
+    private function ledgerOutcomeIsStatus(string $outcome): bool
+    {
+        return in_array($outcome, [
+            'shopify_authorization_pending',
+            'local_rebuilt',
+            'deferred_inactive',
+            'no_eligible_work',
+            'no_changes_required',
+            'retirement_pending',
+        ], true);
+    }
+
+    private function resolveOutstandingOperation(Product $stack, string $operation, string $detail): void
+    {
+        $rows = DB::table('stack_image_sync_ledger')
+            ->where('stack_product_id', $stack->id)
+            ->orderBy('id')
+            ->get()
+            ->filter(function (object $row) use ($operation): bool {
+                if ((string) ($row->operation ?? '') === $operation) {
+                    return true;
+                }
+
+                return $operation === self::OPERATION_GALLERY_READ && $this->isHistoricalGalleryReadFailure($row);
+            })
+            ->reject(fn (object $row): bool => $this->ledgerOutcomeIsStatus((string) $row->outcome))
+            ->values();
+        $latest = $rows->last();
+        if ($latest === null || ! in_array((string) $latest->outcome, ['failed', 'uncertain'], true)) {
+            return;
+        }
+        $this->note($stack, null, null, 'verified', $detail, true, null, false, false, $operation);
+    }
+
+    /** Rows written before gallery reads had their own operation key. The stored row is left unchanged. */
+    private function isHistoricalGalleryReadFailure(object $ledger): bool
+    {
+        if (trim((string) ($ledger->operation ?? '')) !== '' || $ledger->image_id !== null) {
+            return false;
+        }
+        if (! in_array((string) $ledger->outcome, ['failed', 'uncertain'], true)) {
+            return false;
+        }
+        $detail = (string) $ledger->detail;
+
+        return $detail === 'Shopify still shows media that was supposed to be retired. The gallery was not marked verified.'
+            || str_starts_with($detail, 'Shopify gallery evidence is incomplete. Nothing was marked verified.');
+    }
+
+    /**
      * @return array{outcome:string, uploads:array<int, int>, alt_only:array<int, int>, retire:array<int, int>, reorder:bool, detail:string}
      */
     private function applyAuthorizedPlan(Product $stack): array
@@ -932,7 +1221,7 @@ final class StackImageSync
             $image = Image::query()->with('imageAsset')->find($imageId);
             $source = $image ? Image::query()->find((int) $image->source_image_id) : null;
             if (! $image instanceof Image || ! $this->stackIsActive($stack->fresh() ?? $stack)) {
-                $this->note($stack, $image, $source, 'deferred_inactive', 'Stack status changed before the photograph mutation.', false);
+                $this->note($stack, $image, $source, 'deferred_inactive', 'Stack status changed before the photograph mutation.', false, null, false, false, 'images');
 
                 return $this->emptyPlan('deferred_inactive', 'Stack status changed before the photograph mutation.');
             }
@@ -941,7 +1230,7 @@ final class StackImageSync
                 $reason = (int) $image->image_asset_id !== (int) ($source?->image_asset_id ?? 0)
                     ? 'The stack photograph is not the authorized component photograph. Shopify was not changed.'
                     : 'The authorized photograph backup is missing. Shopify was not changed.';
-                $this->note($stack, $image, $source, 'failed', $reason, false);
+                $this->note($stack, $image, $source, 'failed', $reason, false, null, false, false, 'images');
                 $plan['outcome'] = 'failed';
                 $plan['detail'] = $reason;
 
@@ -961,6 +1250,7 @@ final class StackImageSync
                     null,
                     $confirmed,
                     false,
+                    'images',
                 );
                 if ($confirmed) {
                     $this->completeVerifiedPublication($image, $source, 'images');
@@ -969,7 +1259,7 @@ final class StackImageSync
                     $plan['outcome'] = 'uncertain';
                 }
             } catch (\Throwable $exception) {
-                $this->note($stack, $image, $source, 'failed', $exception->getMessage(), false);
+                $this->note($stack, $image, $source, 'failed', $exception->getMessage(), false, null, false, false, 'images');
                 $plan['outcome'] = 'failed';
                 $plan['detail'] = $exception->getMessage();
             }
@@ -985,18 +1275,11 @@ final class StackImageSync
             $failed = ($result['failed'] ?? []) !== [];
             $target = $this->authorizedAltTarget($image, $source instanceof Image ? $source : null);
             $verified = ! $failed && $target !== null && trim((string) $image->shopify_alt_text) === $target;
-            $this->note($stack, $image, $source, $verified ? 'verified' : 'failed', $verified ? 'Alt text verified without a new photograph upload.' : 'Alt text was not verified.', $verified, null, false, $verified);
+            $this->note($stack, $image, $source, $verified ? 'verified' : 'failed', $verified ? 'Alt text verified without a new photograph upload.' : 'Alt text was not verified.', $verified, null, false, $verified, 'image_alt');
             if ($verified) {
                 $this->completeVerifiedPublication($image, $source instanceof Image ? $source : null, 'image_alt');
             }
             if (! $verified) {
-                $plan['outcome'] = 'failed';
-            }
-        }
-        if ($plan['reorder']) {
-            $warnings = $updater->reorderStackMedia($stack->fresh() ?? $stack);
-            $this->note($stack, null, null, $warnings === [] ? 'verified' : 'failed', $warnings === [] ? 'Image order verified.' : collect($warnings)->pluck('warning')->implode(' '), $warnings === []);
-            if ($warnings !== []) {
                 $plan['outcome'] = 'failed';
             }
         }
@@ -1115,14 +1398,14 @@ final class StackImageSync
             $nodes = (new ShopifyProductMediaReader(app(ShopifyGraphqlGateway::class)))->media($productId, 'StackGalleryVerification');
         } catch (\Throwable $exception) {
             $plan = $this->emptyPlan('uncertain', 'Shopify gallery evidence is incomplete. Nothing was marked verified. '.$exception->getMessage());
-            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false, null, false, false, self::OPERATION_GALLERY_READ);
 
             return $plan;
         }
         foreach ($retiredMediaIds as $mediaId) {
             if (collect($nodes)->contains(fn (array $node): bool => ($node['id'] ?? null) === $mediaId)) {
                 $plan = $this->emptyPlan('failed', 'Shopify still shows media that was supposed to be retired. The gallery was not marked verified.');
-                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+                $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false, null, false, false, self::OPERATION_GALLERY_READ);
 
                 return $plan;
             }
@@ -1135,7 +1418,10 @@ final class StackImageSync
             })
             ->values();
         if ($images->isEmpty()) {
-            return $this->emptyPlan('read_complete', 'Shopify gallery read completed. No authorized photograph remained to verify.');
+            $plan = $this->emptyPlan('read_complete', 'Shopify gallery read completed. No authorized photograph remained to verify.');
+            $this->resolveOutstandingOperation($stack, self::OPERATION_GALLERY_READ, $plan['detail']);
+
+            return $plan;
         }
         $matched = true;
         foreach ($images as $image) {
@@ -1183,8 +1469,10 @@ final class StackImageSync
         if (! $matched) {
             return $this->emptyPlan('failed', 'Shopify read-back did not match the authorized photograph and alt text.');
         }
+        $plan = $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
+        $this->resolveOutstandingOperation($stack, self::OPERATION_GALLERY_READ, $plan['detail']);
 
-        return $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
+        return $plan;
     }
 
     /**
@@ -1218,7 +1506,7 @@ final class StackImageSync
             $nodes = (new ShopifyProductMediaReader(app(ShopifyGraphqlGateway::class)))->media($productId, 'StackGalleryVerification');
         } catch (\Throwable $exception) {
             $plan = $this->emptyPlan('uncertain', 'Shopify gallery evidence is incomplete. Nothing was marked verified. '.$exception->getMessage());
-            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false);
+            $this->note($stack, null, null, $plan['outcome'], $plan['detail'], false, null, false, false, self::OPERATION_GALLERY_READ);
 
             return $plan;
         }
@@ -1268,8 +1556,10 @@ final class StackImageSync
         if (! $matched) {
             return $this->emptyPlan('failed', 'Shopify read-back did not match the authorized gallery.');
         }
+        $plan = $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
+        $this->resolveOutstandingOperation($stack, self::OPERATION_GALLERY_READ, $plan['detail']);
 
-        return $this->emptyPlan('verified', 'Shopify read-back matched the authorized gallery.');
+        return $plan;
     }
 
     private function sourceStillMember(Product $stack, Image $source): bool
