@@ -116,25 +116,6 @@ return new class extends Migration
 
     public function down(): void
     {
-        Schema::dropIfExists('image_publication_reminders');
-        Schema::dropIfExists('stack_image_sync_cursors');
-        Schema::dropIfExists('stack_image_sync_ledger');
-        Schema::dropIfExists('component_image_authorizations');
-
-        Schema::table('inherited_image_sources', function (Blueprint $table): void {
-            foreach (['source_sku', 'source_filename', 'source_position', 'photograph_version', 'alt_text_version', 'alt_fingerprint', 'asset_sha256'] as $column) {
-                if (Schema::hasColumn('inherited_image_sources', $column)) {
-                    $table->dropColumn($column);
-                }
-            }
-        });
-
-        Schema::table('images', function (Blueprint $table): void {
-            foreach (['photograph_version', 'alt_text_version', 'image_attention_since'] as $column) {
-                if (Schema::hasColumn('images', $column)) {
-                    $table->dropColumn($column);
-                }
-            }
-        });
+        throw new RuntimeException('Retain image and delivery evidence during application rollback; destructive schema rollback requires separate review.');
     }
 };

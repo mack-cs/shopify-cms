@@ -225,6 +225,22 @@ class Product extends Model
         return (bool) $this->is_bundle || TagNormalizer::containsBundleOrStackTag($this->tags);
     }
 
+    /** The same predicate as isStackProduct(), for baseline discovery and the operator page. */
+    public function scopeRecognizedStacks(Builder $query): Builder
+    {
+        $ids = $query->getModel()->newQuery()
+            ->where(function (Builder $candidate): void {
+                $candidate->where('is_bundle', true)
+                    ->orWhereRaw('LOWER(COALESCE(tags, "")) LIKE ?', ['%stack%'])
+                    ->orWhereRaw('LOWER(COALESCE(tags, "")) LIKE ?', ['%bundle%']);
+            })
+            ->get(['id', 'is_bundle', 'tags'])
+            ->filter(fn (self $product): bool => $product->isStackProduct())
+            ->modelKeys();
+
+        return $query->whereIn($query->getModel()->getQualifiedKeyName(), $ids !== [] ? $ids : [0]);
+    }
+
     public function scopeMissingImageAltText(Builder $query): Builder
     {
         return $query->whereHas('images', fn (Builder $imageQuery): Builder => self::applyMissingImageAltTextImageFilter($imageQuery));

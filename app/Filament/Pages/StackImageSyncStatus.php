@@ -39,7 +39,7 @@ final class StackImageSyncStatus extends Page implements HasTable
     public function table(Table $table): Table
     {
         return $table
-            ->query(Product::query()->where('is_bundle', true)->with('variants'))
+            ->query(Product::query()->recognizedStacks()->with('variants'))
             ->defaultSort('id', 'desc')
             ->columns([
                 Tables\Columns\TextColumn::make('id')->sortable(),
@@ -61,8 +61,15 @@ final class StackImageSyncStatus extends Page implements HasTable
                     ->label('Rebuild locally')
                     ->action(function (Product $record): void {
                         $result = app(ComponentStackPropagation::class)->stageStack($record);
-                        app(StackImageSync::class)->note($record, null, null, 'local_rebuilt', $result['message'], false);
-                        Notification::make()->title('Local gallery rebuilt')->body($result['message'])->success()->send();
+                        $sync = app(StackImageSync::class);
+                        if (($result['rebuilt'] ?? false) === true) {
+                            $sync->note($record, null, null, 'local_rebuilt', $result['message'], false);
+                            Notification::make()->title('Local gallery rebuilt')->body($result['message'])->success()->send();
+
+                            return;
+                        }
+                        $sync->note($record, null, null, 'local_rebuild_failed', $result['message'], false);
+                        Notification::make()->title('Local gallery was not rebuilt')->body($result['message'])->danger()->send();
                     }),
             ]);
     }

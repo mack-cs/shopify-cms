@@ -17,7 +17,7 @@ class RebuildStackImageBaseline extends Command
 
     public function handle(ComponentStackPropagation $propagation, StackImageSync $sync): int
     {
-        $query = Product::query()->where('is_bundle', true)->orderBy('id');
+        $query = Product::query()->recognizedStacks()->orderBy('id');
         if ($this->argument('stack')) {
             $query->whereKey((int) $this->argument('stack'));
         }
@@ -34,6 +34,11 @@ class RebuildStackImageBaseline extends Command
             }
             $result = $propagation->stageStack($stack);
             $this->line($result['message']);
+            if (($result['rebuilt'] ?? false) !== true) {
+                $this->error($result['message']);
+
+                continue;
+            }
             foreach ($stack->allImages()->where('ownership', ImageOwnership::COMPONENT_INHERITED)->get() as $image) {
                 $sync->note($stack, $image, Image::query()->find((int) $image->source_image_id), 'local_rebuilt', 'Legacy local rebuild. Shopify baseline is not verified.', false);
             }

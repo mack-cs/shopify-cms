@@ -66,6 +66,11 @@ final class StackImageSync
                 continue;
             }
             $result = app(ComponentStackPropagation::class)->stageStack($stack);
+            if (($result['rebuilt'] ?? false) !== true) {
+                $this->note($stack, null, null, 'local_rebuild_failed', $result['message'] ?? 'Local gallery rebuild failed.', false);
+
+                continue;
+            }
             $this->note($stack, null, null, 'local_rebuilt', $result['message'] ?? 'Local gallery rebuilt.', false);
             $count++;
         }
@@ -690,6 +695,8 @@ final class StackImageSync
             $phase = 'retirement_confirmed';
         } elseif ($outcome === 'local_rebuilt') {
             $phase = 'local_cms_rebuild_completed';
+        } elseif ($outcome === 'local_rebuild_failed') {
+            $phase = 'local_rebuild_failed';
         }
 
         return [
@@ -1162,6 +1169,7 @@ final class StackImageSync
         return in_array($outcome, [
             'shopify_authorization_pending',
             'local_rebuilt',
+            'local_rebuild_failed',
             'deferred_inactive',
             'no_eligible_work',
             'no_changes_required',
