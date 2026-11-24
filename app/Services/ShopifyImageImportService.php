@@ -583,12 +583,9 @@ class ShopifyImageImportService
             $previousAssetId = (int) ($image->image_asset_id ?? 0);
             $replacedPhotograph = $image->exists && ! $photographMatches && $previousAssetId !== (int) $asset->id;
 
-            if ($replacedPhotograph && ($image->alt_confirmation_media_id !== null || $image->shopify_media_create_uncertain
-                || app(ImageUploadOperations::class)->active($image))) {
-                throw new \RuntimeException('Resolve the pending Shopify image or alt operation before replacing this photograph. Its tracking and approval history were preserved.');
-            }
-
             if ($replacedPhotograph) {
+                // Keep the prior remote evidence while accepting the new CMS photo.
+                // The active upload claim still prevents a second Shopify create.
                 app(ImagePhotographEvidence::class)->archive($image, 'S3 photograph replacement');
             }
             if ($product->isStackProduct() && ! $photographMatches) {

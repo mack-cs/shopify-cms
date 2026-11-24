@@ -593,6 +593,9 @@ it('clears stale approval evidence when a higher filename version replaces the p
         'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
         'backup_completed_at' => now(),
     ]));
+    $before = $product->allImages()->first();
+    $upload = app(\App\Services\ImageUploadOperations::class)->claim($before, $product->shopify_id, []);
+    expect($upload)->not->toBeNull();
     Storage::disk('shopify_product_images')->put('incoming/replace-bytes/REPL100-v2.png', 'new-photo');
 
     importDefectPrefix('incoming/replace-bytes');
@@ -604,6 +607,8 @@ it('clears stale approval evidence when a higher filename version replaces the p
         ->and($image->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
         ->and($image->shopify_id)->toBeNull()
         ->and($image->needs_shopify_image_sync)->toBeTrue()
+        ->and($image->shopify_media_create_uncertain)->toBeTrue()
+        ->and(app(\App\Services\ImageUploadOperations::class)->active($image)->id)->toBe($upload->id)
         ->and($image->alt_text_version)->not->toBe(2);
 });
 
