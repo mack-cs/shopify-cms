@@ -73,7 +73,7 @@ final class ImageUploadOperations
                 $stillAttached = filled($existing->media_id) && collect($media)->contains(
                     fn ($node): bool => is_array($node) && ($node['id'] ?? null) === $existing->media_id
                 );
-                $reusable = $existing->status === 'confirmed'
+                $reusable = in_array($existing->status, ['confirmed', 'superseded'], true)
                     && $existing->active_image_id === null
                     && ! $stillAttached;
                 if (! $reusable) {
@@ -116,6 +116,44 @@ final class ImageUploadOperations
             'status' => $status, 'media_id' => $mediaId ?: $operation->media_id,
             'error' => $error, 'updated_at' => now(),
         ]);
+    }
+
+    public function supersedePreviousUpload(Image $image, object $operation, array $media): bool
+    {
+        $id = (string) $operation->media_id;
+        $before = json_decode($operation->before_media_ids, true, flags: JSON_THROW_ON_ERROR);
+        if (preg_match('~^gid://shopify/MediaImage/\d+$~', $id) !== 1
+            || in_array($id, $before, true) || $operation->product_gid !== $image->product?->shopify_id
+            || Image::query()->active()->whereKeyNot($image->id)->where('shopify_id', $id)->exists()) {
+            $this->record($operation, 'needs_review', error: 'The earlier upload has no independently tracked Shopify attachment. Review the previous upload before publishing this replacement.');
+
+            return false;
+        }
+        $node = collect($media)->firstWhere('id', $id);
+        if ($node && in_array('FAILED', [$node['status'] ?? null, $node['fileStatus'] ?? null], true)) {
+            $this->record($operation, 'needs_review', error: 'Shopify reports the earlier upload failed. Review its recorded attachment before publishing the replacement.');
+
+            return false;
+        }
+        if (! $node || ! ShopifyProductMediaReader::ready($node)) {
+            $this->record($operation, 'processing', error: 'Waiting for Shopify to confirm the earlier upload before replacing it.');
+
+            return false;
+        }
+
+        DB::transaction(function () use ($image, $operation): void {
+            $current = Image::query()->lockForUpdate()->findOrFail($image->id);
+            if ($current->image_asset_id !== $image->image_asset_id
+                || DB::table('image_upload_operations')->where('id', $operation->id)->where('active_image_id', $image->id)->update([
+                'status' => 'superseded', 'active_image_id' => null, 'error' => null, 'updated_at' => now(),
+            ]) !== 1) {
+                throw new RuntimeException('This position changed while confirming the earlier Shopify upload.');
+            }
+            Image::withoutEvents(fn () => $current->forceFill(['shopify_media_create_uncertain' => false])->save());
+        });
+        $image->refresh();
+
+        return true;
     }
 
     /** Confirms the new attachment returned by the create mutation on this product. */

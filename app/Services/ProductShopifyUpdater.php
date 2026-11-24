@@ -5270,6 +5270,16 @@ GQL;
                 }
             }
             $operation = $operations->active($image);
+            if ($operation !== null && (int) $operation->image_asset_id !== (int) $image->image_asset_id) {
+                if (! $operations->supersedePreviousUpload($image, $operation, $details['media']['nodes'])) {
+                    $pending = $operations->active($image);
+                    $warnings[] = ['product_id' => $product->id, 'warning' => "Position {$image->position}: ".$pending?->error, 'processing' => $pending?->status === 'processing'];
+                    $row['blocked'] = true;
+
+                    return $row;
+                }
+                $operation = null;
+            }
             if ($operation !== null) {
                 $node = $this->confirmRecordedUpload($image, $operation, $details['media']['nodes']);
                 if ($node !== null && ! $this->photographReplacementIsUnauthorized($image)) {
@@ -5513,7 +5523,10 @@ GQL;
             ->pluck('shopify_id')->filter(fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/MediaImage/\d+$~', $id) === 1)
             ->unique();
 
-        foreach ($oldMediaIds as $oldId) {
+        $supersededUploads = DB::table('image_upload_operations')->where('image_id', $image->id)
+            ->where('product_gid', $product->shopify_id)->where('status', 'superseded')
+            ->where('image_asset_id', '!=', $image->image_asset_id)->pluck('media_id');
+        foreach ($oldMediaIds->merge($supersededUploads)->filter()->unique() as $oldId) {
             if ($oldId === $replacementId) {
                 continue;
             }

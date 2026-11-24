@@ -769,13 +769,23 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     $oldId = 'gid://shopify/MediaImage/5611';
     $newId = 'gid://shopify/MediaImage/5612';
     $extraId = 'gid://shopify/MediaImage/5613';
+    $pendingId = 'gid://shopify/MediaImage/5614';
     Image::withoutEvents(fn () => $image->forceFill([
         'shopify_id' => $oldId, 'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
         'last_shopify_synced_image_asset_id' => $image->image_asset_id,
         'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now(),
     ])->save());
     app(\App\Services\ImagePhotographEvidence::class)->archive($image->fresh(), 'S3 photograph replacement');
+    $uploads = app(\App\Services\ImageUploadOperations::class);
+    $operation = $uploads->claim($image, $product->shopify_id, [['id' => $oldId]]);
+    $uploads->record($operation, 'processing', $pendingId);
+    Storage::disk('public')->put('replacement-561.png', 'new replacement bytes');
+    $replacement = ImageAsset::query()->create([
+        'sha256' => hash('sha256', 'new replacement bytes'), 'storage_disk' => 'public',
+        'storage_path' => 'replacement-561.png', 'status' => ImageAsset::STATUS_AVAILABLE,
+    ]);
     Image::withoutEvents(fn () => $image->forceFill([
+        'image_asset_id' => $replacement->id,
         'shopify_id' => null, 'shopify_identity_unresolved' => true, 'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
         'needs_shopify_image_sync' => true,
     ])->save());
@@ -787,7 +797,7 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     config()->set('services.shopify.shop', 'verification.myshopify.com');
     config()->set('services.shopify.admin_access_token', 'test-token');
     $newUrl = 'https://cdn.shopify.com/s/files/1/replacement.png';
-    $ids = [$oldId, $extraId];
+    $ids = [$oldId, $extraId, $pendingId];
     $ready = false;
     $creates = 0;
     $removals = [];
@@ -850,7 +860,7 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     $continuation->handle($updater, $backups);
     $continuation->handle($updater, $backups);
     expect((int) $product->fresh()->approval_version)->toBe($version + 1)
-        ->and($creates)->toBe(1)->and($removals)->toBe([$oldId])
+        ->and($creates)->toBe(1)->and($removals)->toBe([$oldId, $pendingId])
         ->and($ids)->toBe([$newId, $extraId])
         ->and($image->fresh()->shopify_id)->toBe($newId)
         ->and($image->fresh()->src)->toBe($newUrl);
