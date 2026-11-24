@@ -531,6 +531,17 @@ it('rebuilds a parent stack from a component import with Shopify propagation dis
 
 it('lists the imported component and rebuilt stack until their image updates are confirmed', function (): void {
     [$stack, $component] = stackRebuildBundle('STACKUPDATES', ['COMPUPDATES']);
+    $backupOnly = createImageImportProduct('BACKUPONLYUPDATES');
+    stackComponentPhotograph($backupOnly, [
+        'image_asset_id' => createImportTestAsset('existing Shopify backup', 'jpg', 'existing.jpg')->id,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+        'backup_completed_at' => now(),
+        'needs_shopify_image_sync' => true,
+        'sync_state' => Image::SYNC_STATE_SYNCED,
+        'alt_text_status' => Image::ALT_PUBLISHED,
+        'shopify_alt_text' => 'Component sentence',
+        'src' => 'https://cdn.shopify.com/s/files/1/existing.jpg',
+    ]);
     $page = new \App\Filament\Resources\ProductResource\Pages\ListProducts;
     $page->activeTab = 'image_updates';
     $queryForTab = new ReflectionMethod($page, 'modifyQueryWithActiveTab');

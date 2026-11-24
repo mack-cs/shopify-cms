@@ -242,7 +242,20 @@ class Image extends Model
     public function scopePendingPublication(Builder $query): Builder
     {
         return $query->active()->where(function (Builder $pending): void {
-            $pending->where('needs_shopify_image_sync', true)
+            $pending->where(function (Builder $photograph): void {
+                $photograph->where('needs_shopify_image_sync', true)
+                    ->whereIn('sync_state', [self::SYNC_STATE_LOCAL_NEW, self::SYNC_STATE_LOCAL_UPDATED])
+                    ->where(function (Builder $source): void {
+                        // A pending sync flag alone can come from existing catalogue media.
+                        $source->whereNotNull('s3_filename')
+                            ->orWhereNotNull('image_path')
+                            ->orWhere('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED)
+                            ->orWhereExists(function ($revisions): void {
+                                $revisions->from('image_revisions')->whereColumn('image_id', 'images.id')
+                                    ->where('reason', 'Local photograph replacement');
+                            });
+                    });
+            })
                 ->orWhere('shopify_media_create_uncertain', true)
                 ->orWhere('shopify_image_sync_error', self::ORDER_CONFIRMATION_PENDING)
                 ->orWhereExists(function ($retirements): void {
