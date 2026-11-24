@@ -770,7 +770,8 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     $newId = 'gid://shopify/MediaImage/5612';
     $extraId = 'gid://shopify/MediaImage/5613';
     Image::withoutEvents(fn () => $image->forceFill([
-        'shopify_id' => $oldId, 'sync_state' => Image::SYNC_STATE_SYNCED,
+        'shopify_id' => $oldId, 'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
+        'last_shopify_synced_image_asset_id' => $image->image_asset_id,
         'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now(),
     ])->save());
     app(\App\Services\ImagePhotographEvidence::class)->archive($image->fresh(), 'S3 photograph replacement');
@@ -833,12 +834,22 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     });
 
     $updater = app(ProductShopifyUpdater::class);
-    $sync = new ReflectionMethod(ProductShopifyUpdater::class, 'updateImages');
-    $pending = $sync->invoke($updater, $product, $product->shopify_id, [], []);
-    expect($pending)->not->toBeEmpty()->and($removals)->toBe([]);
+    Bus::fake([\App\Jobs\ProductShopifyUpdateJob::class]);
+    $backups = Mockery::mock(\App\Services\ProductImageBackupService::class);
+    $backups->shouldReceive('backupProducts')->once()->andReturn([]);
+    $version = (int) $product->fresh()->approval_version;
+    $job = new \App\Jobs\ProductShopifyUpdateJob([$product->id], scopes: [ProductShopifyUpdater::SYNC_SCOPE_IMAGES]);
+    $job->handle($updater, $backups);
+    $continuation = Bus::dispatched(\App\Jobs\ProductShopifyUpdateJob::class)->sole();
+    expect($continuation->confirmationAttempt)->toBe(1)
+        ->and($continuation->confirmationApprovalVersions)->toBe([$product->id => $version])
+        ->and((int) $product->fresh()->approval_version)->toBe($version)
+        ->and($removals)->toBe([])
+        ->and($altWrites)->toBe([]);
     $ready = true;
-    expect($sync->invoke($updater, $product, $product->shopify_id, [], []))->toBe([])
-        ->and($sync->invoke($updater, $product, $product->shopify_id, [], []))->toBe([])
+    $continuation->handle($updater, $backups);
+    $continuation->handle($updater, $backups);
+    expect((int) $product->fresh()->approval_version)->toBe($version + 1)
         ->and($creates)->toBe(1)->and($removals)->toBe([$oldId])
         ->and($ids)->toBe([$newId, $extraId])
         ->and($image->fresh()->shopify_id)->toBe($newId)
@@ -846,8 +857,7 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
 
     $publishAlt = new ReflectionMethod(ProductShopifyUpdater::class, 'publishApprovedImageAlt');
     expect($partial->altApprovedWithPhotograph($image->fresh()))->toBe('Carry this description');
-    expect($publishAlt->invoke($updater, $product, true, [], true))->toBe([])
-        ->and($altWrites)->toBe([['id' => $newId, 'alt' => 'Carry this description']]);
+    expect($altWrites)->toBe([['id' => $newId, 'alt' => 'Carry this description']]);
     app(ImageAltTextBackfillService::class)->markPendingReview($image->fresh(), 'A later edit');
     expect($partial->approvedAlt($image->fresh()))->toBeNull()
         ->and($publishAlt->invoke($updater, $product, true, [], true))->toBe([])

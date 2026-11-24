@@ -158,9 +158,14 @@ final class ImageUploadOperations
 
             return null;
         }
-        if (! $node || ! ShopifyProductMediaReader::ready($node)
-            || ! ShopifyMediaPath::rememberableCdnUrl($node['image']['url'] ?? null)) {
-            $this->record($operation, 'processing', error: 'Shopify has not returned a ready attachment and CDN URL for this upload. Retry confirmation of the recorded media ID.');
+        $reason = match (true) {
+            ! $node => 'The recorded image is not visible in the Shopify product gallery yet.',
+            ! ShopifyProductMediaReader::ready($node) => 'Shopify image status is '.($node['status'] ?? 'missing').' and file status is '.($node['fileStatus'] ?? 'missing').'.',
+            ! ShopifyMediaPath::rememberableCdnUrl($node['image']['url'] ?? null) => 'Shopify has not supplied a usable image URL yet.',
+            default => null,
+        };
+        if ($reason !== null) {
+            $this->record($operation, 'processing', error: $reason);
 
             return null;
         }

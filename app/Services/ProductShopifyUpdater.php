@@ -818,6 +818,9 @@ GQL, ['id' => $productId]);
                     'alt_text' => in_array(self::SYNC_SCOPE_IMAGE_ALT, $effectiveScopes, true) ? 'not_completed' : 'not_requested',
                 ];
                 $warnings = array_merge($warnings, $this->updateProduct($product, $effectiveScopes, $effectiveCoreFields));
+                if (($this->imageOutcomes[$product->id]['photographs'] ?? null) === 'processing') {
+                    continue;
+                }
                 if ($effectiveScopes === [self::SYNC_SCOPE_IMAGE_ALT]) {
                     $product->forceFill(['sync_batch_id' => $syncBatchId, 'last_synced_at' => now()])->saveQuietly();
                 } else {
@@ -2247,6 +2250,11 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
             $imageWarnings = $this->updateImages($product, $productId, $imageRows, $details);
             $this->imageOutcomes[$product->id]['photographs'] = $imageWarnings === [] ? 'verified' : 'incomplete';
             $this->imageOutcomes[$product->id]['photograph_warnings'] = $imageWarnings;
+            if (collect($imageWarnings)->contains(fn (array $warning): bool => $warning['processing'] ?? false)) {
+                $this->imageOutcomes[$product->id]['photographs'] = 'processing';
+
+                return array_merge($warnings, array_values(array_filter($imageWarnings, fn (array $warning): bool => ! ($warning['processing'] ?? false))));
+            }
             $warnings = array_merge(
                 $warnings,
                 $imageWarnings
@@ -5274,8 +5282,9 @@ GQL;
                     if ($node !== null) {
                         $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
                     } else {
-                        $reason = $operations->active($image)?->error ?? 'The upload still needs confirmation.';
-                        $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} at position {$image->position}: ".$reason];
+                        $pending = $operations->active($image);
+                        $reason = $pending?->error ?? 'The upload still needs confirmation.';
+                        $warnings[] = ['product_id' => $product->id, 'warning' => "Position {$image->position}: ".$reason, 'processing' => $pending?->status === 'processing'];
                     }
                     $row['blocked'] = true;
                 }
@@ -5420,8 +5429,9 @@ GQL;
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'], $operation);
                     $row['matched_media_id'] = $node['id'];
                 } else {
-                    $reason = $operations->active($image)?->error ?? 'The upload still needs confirmation.';
-                    $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} at position {$image->position}: ".$reason];
+                    $pending = $operations->active($image);
+                    $reason = $pending?->error ?? 'The upload still needs confirmation.';
+                    $warnings[] = ['product_id' => $product->id, 'warning' => "Position {$image->position}: ".$reason, 'processing' => $pending?->status === 'processing'];
                 }
             } catch (\Throwable $exception) {
                 $operations->record($operations->active($image) ?? $operation, 'needs_review', error: $exception->getMessage());
@@ -5430,6 +5440,11 @@ GQL;
 
             return $row;
         });
+        if (collect($warnings)->contains(fn (array $warning): bool => $warning['processing'] ?? false)) {
+            $this->rememberPhotographOutcomes($product, $desiredImages, $warnings);
+
+            return $warnings;
+        }
         foreach ($desiredImages as $row) {
             if (filled($row['matched_media_id']) && ! ($row['blocked'] ?? false)) {
                 $warnings = array_merge($warnings, $this->retireReplacedPosition($product, $row['image'], $row['matched_media_id']));
@@ -5491,7 +5506,10 @@ GQL;
         $oldMediaIds = $snapshots->map(fn (string $snapshot): array => json_decode($snapshot, true, flags: JSON_THROW_ON_ERROR))
             ->filter(fn (array $snapshot): bool => (int) ($snapshot['product_id'] ?? 0) === (int) $product->id
                 && empty($snapshot['shopify_identity_unresolved'])
-                && ($snapshot['sync_state'] ?? null) === Image::SYNC_STATE_SYNCED)
+                && (($snapshot['sync_state'] ?? null) === Image::SYNC_STATE_SYNCED
+                    || (($snapshot['sync_state'] ?? null) === Image::SYNC_STATE_LOCAL_UPDATED
+                        && (int) ($snapshot['image_asset_id'] ?? 0) > 0
+                        && (int) $snapshot['image_asset_id'] === (int) ($snapshot['last_shopify_synced_image_asset_id'] ?? 0))))
             ->pluck('shopify_id')->filter(fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/MediaImage/\d+$~', $id) === 1)
             ->unique();
 
@@ -5832,7 +5850,7 @@ GQL;
             } elseif ($verifyOrder) {
                 $confirmed = (new ShopifyProductMediaReader($this->client))->media($productId, 'ProductImageOrderConfirmation');
                 if (array_column($confirmed, 'id') !== $desiredOrder) {
-                    $warnings[] = ['product_id' => $product->id, 'warning' => 'Shopify has not confirmed the new gallery order. Retry the approved push to check the order.'];
+                    $warnings[] = ['product_id' => $product->id, 'warning' => 'Shopify has not confirmed the new gallery order yet.', 'processing' => true];
                 }
             }
         } catch (\Throwable $e) {

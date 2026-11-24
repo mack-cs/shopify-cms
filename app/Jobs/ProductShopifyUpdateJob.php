@@ -27,6 +27,8 @@ class ProductShopifyUpdateJob implements ShouldQueue
         public ?array $scopes = null,
         public ?array $coreFields = null,
         public ?string $syncBatchId = null,
+        public int $confirmationAttempt = 0,
+        public array $confirmationApprovalVersions = [],
     ) {}
 
     public function handle(ProductShopifyUpdater $updater, ProductImageBackupService $backupService): void
@@ -34,14 +36,35 @@ class ProductShopifyUpdateJob implements ShouldQueue
         $products = Product::query()
             ->whereIn('id', $this->productIds)
             ->get();
+        $attempt = $this->confirmationAttempt ?? 0;
+        if ($attempt > 0) {
+            $products = $products->filter(fn (Product $product): bool => (int) $product->approval_version
+                === ($this->confirmationApprovalVersions[$product->id] ?? null));
+            if ($products->isEmpty()) {
+                return;
+            }
+        }
 
         $syncBatchId = $this->syncBatchId ?: (string) Str::uuid();
         $backupResult = null;
-        if ($this->shouldPrepareImageBackups()) {
+        if ($attempt === 0 && $this->shouldPrepareImageBackups()) {
             $backupResult = $backupService->backupProducts($products);
         }
 
         $result = $updater->updateApprovedProducts($products, $this->scopes, $this->coreFields, $syncBatchId, $this->userId);
+        $pending = collect($result['image_outcomes'] ?? [])->filter(fn (array $outcome): bool => ($outcome['photographs'] ?? null) === 'processing');
+        $retryDelays = [15, 30, 60, 120, 240];
+        $retrying = $pending->isNotEmpty() && isset($retryDelays[$attempt]);
+        if ($retrying) {
+            $versions = $products->whereIn('id', $pending->keys())->mapWithKeys(
+                fn (Product $product): array => [$product->id => (int) $product->approval_version]
+            )->all();
+            self::dispatch(array_keys($versions), $this->userId, $this->scopes, $this->coreFields, $syncBatchId, $attempt + 1, $versions)
+                ->onConnection($this->connection)->onQueue($this->queue)->delay(now()->addSeconds($retryDelays[$attempt]));
+            if ($attempt > 0 && $result['updated'] === 0 && $result['failed'] === 0) {
+                return;
+            }
+        }
 
         if ($this->userId) {
             $parts = [];
@@ -96,6 +119,16 @@ class ProductShopifyUpdateJob implements ShouldQueue
             if ($result['failed'] > 0) {
                 $parts[] = "Failed {$result['failed']}.";
             }
+            if ($pending->isNotEmpty()) {
+                if ($retrying) {
+                    $parts[] = 'Waiting for Shopify to finish processing images for '.$pending->count().' product(s). The CMS will check again automatically.';
+                } else {
+                    foreach ($pending as $id => $outcome) {
+                        $details = collect($outcome['photograph_warnings'])->pluck('warning')->implode(' ');
+                        $parts[] = "Product {$id}: Confirmation timed out. {$details} Retry the approved push to check the recorded attachments.";
+                    }
+                }
+            }
 
             if (!empty($result['warnings'])) {
                 $warnings = collect($result['warnings'])
@@ -113,11 +146,12 @@ class ProductShopifyUpdateJob implements ShouldQueue
                 $parts[] = "Failures: {$failures}";
             }
 
+            $incomplete = $result['failed'] > 0 || ($pending->isNotEmpty() && ! $retrying);
             AdminNotification::sendToUserId(
                 Notification::make()
-                    ->title($result['failed'] > 0 ? 'Shopify product update incomplete' : 'Shopify product update complete')
+                    ->title($incomplete ? 'Shopify product update incomplete' : ($retrying ? 'Waiting for Shopify images' : 'Shopify product update complete'))
                     ->body($parts ? implode(' ', $parts) : 'No products were updated.')
-                    ->status($result['failed'] > 0 ? 'danger' : 'success'),
+                    ->status($incomplete ? 'danger' : ($retrying ? 'warning' : 'success')),
                 $this->userId
             );
         }
