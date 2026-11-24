@@ -538,8 +538,8 @@ it('lists the imported component and rebuilt stack until their image updates are
         'backup_completed_at' => now(),
         'needs_shopify_image_sync' => true,
         'sync_state' => Image::SYNC_STATE_SYNCED,
-        'alt_text_status' => Image::ALT_PUBLISHED,
-        'shopify_alt_text' => 'Component sentence',
+        'alt_text_status' => Image::ALT_PENDING_REVIEW,
+        'shopify_alt_text' => 'Older catalogue description',
         'src' => 'https://cdn.shopify.com/s/files/1/existing.jpg',
     ]);
     $page = new \App\Filament\Resources\ProductResource\Pages\ListProducts;

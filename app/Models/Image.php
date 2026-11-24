@@ -241,36 +241,32 @@ class Image extends Model
 
     public function scopePendingPublication(Builder $query): Builder
     {
-        return $query->active()->where(function (Builder $pending): void {
-            $pending->where(function (Builder $photograph): void {
-                $photograph->where('needs_shopify_image_sync', true)
-                    ->whereIn('sync_state', [self::SYNC_STATE_LOCAL_NEW, self::SYNC_STATE_LOCAL_UPDATED])
-                    ->where(function (Builder $source): void {
-                        // A pending sync flag alone can come from existing catalogue media.
-                        $source->whereNotNull('s3_filename')
-                            ->orWhereNotNull('image_path')
-                            ->orWhere('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED)
-                            ->orWhereExists(function ($revisions): void {
-                                $revisions->from('image_revisions')->whereColumn('image_id', 'images.id')
-                                    ->where('reason', 'Local photograph replacement');
-                            });
-                    });
-            })
-                ->orWhere('shopify_media_create_uncertain', true)
-                ->orWhere('shopify_image_sync_error', self::ORDER_CONFIRMATION_PENDING)
-                ->orWhereExists(function ($retirements): void {
-                    $retirements->from('inherited_media_retirements')
-                        ->whereColumn('replacement_image_id', 'images.id')
-                        ->whereIn('status', ['pending', 'mutating']);
-                })
-                ->orWhere('shopify_alt_pending', true)
-                ->orWhereIn('alt_text_status', [self::ALT_PENDING_REVIEW, self::ALT_FAILED, self::ALT_AWAITING_CONFIRMATION])
-                ->orWhere(function (Builder $alt): void {
-                    $alt->where(fn (Builder $tracked) => $tracked->where('alt_text_status', self::ALT_APPROVED)
-                        ->orWhere('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED))
-                        ->whereRaw("TRIM(COALESCE(alt_text, '')) <> TRIM(COALESCE(shopify_alt_text, ''))");
+        return $query->active()
+            ->where(function (Builder $imported): void {
+                $imported->whereNotNull('s3_filename')->orWhere(function (Builder $inherited): void {
+                    $inherited->where('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED)
+                        ->whereHas('product', fn (Builder $stack) => $stack->whereNotNull('image_rebuild_batch_id'))
+                        ->whereHas('sourceImage', fn (Builder $source) => $source->whereNotNull('s3_filename'));
                 });
-        });
+            })
+            ->where(function (Builder $pending): void {
+                $pending->where(fn (Builder $photograph) => $photograph->where('needs_shopify_image_sync', true)
+                    ->whereIn('sync_state', [self::SYNC_STATE_LOCAL_NEW, self::SYNC_STATE_LOCAL_UPDATED]))
+                    ->orWhere('shopify_media_create_uncertain', true)
+                    ->orWhere('shopify_image_sync_error', self::ORDER_CONFIRMATION_PENDING)
+                    ->orWhereExists(function ($retirements): void {
+                        $retirements->from('inherited_media_retirements')
+                            ->whereColumn('replacement_image_id', 'images.id')
+                            ->whereIn('status', ['pending', 'mutating']);
+                    })
+                    ->orWhere('shopify_alt_pending', true)
+                    ->orWhereIn('alt_text_status', [self::ALT_PENDING_REVIEW, self::ALT_FAILED, self::ALT_AWAITING_CONFIRMATION])
+                    ->orWhere(function (Builder $alt): void {
+                        $alt->where(fn (Builder $tracked) => $tracked->where('alt_text_status', self::ALT_APPROVED)
+                            ->orWhere('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED))
+                            ->whereRaw("TRIM(COALESCE(alt_text, '')) <> TRIM(COALESCE(shopify_alt_text, ''))");
+                    });
+            });
     }
 
     public function product(): BelongsTo
