@@ -23,6 +23,12 @@ final class PullProcurementSheets extends Command
         try {
             $stats = $sheets->pullHumanInputs();
             $this->info("Read {$stats['rows']} row(s) from {$stats['tabs']} tab(s).");
+            if (($stats['ignore_warnings'] ?? 0) > 0) {
+                $this->warn("Preserved Ignore for {$stats['ignore_warnings']} blank/invalid row(s).");
+            }
+            if (($stats['archive_flag_queued'] ?? 0) > 0) {
+                $this->info("Queued {$stats['archive_flag_queued']} mark-for-archive Shopify sync job(s).");
+            }
 
             return self::SUCCESS;
         } finally {

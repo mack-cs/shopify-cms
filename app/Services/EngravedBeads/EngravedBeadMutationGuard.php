@@ -17,6 +17,7 @@ final class EngravedBeadMutationGuard
             return;
         }
         if (app(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class)->permits($query,$variables)) return;
+        if (app(\App\Services\Procurement\MarkForArchiveMutationAuthorization::class)->permits($query, $variables)) return;
         $this->check($variables, $query);
     }
 

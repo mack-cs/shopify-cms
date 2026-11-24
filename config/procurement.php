@@ -18,4 +18,8 @@ return [
     'movement_source_version' => env('PROCUREMENT_MOVEMENT_SOURCE_VERSION', 'product-movement-v2'),
     'pending_receipt_push_reminder_minutes' => (int) env('PROCUREMENT_PENDING_RECEIPT_PUSH_REMINDER_MINUTES', 30),
     'include_test_products' => filter_var(env('PROCUREMENT_INCLUDE_TEST_PRODUCTS', false), FILTER_VALIDATE_BOOLEAN),
+    'mark_for_archive_sync_enabled' => filter_var(
+        env('PROCUREMENT_MARK_FOR_ARCHIVE_SYNC_ENABLED', true),
+        FILTER_VALIDATE_BOOLEAN
+    ),
 ];

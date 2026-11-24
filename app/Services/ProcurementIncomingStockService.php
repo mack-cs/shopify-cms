@@ -30,11 +30,33 @@ final class ProcurementIncomingStockService
 
     public function normalizeBoolean(mixed $value, string $field = 'ignore'): bool
     {
+        $parsed = $this->tryParseBoolean($value, $field, allowBlank: true);
+        if ($parsed === null) {
+            return false;
+        }
+
+        return $parsed;
+    }
+
+    /**
+     * Parse Ignore/boolean sheet cells.
+     * Blank returns null so callers can preserve the last valid value.
+     * Invalid non-blank values throw.
+     */
+    public function tryParseBoolean(mixed $value, string $field = 'ignore', bool $allowBlank = true): ?bool
+    {
         if (is_bool($value)) {
             return $value;
         }
         $normalized = strtolower(trim((string) $value));
-        if ($normalized === '' || in_array($normalized, ['0', 'false', 'no', 'n'], true)) {
+        if ($normalized === '') {
+            if ($allowBlank) {
+                return null;
+            }
+
+            throw ValidationException::withMessages([$field => 'Ignore must be TRUE or FALSE.']);
+        }
+        if (in_array($normalized, ['0', 'false', 'no', 'n'], true)) {
             return false;
         }
         if (in_array($normalized, ['1', 'true', 'yes', 'y'], true)) {
@@ -78,7 +100,10 @@ final class ProcurementIncomingStockService
         }
     }
 
-    /** @param array<string,mixed> $inputs */
+    /**
+     * @param  array{ignore?:bool|null,quantity_to_order?:mixed}  $inputs
+     *         Pass ignore=null to preserve the last valid Ignore value.
+     */
     public function updateFromSheet(
         Variant $variant,
         array $inputs,
@@ -86,19 +111,21 @@ final class ProcurementIncomingStockService
         ?int $sourceRow = null,
         ?int $changedBy = null,
     ): ProcurementIncomingStock {
-        $values = [
-            'ignore' => $this->normalizeBoolean($inputs['ignore'] ?? false),
-            'quantity_to_order' => $this->normalizeQuantity($inputs['quantity_to_order'] ?? null, 'quantity_to_order'),
-        ];
         $detectedAt = now();
+        $hasIgnoreUpdate = array_key_exists('ignore', $inputs) && $inputs['ignore'] !== null;
+        $quantity = array_key_exists('quantity_to_order', $inputs)
+            ? $this->normalizeQuantity($inputs['quantity_to_order'] ?? null, 'quantity_to_order')
+            : null;
 
-        return DB::transaction(function () use ($variant, $values, $sourceSheet, $sourceRow, $changedBy, $detectedAt): ProcurementIncomingStock {
+        return DB::transaction(function () use ($variant, $inputs, $hasIgnoreUpdate, $quantity, $sourceSheet, $sourceRow, $changedBy, $detectedAt): ProcurementIncomingStock {
             $stock = ProcurementIncomingStock::query()
                 ->where('variant_id', $variant->id)
                 ->lockForUpdate()
                 ->first();
             $stock ??= new ProcurementIncomingStock([
                 'variant_id' => $variant->id,
+                'ignore' => false,
+                'quantity_to_order' => 0,
                 'quantity_on_order_phase_1' => 0,
                 'quantity_on_order_phase_2' => 0,
                 'quantity_on_order_phase_3' => 0,
@@ -107,11 +134,30 @@ final class ProcurementIncomingStockService
                 'number_of_wip_orders' => 0,
             ]);
 
+            $values = [];
+            if ($hasIgnoreUpdate) {
+                $values['ignore'] = (bool) $inputs['ignore'];
+            } elseif (! $stock->exists) {
+                $values['ignore'] = false;
+            }
+            if ($quantity !== null) {
+                $values['quantity_to_order'] = $quantity;
+            } elseif (! $stock->exists) {
+                $values['quantity_to_order'] = 0;
+            }
+
             $workflowFields = ['ignore', 'quantity_to_order'];
             $previousWorkflow = collect($workflowFields)->mapWithKeys(
                 fn (string $field): array => [$field => $stock->getAttribute($field)]
             )->all();
-            $nextWorkflow = array_intersect_key($values, array_flip($workflowFields));
+            $nextWorkflow = [
+                'ignore' => array_key_exists('ignore', $values)
+                    ? (bool) $values['ignore']
+                    : (bool) ($stock->ignore ?? false),
+                'quantity_to_order' => array_key_exists('quantity_to_order', $values)
+                    ? (int) $values['quantity_to_order']
+                    : (int) ($stock->quantity_to_order ?? 0),
+            ];
             $changed = ! $stock->exists || $this->humanInputComparable($previousWorkflow) !== $this->humanInputComparable($nextWorkflow);
             $predictionChanged = ! $stock->exists
                 || (bool) ($previousWorkflow['ignore'] ?? false) !== (bool) $nextWorkflow['ignore'];

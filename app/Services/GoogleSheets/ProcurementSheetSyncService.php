@@ -7,11 +7,13 @@ use App\Models\ProcurementCollectionConfig;
 use App\Models\ProcurementIncomingStock;
 use App\Models\Variant;
 use App\Services\OperationalProcurementCollectionResolver;
+use App\Services\Procurement\ProcurementArchiveFlagSyncService;
 use App\Services\ProcurementIncomingStockService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 final class ProcurementSheetSyncService
 {
@@ -21,6 +23,7 @@ final class ProcurementSheetSyncService
         private readonly ProcurementIncomingStockService $incomingStock,
         private readonly OperationalProcurementCollectionResolver $collections,
         private readonly ProcurementSheetDatasetBuilder $dataset,
+        private readonly ?ProcurementArchiveFlagSyncService $archiveFlags = null,
     ) {}
 
     public function enabled(): bool
@@ -28,18 +31,19 @@ final class ProcurementSheetSyncService
         return (bool) config('google_sheets.enabled', false);
     }
 
-    /** @return array{tabs:int,rows:int,changed:int} */
+    /** @return array{tabs:int,rows:int,changed:int,ignore_warnings:int,archive_flag_queued:int} */
     public function pullHumanInputs(): array
     {
         if (! $this->enabled()) {
-            return ['tabs' => 0, 'rows' => 0, 'changed' => 0];
+            return ['tabs' => 0, 'rows' => 0, 'changed' => 0, 'ignore_warnings' => 0, 'archive_flag_queued' => 0];
         }
         $variantGroups = Variant::query()->active()->whereNotNull('sku')
             ->whereHas('product', fn ($query) => $query->procurementCatalogEligible())
             ->with('product')->get()
             ->groupBy(fn (Variant $variant): string => strtoupper(trim((string) $variant->sku)));
-        $stats = ['tabs' => 0, 'rows' => 0, 'changed' => 0];
+        $stats = ['tabs' => 0, 'rows' => 0, 'changed' => 0, 'ignore_warnings' => 0, 'archive_flag_queued' => 0];
         $pending = [];
+        $ignoreBySku = [];
 
         foreach ($this->collections->configured() as $collection) {
             $tab = trim((string) $collection->google_sheet_tab_name);
@@ -80,10 +84,41 @@ final class ProcurementSheetSyncService
 
                     continue;
                 }
+
+                $ignore = null;
+                try {
+                    $ignore = $this->incomingStock->tryParseBoolean($row[$map['ignore']] ?? null);
+                } catch (ValidationException $exception) {
+                    $stats['ignore_warnings']++;
+                    Log::warning('Procurement Ignore value was invalid and was preserved from the last valid CMS state.', [
+                        'tab' => $tab,
+                        'sku' => $sku,
+                        'row' => $offset + 2,
+                        'raw' => $row[$map['ignore']] ?? null,
+                        'error' => $exception->getMessage(),
+                    ]);
+                }
+                if ($ignore === null && trim((string) ($row[$map['ignore']] ?? '')) === '') {
+                    $stats['ignore_warnings']++;
+                    Log::warning('Procurement Ignore value was blank; preserved last valid CMS state.', [
+                        'tab' => $tab,
+                        'sku' => $sku,
+                        'row' => $offset + 2,
+                    ]);
+                }
+                if ($ignore !== null) {
+                    if (isset($ignoreBySku[$sku]) && $ignoreBySku[$sku] !== $ignore) {
+                        throw new \RuntimeException(
+                            "Conflicting Ignore values for duplicate SKU [{$sku}] across procurement tabs."
+                        );
+                    }
+                    $ignoreBySku[$sku] = $ignore;
+                }
+
                 $pending[] = [
                     'variant' => $variant,
                     'workflow' => [
-                        'ignore' => $this->incomingStock->normalizeBoolean($row[$map['ignore']] ?? null),
+                        'ignore' => $ignore,
                         'quantity_to_order' => $this->incomingStock->normalizeQuantity(
                             $row[$map['quantity_to_order']] ?? null,
                             'quantity_to_order'
@@ -97,21 +132,28 @@ final class ProcurementSheetSyncService
             $stats['tabs']++;
         }
 
-        DB::transaction(function () use ($pending, &$stats): void {
+        $touchedProductIds = [];
+        DB::transaction(function () use ($pending, &$stats, &$touchedProductIds): void {
             foreach ($pending as $item) {
                 /** @var Variant $variant */
                 $variant = $item['variant'];
                 $before = $variant->procurementIncomingStock;
-                $previous = $before?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
+                $previous = $before?->only(['ignore', 'quantity_to_order']) ?? [];
                 $this->incomingStock->updateFromSheet(
                     $variant, $item['workflow'], 'google_sheets:'.$item['tab'], $item['row']
                 );
-                $after = $variant->procurementIncomingStock()->first()?->only(ProcurementSheetSchema::HUMAN_OWNED_FIELDS) ?? [];
+                $after = $variant->procurementIncomingStock()->first()?->only(['ignore', 'quantity_to_order']) ?? [];
                 if ($before === null || json_encode($previous) !== json_encode($after)) {
                     $stats['changed']++;
                 }
+                $touchedProductIds[(int) $variant->product_id] = true;
             }
         });
+
+        if ((bool) config('procurement.mark_for_archive_sync_enabled', true) && $touchedProductIds !== []) {
+            $archive = $this->archiveFlags ?? app(ProcurementArchiveFlagSyncService::class);
+            $stats['archive_flag_queued'] = $archive->refreshProducts(array_keys($touchedProductIds))['queued'];
+        }
 
         $this->publishChangeLogSafely();
 

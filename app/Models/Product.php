@@ -27,6 +27,9 @@ class Product extends Model
         'image_import_batch_id', 'image_imported_at', 'image_import_status',
         'image_rebuild_status', 'image_rebuild_message', 'image_rebuild_batch_id', 'image_rebuild_owner',
         'has_errors', 'error_fields',
+        'mark_for_archive', 'mark_for_archive_sync_status', 'mark_for_archive_synced_value',
+        'mark_for_archive_synced_at', 'mark_for_archive_sync_error',
+        'mark_for_archive_desired_version', 'mark_for_archive_source_changed_at',
         'engraved_bead_quantity', 'engraved_bead_configuration',
     ];
 
@@ -35,6 +38,10 @@ class Product extends Model
         'you_save' => 'decimal:2',
         'has_errors' => 'boolean',
         'error_fields' => 'array',
+        // mark_for_archive / mark_for_archive_synced_value stay uncast so null remains null.
+        'mark_for_archive_desired_version' => 'integer',
+        'mark_for_archive_synced_at' => 'datetime',
+        'mark_for_archive_source_changed_at' => 'datetime',
         'last_synced_at' => 'datetime',
         'shopify_created_at' => 'datetime',
         'image_imported_at' => 'datetime',

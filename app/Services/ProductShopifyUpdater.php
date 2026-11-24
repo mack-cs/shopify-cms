@@ -401,6 +401,89 @@ final class ProductShopifyUpdater
     }
 
     /**
+     * Set product metafield custom.mark_for_archive. Does not change status, publication, or inventory.
+     *
+     * @return array{product_id:int,shopify_product_id:string,value:bool,readback:bool}
+     */
+    public function setMarkForArchiveMetafield(Product $product, bool $value): array
+    {
+        $productId = $this->resolveProductId($product);
+        if ($productId === null) {
+            throw new \RuntimeException('Product has no Shopify ID and could not be resolved by handle.');
+        }
+
+        $stringValue = $value ? 'true' : 'false';
+        $authorization = app(\App\Services\Procurement\MarkForArchiveMutationAuthorization::class);
+        $data = $authorization->run($productId, fn (): array => $this->graphql($this->metafieldsSetMutationWithValue(), [
+            'metafields' => [[
+                'ownerId' => $productId,
+                'namespace' => 'custom',
+                'key' => 'mark_for_archive',
+                'type' => 'boolean',
+                'value' => $stringValue,
+            ]],
+        ]));
+
+        $errors = data_get($data, 'metafieldsSet.userErrors', []);
+        if (is_array($errors) && $errors !== []) {
+            $messages = $this->formatUserErrors($errors);
+            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the mark_for_archive metafield update.');
+        }
+
+        $returned = data_get($data, 'metafieldsSet.metafields.0.value');
+        if ($returned !== null && (string) $returned !== $stringValue) {
+            throw new \RuntimeException(
+                "Shopify metafieldsSet returned unexpected mark_for_archive value [{$returned}]; expected [{$stringValue}]."
+            );
+        }
+
+        $readback = $this->readMarkForArchiveMetafield($productId);
+        if ($readback !== $value) {
+            throw new \RuntimeException(
+                'Shopify did not confirm custom.mark_for_archive after metafieldsSet '
+                .'(readback='.($readback === null ? 'null' : ($readback ? 'true' : 'false')).').'
+            );
+        }
+
+        return [
+            'product_id' => (int) $product->id,
+            'shopify_product_id' => $productId,
+            'value' => $value,
+            'readback' => $readback,
+        ];
+    }
+
+    public function readMarkForArchiveMetafield(string $productId): ?bool
+    {
+        $data = $this->graphql(<<<'GQL'
+query ReadMarkForArchive($id: ID!) {
+  product(id: $id) {
+    id
+    markForArchive: metafield(namespace: "custom", key: "mark_for_archive") {
+      value
+      type
+    }
+  }
+}
+GQL, ['id' => $productId]);
+
+        $raw = data_get($data, 'product.markForArchive.value');
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+
+        $normalized = strtolower(trim((string) $raw));
+        if (in_array($normalized, ['true', '1'], true)) {
+            return true;
+        }
+        if (in_array($normalized, ['false', '0'], true)) {
+            return false;
+        }
+
+        throw new \RuntimeException("Unexpected custom.mark_for_archive value [{$raw}] on {$productId}.");
+    }
+
+    /**
      * @return array{product_id:int,variant_id:int,shopify_product_id:string,shopify_variant_id:string,price:string}
      */
     public function updateVariantPrice(Variant $variant, string $price): array
@@ -3259,6 +3342,18 @@ mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
     metafields { id }
     userErrors { field message }
+  }
+}
+GQL;
+    }
+
+    private function metafieldsSetMutationWithValue(): string
+    {
+        return <<<'GQL'
+mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id namespace key type value }
+    userErrors { field message code }
   }
 }
 GQL;
