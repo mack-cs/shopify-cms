@@ -5863,7 +5863,9 @@ GQL;
             } elseif ($verifyOrder) {
                 $confirmed = (new ShopifyProductMediaReader($this->client))->media($productId, 'ProductImageOrderConfirmation');
                 if (array_column($confirmed, 'id') !== $desiredOrder) {
-                    $warnings[] = ['product_id' => $product->id, 'warning' => 'Shopify has not confirmed the new gallery order yet.', 'processing' => true];
+                    Image::query()->whereIn('id', $desiredImages->map(fn (array $row) => $row['image']->id))
+                        ->update(['shopify_image_sync_error' => Image::ORDER_CONFIRMATION_PENDING]);
+                    $warnings[] = ['product_id' => $product->id, 'warning' => Image::ORDER_CONFIRMATION_PENDING, 'processing' => true];
                 }
             }
         } catch (\Throwable $e) {

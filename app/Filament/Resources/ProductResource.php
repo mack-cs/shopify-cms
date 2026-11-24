@@ -1056,6 +1056,31 @@ class ProductResource extends Resource
                 ->sortable()
                 ->toggleable(),
             TextColumn::make('title')->searchable()->sortable()->toggleable(),
+            TextColumn::make('image_update_reason')
+                ->label('Image update')
+                ->visible(fn ($livewire): bool => $livewire instanceof ProductResource\Pages\ListProducts
+                    && $livewire->activeTab === 'image_updates')
+                ->state(function (Product $record): string {
+                    $images = $record->pendingImageUpdates->sortBy('position');
+                    $image = $images->first();
+                    if (! $image instanceof Image) {
+                        return '';
+                    }
+                    $component = $image->sourceImage?->product;
+                    $change = match (true) {
+                        $image->shopify_image_sync_error === Image::ORDER_CONFIRMATION_PENDING => 'Shopify order pending',
+                        $image->needs_shopify_image_sync || $image->shopify_media_create_uncertain => 'Photo update',
+                        default => 'Image or alt-text update',
+                    };
+                    $reason = $change.' at position '.$image->position;
+                    if ($component) {
+                        $reason .= ' from '.($component->title ?: $component->handle);
+                    }
+                    $remaining = $images->count() - 1;
+
+                    return $remaining > 0 ? $reason.' (+'.$remaining.' more)' : $reason;
+                })
+                ->wrap(),
             TextColumn::make('seo_title')
                 ->label('SEO title')
                 ->sortable()

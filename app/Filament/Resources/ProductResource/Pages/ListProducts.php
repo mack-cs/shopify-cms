@@ -227,6 +227,12 @@ class ListProducts extends ListRecords
                 ->modifyQueryUsing(fn (Builder $query) => self::applyPartiallyApprovedFilter($query));
         }
 
+        if ($reportCounts['image_updates'] > 0) {
+            $tabs['image_updates'] = Tab::make('Image Updates')
+                ->badge((string) $reportCounts['image_updates'])
+                ->badgeColor('warning');
+        }
+
         if ($reportCounts['approved'] > 0) {
             $tabs['approved'] = Tab::make('Approved')
                 ->badge((string) $reportCounts['approved'])
@@ -280,6 +286,7 @@ class ListProducts extends ListRecords
     {
         return [
             'partially_approved' => self::applyPartiallyApprovedFilter(Product::query())->count(),
+            'image_updates' => Product::query()->whereHas('pendingImageUpdates')->count(),
             'approved' => self::applyApprovedFilter(Product::query())->count(),
             'synced' => self::applySyncedFilter(Product::query())->count(),
             'pending_approval' => self::applyPendingApprovalFilter(Product::query())->count(),
@@ -291,6 +298,15 @@ class ListProducts extends ListRecords
                 self::applyHeaderReportScope(Product::query())
             )->count(),
         ];
+    }
+
+    protected function modifyQueryWithActiveTab(Builder $query): Builder
+    {
+        if ($this->activeTab === 'image_updates') {
+            return $query->whereHas('pendingImageUpdates')->with('pendingImageUpdates.sourceImage.product');
+        }
+
+        return parent::modifyQueryWithActiveTab($query);
     }
 
     private function statusTabCounts(): array

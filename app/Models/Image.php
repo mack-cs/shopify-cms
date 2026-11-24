@@ -23,6 +23,8 @@ class Image extends Model
 
     public const SYNC_STATE_CONFLICT = 'conflict';
 
+    public const ORDER_CONFIRMATION_PENDING = 'Shopify has not confirmed the new gallery order yet.';
+
     public const BACKUP_STATUS_PENDING = 'pending';
 
     public const BACKUP_STATUS_BACKED_UP = 'backed_up';
@@ -234,6 +236,27 @@ class Image extends Model
         ])->where(function (Builder $activeQuery): void {
             $activeQuery->whereNull('is_duplicate_hidden')
                 ->orWhere('is_duplicate_hidden', false);
+        });
+    }
+
+    public function scopePendingPublication(Builder $query): Builder
+    {
+        return $query->active()->where(function (Builder $pending): void {
+            $pending->where('needs_shopify_image_sync', true)
+                ->orWhere('shopify_media_create_uncertain', true)
+                ->orWhere('shopify_image_sync_error', self::ORDER_CONFIRMATION_PENDING)
+                ->orWhereExists(function ($retirements): void {
+                    $retirements->from('inherited_media_retirements')
+                        ->whereColumn('replacement_image_id', 'images.id')
+                        ->whereIn('status', ['pending', 'mutating']);
+                })
+                ->orWhere('shopify_alt_pending', true)
+                ->orWhereIn('alt_text_status', [self::ALT_PENDING_REVIEW, self::ALT_FAILED, self::ALT_AWAITING_CONFIRMATION])
+                ->orWhere(function (Builder $alt): void {
+                    $alt->where(fn (Builder $tracked) => $tracked->where('alt_text_status', self::ALT_APPROVED)
+                        ->orWhere('ownership', \App\Services\ImageOwnership::COMPONENT_INHERITED))
+                        ->whereRaw("TRIM(COALESCE(alt_text, '')) <> TRIM(COALESCE(shopify_alt_text, ''))");
+                });
         });
     }
 

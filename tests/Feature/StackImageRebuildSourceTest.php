@@ -529,6 +529,40 @@ it('rebuilds a parent stack from a component import with Shopify propagation dis
     }
 });
 
+it('lists the imported component and rebuilt stack until their image updates are confirmed', function (): void {
+    [$stack, $component] = stackRebuildBundle('STACKUPDATES', ['COMPUPDATES']);
+    $page = new \App\Filament\Resources\ProductResource\Pages\ListProducts;
+    $page->activeTab = 'image_updates';
+    $queryForTab = new ReflectionMethod($page, 'modifyQueryWithActiveTab');
+    expect($page->getTabs())->not->toHaveKey('image_updates');
+
+    Storage::disk('shopify_product_images')->put('incoming/pending-tab/COMPUPDATES.jpg', 'component-photo');
+    runStackImageImport('incoming/pending-tab');
+    expect($page->getTabs())->toHaveKey('image_updates')
+        ->and($queryForTab->invoke($page, Product::query())->orderBy('products.id')->pluck('products.id')->all())
+        ->toBe([$component->id, $stack->id]);
+    $copy = $stack->pendingImageUpdates()->first();
+    expect($copy->sourceImage->product_id)->toBe($component->id);
+
+    $source = $component->pendingImageUpdates()->first();
+    Image::withoutEvents(fn () => $source->forceFill([
+        'sync_state' => Image::SYNC_STATE_SYNCED, 'needs_shopify_image_sync' => false,
+        'alt_text' => 'Approved description', 'alt_text_status' => Image::ALT_APPROVED,
+    ])->save());
+    expect($component->pendingImageUpdates()->exists())->toBeTrue();
+    Image::withoutEvents(fn () => $source->forceFill([
+        'alt_text_status' => Image::ALT_PUBLISHED, 'shopify_alt_text' => 'Approved description',
+    ])->save());
+    expect($component->pendingImageUpdates()->exists())->toBeFalse()
+        ->and($stack->pendingImageUpdates()->exists())->toBeTrue();
+    Image::withoutEvents(fn () => $copy->forceFill([
+        'sync_state' => Image::SYNC_STATE_SYNCED, 'needs_shopify_image_sync' => false,
+    ])->save());
+
+    expect($page->getTabs())->not->toHaveKey('image_updates')
+        ->and($queryForTab->invoke($page, Product::query())->count())->toBe(0);
+});
+
 /**
  * @param  array<int, Product>  $components
  */

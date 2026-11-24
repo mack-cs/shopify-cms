@@ -272,6 +272,11 @@ class Product extends Model
         return $this->hasMany(Image::class);
     }
 
+    public function pendingImageUpdates(): HasMany
+    {
+        return $this->allImages()->pendingPublication();
+    }
+
     public function approvals(): HasMany
     {
         return $this->hasMany(Approval::class);
