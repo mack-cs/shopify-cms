@@ -482,7 +482,7 @@ it('imports the same photograph at another position and accepts a repeated impor
         ->and($product->allImages()->orderBy('position')->pluck('image_asset_id')->all())->toBe([$asset->id, $asset->id]);
 });
 
-it('does not rebuild a dependent stack from the import job while local rebuild is disabled', function (): void {
+it('queues a dependent stack rebuild with Shopify propagation disabled', function (): void {
     expect(config('images.component_stack_propagation'))->toBeFalse()
         ->and(config('images.component_stack_local_rebuild'))->toBeFalse()
         ->and(config('images.component_stack_blind_publication'))->toBeFalse();
@@ -525,7 +525,7 @@ it('does not rebuild a dependent stack from the import job while local rebuild i
     ])->handle(app(ShopifyImageImportService::class));
     $stackImage->refresh();
 
-    Bus::assertNotDispatched(RebuildShopifyStackImagesJob::class);
+    Bus::assertDispatched(RebuildShopifyStackImagesJob::class);
     expect($component->allImages()->count())->toBe(1)
         ->and($stack->allImages()->count())->toBe(1)
         ->and($stackImage->src)->toBe('https://cdn.shopify.com/s/files/1/stack-gallery.png')
@@ -600,8 +600,8 @@ it('clears stale approval evidence when a higher filename version replaces the p
 
     expect($image->filename_version)->toBe(2)
         ->and($image->photograph_version)->toBe(5)
-        ->and($image->alt_text)->toBeNull()
-        ->and($image->alt_text_status)->toBeNull()
+        ->and($image->alt_text)->toBe('Old sentence')
+        ->and($image->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW)
         ->and($image->shopify_id)->toBeNull()
         ->and($image->needs_shopify_image_sync)->toBeTrue()
         ->and($image->alt_text_version)->not->toBe(2);
@@ -952,7 +952,7 @@ it('keeps a manual filename on an unchanged reimport and replaces it only for a 
         ->and($image->filename_version)->toBe(2)
         ->and($image->photograph_version)->toBe(5)
         ->and($image->shopify_id)->toBeNull()
-        ->and($image->alt_text)->toBeNull()
+        ->and($image->alt_text)->toBe('Approved sentence')
         ->and($image->needs_shopify_image_sync)->toBeTrue();
 });
 

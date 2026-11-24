@@ -96,7 +96,8 @@ final class ShopifyMediaImageResolver
                 if (! ShopifyProductMediaReader::ready($attached)) {
                     return $this->outcome('processing', null, 'Shopify file is not ready.', null, 0);
                 }
-                if ($image->image_asset_id && ! app(ImagePhotographEvidence::class)->matchesMedia($image, $attached)) {
+                if ($image->image_asset_id && ! app(ImageUploadOperations::class)->confirmedAttachment($image, $localId)
+                    && ! app(ImagePhotographEvidence::class)->matchesMedia($image, $attached)) {
                     return $this->outcome('unresolved_provenance', null, 'Current Shopify bytes do not verify the CMS photograph.', null, 0);
                 }
 

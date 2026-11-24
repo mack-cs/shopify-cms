@@ -14,6 +14,20 @@ final class ImageUploadOperations
         return DB::table('image_upload_operations')->useWritePdo()->where('active_image_id', $image->id)->first();
     }
 
+    public function confirmedAttachment(Image $image, string $mediaId): bool
+    {
+        $image->loadMissing(['imageAsset', 'product']);
+
+        return $image->imageAsset !== null && DB::table('image_upload_operations')->useWritePdo()
+            ->where('image_id', $image->id)
+            ->where('image_asset_id', $image->image_asset_id)
+            ->where('asset_sha256', $image->imageAsset->sha256)
+            ->where('product_gid', $image->product?->shopify_id)
+            ->where('media_id', $mediaId)
+            ->where('status', 'confirmed')
+            ->exists();
+    }
+
     /**
      * An unresolved operation blocks alt publication only when it belongs to the
      * current photograph. A confirmed or superseded operation for another asset does not.
@@ -104,7 +118,7 @@ final class ImageUploadOperations
         ]);
     }
 
-    /** Returns only a ready, attached file proved to contain this operation's bytes. */
+    /** Confirms the new attachment returned by the create mutation on this product. */
     public function reconcile(Image $image, object $operation, array $media): ?array
     {
         $image->refresh()->load('imageAsset');
@@ -115,8 +129,13 @@ final class ImageUploadOperations
             return null;
         }
         $before = json_decode($operation->before_media_ids, true, flags: JSON_THROW_ON_ERROR);
-        if (! $operation->media_id) {
+        if (preg_match('~^gid://shopify/MediaImage/\d+$~', (string) $operation->media_id) !== 1) {
             $this->record($operation, 'needs_review', error: 'The creation response contained no durable media id. A matching new file alone cannot prove operation ownership; use explicit reviewed adoption.');
+
+            return null;
+        }
+        if (in_array($operation->media_id, $before, true)) {
+            $this->record($operation, 'needs_review', error: 'Shopify returned an attachment that already existed before this upload.');
 
             return null;
         }
@@ -133,24 +152,20 @@ final class ImageUploadOperations
             $this->record($operation, 'needs_review', error: 'The returned file is already referenced by another CMS image or component. Review independent ownership; no file was adopted.');
             return null;
         }
-        $candidates = collect($media)->filter(fn (array $node): bool => preg_match('~^gid://shopify/MediaImage/\d+$~', (string) ($node['id'] ?? '')) === 1
-            && ! in_array($node['id'], $usedIds, true)
-            && ($operation->media_id ? $node['id'] === $operation->media_id : ! in_array($node['id'], $before, true))
-        );
-        $matches = [];
-        foreach ($candidates as $node) {
-            if (ShopifyProductMediaReader::ready($node)
-                && app(ImagePhotographEvidence::class)->matchesMedia($image, $node)) {
-                $matches[] = $node;
-            }
+        $node = collect($media)->firstWhere('id', $operation->media_id);
+        if ($node && in_array('FAILED', [$node['status'] ?? null, $node['fileStatus'] ?? null], true)) {
+            $this->record($operation, 'needs_review', error: 'Shopify reports that this upload failed. Review the recorded media ID before starting another upload.');
+
+            return null;
         }
-        if (count($matches) !== 1) {
-            $this->record($operation, $operation->media_id ? 'processing' : 'needs_review', error: 'No unique ready file has verified bytes. Reconcile or resolve manually; creation is blocked.');
+        if (! $node || ! ShopifyProductMediaReader::ready($node)
+            || ! ShopifyMediaPath::rememberableCdnUrl($node['image']['url'] ?? null)) {
+            $this->record($operation, 'processing', error: 'Shopify has not returned a ready attachment and CDN URL for this upload. Retry confirmation of the recorded media ID.');
 
             return null;
         }
 
-        return $matches[0];
+        return $node;
     }
 
     public function complete(object $operation, string $mediaId): void

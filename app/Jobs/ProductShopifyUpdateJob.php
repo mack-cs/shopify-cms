@@ -115,7 +115,7 @@ class ProductShopifyUpdateJob implements ShouldQueue
 
             AdminNotification::sendToUserId(
                 Notification::make()
-                    ->title('Shopify product update complete')
+                    ->title($result['failed'] > 0 ? 'Shopify product update incomplete' : 'Shopify product update complete')
                     ->body($parts ? implode(' ', $parts) : 'No products were updated.')
                     ->status($result['failed'] > 0 ? 'danger' : 'success'),
                 $this->userId

@@ -630,7 +630,7 @@ class ShopifyImageImportService
                     $attributes['filename_mode'] = Image::FILENAME_MODE_MANUAL;
                 }
                 if ($replacedPhotograph) {
-                    $attributes['alt_text'] = null;
+                    $attributes['alt_text'] = $image->alt_text ?? $image->shopify_alt_text;
                     $attributes['imported_alt_text'] = null;
                     $attributes['source_image_id'] = null;
                     $attributes['shopify_id'] = null;
@@ -643,7 +643,8 @@ class ShopifyImageImportService
                     $attributes['shopify_alt_pending'] = false;
                     $attributes['shopify_alt_sync_error'] = null;
                     $attributes['shopify_alt_text'] = null;
-                    $attributes['alt_text_status'] = null;
+                    $attributes['alt_text_status'] = filled($attributes['alt_text']) ? Image::ALT_PENDING_REVIEW : null;
+                    $attributes['alt_text_version'] = max(1, (int) $image->alt_text_version) + 1;
                 }
                 $resultingSource = $replacedPhotograph ? null : $image->source_image_id;
                 if ($product->isStackProduct() && $image->ownership === null && $resultingSource === null) {

@@ -1225,7 +1225,7 @@ GQL, ['id' => $productId]);
     }
 
     /** Removes one superseded media attachment from this stack product. It does not delete a file globally. */
-    public function retireStackProductMedia(Product $stack, string $mediaId, string $replacementMediaId, ?callable $assertCurrent = null, int $retiringImageId = 0): void
+    public function retireStackProductMedia(Product $stack, string $mediaId, string $replacementMediaId, ?callable $assertCurrent = null, int $retiringImageId = 0, bool $recordedSlotReplacement = false): void
     {
         if ($mediaId === '' || ($replacementMediaId !== '' && $mediaId === $replacementMediaId)) {
             return;
@@ -1274,10 +1274,10 @@ GQL, ['id' => $productId]);
                     ->whereIn('status', ['pending', 'mutating'])
                     ->exists();
             $oldNode = collect($nodes)->first(fn (array $node): bool => ($node['id'] ?? null) === $mediaId);
-            if (! $retiring || ! ImageOwnership::isInherited($retiring) || $retiring->shopify_id !== $mediaId
+            if (! $recordedSlotReplacement && (! $retiring || ! ImageOwnership::isInherited($retiring) || $retiring->shopify_id !== $mediaId
                 || $retiring->shopify_identity_unresolved
                 || (! Image::query()->active()->whereKey($retiring->id)->exists() && ! $deferredRetirement)
-                || ! app(ImagePhotographEvidence::class)->matchesMedia($retiring, $oldNode)) {
+                || ! app(ImagePhotographEvidence::class)->matchesMedia($retiring, $oldNode))) {
                 throw new \RuntimeException('Retirement requires a verified obsolete inherited photograph; no association was changed.');
             }
             if ($replacementMediaId !== '') {
@@ -5241,7 +5241,8 @@ GQL;
                     && (app(ComponentPhotographSelector::class)->publicationAllowed($source)
                         || app(ImageAltTextBackfillService::class)->canPublishInheritedPhotograph($image)
                         || $cmsAuthorized
-                        || $blindAuthorized)
+                        || $blindAuthorized
+                        || $sync->stackCapturedPhotograph($image))
                     && app(ImageAltTextBackfillService::class)->copyHasCurrentSource($image);
                 if (! $publishable) {
                     $existingId = trim((string) $image->shopify_id);
@@ -5262,7 +5263,7 @@ GQL;
             }
             $operation = $operations->active($image);
             if ($operation !== null) {
-                $node = $operations->reconcile($image, $operation, $details['media']['nodes']);
+                $node = $this->confirmRecordedUpload($image, $operation, $details['media']['nodes']);
                 if ($node !== null && ! $this->photographReplacementIsUnauthorized($image)) {
                     $this->imageSyncMutex->assertOwned();
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'], $operation);
@@ -5272,6 +5273,9 @@ GQL;
                 } else {
                     if ($node !== null) {
                         $warnings[] = ['product_id' => $product->id, 'warning' => $this->unauthorizedPhotographWarning($image)];
+                    } else {
+                        $reason = $operations->active($image)?->error ?? 'The upload still needs confirmation.';
+                        $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} at position {$image->position}: ".$reason];
                     }
                     $row['blocked'] = true;
                 }
@@ -5337,7 +5341,7 @@ GQL;
             } elseif ($candidates->count() === 1) {
                 $node = $candidates->first();
                 $proven = $image->image_asset_id
-                    ? app(ImagePhotographEvidence::class)->matchesMedia($image, $node)
+                    ? ($operations->confirmedAttachment($image, $node['id']) || app(ImagePhotographEvidence::class)->matchesMedia($image, $node))
                     : ($node['id'] === $image->shopify_id && ! $row['requires_republish']);
                 if ($proven && ShopifyProductMediaReader::ready($node) && ! $this->photographReplacementIsUnauthorized($image)) {
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'] ?? null);
@@ -5410,13 +5414,14 @@ GQL;
                 }
                 $operation = $operations->active($image);
                 $media = (new ShopifyProductMediaReader($this->client))->media($productId, 'ProductImageCreatedMedia');
-                $node = $operations->reconcile($image, $operation, $media);
+                $node = $this->confirmRecordedUpload($image, $operation, $media);
                 if ($node !== null) {
                     $this->imageSyncMutex->assertOwned();
                     $this->markImageSynced($image, $node['id'], $row['preferred_filename'], $node['image']['url'], $operation);
                     $row['matched_media_id'] = $node['id'];
                 } else {
-                    $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} is awaiting upload reconciliation; it was not marked synced."];
+                    $reason = $operations->active($image)?->error ?? 'The upload still needs confirmation.';
+                    $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$image->id} at position {$image->position}: ".$reason];
                 }
             } catch (\Throwable $exception) {
                 $operations->record($operations->active($image) ?? $operation, 'needs_review', error: $exception->getMessage());
@@ -5425,16 +5430,103 @@ GQL;
 
             return $row;
         });
-        // Removing existing Shopify media requires a separate explicit cleanup decision.
+        foreach ($desiredImages as $row) {
+            if (filled($row['matched_media_id']) && ! ($row['blocked'] ?? false)) {
+                $warnings = array_merge($warnings, $this->retireReplacedPosition($product, $row['image'], $row['matched_media_id']));
+                if (ImageOwnership::isInherited($row['image'])) {
+                    $prior = $product->allImages()->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+                        ->where('source_image_id', $row['image']->source_image_id)
+                        ->where('image_asset_id', '!=', $row['image']->image_asset_id)
+                        ->where('duplicate_hidden_reason', ComponentStackPropagation::OUTSIDE_PRIMARY_GALLERY)
+                        ->where('sync_state', '!=', Image::SYNC_STATE_LOCAL_DELETED)
+                        ->whereNotNull('shopify_id')->get();
+                    foreach ($prior as $old) {
+                        $status = app(ComponentStackPropagation::class)->retirePlannedAssociation($product, $old);
+                        if ($status !== 'confirmed' && $status !== 'preserved') {
+                            $warnings[] = ['product_id' => $product->id, 'warning' => "Image {$row['image']->id} at position {$row['image']->position}: the previous inherited Shopify attachment still needs confirmation of removal."];
+                        }
+                    }
+                }
+            }
+        }
 
         $warnings = array_merge(
             $warnings,
             $selectedSync
                 ? $this->reorderSelectedProductImages($product, $productId, $desiredImages)
-                : $this->reorderProductImages($product, $productId, $desiredImages)
+                : $this->reorderProductImages($product, $productId, $desiredImages,
+                    DB::table('inherited_media_retirements')->where('stack_product_id', $product->id)
+                        ->whereIn('replacement_image_id', $desiredImages->map(fn (array $row) => $row['image']->id))->exists())
         );
 
         $this->rememberPhotographOutcomes($product, $desiredImages, $warnings);
+
+        return $warnings;
+    }
+
+    private function confirmRecordedUpload(Image $image, object $operation, array $media): ?array
+    {
+        $operations = app(ImageUploadOperations::class);
+        $node = $operations->reconcile($image, $operation, $media);
+        if ($node !== null || $operations->active($image)?->status !== 'processing') {
+            return $node;
+        }
+
+        // Shopify may acknowledge creation before the attachment becomes readable.
+        // Only repeat the read. The durable operation guards the create mutation.
+        usleep(500000);
+        $this->imageSyncMutex->assertOwned();
+        $media = (new ShopifyProductMediaReader($this->client))->media($operation->product_gid, 'ProductImageCreatedMedia');
+
+        return $operations->reconcile($image, $operation, $media);
+    }
+
+    /** @return array<int, array{product_id:int, warning:string}> */
+    private function retireReplacedPosition(Product $product, Image $image, string $replacementId): array
+    {
+        $warnings = [];
+        $image->refresh();
+        $snapshots = DB::table('image_revisions')->where('image_id', $image->id)
+            ->where('reason', 'S3 photograph replacement')->pluck('snapshot');
+        $oldMediaIds = $snapshots->map(fn (string $snapshot): array => json_decode($snapshot, true, flags: JSON_THROW_ON_ERROR))
+            ->filter(fn (array $snapshot): bool => (int) ($snapshot['product_id'] ?? 0) === (int) $product->id
+                && empty($snapshot['shopify_identity_unresolved'])
+                && ($snapshot['sync_state'] ?? null) === Image::SYNC_STATE_SYNCED)
+            ->pluck('shopify_id')->filter(fn ($id): bool => is_string($id) && preg_match('~^gid://shopify/MediaImage/\d+$~', $id) === 1)
+            ->unique();
+
+        foreach ($oldMediaIds as $oldId) {
+            if ($oldId === $replacementId) {
+                continue;
+            }
+            $key = ['image_id' => $image->id, 'old_media_id' => $oldId, 'generation_id' => 0];
+            DB::table('inherited_media_retirements')->insertOrIgnore($key + [
+                'stack_product_id' => $product->id, 'replacement_image_id' => $image->id,
+                'replacement_media_id' => $replacementId, 'status' => 'pending',
+                'created_at' => now(), 'updated_at' => now(),
+            ]);
+            $intent = DB::table('inherited_media_retirements')->where($key);
+            if (in_array($intent->value('status'), ['confirmed', 'retained'], true)) {
+                continue;
+            }
+            try {
+                $assertCurrent = function () use ($product, $image, $replacementId): void {
+                    $fresh = $image->fresh();
+                    if (! $fresh || (int) $fresh->product_id !== (int) $product->id
+                        || $fresh->shopify_id !== $replacementId || $fresh->image_asset_id !== $image->image_asset_id
+                        || $fresh->sync_state !== Image::SYNC_STATE_SYNCED || $fresh->is_duplicate_hidden) {
+                        throw new \RuntimeException('The replacement changed during Shopify synchronization.');
+                    }
+                };
+                $this->retireStackProductMedia($product, $oldId, $replacementId, $assertCurrent, (int) $image->id, true);
+                $intent->update(['status' => 'confirmed', 'updated_at' => now()]);
+            } catch (\Throwable $exception) {
+                $warnings[] = [
+                    'product_id' => $product->id,
+                    'warning' => "Image {$image->id} at position {$image->position}: the replacement is attached but Shopify cleanup is incomplete. ".$exception->getMessage(),
+                ];
+            }
+        }
 
         return $warnings;
     }
@@ -5648,7 +5740,7 @@ GQL;
      * @param  Collection<int, array{image:Image,shopify_id:?string,current_url:?string,sync_url:?string,preferred_filename:string,alt:?string,position:?int,index:int,matched_media_id:?string,requires_republish:bool,previous_media_id:?string,previous_media_mode:?string}>  $desiredImages
      * @return array<int, array{product_id:int, warning:string}>
      */
-    private function reorderProductImages(Product $product, string $productId, Collection $desiredImages): array
+    private function reorderProductImages(Product $product, string $productId, Collection $desiredImages, bool $verifyOrder = false): array
     {
         $warnings = [];
 
@@ -5737,6 +5829,11 @@ GQL;
                     'product_id' => $product->id,
                     'warning' => $messages !== '' ? $messages : 'Shopify image reorder failed.',
                 ];
+            } elseif ($verifyOrder) {
+                $confirmed = (new ShopifyProductMediaReader($this->client))->media($productId, 'ProductImageOrderConfirmation');
+                if (array_column($confirmed, 'id') !== $desiredOrder) {
+                    $warnings[] = ['product_id' => $product->id, 'warning' => 'Shopify has not confirmed the new gallery order. Retry the approved push to check the order.'];
+                }
             }
         } catch (\Throwable $e) {
             $warnings[] = [
@@ -5831,8 +5928,9 @@ GQL;
                 }
                 if (($remembered = ShopifyMediaPath::rememberableCdnUrl($cdnUrl)) !== null) {
                     $updates['shopify_cdn_url'] = $remembered;
+                    $updates['src'] = $remembered;
                 }
-                $current->forceFill($updates)->save();
+                    $current->forceFill($updates)->save();
             });
             if ($operation !== null) {
                 $closed = in_array((string) $live->status, ['confirmed', 'resolved_absent', 'resolved_deleted', 'superseded'], true)

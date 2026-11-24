@@ -332,7 +332,7 @@ it('copies component image alt text onto a rebuilt stack image and keeps the sta
         ->and($copy->alt_text)->not->toBe('Component product title');
 });
 
-it('clears alt text when a photograph is replaced', function (): void {
+it('carries forward the slot description when a photograph is replaced', function (): void {
     Storage::fake('public');
     Storage::disk('public')->put('old.jpg', 'history fixture bytes');
     Storage::disk('public')->put('replacement.jpg', 'new-bytes');
@@ -355,7 +355,7 @@ it('clears alt text when a photograph is replaced', function (): void {
     $method = new ReflectionMethod(ShopifyImageImportService::class, 'prepareImageForImport');
     $method->invoke(app(ShopifyImageImportService::class), $product, $new, 'replacement-v2.jpg', 1, 2);
 
-    expect($image->fresh()->alt_text)->toBeNull()
+    expect($image->fresh()->alt_text)->toBe('Describes the old photograph')
         ->and($image->fresh()->position)->toBe(1)
         ->and($image->fresh()->image_asset_id)->toBe($new->id);
 });
@@ -760,6 +760,83 @@ it('omits unapproved CMS alt text from ordinary photograph uploads', function ()
     expect($uploads)->toHaveCount(1)->and($uploads[0])->not->toHaveKey('alt')
         ->and($image->fresh()->alt_text)->toBe('Unreviewed description')
         ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PENDING_REVIEW);
+});
+
+it('resumes a Shopify slot replacement and removes only the recorded superseded attachment', function (): void {
+    Storage::fake('public');
+    $product = altTextProduct('PHOTO-SLOT-REPLACEMENT', 'gid://shopify/Product/561');
+    $image = verificationManagedSource($product, 1, 'Carry this description');
+    $oldId = 'gid://shopify/MediaImage/5611';
+    $newId = 'gid://shopify/MediaImage/5612';
+    $extraId = 'gid://shopify/MediaImage/5613';
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => $oldId, 'sync_state' => Image::SYNC_STATE_SYNCED,
+        'backup_status' => Image::BACKUP_STATUS_BACKED_UP, 'backup_completed_at' => now(),
+    ])->save());
+    app(\App\Services\ImagePhotographEvidence::class)->archive($image->fresh(), 'S3 photograph replacement');
+    Image::withoutEvents(fn () => $image->forceFill([
+        'shopify_id' => null, 'shopify_identity_unresolved' => true, 'sync_state' => Image::SYNC_STATE_LOCAL_UPDATED,
+        'needs_shopify_image_sync' => true,
+    ])->save());
+    Bus::fake([SendProductPartialApprovalSlackReminderJob::class]);
+    $partial = app(ProductPartialApprovalService::class);
+    $partial->request(collect([$product->fresh()]), User::factory()->create()->id, [ProductShopifyUpdater::SYNC_SCOPE_IMAGES], []);
+    $approval = ProductPartialApprovalRequest::query()->where('product_id', $product->id)->latest('id')->first();
+    expect($partial->approveRequests(collect([$approval]), User::factory()->create()->id)['approved'])->toBe(1);
+    config()->set('services.shopify.shop', 'verification.myshopify.com');
+    config()->set('services.shopify.admin_access_token', 'test-token');
+    $newUrl = 'https://cdn.shopify.com/s/files/1/replacement.png';
+    $ids = [$oldId, $extraId];
+    $ready = false;
+    $creates = 0;
+    $removals = [];
+    Http::fake(function ($request) use (&$ids, &$ready, &$creates, &$removals, $newId, $newUrl) {
+        $query = $request->data()['query'] ?? '';
+        if (str_contains($query, 'productCreateMedia')) {
+            $creates++;
+            $ids[] = $newId;
+            return Http::response(['data' => ['productCreateMedia' => ['media' => [['id' => $newId]], 'mediaUserErrors' => []]]]);
+        }
+        if (str_contains($query, 'StackRetirementVariants')) {
+            return Http::response(['data' => ['product' => ['variants' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false]]]]]);
+        }
+        if (str_contains($query, 'mutation DetachInheritedStackMedia')) {
+            $id = $request->data()['variables']['files'][0]['id'];
+            $removals[] = $id;
+            $ids = array_values(array_diff($ids, [$id]));
+            return Http::response(['data' => ['fileUpdate' => ['files' => [['id' => $id]], 'userErrors' => []]]]);
+        }
+        if (str_contains($query, 'productReorderMedia')) {
+            $ids = array_column($request->data()['variables']['moves'], 'id');
+            return Http::response(['data' => ['productReorderMedia' => ['job' => ['id' => 'gid://shopify/Job/1'], 'mediaUserErrors' => []]]]);
+        }
+        if (str_contains($query, 'query ProductByHandleDetails')) {
+            return Http::response(['data' => ['productByHandle' => ['media' => ['nodes' => []]]]]);
+        }
+        if ($query === '') {
+            return Http::response('Shopify may transform the uploaded bytes');
+        }
+        $nodes = array_map(fn (string $id): array => [
+            'id' => $id, 'status' => $id === $newId && ! $ready ? 'PROCESSING' : 'READY', 'fileStatus' => 'READY',
+            'image' => ['url' => $id === $newId ? $newUrl : 'https://cdn.shopify.com/s/files/1/old-'.basename($id).'.png'],
+        ], $ids);
+        return Http::response(['data' => ['product' => [
+            'media' => ['nodes' => $nodes, 'pageInfo' => ['hasNextPage' => false]],
+            'images' => ['nodes' => [], 'pageInfo' => ['hasNextPage' => false]],
+        ]]]);
+    });
+
+    $updater = app(ProductShopifyUpdater::class);
+    $sync = new ReflectionMethod(ProductShopifyUpdater::class, 'updateImages');
+    $pending = $sync->invoke($updater, $product, $product->shopify_id, [], []);
+    expect($pending)->not->toBeEmpty()->and($removals)->toBe([]);
+    $ready = true;
+    expect($sync->invoke($updater, $product, $product->shopify_id, [], []))->toBe([])
+        ->and($sync->invoke($updater, $product, $product->shopify_id, [], []))->toBe([])
+        ->and($creates)->toBe(1)->and($removals)->toBe([$oldId])
+        ->and($ids)->toBe([$newId, $extraId])
+        ->and($image->fresh()->shopify_id)->toBe($newId)
+        ->and($image->fresh()->src)->toBe($newUrl);
 });
 
 it('repairs only selected stack source links through the existing image workflow and records failures', function (): void {

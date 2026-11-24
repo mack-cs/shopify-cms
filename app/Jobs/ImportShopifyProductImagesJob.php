@@ -104,7 +104,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
 
     /**
      * A stack whose own file was imported is always rebuilt locally.
-     * COMPONENT_STACK_LOCAL_REBUILD still decides whether a component import rebuilds parent stacks.
+     * Successful component imports also refresh their parent stacks locally.
      *
      * @param  array<string, mixed>  $result
      * @return array<int, int>
@@ -112,9 +112,7 @@ class ImportShopifyProductImagesJob implements ShouldQueue
     private function queueDirectStackRebuild(ShopifyImageImportBatch $batch, array $result): array
     {
         $direct = array_map('intval', $result['direct_stack_product_ids'] ?? []);
-        $dependent = config('images.component_stack_local_rebuild')
-            ? array_map('intval', $result['dependent_stack_product_ids'] ?? [])
-            : [];
+        $dependent = array_map('intval', $result['dependent_stack_product_ids'] ?? []);
         $stackIds = array_values(array_unique(array_filter(array_merge($direct, $dependent))));
         sort($stackIds);
         if ($stackIds === []) {

@@ -500,18 +500,31 @@ it('reports a failed rebuild separately when component membership is unknown', f
         ->and($stack->allImages()->active()->first()->ownership)->toBe(ImageOwnership::STACK_OWNED);
 });
 
-it('does not rebuild a parent stack from a component import while local rebuild is disabled', function (): void {
+it('rebuilds a parent stack from a component import with Shopify propagation disabled', function (): void {
     [$stack, $component] = stackRebuildBundle('STACKDEP', ['COMPDEP']);
     Storage::disk('shopify_product_images')->put('incoming/stack-dependent/COMPDEP.jpg', 'component-only');
 
     $batch = runStackImageImport('incoming/stack-dependent');
 
     expect($batch->status)->toBe(ShopifyImageImportBatch::STATUS_COMPLETED)
-        ->and($batch->rebuild_status)->toBeNull()
-        ->and($stack->fresh()->image_rebuild_status)->toBeNull()
-        ->and($stack->allImages()->count())->toBe(0)
+        ->and($batch->rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
+        ->and($stack->fresh()->image_rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
+        ->and($stack->allImages()->active()->count())->toBe(1)
         ->and($component->allImages()->count())->toBe(1)
         ->and(config('images.component_stack_local_rebuild'))->toBeFalse();
+
+    foreach (range(2, 4) as $version) {
+        $prefix = 'incoming/stack-dependent-'.$version;
+        Storage::disk('shopify_product_images')->put($prefix.'/COMPDEP.jpg', 'component-update-'.$version);
+        $batch = runStackImageImport($prefix);
+        $source = $component->allImages()->active()->first();
+        $copies = $stack->allImages()->active()->get();
+        expect($batch->rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
+            ->and($copies)->toHaveCount(1)
+            ->and($copies->first()->source_image_id)->toBe($source->id)
+            ->and($copies->first()->image_asset_id)->toBe($source->image_asset_id)
+            ->and($copies->first()->filename_version)->toBe($version);
+    }
 });
 
 /**
