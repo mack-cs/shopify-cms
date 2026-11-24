@@ -329,7 +329,7 @@ final class ImageAltTextBackfillService
 
     /**
      * @param  array<int, string>  $collectionGids
-     * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>}
+     * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>, verified_unchanged_image_ids:list<int>}
      */
     public function publishApproved(array $collectionGids = []): array
     {
@@ -338,23 +338,39 @@ final class ImageAltTextBackfillService
 
     /**
      * @param  array<int, int>  $imageIds
-     * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>}
+     * @return array{published:int, propagated:int, shopify_failed:array<int, array<string, mixed>>, verified_unchanged_image_ids:list<int>}
      */
     public function publishIds(array $imageIds): array
     {
         $published = 0;
         $propagated = 0;
         $failed = [];
+        $verifiedUnchanged = [];
         $ids = $this->ids($imageIds);
         if ($ids === []) {
-            return ['published' => 0, 'propagated' => 0, 'shopify_failed' => []];
+            return ['published' => 0, 'propagated' => 0, 'shopify_failed' => [], 'verified_unchanged_image_ids' => []];
         }
-        Image::query()->useWritePdo()->active()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$published, &$propagated, &$failed): void {
+        Image::query()->useWritePdo()->active()->with('product')->whereIn('id', $ids)->orderBy('id')->each(function (Image $image) use (&$published, &$propagated, &$failed, &$verifiedUnchanged): void {
             $image = $image->fresh(['product', 'imageAsset']) ?? $image;
             $approved = $this->approvedUploadAlt($image);
             if ($approved === null) {
+                $currentAlt = trim((string) $image->alt_text);
+                if ($currentAlt !== '' && $image->sync_state === Image::SYNC_STATE_SYNCED
+                    && ! $image->needs_shopify_image_sync && ! $image->shopify_media_create_uncertain
+                    && ! $image->shopify_alt_pending && $image->alt_confirmation_media_id === null
+                    && $this->shopifyAlreadyHasApprovedAlt($image, $currentAlt)) {
+                    $verifiedUnchanged[] = (int) $image->id;
+
+                    return;
+                }
+
                 if (in_array($image->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED, Image::ALT_FAILED, Image::ALT_AWAITING_CONFIRMATION], true)) {
-                    $failed[] = $this->failure(0, (int) $image->id, 'Approval evidence or ownership is unresolved. Review this image before publishing.');
+                    $reason = match (true) {
+                        ImageOwnership::effective($image) === ImageOwnership::UNRESOLVED => 'Choose the ownership of this stack image in Image Alt Review before publishing its alt text.',
+                        $image->alt_text_status === Image::ALT_PUBLISHED => 'Could not confirm that Shopify still has this photograph and description. Check the Shopify image and approve its current alt text before publishing a change.',
+                        default => 'Approve the current alt text for this photograph before publishing it.',
+                    };
+                    $failed[] = $this->failure(0, (int) $image->id, $reason);
                 }
 
                 return;
@@ -374,7 +390,7 @@ final class ImageAltTextBackfillService
             $failed = array_merge($failed, $result['failed']);
         });
 
-        return ['published' => $published, 'propagated' => $propagated, 'shopify_failed' => $failed];
+        return ['published' => $published, 'propagated' => $propagated, 'shopify_failed' => $failed, 'verified_unchanged_image_ids' => $verifiedUnchanged];
     }
 
     /**

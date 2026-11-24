@@ -686,6 +686,40 @@ it('reports approved alt failures through existing product sync and retries the 
         ->and($image->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED);
 });
 
+it('accepts an unchanged published description on a repeat push without granting new approval', function (): void {
+    $gateway = altTextGateway();
+    $product = altTextProduct('REPEAT-LEGACY', 'gid://shopify/Product/539');
+    $reviewed = altTextImage($product, 1, 'First description', 'gid://shopify/MediaImage/5391');
+    $published = altTextImage($product, 2, 'Published description', 'gid://shopify/MediaImage/5392');
+    Image::withoutEvents(fn () => $published->forceFill([
+        'alt_text_status' => Image::ALT_PUBLISHED,
+        'shopify_alt_text' => $published->alt_text,
+        'needs_shopify_image_sync' => false,
+    ])->save());
+    $service = app(ImageAltTextBackfillService::class);
+    $service->markPendingReview($reviewed, 'Approved first description');
+    $approval = altTextApprove($reviewed->fresh());
+    expect($service->approvedUploadAlt($published->fresh()))->toBeNull();
+    $before = $published->fresh()->getAttributes();
+    $updater = app(ProductShopifyUpdater::class);
+
+    $updater->updateApprovedProducts(collect([$product->fresh()]));
+    $repeated = $updater->updateApprovedProducts(collect([$product->fresh()]));
+
+    expect($repeated['failed'])->toBe(0)
+        ->and($repeated['image_outcomes'][$product->id]['alt_review_required_ids'])->toBe([])
+        ->and($gateway->updates)->toBe(1)
+        ->and($published->fresh()->getAttributes())->toBe($before)
+        ->and($approval->fresh()->status)->toBe(ProductPartialApprovalRequest::STATUS_APPROVED);
+
+    $gateway->attachedAltOverrides[$published->shopify_id] = 'Changed in Shopify';
+    $drifted = $service->publishIds([$published->id]);
+    expect($drifted['shopify_failed'][0]['reason'])->toContain('Could not confirm')
+        ->and($drifted['verified_unchanged_image_ids'])->toBe([])
+        ->and($service->approvedUploadAlt($published->fresh()))->toBeNull()
+        ->and($gateway->updates)->toBe(1);
+});
+
 it('omits unapproved CMS alt text from ordinary photograph uploads', function (): void {
     Storage::fake('public');
     $product = altTextProduct('PHOTO-APPROVAL-GUARD', 'gid://shopify/Product/560');

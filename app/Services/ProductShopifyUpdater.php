@@ -6724,7 +6724,9 @@ GQL;
         }
         $published = $backfill->publishIds($eligible);
         $failures = $published['shopify_failed'];
-        $reviewIds = $images->filter(fn (Image $image): bool => $backfill->approvedUploadAlt($image->fresh(['product', 'imageAsset'])) === null)->pluck('id')->all();
+        $reviewIds = $images->whereNotIn('id', $published['verified_unchanged_image_ids'])
+            ->filter(fn (Image $image): bool => $backfill->approvedUploadAlt($image->fresh(['product', 'imageAsset'])) === null)
+            ->pluck('id')->all();
         $this->imageOutcomes[$product->id]['alt_text'] = ($failures !== [] || $deferred !== []) ? 'needs_review'
             : ($reviewIds !== [] ? 'verified_eligible_with_review_pending' : 'verified_eligible');
         $this->imageOutcomes[$product->id]['alt_review_required_ids'] = $reviewIds;
