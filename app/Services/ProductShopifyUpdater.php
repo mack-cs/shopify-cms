@@ -1182,7 +1182,9 @@ final class ProductShopifyUpdater
             $this->refuseSharedMedia($stack, $mediaId, $retiringImageId);
             $retiring = Image::query()->with('imageAsset')->where('product_id', $stack->id)->find($retiringImageId);
             $deferredRetirement = $retiring instanceof Image
-                && $retiring->sync_state === Image::SYNC_STATE_LOCAL_DELETED
+                && ($retiring->sync_state === Image::SYNC_STATE_LOCAL_DELETED
+                    || ($retiring->is_duplicate_hidden
+                        && $retiring->duplicate_hidden_reason === ComponentStackPropagation::OUTSIDE_PRIMARY_GALLERY))
                 && DB::table('inherited_media_retirements')
                     ->where('image_id', $retiring->id)
                     ->where('old_media_id', $mediaId)

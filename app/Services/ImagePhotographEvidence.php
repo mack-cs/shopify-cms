@@ -76,6 +76,26 @@ final class ImagePhotographEvidence
     /** Read-only; signed URL query parameters are never included in diagnostics. */
     public function probe(string $url): array
     {
+        $fetched = $this->fetch($url);
+
+        return [
+            'sha256' => hash('sha256', $fetched['body']),
+            'bytes' => strlen($fetched['body']),
+            'trace' => $fetched['trace'],
+        ];
+    }
+
+    /** The original bytes from a trusted Shopify host. Callers decide whether those bytes are the current photograph. */
+    public function download(string $url): string
+    {
+        return $this->fetch($url)['body'];
+    }
+
+    /**
+     * @return array{body: string, trace: array<int, array{host: string, status: int}>}
+     */
+    private function fetch(string $url): array
+    {
         $seen = [];
         $trace = [];
         for ($hop = 0; $hop <= 3; $hop++) {
@@ -121,7 +141,7 @@ final class ImagePhotographEvidence
                 throw new \RuntimeException('Photograph download is empty or exceeds the evidence limit.');
             }
 
-            return ['sha256' => hash('sha256', $body), 'bytes' => strlen($body), 'trace' => $trace];
+            return ['body' => $body, 'trace' => $trace];
         }
         throw new \RuntimeException('Photograph redirect limit exceeded.');
     }

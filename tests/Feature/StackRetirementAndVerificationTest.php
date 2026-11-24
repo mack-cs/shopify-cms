@@ -206,10 +206,18 @@ function phase3Pair(string $sku, array $photos): array
 
 it('removes a published inherited photograph and does not leave it active', function (): void {
     phase3Flags();
-    [, $images, $stack] = phase3Pair('REMOVE', [
+    [$firstComponent, $images, $stack, $draft] = phase3Pair('REMOVE', [
         ['bytes' => 'stay-bytes', 'filename' => 'REMOVE.jpg', 'alt' => 'Stays'],
         ['bytes' => 'gone-bytes', 'filename' => 'REMOVE-1.jpg', 'alt' => 'Goes'],
     ]);
+    $secondComponent = createImageImportProduct('REMOVE-SECOND');
+    Image::withoutEvents(fn () => $images[1]->forceFill([
+        'product_id' => $secondComponent->id,
+        'position' => 1,
+    ])->save());
+    NewProductDraft::withoutEvents(fn () => $draft->forceFill([
+        'bundle_product_ids' => [$firstComponent->id, $secondComponent->id],
+    ])->save());
     app(ComponentStackPropagation::class)->stageStack($stack);
     $copy = Image::query()->where('product_id', $stack->id)->where('source_image_id', $images[1]->id)->first();
     Image::withoutEvents(fn () => $copy->forceFill(['shopify_id' => 'gid://shopify/MediaImage/771'])->save());
@@ -349,6 +357,8 @@ it('recovers a not-ready retirement and does not replay an uncertain removal', f
 
     $remote->keepRemovedMedia = true;
     $remote->nodes[] = $remote->node('gid://shopify/MediaImage/776', 'https://cdn.shopify.com/s/files/uncertain.jpg');
+    Image::withoutEvents(fn () => $images[1]->forceFill(['position' => 1])->save());
+    app(ComponentStackPropagation::class)->stageStack($stack->fresh());
     $second = Image::query()->where('product_id', $stack->id)->where('source_image_id', $images[1]->id)->first();
     Image::withoutEvents(fn () => $second->forceFill(['shopify_id' => 'gid://shopify/MediaImage/776'])->save());
     Image::withoutEvents(fn () => $images[1]->forceFill(['sync_state' => Image::SYNC_STATE_LOCAL_DELETED])->save());

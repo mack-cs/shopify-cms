@@ -48,6 +48,8 @@ class ShopifyImageImportBatchResource extends Resource
                     DateTimePicker::make('started_at')->disabled(),
                     DateTimePicker::make('completed_at')->disabled(),
                     Textarea::make('error_message')->label('Image import error')->disabled()->columnSpanFull(),
+                    TextInput::make('rebuild_status')->label('Local stack rebuild')->disabled(),
+                    Textarea::make('rebuild_message')->label('Local stack rebuild detail')->disabled()->columnSpanFull(),
                     Placeholder::make('alt_text_report_lines')
                         ->label('Alt text report')
                         ->content(function (?ShopifyImageImportBatch $record): string {
@@ -77,6 +79,7 @@ class ShopifyImageImportBatchResource extends Resource
                     ->sortable(),
                 TextColumn::make('s3_prefix')->searchable()->sortable(),
                 TextColumn::make('status')
+                    ->label('Import')
                     ->badge()
                     ->color(fn (?string $state): string => match ($state) {
                         ShopifyImageImportBatch::STATUS_COMPLETED => 'success',
@@ -86,6 +89,25 @@ class ShopifyImageImportBatchResource extends Resource
                         default => 'gray',
                     })
                     ->sortable(),
+                TextColumn::make('rebuild_status')
+                    ->label('Stack rebuild')
+                    ->badge()
+                    ->placeholder('-')
+                    ->formatStateUsing(fn (?string $state): string => match ($state) {
+                        ShopifyImageImportBatch::REBUILD_COMPLETED => 'Completed',
+                        ShopifyImageImportBatch::REBUILD_INCOMPLETE => 'Incomplete',
+                        ShopifyImageImportBatch::REBUILD_FAILED => 'Failed',
+                        ShopifyImageImportBatch::REBUILD_PENDING => 'Pending',
+                        default => (string) $state,
+                    })
+                    ->color(fn (?string $state): string => match ($state) {
+                        ShopifyImageImportBatch::REBUILD_COMPLETED => 'success',
+                        ShopifyImageImportBatch::REBUILD_INCOMPLETE => 'warning',
+                        ShopifyImageImportBatch::REBUILD_FAILED => 'danger',
+                        ShopifyImageImportBatch::REBUILD_PENDING => 'gray',
+                        default => 'gray',
+                    })
+                    ->tooltip(fn (ShopifyImageImportBatch $record): ?string => $record->rebuild_message),
                 TextColumn::make('total_files')->sortable(),
                 TextColumn::make('matched_count')->sortable(),
                 TextColumn::make('updated_count')->sortable(),

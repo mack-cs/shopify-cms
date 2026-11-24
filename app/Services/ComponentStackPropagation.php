@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Models\Variant;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 
 /**
@@ -21,6 +22,8 @@ use RuntimeException;
  */
 final class ComponentStackPropagation
 {
+    public const OUTSIDE_PRIMARY_GALLERY = 'Outside the component position-1 gallery';
+
     public function __construct(
         private readonly StackComponentCatalog $catalog,
         private readonly ComponentPhotographSelector $selector,
@@ -396,19 +399,23 @@ final class ComponentStackPropagation
      * Local staging used by the manual rebuild and by automatic propagation.
      * It does not upload, delete, or renumber stack-owned images.
      *
+     * @param  array<int, string>  $rejectedSources  Component image id => reason already rejected by source verification
      * @return array{rebuilt:bool, message:string, created:array<int, int>}
      */
-    public function stageStack(Product $stack): array
+    public function stageStack(Product $stack, array $rejectedSources = []): array
     {
         $boundary = app(StackSynchronizationBoundary::class)->acquireForStacks([(int) $stack->id]);
         try {
-            return $this->stageStackWhileLocked($stack);
+            return $this->stageStackWhileLocked($stack, $rejectedSources);
         } finally {
             $boundary->release();
         }
     }
 
-    private function stageStackWhileLocked(Product $stack): array
+    /**
+     * @param  array<int, string>  $rejectedSources
+     */
+    private function stageStackWhileLocked(Product $stack, array $rejectedSources = []): array
     {
         $membership = $this->catalog->membershipState($stack);
         $componentIds = $membership === 'known' ? $this->catalog->componentIds($stack) : [];
@@ -436,25 +443,31 @@ final class ComponentStackPropagation
 
                 continue;
             }
-            $images = $component->allImages()->active()->with('imageAsset')->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')->orderBy('position')->orderBy('id')->get();
-            if ($images->isEmpty()) {
-                $blockers[] = ($component->handle ?: 'Product #'.$component->id).' has no current photographs.';
+            $selected = $this->selector->positionOne($component);
+            if (! $selected instanceof Image) {
+                $unavailable[] = ($component->handle ?: 'Product #'.$component->id).' has no unique active photograph at position 1.';
 
                 continue;
             }
-            foreach ($images as $selected) {
-                $reason = $this->unavailablePhotographReason($selected);
-                if ($reason !== null) {
-                    $protectedSourceIds[] = (int) $selected->id;
-                    $sku = $component->variants()->orderBy('id')->value('sku') ?: $component->handle;
-                    $filename = trim((string) ($selected->imageAsset?->original_filename ?? ''));
-                    $filenameNote = $filename !== '' ? ' ('.$filename.')' : '';
-                    $unavailable[] = 'Image '.$selected->id.' on '.$sku.$filenameNote.' was not copied: '.$reason;
-
-                    continue;
-                }
-                $ready[] = [$component, $selected];
+            $reason = $rejectedSources[(int) $selected->id] ?? $this->unavailablePhotographReason($selected);
+            if ($reason !== null && ! isset($rejectedSources[(int) $selected->id])) {
+                $reason = app(ShopifyImageImportService::class)->prepareInheritedSource($selected, $component)
+                    ?? $this->unavailablePhotographReason($selected);
             }
+            $legacy = $reason === null ? $this->legacyPrimaryCopies($stack, $selected) : collect();
+            if ($legacy->count() > 1) {
+                $reason = 'multiple existing gallery rows match this photograph; review their ownership.';
+            }
+            if ($reason !== null) {
+                $protectedSourceIds[] = (int) $selected->id;
+                $sku = $component->variants()->orderBy('id')->value('sku') ?: $component->handle;
+                $filename = trim((string) ($selected->imageAsset?->original_filename ?? ''));
+                $filenameNote = $filename !== '' ? ' ('.$filename.')' : '';
+                $unavailable[] = 'Image '.$selected->id.' on '.$sku.$filenameNote.' was not copied: '.$reason;
+
+                continue;
+            }
+            $ready[] = [$component, $selected, $legacy->first()];
         }
         if ($blockers !== []) {
             return [
@@ -466,7 +479,7 @@ final class ComponentStackPropagation
         }
         $created = [];
         $conflicts = [];
-        foreach ($ready as [$component, $selected]) {
+        foreach ($ready as [$component, $selected, $legacy]) {
             $generation = (object) [
                 'id' => null,
                 'component_image_id' => $selected->id,
@@ -475,14 +488,14 @@ final class ComponentStackPropagation
                 'asset_sha256' => $selected->imageAsset->sha256,
                 'status' => 'staged',
             ];
-            $staged = $this->stageComponentOnStack($stack, $component, $generation);
+            $staged = $this->stageComponentOnStack($stack, $component, $generation, $legacy);
             $created[] = (int) $staged['image']->id;
             if ($staged['alt_conflict']) {
                 $conflicts[] = $selected->imageAsset->sha256;
             }
         }
         $this->retireInheritedAbsentFromGallery($stack, array_values(array_unique($created)), $protectedSourceIds);
-        $this->assignInheritedGalleryOrder($stack);
+        $this->assignInheritedGalleryOrder($stack, array_values(array_unique($created)));
 
         $conflictNote = $conflicts !== [] ? ' Conflicting inherited alt text needs review; previous descriptions were preserved.' : '';
         $missingNote = $unavailable !== [] ? ' Unavailable: '.implode(' ', $unavailable) : '';
@@ -506,30 +519,8 @@ final class ComponentStackPropagation
      *
      * @return array<int, int>
      */
-    public function desiredInheritedPositions(Product $stack): array
+    private function desiredInheritedPositions(Product $stack, array $desiredIds): array
     {
-        $desiredIds = [];
-        foreach ($this->catalog->componentIds($stack) as $componentId) {
-            $sources = Image::query()->active()->where('product_id', $componentId)
-                ->orderByRaw('CASE WHEN position IS NULL THEN 1 ELSE 0 END')
-                ->orderBy('position')
-                ->orderBy('id')
-                ->get(['id', 'image_asset_id']);
-            foreach ($sources as $source) {
-                if ((int) $source->image_asset_id < 1) {
-                    continue;
-                }
-                $copyId = Image::query()->active()
-                    ->where('product_id', $stack->id)
-                    ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
-                    ->where('image_asset_id', $source->image_asset_id)
-                    ->orderBy('id')
-                    ->value('id');
-                if ($copyId && ! in_array((int) $copyId, $desiredIds, true)) {
-                    $desiredIds[] = (int) $copyId;
-                }
-            }
-        }
         $reserved = [];
         foreach (Image::query()->active()->where('product_id', $stack->id)->where(function ($query): void {
             $query->whereNull('ownership')->orWhere('ownership', '!=', ImageOwnership::COMPONENT_INHERITED);
@@ -538,6 +529,7 @@ final class ComponentStackPropagation
                 $reserved[(int) $position] = true;
             }
         }
+        $firstInheritedPosition = $reserved === [] ? 1 : max(array_keys($reserved)) + 1;
         if ($desiredIds !== []) {
             foreach (Image::query()->active()->where('product_id', $stack->id)
                 ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
@@ -549,7 +541,7 @@ final class ComponentStackPropagation
             }
         }
         $slots = [];
-        $cursor = 1;
+        $cursor = $firstInheritedPosition;
         while (count($slots) < count($desiredIds)) {
             if (! isset($reserved[$cursor])) {
                 $slots[] = $cursor;
@@ -564,9 +556,9 @@ final class ComponentStackPropagation
         return $positions;
     }
 
-    private function assignInheritedGalleryOrder(Product $stack): void
+    private function assignInheritedGalleryOrder(Product $stack, array $desiredIds): void
     {
-        $positions = $this->desiredInheritedPositions($stack);
+        $positions = $this->desiredInheritedPositions($stack, $desiredIds);
         if ($positions === []) {
             return;
         }
@@ -690,7 +682,7 @@ final class ComponentStackPropagation
     /**
      * @return array{image: Image, alt_conflict: bool}
      */
-    private function stageComponentOnStack(Product $stack, Product $component, object $generation): array
+    private function stageComponentOnStack(Product $stack, Product $component, object $generation, ?Image $legacy = null): array
     {
         $asset = ImageAsset::query()->find($generation->image_asset_id);
         if (! $asset instanceof ImageAsset) {
@@ -705,9 +697,14 @@ final class ComponentStackPropagation
         $raw = $sources->map(fn (Image $image): string => trim((string) $image->alt_text))->filter()->unique()->values();
         $altConflict = $approved->count() > 1 || ($approved->isEmpty() && $raw->count() > 1);
         $alts = $approved->count() === 1 ? $approved : ($raw->count() === 1 ? $raw : collect());
-        $existing = $stack->allImages()->active()
+        $existing = $legacy ?? $stack->allImages()
             ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
             ->where('image_asset_id', $asset->id)
+            ->whereNotIn('sync_state', [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED])
+            ->where(fn ($query) => $query->whereNull('is_duplicate_hidden')
+                ->orWhere('is_duplicate_hidden', false)
+                ->orWhere('duplicate_hidden_reason', self::OUTSIDE_PRIMARY_GALLERY))
+            ->orderByRaw('CASE WHEN is_duplicate_hidden = 1 THEN 1 ELSE 0 END')
             ->orderBy('id')
             ->first();
         if (! $existing instanceof Image) {
@@ -732,6 +729,31 @@ final class ComponentStackPropagation
                     'filename_mode' => Image::FILENAME_MODE_MANUAL,
                 ])->save();
             });
+        }
+        if ($legacy instanceof Image) {
+            $updates = [
+                'ownership' => ImageOwnership::COMPONENT_INHERITED,
+                'source_image_id' => $componentImage?->id,
+                'image_asset_id' => $asset->id,
+                'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+            ];
+            // A matching reference adds provenance to the existing photograph.
+            // Keep its content version and Shopify identity.
+            DB::table('images')->where('id', $legacy->id)->update($updates);
+            $existing->refresh();
+        }
+        if ($existing->duplicate_hidden_reason === self::OUTSIDE_PRIMARY_GALLERY) {
+            Image::withoutEvents(fn () => $existing->forceFill([
+                'is_duplicate_hidden' => false,
+                'duplicate_hidden_at' => null,
+                'duplicate_hidden_reason' => null,
+            ])->save());
+        }
+        if (! filled($existing->src) || ShopifyMediaPath::isCmsDeliveryUrl($existing->src)) {
+            $url = $existing->backupPublicUrl();
+            if ($url !== null && $url !== $existing->src) {
+                Image::withoutEvents(fn () => $existing->forceFill(['src' => $url])->save());
+            }
         }
         foreach ($sources as $source) {
             $sourceGenerationId = DB::table('component_photograph_generations')
@@ -797,10 +819,34 @@ final class ComponentStackPropagation
         } elseif ($altConflict && trim((string) $existing->alt_text) !== '') {
             app(ImagePhotographEvidence::class)->archive($existing, 'Inherited alt conflict preserved the previous description');
         }
-        $this->copyInheritedAlt($existing, $approved, $raw, $altConflict, is_string($resolution) && $resolution !== '');
+        $this->copyInheritedAlt(
+            $existing,
+            $approved,
+            $raw,
+            $altConflict,
+            is_string($resolution) && $resolution !== '',
+            ($generation->status ?? null) === 'staged',
+        );
         $fresh = $existing->fresh() ?? $existing;
 
         return ['image' => $fresh->fresh() ?? $fresh, 'alt_conflict' => $altConflict];
+    }
+
+    private function legacyPrimaryCopies(Product $stack, Image $source): Collection
+    {
+        $keys = array_filter(array_map(
+            ShopifyMediaPath::canonical(...),
+            [$source->src, $source->shopify_cdn_url, $source->backupPublicUrl()],
+        ));
+
+        return $stack->allImages()->active()->whereNull('ownership')
+            ->where('position', '>', 1)->get()->filter(function (Image $image) use ($source, $keys): bool {
+                if ((int) $image->image_asset_id > 0) {
+                    return (int) $image->image_asset_id === (int) $source->image_asset_id;
+                }
+
+                return in_array(ShopifyMediaPath::canonical($image->src), $keys, true);
+            })->values();
     }
 
     /**
@@ -838,6 +884,14 @@ final class ComponentStackPropagation
             return 'the backup file is not readable on the CMS disk.';
         }
 
+        $disk = trim((string) $image->imageAsset->storage_disk) !== '' ? $image->imageAsset->storage_disk : 'public';
+        $path = trim((string) $image->imageAsset->storage_path);
+        $contents = $path === '' ? null : Storage::disk($disk)->get($path);
+        $stored = strtolower(trim((string) $image->imageAsset->sha256));
+        if (! is_string($contents) || $contents === '' || $stored === '' || ! hash_equals($stored, hash('sha256', $contents))) {
+            return 'the managed backup does not match its stored SHA-256.';
+        }
+
         return null;
     }
 
@@ -863,6 +917,11 @@ final class ComponentStackPropagation
                 continue;
             }
             if (trim((string) $image->shopify_id) !== '') {
+                Image::withoutEvents(fn () => $image->forceFill([
+                    'is_duplicate_hidden' => true,
+                    'duplicate_hidden_at' => now(),
+                    'duplicate_hidden_reason' => self::OUTSIDE_PRIMARY_GALLERY,
+                ])->save());
                 app(StackImageSync::class)->note($stack, $image, null, 'retirement_pending', 'Inherited photograph '.$image->id.' is no longer in the component gallery. Its Shopify media was not deleted by the local rebuild.', false);
 
                 continue;
@@ -875,6 +934,9 @@ final class ComponentStackPropagation
             Image::withoutEvents(fn () => $image->forceFill([
                 'sync_state' => Image::SYNC_STATE_LOCAL_DELETED,
                 'needs_shopify_image_sync' => false,
+                'is_duplicate_hidden' => true,
+                'duplicate_hidden_at' => now(),
+                'duplicate_hidden_reason' => self::OUTSIDE_PRIMARY_GALLERY,
             ])->save());
         }
     }
@@ -904,14 +966,16 @@ final class ComponentStackPropagation
      * @param  Collection<int, string>  $approved
      * @param  Collection<int, string>  $raw
      */
-    private function copyInheritedAlt(Image $existing, Collection $approved, Collection $raw, bool $altConflict, bool $hasResolution): void
+    private function copyInheritedAlt(Image $existing, Collection $approved, Collection $raw, bool $altConflict, bool $hasResolution, bool $localPrimary): void
     {
-        if ($altConflict || $hasResolution || $existing->alt_inheritance_mode === 'independent') {
+        if ($altConflict || $hasResolution || $existing->alt_inheritance_mode === 'independent' || $existing->alt_confirmation_media_id !== null) {
             return;
         }
         $published = in_array($existing->alt_text_status, [Image::ALT_APPROVED, Image::ALT_PUBLISHED], true)
             && trim((string) $existing->alt_text) !== '';
-        $sentence = $approved->count() === 1 ? (string) $approved->first() : null;
+        $sentence = $localPrimary && $raw->count() <= 1
+            ? (string) $raw->first()
+            : ($approved->count() === 1 ? (string) $approved->first() : null);
         if ($sentence === null && ! $published && $raw->count() === 1) {
             $sentence = (string) $raw->first();
         }
@@ -946,6 +1010,7 @@ final class ComponentStackPropagation
 
         return Image::query()->active()
             ->whereIn('product_id', $ids)
+            ->where('position', 1)
             ->where('image_asset_id', $asset->id)
             ->orderBy('position')
             ->orderBy('id')

@@ -305,7 +305,7 @@ it('does not let a later shopify product import replace approved alt text', func
 
 it('copies component image alt text onto a rebuilt stack image and keeps the stack image', function (): void {
     Storage::fake('public');
-    Storage::disk('public')->put('component.jpg', 'image-bytes');
+    Storage::disk('public')->put('component.jpg', 'recover fixture bytes');
     $asset = ImageAsset::query()->create([
         'sha256' => hash('sha256', 'recover fixture bytes'),
         'storage_disk' => 'public',
@@ -865,9 +865,10 @@ function verificationManagedSource(Product $product, int $position, ?string $alt
 {
     $image = altTextImage($product, $position, $alt, 'gid://shopify/MediaImage/'.($product->id * 100 + $position));
     $name = 'verify-'.$image->id.'.jpg';
-    Storage::disk('public')->put($name, 'photo-'.$image->id);
+    $bytes = 'photo-'.$image->id;
+    Storage::disk('public')->put($name, $bytes);
     $asset = ImageAsset::query()->create([
-        'sha256' => hash('sha256', $name), 'storage_disk' => 'public',
+        'sha256' => hash('sha256', $bytes), 'storage_disk' => 'public',
         'storage_path' => $name, 'status' => ImageAsset::STATUS_AVAILABLE,
     ]);
     $image->update(['image_asset_id' => $asset->id, 'approved_filename' => $name]);

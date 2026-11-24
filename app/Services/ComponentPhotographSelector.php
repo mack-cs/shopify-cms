@@ -10,16 +10,19 @@ final class ComponentPhotographSelector
 {
     public function selected(Product $product): ?Image
     {
-        $primary = $product->allImages()->active()->where('position', 1)->orderBy('id')->get();
+        $image = $this->positionOne($product);
+
+        return $image && (int) $image->image_asset_id > 0 ? $image : null;
+    }
+
+    public function positionOne(Product $product): ?Image
+    {
+        $primary = $product->images()->where('position', 1)->with('imageAsset')->limit(2)->get();
         if ($primary->count() !== 1) {
             return null;
         }
-        $image = $primary->first();
-        if (! $image instanceof Image || (int) ($image->image_asset_id ?? 0) < 1) {
-            return null;
-        }
 
-        return $image;
+        return $primary->first();
     }
 
     public function confirmed(Image $image): bool

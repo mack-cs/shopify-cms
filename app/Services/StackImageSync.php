@@ -549,6 +549,9 @@ final class StackImageSync
                 }
                 continue;
             }
+            if ($image->is_duplicate_hidden && $image->duplicate_hidden_reason === ComponentStackPropagation::OUTSIDE_PRIMARY_GALLERY) {
+                continue;
+            }
             $photoAuthorized = $this->photographAuthorized($source) || $this->stackCapturedPhotograph($image);
             $publishedHere = trim((string) $image->shopify_id) !== ''
                 && (int) $image->image_asset_id === (int) $source->image_asset_id

@@ -61,22 +61,19 @@ function phase6Image(Product $product, string $bytes, int $position, ?string $me
     ]))->fresh('imageAsset');
 }
 
-it('swaps inherited photographs when occupied source positions are exchanged', function (): void {
+it('swaps inherited photographs when component order is exchanged', function (): void {
     Storage::fake('public');
     $component = createImageImportProduct('SWAP');
     $first = phase6Image($component, 'swap-a', 1);
-    $second = phase6Image($component, 'swap-b', 2);
-    $stack = phase6Stack('SWAP-STACK', [$component->id]);
+    $second = phase6Image(createImageImportProduct('SWAP-B'), 'swap-b', 1);
+    $stack = phase6Stack('SWAP-STACK', [$component->id, $second->product_id]);
 
     app(ComponentStackPropagation::class)->stageStack($stack);
     $before = Image::query()->where('product_id', $stack->id)->where('ownership', ImageOwnership::COMPONENT_INHERITED)->orderBy('position')->get();
     expect($before->pluck('position')->map(fn ($position): int => (int) $position)->all())->toBe([1, 2]);
     $ids = $before->pluck('id', 'image_asset_id');
 
-    Image::withoutEvents(function () use ($first, $second): void {
-        $first->forceFill(['position' => 2])->save();
-        $second->forceFill(['position' => 1])->save();
-    });
+    phase6ReverseComponents($stack, $first, $second);
     app(ComponentStackPropagation::class)->stageStack($stack->fresh());
 
     $after = Image::query()->where('product_id', $stack->id)->where('ownership', ImageOwnership::COMPONENT_INHERITED)->get()->keyBy('image_asset_id');
@@ -91,8 +88,8 @@ it('keeps a merged gallery stable and does not reorder it on every synchronizati
     Storage::fake('public');
     $component = createImageImportProduct('MERGE');
     $first = phase6Image($component, 'merge-a', 1, 'gid://shopify/MediaImage/11');
-    $second = phase6Image($component, 'merge-b', 2, 'gid://shopify/MediaImage/12');
-    $stack = phase6Stack('MERGE-STACK', [$component->id]);
+    $second = phase6Image(createImageImportProduct('MERGE-B'), 'merge-b', 1, 'gid://shopify/MediaImage/12');
+    $stack = phase6Stack('MERGE-STACK', [$component->id, $second->product_id]);
     foreach ([1, 2] as $position) {
         Image::withoutEvents(fn () => Image::create([
             'product_id' => $stack->id,
@@ -399,8 +396,8 @@ function phase6PublishedInheritedPair(string $sku): array
     Storage::fake('public');
     $component = createImageImportProduct($sku);
     $first = phase6Image($component, $sku.'-a', 1);
-    $second = phase6Image($component, $sku.'-b', 2);
-    $stack = phase6Stack($sku.'-STACK', [$component->id]);
+    $second = phase6Image(createImageImportProduct($sku.'-B'), $sku.'-b', 1);
+    $stack = phase6Stack($sku.'-STACK', [$component->id, $second->product_id]);
     app(ComponentStackPropagation::class)->stageStack($stack);
     $copies = Image::query()->where('product_id', $stack->id)->where('ownership', ImageOwnership::COMPONENT_INHERITED)->get()->keyBy('image_asset_id');
     $media = [
@@ -433,6 +430,14 @@ function phase6PublishedInheritedPair(string $sku): array
     return ['stack' => $stack->fresh(), 'first' => $first->fresh(), 'second' => $second->fresh(), 'media' => $media];
 }
 
+function phase6ReverseComponents(Product $stack, Image $first, Image $second): void
+{
+    $draft = NewProductDraft::query()->where('shopify_id', $stack->shopify_id)->firstOrFail();
+    NewProductDraft::withoutEvents(fn () => $draft->forceFill([
+        'bundle_product_ids' => [$second->product_id, $first->product_id],
+    ])->save());
+}
+
 it('reorders published Shopify media once when inherited photographs exchange positions', function (): void {
     $fixture = phase6PublishedInheritedPair('ORDER');
     $stack = $fixture['stack'];
@@ -448,10 +453,7 @@ it('reorders published Shopify media once when inherited photographs exchange po
         ];
     }
     $authorizations = DB::table('component_image_authorizations')->count();
-    Image::withoutEvents(function () use ($first, $second): void {
-        $first->forceFill(['position' => 2])->save();
-        $second->forceFill(['position' => 1])->save();
-    });
+    phase6ReverseComponents($stack, $first, $second);
     $remote = [$fixture['media'][(int) $first->image_asset_id], $fixture['media'][(int) $second->image_asset_id]];
     $reorders = 0;
     Http::fake(function ($request) use (&$remote, &$reorders) {
@@ -498,10 +500,7 @@ it('records an incomplete Shopify media read as uncertain and does not reorder',
     $fixture = phase6PublishedInheritedPair('UNREAD');
     $first = $fixture['first'];
     $second = $fixture['second'];
-    Image::withoutEvents(function () use ($first, $second): void {
-        $first->forceFill(['position' => 2])->save();
-        $second->forceFill(['position' => 1])->save();
-    });
+    phase6ReverseComponents($fixture['stack'], $first, $second);
     $reorders = 0;
     Http::fake(function ($request) use (&$reorders) {
         $query = (string) data_get($request->data(), 'query');

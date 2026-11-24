@@ -25,6 +25,7 @@ class Product extends Model
         'first_handle_auto_lock_completed_at', 'first_handle_auto_lock_approval_version',
         'batch', 'sync_batch_id', 'last_synced_at', 'is_bundle', 'you_save',
         'image_import_batch_id', 'image_imported_at', 'image_import_status',
+        'image_rebuild_status', 'image_rebuild_message', 'image_rebuild_batch_id', 'image_rebuild_owner',
         'has_errors', 'error_fields',
         'engraved_bead_quantity', 'engraved_bead_configuration',
     ];

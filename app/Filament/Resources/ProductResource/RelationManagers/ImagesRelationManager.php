@@ -151,7 +151,7 @@ class ImagesRelationManager extends RelationManager
                 ->square()
                 ->size(50)
                 ->checkFileExistence(false)
-                ->getStateUsing(fn ($record) => $this->normalizeImageUrl($record->src)),
+                ->getStateUsing(fn (Image $record) => $this->normalizeImageUrl($record->src) ?? $record->backupPublicUrl()),
             Tables\Columns\IconColumn::make('duplicate_position')
                 ->label('Duplicate')
                 ->boolean()
@@ -841,7 +841,11 @@ HTML);
     private function applyImageVisibilityQuery(Builder $query): Builder
     {
         if ($this->canViewHiddenDuplicates()) {
-            return $query;
+            return filled($this->getTableFilterState('is_duplicate_hidden')['value'] ?? null)
+                ? $query
+                : $query->where(fn (Builder $images) => $images
+                    ->whereNull('duplicate_hidden_reason')
+                    ->orWhere('duplicate_hidden_reason', '!=', \App\Services\ComponentStackPropagation::OUTSIDE_PRIMARY_GALLERY));
         }
 
         return $query

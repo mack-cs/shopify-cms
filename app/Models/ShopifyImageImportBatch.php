@@ -16,6 +16,14 @@ class ShopifyImageImportBatch extends Model
 
     public const STATUS_FAILED = 'failed';
 
+    public const REBUILD_PENDING = 'pending';
+
+    public const REBUILD_COMPLETED = 'completed';
+
+    public const REBUILD_INCOMPLETE = 'incomplete';
+
+    public const REBUILD_FAILED = 'failed';
+
     protected $fillable = [
         's3_prefix',
         'status',
@@ -34,11 +42,15 @@ class ShopifyImageImportBatch extends Model
         'completed_at',
         'created_by',
         'error_message',
+        'rebuild_status',
+        'rebuild_message',
+        'rebuild_stack_product_ids',
     ];
 
     protected $casts = [
         'alt_text_csv_found' => 'boolean',
         'alt_text_report' => 'array',
+        'rebuild_stack_product_ids' => 'array',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
     ];

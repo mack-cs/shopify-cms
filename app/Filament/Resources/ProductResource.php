@@ -1259,6 +1259,26 @@ class ProductResource extends Resource
                     default => 'gray',
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('image_rebuild_status')
+                ->label('Stack Rebuild')
+                ->badge()
+                ->placeholder('-')
+                ->formatStateUsing(fn (?string $state): string => match ($state) {
+                    'completed' => 'Completed',
+                    'incomplete' => 'Incomplete',
+                    'failed' => 'Failed',
+                    'pending' => 'Pending',
+                    default => str_replace('_', ' ', (string) $state),
+                })
+                ->color(fn (?string $state): string => match ($state) {
+                    'completed' => 'success',
+                    'incomplete' => 'warning',
+                    'failed' => 'danger',
+                    'pending' => 'gray',
+                    default => 'gray',
+                })
+                ->tooltip(fn (Product $record): ?string => $record->image_rebuild_message)
+                ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('image_imported_at')
                 ->label('Image Imported')
                 ->dateTime()
@@ -1529,6 +1549,24 @@ class ProductResource extends Resource
                         'updated' => 'Updated',
                         'failed' => 'Failed',
                         'stack_rebuild_failed' => 'Stack Rebuild Failed',
+                    ]
+                )),
+            SelectFilter::make('image_rebuild_status')
+                ->label('Stack Rebuild')
+                ->options([
+                    'completed' => 'Completed',
+                    'incomplete' => 'Incomplete',
+                    'failed' => 'Failed',
+                    'pending' => 'Pending',
+                ])
+                ->indicateUsing(fn (array $data): array => self::singleValueIndicators(
+                    $data,
+                    'Stack Rebuild',
+                    [
+                        'completed' => 'Completed',
+                        'incomplete' => 'Incomplete',
+                        'failed' => 'Failed',
+                        'pending' => 'Pending',
                     ]
                 )),
             Filter::make('image_imported_at')

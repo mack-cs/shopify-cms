@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Models\ShopifyImageImportBatch;
 use App\Models\ShopifyImageImportItem;
 use App\Models\Variant;
+use App\Services\StackRebuildLockStore;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -18,6 +19,9 @@ use Illuminate\Support\Str;
 class ShopifyImageImportService
 {
     private const SUPPORTED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'];
+
+    /** @var array<string, array{nodes?: array<int, mixed>, error?: string}> */
+    private array $componentMediaReads = [];
 
     public function __construct(
         private readonly ProductImageBackupService $backupService,
@@ -123,6 +127,8 @@ class ShopifyImageImportService
      *   updated_count:int,
      *   failed_count:int,
      *   affected_stack_product_ids:array<int, int>,
+     *   direct_stack_product_ids:array<int, int>,
+     *   dependent_stack_product_ids:array<int, int>,
      *   alt_text_csv_found:bool,
      *   alt_text_applied:int,
      *   alt_text_missing:int,
@@ -141,6 +147,7 @@ class ShopifyImageImportService
         $matched = 0;
         $updated = 0;
         $failed = 0;
+        $directStackProductIds = [];
         $affectedStackProductIds = [];
         $updatedProductIds = [];
         $outcomes = [];
@@ -192,6 +199,7 @@ class ShopifyImageImportService
             }
 
             if ($result['affected_stack_product_id'] !== null) {
+                $directStackProductIds[$result['affected_stack_product_id']] = $result['affected_stack_product_id'];
                 $affectedStackProductIds[$result['affected_stack_product_id']] = $result['affected_stack_product_id'];
             }
 
@@ -206,8 +214,12 @@ class ShopifyImageImportService
             ])->save();
         }
 
+        $dependentStackProductIds = [];
         foreach ($this->stackProductIdsForUpdatedComponents(array_values($updatedProductIds)) as $stackProductId) {
             $affectedStackProductIds[$stackProductId] = $stackProductId;
+            if (! isset($directStackProductIds[$stackProductId])) {
+                $dependentStackProductIds[$stackProductId] = $stackProductId;
+            }
         }
 
         $alt = $this->applyImportedAltText($batch, $prefix, $outcomes);
@@ -218,6 +230,8 @@ class ShopifyImageImportService
             'updated_count' => $updated,
             'failed_count' => $failed,
             'affected_stack_product_ids' => array_values($affectedStackProductIds),
+            'direct_stack_product_ids' => array_values($directStackProductIds),
+            'dependent_stack_product_ids' => array_values($dependentStackProductIds),
             'alt_text_csv_found' => $alt['found'],
             'alt_text_applied' => $alt['applied'],
             'alt_text_missing' => $alt['missing'],
@@ -229,13 +243,16 @@ class ShopifyImageImportService
 
     /**
      * @param  array<int, int>  $stackProductIds
-     * @return array{rebuilt:int, failed:int, compare_at_updated:int, messages:array<int, string>}
+     * @param  array{key: string, owner: string}|null  $claim
+     * @return array{rebuilt:int, incomplete:int, failed:int, compare_at_updated:int, messages:array<int, string>, recorded:bool}
      */
-    public function rebuildStacksForBatch(ShopifyImageImportBatch $batch, array $stackProductIds): array
+    public function rebuildStacksForBatch(ShopifyImageImportBatch $batch, array $stackProductIds, ?array $claim = null): array
     {
         $stackProductIds = array_values(array_unique(array_filter(array_map('intval', $stackProductIds))));
         $rebuilt = 0;
+        $incomplete = 0;
         $failed = 0;
+        $skipped = 0;
         $compareAtUpdated = 0;
         $messages = [];
 
@@ -249,22 +266,31 @@ class ShopifyImageImportService
             }
 
             try {
-                $result = $this->rebuildStackImages($stack);
-                if ($result['rebuilt']) {
+                $result = $this->rebuildStackImages($stack, $batch, $claim);
+                if (($result['skipped'] ?? false) === true) {
+                    $skipped++;
+
+                    continue;
+                }
+                $outcome = $this->classifyStackRebuild($result);
+                $message = (string) ($result['message'] ?? '');
+                if ($outcome === ShopifyImageImportBatch::REBUILD_COMPLETED) {
                     $rebuilt++;
-                    $this->markProductImportStatus($stack, $batch, 'updated');
+                } elseif ($outcome === ShopifyImageImportBatch::REBUILD_INCOMPLETE) {
+                    $incomplete++;
                 } else {
                     $failed++;
                 }
+                $this->markRebuildStatus($stack, $batch, $outcome, $message, $claim);
 
-                if ($result['message'] !== '') {
-                    $messages[] = $result['message'];
+                if ($message !== '') {
+                    $messages[] = $message;
                 }
             } catch (\Throwable $e) {
                 $failed++;
-                $messages[] = "{$stack->handle}: {$e->getMessage()}";
-
-                $this->markProductImportStatus($stack, $batch, 'stack_rebuild_failed');
+                $message = "{$stack->handle}: {$e->getMessage()}";
+                $messages[] = $message;
+                $this->markRebuildStatus($stack, $batch, ShopifyImageImportBatch::REBUILD_FAILED, $message, $claim);
 
                 logger()->error('Shopify stack image rebuild failed.', [
                     'batch_id' => $batch->id,
@@ -293,11 +319,15 @@ class ShopifyImageImportService
             }
         }
 
+        $recorded = $this->recordBatchRebuild($batch, $stackProductIds, $claim, $rebuilt, $incomplete, $failed, $skipped, $messages);
+
         return [
             'rebuilt' => $rebuilt,
+            'incomplete' => $incomplete,
             'failed' => $failed,
             'compare_at_updated' => $compareAtUpdated,
             'messages' => $messages,
+            'recorded' => $recorded,
         ];
     }
 
@@ -796,30 +826,469 @@ class ShopifyImageImportService
     }
 
     /**
-     * @return array{rebuilt:bool, message:string}
+     * @param  array{key: string, owner: string}|null  $claim
+     * @return array{rebuilt:bool, message:string, unavailable:array<int, string>, skipped?:bool}
      */
-    private function rebuildStackImages(Product $stack): array
+    private function rebuildStackImages(Product $stack, ShopifyImageImportBatch $batch, ?array $claim = null): array
     {
+        if ($this->newerBatchOwns($stack->id, $batch)) {
+            return $this->skippedRebuild();
+        }
+
         $mutex = new ImageSyncMutex;
         if (! $mutex->acquire((int) $stack->id)) {
             throw new \RuntimeException('Another image operation is running for this stack. Retry later.');
         }
         try {
             $mutex->assertOwned();
+            if (! $this->rebuildAttemptMayCommit($stack->id, $batch, $claim)) {
+                return $this->skippedRebuild();
+            }
 
-            return $this->rebuildStackImagesLocked($stack);
+            return $this->rebuildStackImagesLocked($stack, $batch, $claim);
         } finally {
             $mutex->release();
         }
     }
 
-    private function rebuildStackImagesLocked(Product $stack): array
+    /**
+     * @param  array{key: string, owner: string}|null  $claim
+     * @return array{rebuilt:bool, message:string, unavailable:array<int, string>, skipped?:bool}
+     */
+    private function rebuildStackImagesLocked(Product $stack, ShopifyImageImportBatch $batch, ?array $claim = null): array
     {
-        $staged = app(ComponentStackPropagation::class)->stageStack($stack);
+        $prepared = $this->prepareComponentSources($stack);
+
+        return DB::transaction(function () use ($stack, $batch, $claim, $prepared): array {
+            $locked = Product::query()->whereKey($stack->id)->lockForUpdate()->first();
+            if (! $locked instanceof Product || ! $this->rebuildAttemptMayCommit((int) $locked->id, $batch, $claim, $locked)) {
+                return $this->skippedRebuild();
+            }
+
+            $again = Product::query()->whereKey($stack->id)->lockForUpdate()->first();
+            if (! $again instanceof Product || ! $this->rebuildAttemptMayCommit((int) $again->id, $batch, $claim, $again)) {
+                return $this->skippedRebuild();
+            }
+
+            $staged = app(ComponentStackPropagation::class)->stageStack($stack, $prepared['rejected']);
+            $unavailable = $this->mergeUnavailableSources($prepared['reasons'], $staged['unavailable'] ?? []);
+            $message = (string) ($staged['message'] ?? '');
+            foreach ($prepared['reasons'] as $reason) {
+                if (! str_contains($message, $reason)) {
+                    $message .= ($message === '' ? '' : ' ').$reason;
+                }
+            }
+
+            return [
+                'rebuilt' => (bool) ($staged['rebuilt'] ?? false),
+                'message' => $message,
+                'unavailable' => $unavailable,
+            ];
+        });
+    }
+
+    /**
+     * Resolve a verified managed backup before inherited images are staged.
+     * Shopify is only read. Nothing is uploaded, published, or deleted.
+     *
+     * @return array{reasons: array<int, string>, rejected: array<int, string>}
+     */
+    private function prepareComponentSources(Product $stack): array
+    {
+        $this->componentMediaReads = [];
+        if (app(StackComponentCatalog::class)->membershipState($stack) !== 'known') {
+            return ['reasons' => [], 'rejected' => []];
+        }
+
+        $reasons = [];
+        $rejected = [];
+        foreach (app(StackComponentCatalog::class)->componentIds($stack) as $componentId) {
+            $component = Product::query()->find($componentId);
+            if (! $component instanceof Product) {
+                continue;
+            }
+            $image = app(ComponentPhotographSelector::class)->positionOne($component);
+            if ($image instanceof Image && ($reason = $this->prepareInheritedSource($image, $component)) !== null) {
+                $rejected[(int) $image->id] = $reason;
+                $sku = trim((string) ($component->variants()->orderBy('id')->value('sku') ?: $component->handle));
+                $reasons[] = 'Image '.$image->id.' on '.($sku !== '' ? $sku : 'Product #'.$component->id).' was not copied: '.$reason;
+            }
+        }
+
+        return ['reasons' => $reasons, 'rejected' => $rejected];
+    }
+
+    public function prepareInheritedSource(Image $image, Product $component): ?string
+    {
+        $image->refresh();
+        $image->loadMissing('imageAsset');
+        if (is_string($this->managedAssetBytes($image))) {
+            return null;
+        }
+        if ((int) $image->image_asset_id > 0 && $image->imageAsset instanceof ImageAsset && $image->imageAsset->isAvailable()) {
+            return 'the managed backup does not match its stored SHA-256.';
+        }
+
+        $hasAsset = (int) $image->image_asset_id > 0;
+        $local = $this->localPathBytes($image);
+        if (is_string($local)) {
+            $stored = strtolower(trim((string) ($image->imageAsset?->sha256 ?? '')));
+            if ($stored !== '' && ! hash_equals($stored, hash('sha256', $local))) {
+                return 'the local CMS photograph does not match the stored SHA-256.';
+            }
+            $extension = $this->extensionFromName($image->image_path);
+            $asset = $this->storeBytesAsAsset(
+                $local,
+                $extension,
+                $this->mimeTypeFromExtension($extension),
+                basename((string) $image->image_path),
+                null,
+            );
+            if ($hasAsset && (int) $asset->id !== (int) $image->image_asset_id) {
+                return 'the local CMS photograph does not match the current managed backup.';
+            }
+            $this->attachVerifiedBackup($image, $asset);
+
+            return null;
+        }
+
+        $shopify = $this->verifiedShopifyPhotograph($image, $component);
+        if (is_string($shopify)) {
+            if ($local === false) {
+                return 'the local CMS photograph is recorded but could not be read. '.$shopify;
+            }
+
+            return $shopify;
+        }
+
+        $stored = strtolower(trim((string) ($image->imageAsset?->sha256 ?? '')));
+        if ($stored !== '' && ! hash_equals($stored, hash('sha256', $shopify['bytes']))) {
+            return 'the Shopify original does not match the photograph SHA-256.';
+        }
+        $asset = $this->storeBytesAsAsset(
+            $shopify['bytes'],
+            $shopify['extension'],
+            $this->mimeTypeFromExtension($shopify['extension']),
+            $shopify['filename'],
+            $shopify['source_url'],
+        );
+        if ($hasAsset && (int) $asset->id !== (int) $image->image_asset_id) {
+            return 'the Shopify original does not match the current managed backup.';
+        }
+        $this->attachVerifiedBackup($image, $asset);
+
+        return null;
+    }
+
+    /**
+     * A Shopify file is usable only when this photograph's MediaImage id is attached to this component product.
+     *
+     * @return array{bytes:string, extension:?string, filename:string, source_url:string}|string
+     */
+    private function verifiedShopifyPhotograph(Image $image, Product $component): array|string
+    {
+        if ((int) $image->product_id !== (int) $component->id) {
+            return 'the photograph does not belong to this component product.';
+        }
+        if ($image->shopify_identity_unresolved) {
+            return 'photograph identity is unresolved.';
+        }
+        if ($image->shopify_media_create_uncertain) {
+            return 'the Shopify attachment is uncertain because its media create has not been reconciled.';
+        }
+        if (app(ImageUploadOperations::class)->unresolvedForCurrentPhotograph($image) !== null) {
+            return 'an unresolved Shopify upload operation still belongs to this photograph and its SHA-256.';
+        }
+        $syncedAssetId = (int) ($image->last_shopify_synced_image_asset_id ?? 0);
+        $currentAssetId = (int) ($image->image_asset_id ?? 0);
+        if ($syncedAssetId > 0 && $syncedAssetId !== $currentAssetId) {
+            return 'the Shopify attachment belongs to a different photograph.';
+        }
+
+        $mediaId = trim((string) $image->shopify_id);
+        if (preg_match('~^gid://shopify/MediaImage/\d+$~', $mediaId) !== 1) {
+            $url = ShopifyMediaPath::rememberableCdnUrl($image->shopify_cdn_url)
+                ?? ShopifyMediaPath::rememberableCdnUrl($image->src);
+            if ($url === null) {
+                return 'the position-1 photograph has no usable CMS file or Shopify URL.';
+            }
+
+            // A URL on this CMS source can supply local display bytes. It does
+            // not establish a MediaImage identity or authorize publication.
+            return $this->downloadStackSource($image, $url, true);
+        }
+
+        $productGid = trim((string) $component->shopify_id);
+        if ($productGid === '') {
+            return 'this component has no Shopify product id, so its attachment cannot be verified.';
+        }
+
+        $media = $this->componentMedia($productGid);
+        if (isset($media['error'])) {
+            return 'Shopify media for this component could not be read. '.$media['error'];
+        }
+
+        $node = null;
+        foreach ($media['nodes'] ?? [] as $candidate) {
+            if (is_array($candidate) && (string) ($candidate['id'] ?? '') === $mediaId) {
+                $node = $candidate;
+                break;
+            }
+        }
+        if (! is_array($node)) {
+            return 'the Shopify MediaImage is not attached to this component product.';
+        }
+        if (! ShopifyProductMediaReader::ready($node)) {
+            return 'the Shopify file is not ready.';
+        }
+
+        $url = trim((string) ($node['originalSource']['url'] ?? ''));
+        if ($url === '') {
+            return 'the Shopify file has no original source.';
+        }
+
+        return $this->downloadStackSource($image, $url);
+    }
+
+    private function downloadStackSource(Image $image, string $url, bool $validateImage = false): array|string
+    {
+        try {
+            $bytes = app(ImagePhotographEvidence::class)->download($url);
+        } catch (\Throwable $exception) {
+            return 'the Shopify original could not be downloaded. '.$exception->getMessage();
+        }
+        if ($validateImage && @getimagesizefromstring($bytes) === false) {
+            return 'the Shopify URL did not return a readable image.';
+        }
+
+        $filename = basename((string) (parse_url($url, PHP_URL_PATH) ?: ''));
+        if ($filename === '' || $filename === '/' || $filename === '.') {
+            $filename = 'component-'.$image->id.'.jpg';
+        }
 
         return [
-            'rebuilt' => $staged['rebuilt'],
-            'message' => $staged['message'],
+            'bytes' => $bytes,
+            'extension' => $this->extensionFromName($filename),
+            'filename' => $filename,
+            'source_url' => $url,
+        ];
+    }
+
+    /**
+     * @return array{nodes?: array<int, mixed>, error?: string}
+     */
+    private function componentMedia(string $productGid): array
+    {
+        if (! array_key_exists($productGid, $this->componentMediaReads)) {
+            try {
+                $read = app(ShopifyProductMediaReader::class)->read($productGid, 'StackSourceMedia');
+                $nodes = $read['media']['nodes'] ?? null;
+                $this->componentMediaReads[$productGid] = [
+                    'nodes' => is_array($nodes) ? $nodes : [],
+                ];
+            } catch (\Throwable $exception) {
+                $this->componentMediaReads[$productGid] = ['error' => $exception->getMessage()];
+            }
+        }
+
+        return $this->componentMediaReads[$productGid];
+    }
+
+    private function attachVerifiedBackup(Image $image, ImageAsset $asset): void
+    {
+        $current = (int) $image->image_asset_id;
+        if ($current > 0 && $current !== (int) $asset->id) {
+            return;
+        }
+
+        DB::table('images')->where('id', $image->id)->update([
+            'image_asset_id' => $asset->id,
+            'backup_status' => Image::BACKUP_STATUS_BACKED_UP,
+            'backup_completed_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $image->image_asset_id = $asset->id;
+        $image->setRelation('imageAsset', $asset);
+    }
+
+    /**
+     * @param  array<int, string>  $prepared
+     * @param  array<int, mixed>  $staged
+     * @return array<int, string>
+     */
+    private function mergeUnavailableSources(array $prepared, array $staged): array
+    {
+        $covered = [];
+        foreach ($prepared as $reason) {
+            if (preg_match('/Image (\d+)/', $reason, $match) === 1) {
+                $covered[(int) $match[1]] = true;
+            }
+        }
+
+        $combined = $prepared;
+        foreach ($staged as $reason) {
+            $reason = trim((string) $reason);
+            if ($reason === '') {
+                continue;
+            }
+            if (preg_match('/Image (\d+)/', $reason, $match) === 1 && isset($covered[(int) $match[1]])) {
+                continue;
+            }
+            $combined[] = $reason;
+        }
+
+        return array_values(array_unique($combined));
+    }
+
+    /**
+     * @param  array{rebuilt?:bool, message?:string, unavailable?:array<int, string>}  $result
+     */
+    private function classifyStackRebuild(array $result): string
+    {
+        $unavailable = array_values($result['unavailable'] ?? []);
+        $message = (string) ($result['message'] ?? '');
+        $rebuilt = (bool) ($result['rebuilt'] ?? false);
+        $aborted = ! $rebuilt && (
+            $unavailable === []
+            || str_contains($message, 'stopped before replacing')
+            || str_contains($message, 'membership is unknown')
+        );
+        if ($rebuilt && $unavailable === []) {
+            return ShopifyImageImportBatch::REBUILD_COMPLETED;
+        }
+        if (! $aborted && $unavailable !== []) {
+            return ShopifyImageImportBatch::REBUILD_INCOMPLETE;
+        }
+
+        return ShopifyImageImportBatch::REBUILD_FAILED;
+    }
+
+    /**
+     * @param  array{key: string, owner: string}|null  $claim
+     */
+    private function markRebuildStatus(Product $product, ShopifyImageImportBatch $batch, string $status, string $message, ?array $claim = null): void
+    {
+        $stored = $message === '' ? null : Str::limit($message, 2000, '');
+        $query = Product::query()
+            ->whereKey($product->id)
+            ->where(function ($query) use ($batch): void {
+                $query->whereNull('image_rebuild_batch_id')
+                    ->orWhere('image_rebuild_batch_id', '<=', $batch->id);
+            });
+        if ($claim !== null) {
+            $query->where(function ($query) use ($claim): void {
+                $query->whereNull('image_rebuild_owner')
+                    ->orWhere('image_rebuild_owner', $claim['owner']);
+            })->whereExists(function ($query) use ($claim): void {
+                $query->selectRaw('1')
+                    ->from('stack_rebuild_claims')
+                    ->where('claim_key', $claim['key'])
+                    ->where('owner', $claim['owner']);
+            });
+        }
+
+        $values = [
+            'image_rebuild_status' => $status,
+            'image_rebuild_message' => $stored,
+            'image_rebuild_batch_id' => $batch->id,
+            'updated_at' => now(),
+        ];
+        if ($claim !== null) {
+            $values['image_rebuild_owner'] = $claim['owner'];
+        }
+        if ($query->update($values) === 1) {
+            $product->forceFill($values)->syncOriginal();
+        }
+    }
+
+    /**
+     * @param  array<int, int>  $stackProductIds
+     * @param  array{key: string, owner: string}|null  $claim
+     * @param  array<int, string>  $messages
+     */
+    private function recordBatchRebuild(
+        ShopifyImageImportBatch $batch,
+        array $stackProductIds,
+        ?array $claim,
+        int $rebuilt,
+        int $incomplete,
+        int $failed,
+        int $skipped,
+        array $messages,
+    ): bool {
+        $lostClaim = $claim !== null && ! app(StackRebuildLockStore::class)->owns($claim['key'], $claim['owner']);
+        $nothingOwned = $stackProductIds !== [] && $skipped === count($stackProductIds) && $rebuilt + $incomplete + $failed === 0;
+        if ($lostClaim || $nothingOwned) {
+            return false;
+        }
+
+        $batchOutcome = $failed > 0
+            ? ShopifyImageImportBatch::REBUILD_FAILED
+            : ($incomplete > 0
+                ? ShopifyImageImportBatch::REBUILD_INCOMPLETE
+                : ShopifyImageImportBatch::REBUILD_COMPLETED);
+        $values = [
+            'rebuild_status' => $batchOutcome,
+            'rebuild_message' => $messages === [] ? null : Str::limit(implode(' | ', array_slice($messages, 0, 8)), 5000, ''),
+            'rebuild_stack_product_ids' => json_encode(array_values($stackProductIds)),
+            'updated_at' => now(),
+        ];
+        $query = ShopifyImageImportBatch::query()->whereKey($batch->id);
+        if ($claim !== null) {
+            $query->whereExists(function ($query) use ($claim): void {
+                $query->selectRaw('1')
+                    ->from('stack_rebuild_claims')
+                    ->where('claim_key', $claim['key'])
+                    ->where('owner', $claim['owner']);
+            });
+        }
+        if ($query->update($values) === 0 && $claim !== null) {
+            return false;
+        }
+        $batch->forceFill([
+            'rebuild_status' => $batchOutcome,
+            'rebuild_message' => $values['rebuild_message'],
+            'rebuild_stack_product_ids' => array_values($stackProductIds),
+        ])->syncOriginal();
+
+        return true;
+    }
+
+    /**
+     * @param  array{key: string, owner: string}|null  $claim
+     */
+    private function rebuildAttemptMayCommit(int $productId, ShopifyImageImportBatch $batch, ?array $claim, ?Product $locked = null): bool
+    {
+        $current = $locked instanceof Product
+            ? $locked->image_rebuild_batch_id
+            : Product::query()->whereKey($productId)->value('image_rebuild_batch_id');
+        if ($current !== null && (int) $current > (int) $batch->id) {
+            return false;
+        }
+        if ($claim === null) {
+            return true;
+        }
+
+        return app(StackRebuildLockStore::class)->owns($claim['key'], $claim['owner']);
+    }
+
+    private function newerBatchOwns(int $productId, ShopifyImageImportBatch $batch): bool
+    {
+        $current = Product::query()->whereKey($productId)->value('image_rebuild_batch_id');
+
+        return $current !== null && (int) $current > (int) $batch->id;
+    }
+
+    /**
+     * @return array{rebuilt:bool, message:string, unavailable:array<int, string>, skipped:bool}
+     */
+    private function skippedRebuild(): array
+    {
+        return [
+            'rebuilt' => false,
+            'message' => '',
+            'unavailable' => [],
+            'skipped' => true,
         ];
     }
 
