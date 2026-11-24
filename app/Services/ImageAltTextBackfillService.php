@@ -839,6 +839,10 @@ final class ImageAltTextBackfillService
                         $copy->forceFill(['alt_text' => $copySentence])->save();
                     });
                 }
+                if ($copy->sync_state === Image::SYNC_STATE_LOCAL_NEW && blank($copy->shopify_id)) {
+                    // The stack's own push will publish this description after attaching its photo.
+                    continue;
+                }
                 $targetSentences[$copy->id] = $copySentence;
                 $targets->push($copy);
                 $propagated++;

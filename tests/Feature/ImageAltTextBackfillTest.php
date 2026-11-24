@@ -195,6 +195,14 @@ it('propagates component alt text to verified stack copies without reuploading',
     $copy->update(['source_image_id' => $source->id, 'image_asset_id' => $source->image_asset_id]);
     altTextDraft($stack, [$component->id]);
 
+    $unpublishedStack = altTextProduct('STACK-UNPUBLISHED-COPY', 'gid://shopify/Product/73', true);
+    $localCopy = altTextImage($unpublishedStack, 2, 'Old local copy');
+    Image::withoutEvents(fn () => $localCopy->forceFill([
+        'source_image_id' => $source->id, 'image_asset_id' => $source->image_asset_id,
+        'shopify_id' => null, 'sync_state' => Image::SYNC_STATE_LOCAL_NEW,
+    ])->save());
+    altTextDraft($unpublishedStack, [$component->id]);
+
     $imported = app(ImageAltTextBackfillService::class)->import("image_id,alt_text\n{$source->id},Approved component alt\n", true);
 
     expect($imported['propagated'])->toBe(0)
@@ -212,6 +220,9 @@ it('propagates component alt text to verified stack copies without reuploading',
     $result = app(ImageAltTextBackfillService::class)->publishIds([$source->id]);
 
     expect($result['propagated'])->toBe(1)
+        ->and($result['shopify_failed'])->toBe([])
+        ->and($localCopy->fresh()->alt_text)->toBe('Approved component alt')
+        ->and($localCopy->fresh()->shopify_id)->toBeNull()
         ->and($result['published'])->toBe(2)
         ->and($source->fresh()->alt_text)->toBe('Approved component alt')
         ->and($source->fresh()->alt_text_status)->toBe(Image::ALT_PUBLISHED)
