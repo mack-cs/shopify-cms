@@ -2251,10 +2251,10 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
                 $warnings,
                 $imageWarnings
             );
-            $altMessages = [];
-            if ($this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT)) {
-                $altMessages = $this->publishApprovedImageAlt($product->fresh() ?? $product, true, $imageWarnings);
-            }
+            $altMessages = $this->publishApprovedImageAlt(
+                $product->fresh() ?? $product, true, $imageWarnings,
+                onlyAltApprovedWithPhotograph: ! $this->scopeEnabled($scopes, self::SYNC_SCOPE_IMAGE_ALT),
+            );
             $parts = [];
             if ($imageWarnings !== []) {
                 $parts[] = 'Photograph synchronization incomplete: '.collect($imageWarnings)->pluck('warning')->implode(' ');
@@ -5928,9 +5928,12 @@ GQL;
                 }
                 if (($remembered = ShopifyMediaPath::rememberableCdnUrl($cdnUrl)) !== null) {
                     $updates['shopify_cdn_url'] = $remembered;
-                    $updates['src'] = $remembered;
                 }
                     $current->forceFill($updates)->save();
+                if ($remembered !== null && $current->src !== $remembered) {
+                    // Read-back changes the delivery URL, while the locked asset stays the same.
+                    Image::query()->whereKey($current->id)->update(['src' => $remembered]);
+                }
             });
             if ($operation !== null) {
                 $closed = in_array((string) $live->status, ['confirmed', 'resolved_absent', 'resolved_deleted', 'superseded'], true)
@@ -6772,9 +6775,16 @@ GQL;
      * @param  array<int, array{product_id:int, warning:string}>  $photographWarnings
      * @return array<int, string>
      */
-    private function publishApprovedImageAlt(Product $product, bool $afterPhotographs, array $photographWarnings = []): array
+    private function publishApprovedImageAlt(Product $product, bool $afterPhotographs, array $photographWarnings = [], bool $onlyAltApprovedWithPhotograph = false): array
     {
-        $images = $product->allImages()->active()->get();
+        $images = $product->allImages()->active()->with('imageAsset')->get();
+        if ($onlyAltApprovedWithPhotograph) {
+            $approvals = app(ProductPartialApprovalService::class);
+            $images = $images->filter(fn (Image $image): bool => $approvals->altApprovedWithPhotograph($image) !== null);
+            if ($images->isEmpty()) {
+                return [];
+            }
+        }
         $backfill = app(ImageAltTextBackfillService::class);
         $resolver = app(ShopifyMediaImageResolver::class);
         $eligible = [];

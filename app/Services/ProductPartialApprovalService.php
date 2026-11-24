@@ -1058,6 +1058,9 @@ class ProductPartialApprovalService
         if (($recorded = app(ImageAltApprovalEvidence::class)->recorded($image)) !== null) {
             return $recorded;
         }
+        if (($approvedWithPhoto = $this->altApprovedWithPhotograph($image)) !== null) {
+            return $approvedWithPhoto;
+        }
 
         $requests = ProductPartialApprovalRequest::query()->useWritePdo()
             ->where('product_id', $image->product_id)
@@ -1084,6 +1087,34 @@ class ProductPartialApprovalService
                 }
 
                 return $proposed;
+            }
+        }
+
+        return null;
+    }
+
+    public function altApprovedWithPhotograph(Image $image): ?string
+    {
+        $image->loadMissing('imageAsset');
+        $sentence = trim((string) $image->alt_text);
+        if ($sentence === '' || ! $image->imageAsset || $image->is_duplicate_hidden
+            || ImageOwnership::effective($image) === ImageOwnership::UNRESOLVED
+            || ($this->inheritedStackImage($image) && $image->alt_inheritance_mode !== 'independent')
+            || in_array($image->sync_state, [Image::SYNC_STATE_LOCAL_DELETED, Image::SYNC_STATE_REMOTE_DELETED], true)) {
+            return null;
+        }
+
+        $evidence = app(ImageAltApprovalEvidence::class);
+        $requests = ProductPartialApprovalRequest::query()->useWritePdo()
+            ->where('product_id', $image->product_id)->where('status', ProductPartialApprovalRequest::STATUS_APPROVED)
+            ->whereJsonContains('scopes', ProductShopifyUpdater::SYNC_SCOPE_IMAGES)->get();
+        foreach ($requests as $request) {
+            foreach ($request->image_alt_snapshot['photographs'] ?? [] as $row) {
+                if (is_array($row) && isset($row['proposed_alt'], $row['alt_text_version'], $row['photograph_version'])
+                    && ($row['asset_sha256'] ?? null) === $image->imageAsset->sha256
+                    && $evidence->snapshotMatches($image, $row, $request)) {
+                    return $sentence;
+                }
             }
         }
 
@@ -1203,6 +1234,12 @@ class ProductPartialApprovalService
                     'image_asset_id' => (int) $image->image_asset_id,
                     'asset_sha256' => (string) ($image->imageAsset?->sha256 ?? ''),
                     'photograph_version' => max(1, (int) ($image->photograph_version ?? 1)),
+                    'proposed_alt' => $image->needsShopifyRepublish() ? trim((string) $image->alt_text) : '',
+                    'alt_text_version' => max(1, (int) ($image->alt_text_version ?? 1)),
+                    'position' => $image->position,
+                    'src' => $image->backupPublicUrl() ?? $image->src,
+                    'shopify_alt' => $image->shopify_alt_text,
+                    'changed' => true,
                 ];
             })
             ->all();

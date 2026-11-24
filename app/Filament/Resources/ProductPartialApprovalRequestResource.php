@@ -453,6 +453,11 @@ class ProductPartialApprovalRequestResource extends Resource
 
         if ($includesAlt) {
             $lines[] = self::imageAltReviewTable($snapshot);
+        } elseif (is_array($snapshot['photographs'] ?? null)) {
+            $photosWithAlt = array_filter($snapshot['photographs'], fn ($photo): bool => is_array($photo) && filled($photo['proposed_alt'] ?? null));
+            if ($photosWithAlt !== []) {
+                $lines[] = self::imageAltReviewTable(['images' => $photosWithAlt]);
+            }
         }
         $lines[] = '</div>';
 

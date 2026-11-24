@@ -790,7 +790,8 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
     $ready = false;
     $creates = 0;
     $removals = [];
-    Http::fake(function ($request) use (&$ids, &$ready, &$creates, &$removals, $newId, $newUrl) {
+    $altWrites = [];
+    Http::fake(function ($request) use (&$ids, &$ready, &$creates, &$removals, &$altWrites, $newId, $newUrl) {
         $query = $request->data()['query'] ?? '';
         if (str_contains($query, 'productCreateMedia')) {
             $creates++;
@@ -806,6 +807,10 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
             $ids = array_values(array_diff($ids, [$id]));
             return Http::response(['data' => ['fileUpdate' => ['files' => [['id' => $id]], 'userErrors' => []]]]);
         }
+        if (str_contains($query, 'mutation UpdateImageAlt')) {
+            $altWrites[] = $request->data()['variables']['files'][0];
+            return Http::response(['data' => ['fileUpdate' => ['files' => $altWrites, 'userErrors' => []]]]);
+        }
         if (str_contains($query, 'productReorderMedia')) {
             $ids = array_column($request->data()['variables']['moves'], 'id');
             return Http::response(['data' => ['productReorderMedia' => ['job' => ['id' => 'gid://shopify/Job/1'], 'mediaUserErrors' => []]]]);
@@ -818,6 +823,7 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
         }
         $nodes = array_map(fn (string $id): array => [
             'id' => $id, 'status' => $id === $newId && ! $ready ? 'PROCESSING' : 'READY', 'fileStatus' => 'READY',
+            'alt' => $id === $newId ? ($altWrites[0]['alt'] ?? '') : '',
             'image' => ['url' => $id === $newId ? $newUrl : 'https://cdn.shopify.com/s/files/1/old-'.basename($id).'.png'],
         ], $ids);
         return Http::response(['data' => ['product' => [
@@ -837,6 +843,15 @@ it('resumes a Shopify slot replacement and removes only the recorded superseded 
         ->and($ids)->toBe([$newId, $extraId])
         ->and($image->fresh()->shopify_id)->toBe($newId)
         ->and($image->fresh()->src)->toBe($newUrl);
+
+    $publishAlt = new ReflectionMethod(ProductShopifyUpdater::class, 'publishApprovedImageAlt');
+    expect($partial->altApprovedWithPhotograph($image->fresh()))->toBe('Carry this description');
+    expect($publishAlt->invoke($updater, $product, true, [], true))->toBe([])
+        ->and($altWrites)->toBe([['id' => $newId, 'alt' => 'Carry this description']]);
+    app(ImageAltTextBackfillService::class)->markPendingReview($image->fresh(), 'A later edit');
+    expect($partial->approvedAlt($image->fresh()))->toBeNull()
+        ->and($publishAlt->invoke($updater, $product, true, [], true))->toBe([])
+        ->and($altWrites)->toHaveCount(1);
 });
 
 it('repairs only selected stack source links through the existing image workflow and records failures', function (): void {
