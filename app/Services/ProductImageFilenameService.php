@@ -55,6 +55,23 @@ class ProductImageFilenameService
         return sprintf('%s-%d-v%d.%s', $base, max(1, $position), max(1, $filenameVersion), $extension);
     }
 
+    public function nextAvailableImportVersion(Product $product, int $position, int $minimum): int
+    {
+        $sample = $this->generateApprovedImportFilename($product, $position, 1, 'jpg');
+        $prefix = substr($sample, 0, -strlen('1.jpg'));
+        $pattern = '/^'.preg_quote($prefix, '/').'(\d+)\.[a-z0-9]+$/i';
+        $version = $minimum;
+        foreach ($product->allImages()->get(['approved_filename', 'last_shopify_synced_filename']) as $image) {
+            foreach ([$image->approved_filename, $image->last_shopify_synced_filename] as $filename) {
+                if (preg_match($pattern, (string) $filename, $matches)) {
+                    $version = max($version, (int) $matches[1] + 1);
+                }
+            }
+        }
+
+        return $version;
+    }
+
     public function assignFromCurrentTitle(Product $product, bool $manual = false): int
     {
         $product->loadMissing([

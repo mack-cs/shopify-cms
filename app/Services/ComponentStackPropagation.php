@@ -304,6 +304,7 @@ final class ComponentStackPropagation
                 return;
             }
             $image = $staged['image'];
+            $this->assignInheritedFilename($stack, $image);
             DB::table('stack_image_sync_tasks')->where('id', $taskId)->update(['phase' => 'uploading', 'attempts' => (int) $task->attempts + 1, 'updated_at' => now()]);
         } finally {
             $mutex->release();
@@ -496,6 +497,9 @@ final class ComponentStackPropagation
         }
         $this->retireInheritedAbsentFromGallery($stack, array_values(array_unique($created)), $protectedSourceIds);
         $this->assignInheritedGalleryOrder($stack, array_values(array_unique($created)));
+        foreach ($stack->allImages()->whereIn('id', $created)->with('imageAsset')->orderBy('position')->get() as $image) {
+            $this->assignInheritedFilename($stack, $image);
+        }
 
         $conflictNote = $conflicts !== [] ? ' Conflicting inherited alt text needs review; previous descriptions were preserved.' : '';
         $missingNote = $unavailable !== [] ? ' Unavailable: '.implode(' ', $unavailable) : '';
@@ -510,6 +514,36 @@ final class ComponentStackPropagation
             'created' => array_values(array_unique($created)),
             'unavailable' => $unavailable,
         ];
+    }
+
+    private function assignInheritedFilename(Product $stack, Image $image): void
+    {
+        if ($image->filename_version !== null || $image->sync_state !== Image::SYNC_STATE_LOCAL_NEW
+            || filled($image->shopify_id) || filled($image->last_shopify_synced_filename)
+            || $image->last_shopify_image_synced_at !== null || $image->shopify_media_create_uncertain
+            || app(ImageUploadOperations::class)->active($image)) {
+            return;
+        }
+
+        $position = max(1, (int) $image->position);
+        $previousVersion = $stack->allImages()
+            ->where('ownership', ImageOwnership::COMPONENT_INHERITED)
+            ->where('source_image_id', $image->source_image_id)
+            ->where('image_asset_id', '!=', $image->image_asset_id)
+            ->max('filename_version');
+        $filenames = app(ProductImageFilenameService::class);
+        $version = $filenames->nextAvailableImportVersion($stack, $position, (int) $previousVersion + 1);
+        Image::withoutEvents(function () use ($image, $filenames, $stack, $position, $version): void {
+            $image->forceFill([
+                'approved_filename' => $filenames->generateApprovedImportFilename($stack, $position, $version, (string) $image->imageAsset?->extension),
+                'filename_version' => $version,
+                'filename_mode' => Image::FILENAME_MODE_MANUAL,
+            ]);
+            if (ShopifyMediaPath::isCmsDeliveryUrl($image->src)) {
+                $image->src = $image->backupPublicUrl() ?? $image->src;
+            }
+            $image->save();
+        });
     }
 
     /**

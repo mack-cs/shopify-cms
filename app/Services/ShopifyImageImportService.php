@@ -591,6 +591,9 @@ class ShopifyImageImportService
             if ($replacedPhotograph) {
                 app(ImagePhotographEvidence::class)->archive($image, 'S3 photograph replacement');
             }
+            if ($product->isStackProduct() && ! $photographMatches) {
+                $filenameVersion = app(ProductImageFilenameService::class)->nextAvailableImportVersion($product, $position, $filenameVersion);
+            }
             if ($inheritedAtPosition->isNotEmpty()) {
                 $this->relocateInheritedPhotographs($product, $inheritedAtPosition, $position);
             }

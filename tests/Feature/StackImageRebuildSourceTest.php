@@ -400,6 +400,7 @@ it('replaces an inherited photograph when the component photograph changes', fun
 
     $batch = runStackImageImport('incoming/stack-replace');
     $inherited = $stack->allImages()->active()->where('ownership', ImageOwnership::COMPONENT_INHERITED)->first();
+    expect($inherited->approved_filename)->toBe($stack->handle.'-2-v1.jpg');
     $replacement = createImportTestAsset('replacement-component', 'jpg', 'COMPNEW-v2.jpg');
     Image::withoutEvents(fn () => $source->forceFill([
         'image_asset_id' => $replacement->id,
@@ -414,9 +415,24 @@ it('replaces an inherited photograph when the component photograph changes', fun
         ->and($active->first()->id)->not->toBe($inherited->id)
         ->and($active->first()->image_asset_id)->toBe($replacement->id)
         ->and($active->first()->source_image_id)->toBe($source->id)
+        ->and($active->first()->approved_filename)->toBe($stack->handle.'-2-v2.jpg')
+        ->and($active->first()->filename_version)->toBe(2)
         ->and($active->first()->photograph_version)->toBe(4)
         ->and($inherited->sync_state)->toBe(Image::SYNC_STATE_LOCAL_DELETED)
         ->and($stack->allImages()->active()->where('ownership', ImageOwnership::STACK_OWNED)->first()->position)->toBe(1);
+
+    app(\App\Services\ComponentStackPropagation::class)->stageStack($stack->fresh());
+    $copies = $stack->allImages()->active()->where('ownership', ImageOwnership::COMPONENT_INHERITED)->get();
+    expect($copies->modelKeys())->toBe($active->modelKeys())
+        ->and($copies->first()->approved_filename)->toBe($stack->handle.'-2-v2.jpg');
+
+    Storage::disk('shopify_product_images')->put('incoming/stack-second/STACKNEW-1.png', 'second-owned');
+    runStackImageImport('incoming/stack-second');
+    $secondOwned = $stack->allImages()->active()->where('position', 2)->first();
+    expect($secondOwned->ownership)->toBe(ImageOwnership::STACK_OWNED)
+        ->and($secondOwned->approved_filename)->toBe($stack->handle.'-2-v3.png')
+        ->and($copies->first()->fresh()->position)->toBe(3)
+        ->and($copies->first()->fresh()->approved_filename)->toBe($stack->handle.'-2-v2.jpg');
 });
 
 it('keeps photographs that were staged when another component source is missing', function (): void {
