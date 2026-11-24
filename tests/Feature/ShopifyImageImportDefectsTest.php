@@ -28,7 +28,7 @@ beforeEach(function (): void {
     Http::preventStrayRequests();
 });
 
-it('rejects an older filename version and keeps the accepted photograph', function (): void {
+it('automatically advances the filename version for an unversioned replacement', function (): void {
     $product = createImageImportProduct('VER100');
     $asset = createImportTestAsset('current-photo', 'png', 'VER100-v3.png');
     $image = Image::withoutEvents(fn (): Image => Image::create([
@@ -52,19 +52,22 @@ it('rejects an older filename version and keeps the accepted photograph', functi
     $image->refresh();
     $item = ShopifyImageImportItem::query()->where('s3_key', 'incoming/older/VER100.png')->first();
 
-    expect($result['updated_count'])->toBe(0)
-        ->and($result['failed_count'])->toBe(1)
-        ->and($item->message)->toContain('filename version 3')
-        ->and($image->image_asset_id)->toBe($asset->id)
-        ->and($image->filename_version)->toBe(3)
-        ->and($image->alt_text)->toBe('Current sentence')
-        ->and($image->alt_text_status)->toBe(Image::ALT_APPROVED)
-        ->and($image->photograph_version)->toBe(4)
-        ->and($image->alt_text_version)->toBe(2)
-        ->and($image->shopify_id)->toBe('gid://shopify/MediaImage/100');
+    expect($result['updated_count'])->toBe(1)
+        ->and($result['failed_count'])->toBe(0)
+        ->and($image->filename_version)->toBe(4)
+        ->and($image->approved_filename)->toBe('ver100-1-v4.png')
+        ->and($image->s3_filename)->toBe('VER100.png')
+        ->and($image->photograph_version)->toBe(5)
+        ->and($image->shopify_id)->toBeNull()
+        ->and($product->allImages()->active()->count())->toBe(1);
+
+    importDefectPrefix('incoming/older');
+    expect($image->fresh()->filename_version)->toBe(4)
+        ->and($image->fresh()->photograph_version)->toBe(5)
+        ->and($product->allImages()->active()->count())->toBe(1);
 });
 
-it('initializes a legacy row as filename version 1 and rejects different bytes at that version', function (): void {
+it('initializes a legacy row and replaces it on a same-filename upload', function (): void {
     $product = createImageImportProduct('LEGACY1');
     $asset = createImportTestAsset('legacy-photo', 'png', 'LEGACY1.png');
     $image = Image::withoutEvents(fn (): Image => Image::create([
@@ -95,16 +98,14 @@ it('initializes a legacy row as filename version 1 and rejects different bytes a
         ->and($image->alt_text_status)->toBe(Image::ALT_APPROVED);
 
     Storage::disk('shopify_product_images')->put('incoming/legacy-bytes/LEGACY1.png', 'different-photo');
-    $rejected = importDefectPrefix('incoming/legacy-bytes');
+    $replaced = importDefectPrefix('incoming/legacy-bytes');
     $image->refresh();
 
-    expect($rejected['failed_count'])->toBe(1)
-        ->and($rejected['updated_count'])->toBe(0)
-        ->and(ShopifyImageImportItem::query()->where('s3_key', 'incoming/legacy-bytes/LEGACY1.png')->first()->message)->toContain('different bytes')
-        ->and($image->image_asset_id)->toBe($asset->id)
-        ->and($image->filename_version)->toBe(1)
-        ->and($image->alt_text)->toBe('Legacy sentence')
-        ->and($image->photograph_version)->toBe(3);
+    expect($replaced['failed_count'])->toBe(0)
+        ->and($replaced['updated_count'])->toBe(1)
+        ->and($image->image_asset_id)->not->toBe($asset->id)
+        ->and($image->filename_version)->toBe(2)
+        ->and($image->photograph_version)->toBe(4);
 });
 
 it('does not apply a description after a newer photograph has replaced the imported one', function (): void {
@@ -185,7 +186,7 @@ it('places a stack upload beside an inherited photograph and still replaces a st
         'backup_completed_at' => now(),
     ]));
     Storage::disk('shopify_product_images')->put('incoming/inherited/STACK100-1.jpg', 'direct-upload');
-    Storage::disk('shopify_product_images')->put('incoming/inherited/STACK100-v2.png', 'new-stack-front');
+    Storage::disk('shopify_product_images')->put('incoming/inherited/STACK100.png', 'new-stack-front');
 
     $result = importDefectPrefix('incoming/inherited');
     $inherited->refresh();
@@ -204,10 +205,10 @@ it('places a stack upload beside an inherited photograph and still replaces a st
         ->and($inherited->s3_filename)->toBeNull()
         ->and($owned->ownership)->toBe(ImageOwnership::STACK_OWNED)
         ->and($owned->approved_filename)->toBe('stack100-1-v2.png')
-        ->and($owned->s3_filename)->toBe('STACK100-v2.png')
+        ->and($owned->s3_filename)->toBe('STACK100.png')
         ->and($owned->source_image_id)->toBeNull()
         ->and($owned->filename_version)->toBe(2)
-        ->and($owned->imageAsset?->original_filename)->toBe('STACK100-v2.png')
+        ->and($owned->imageAsset?->original_filename)->toBe('STACK100.png')
         ->and($imported?->ownership)->toBe(ImageOwnership::STACK_OWNED)
         ->and($imported?->source_image_id)->toBeNull()
         ->and($imported?->approved_filename)->toBe('stack100-2-v1.jpg')
@@ -606,7 +607,7 @@ it('clears stale approval evidence when a higher filename version replaces the p
         ->and($image->alt_text_version)->not->toBe(2);
 });
 
-it('rejects same-version bytes that differ from a legacy local photograph and accepts a higher version', function (): void {
+it('preserves identical legacy local bytes and replaces changed bytes at the same filename', function (): void {
     $product = createImageImportProduct('LOCAL1');
     Storage::disk('public')->put('product-images/local1.png', 'legacy-local-bytes');
     $image = Image::withoutEvents(fn (): Image => Image::create([
@@ -624,24 +625,6 @@ it('rejects same-version bytes that differ from a legacy local photograph and ac
         'needs_shopify_image_sync' => false,
     ]));
     $imageId = $image->id;
-    Storage::disk('shopify_product_images')->put('incoming/local-different/LOCAL1.png', 'different-upload');
-
-    $rejected = importDefectPrefix('incoming/local-different');
-    $image->refresh();
-
-    expect($rejected['updated_count'])->toBe(0)
-        ->and($rejected['failed_count'])->toBe(1)
-        ->and(ShopifyImageImportItem::query()->first()->message)->toContain('different bytes')
-        ->and($image->id)->toBe($imageId)
-        ->and($image->image_asset_id)->toBeNull()
-        ->and($image->image_path)->toBe('product-images/local1.png')
-        ->and($image->alt_text)->toBe('Keep local sentence')
-        ->and($image->alt_text_status)->toBe(Image::ALT_APPROVED)
-        ->and($image->photograph_version)->toBe(4)
-        ->and($image->alt_text_version)->toBe(2)
-        ->and($image->shopify_id)->toBe('gid://shopify/MediaImage/501')
-        ->and($image->src)->toBe('https://cdn.shopify.com/s/files/1/local-keep.jpg');
-
     Storage::disk('shopify_product_images')->put('incoming/local-same/LOCAL1.png', 'legacy-local-bytes');
     $same = importDefectPrefix('incoming/local-same');
     $image->refresh();
@@ -655,7 +638,7 @@ it('rejects same-version bytes that differ from a legacy local photograph and ac
         ->and($image->alt_text_version)->toBe(2)
         ->and($image->shopify_id)->toBe('gid://shopify/MediaImage/501');
 
-    Storage::disk('shopify_product_images')->put('incoming/local-higher/LOCAL1-v2.png', 'replacement-upload');
+    Storage::disk('shopify_product_images')->put('incoming/local-higher/LOCAL1.png', 'replacement-upload');
     $replaced = importDefectPrefix('incoming/local-higher');
     $image->refresh();
 
@@ -663,7 +646,7 @@ it('rejects same-version bytes that differ from a legacy local photograph and ac
         ->and($replaced['failed_count'])->toBe(0)
         ->and($image->id)->toBe($imageId)
         ->and($image->filename_version)->toBe(2)
-        ->and($image->imageAsset?->original_filename)->toBe('LOCAL1-v2.png')
+        ->and($image->imageAsset?->original_filename)->toBe('LOCAL1.png')
         ->and($image->photograph_version)->toBe(5)
         ->and($image->shopify_id)->toBeNull();
 });

@@ -549,17 +549,13 @@ class ShopifyImageImportService
             $photographMatches = false;
             if ($image instanceof Image) {
                 $acceptedVersion = $image->filename_version === null ? 1 : (int) $image->filename_version;
-                if ($filenameVersion < $acceptedVersion) {
-                    throw new \RuntimeException('Image position '.$position.' already has filename version '.$acceptedVersion.'. '.$filename.' is filename version '.$filenameVersion.' and was not imported.');
-                }
                 $comparison = $this->existingPhotographComparison($image, $asset);
                 if ($comparison === 'unreadable') {
                     throw new \RuntimeException('Image position '.$position.' has a photograph whose bytes could not be read. '.$filename.' was not imported.');
                 }
-                if ($filenameVersion === $acceptedVersion && $comparison === 'different') {
-                    throw new \RuntimeException('Image position '.$position.' already has different bytes for filename version '.$filenameVersion.'. The current photograph was kept.');
-                }
                 $photographMatches = $comparison === 'match';
+                // Existing versioned inputs remain compatible, but a replacement never requires a suffix.
+                $filenameVersion = max($filenameVersion, $photographMatches ? $acceptedVersion : $acceptedVersion + 1);
             }
             $alreadySynced = false;
 
