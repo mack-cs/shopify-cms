@@ -53,7 +53,7 @@ it('rebuilds a directly imported stack while all three stack flags are disabled'
         ->and($batch->rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
         ->and($stack->image_import_status)->toBe('updated')
         ->and($stack->image_rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
-        ->and($stack->approval_version)->toBe(4)
+        ->and($stack->approval_version)->toBe(6)
         ->and($images)->toHaveCount(2)
         ->and($images[0]->ownership)->toBe(ImageOwnership::STACK_OWNED)
         ->and($images[0]->position)->toBe(1)
@@ -514,12 +514,14 @@ it('rebuilds a parent stack from a component import with Shopify propagation dis
         ->and(config('images.component_stack_local_rebuild'))->toBeFalse();
 
     foreach (range(2, 4) as $version) {
+        $stackApprovalVersion = (int) $stack->fresh()->approval_version;
         $prefix = 'incoming/stack-dependent-'.$version;
         Storage::disk('shopify_product_images')->put($prefix.'/COMPDEP.jpg', 'component-update-'.$version);
         $batch = runStackImageImport($prefix);
         $source = $component->allImages()->active()->first();
         $copies = $stack->allImages()->active()->get();
         expect($batch->rebuild_status)->toBe(ShopifyImageImportBatch::REBUILD_COMPLETED)
+            ->and((int) $stack->fresh()->approval_version)->toBe($stackApprovalVersion + 1)
             ->and($copies)->toHaveCount(1)
             ->and($copies->first()->source_image_id)->toBe($source->id)
             ->and($copies->first()->image_asset_id)->toBe($source->image_asset_id)

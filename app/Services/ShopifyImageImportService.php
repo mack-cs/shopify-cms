@@ -654,6 +654,9 @@ class ShopifyImageImportService
                 }
                 $image->forceFill($attributes)->save();
             });
+            if (! $photographMatches) {
+                $this->invalidateGalleryApproval($product);
+            }
 
             return [
                 'image' => $image->fresh() ?? $image,
@@ -867,7 +870,11 @@ class ShopifyImageImportService
                 return $this->skippedRebuild();
             }
 
+            $before = $this->activeGallery($stack);
             $staged = app(ComponentStackPropagation::class)->stageStack($stack, $prepared['rejected']);
+            if ($before !== $this->activeGallery($stack)) {
+                $this->invalidateGalleryApproval($stack);
+            }
             $unavailable = $this->mergeUnavailableSources($prepared['reasons'], $staged['unavailable'] ?? []);
             $message = (string) ($staged['message'] ?? '');
             foreach ($prepared['reasons'] as $reason) {
@@ -882,6 +889,19 @@ class ShopifyImageImportService
                 'unavailable' => $unavailable,
             ];
         });
+    }
+
+    private function activeGallery(Product $product): array
+    {
+        return $product->allImages()->active()->orderBy('id')
+            ->get(['id', 'position', 'image_asset_id'])->toArray();
+    }
+
+    private function invalidateGalleryApproval(Product $product): void
+    {
+        Product::query()->whereKey($product->id)->update([
+            'approval_version' => DB::raw('COALESCE(approval_version, 1) + 1'),
+        ]);
     }
 
     /**

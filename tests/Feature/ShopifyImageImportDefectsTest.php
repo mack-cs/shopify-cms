@@ -47,6 +47,7 @@ it('automatically advances the filename version for an unversioned replacement',
         'backup_completed_at' => now(),
     ]));
     Storage::disk('shopify_product_images')->put('incoming/older/VER100.png', 'older-photo');
+    $approvalVersion = (int) $product->fresh()->approval_version;
 
     $result = importDefectPrefix('incoming/older');
     $image->refresh();
@@ -59,11 +60,13 @@ it('automatically advances the filename version for an unversioned replacement',
         ->and($image->s3_filename)->toBe('VER100.png')
         ->and($image->photograph_version)->toBe(5)
         ->and($image->shopify_id)->toBeNull()
+        ->and((int) $product->fresh()->approval_version)->toBe($approvalVersion + 1)
         ->and($product->allImages()->active()->count())->toBe(1);
 
     importDefectPrefix('incoming/older');
     expect($image->fresh()->filename_version)->toBe(4)
         ->and($image->fresh()->photograph_version)->toBe(5)
+        ->and((int) $product->fresh()->approval_version)->toBe($approvalVersion + 1)
         ->and($product->allImages()->active()->count())->toBe(1);
 });
 
