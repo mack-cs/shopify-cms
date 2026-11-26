@@ -46,7 +46,7 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
         return $response->json() ?? [];
     }
 
-    public function graphql(string $query, array $variables = []): array
+    public function graphql(string $query, array $variables = [], ?callable $beforeRequest = null, bool $rejectSearchWarnings = false): array
     {
         app(EngravedBeadMutationGuard::class)->graphql($query, $variables);
         $shop = config('services.shopify.shop');
@@ -68,6 +68,9 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
             app(EngravedBeadMutationGuard::class)->graphql($query, $variables);
+            if ($beforeRequest !== null) {
+                $beforeRequest();
+            }
             $response = Http::withHeaders([
                 'X-Shopify-Access-Token' => $token,
                 'Content-Type' => 'application/json',
@@ -131,6 +134,14 @@ final class ShopifyApiClient implements ShopifyGraphqlGateway
             if (isset($payload['errors']) && is_array($payload['errors'])) {
                 $messages = collect($payload['errors'])->pluck('message')->filter()->implode('; ');
                 throw new \RuntimeException('Shopify API error: '.($messages !== '' ? $messages : 'Unknown error.'));
+            }
+
+            if ($rejectSearchWarnings) {
+                foreach (data_get($payload, 'extensions.search', []) as $search) {
+                    foreach ($search['warnings'] ?? [] as $warning) {
+                        throw new \RuntimeException('Shopify rejected a search filter: '.($warning['message'] ?? 'unknown warning'));
+                    }
+                }
             }
 
             return $payload['data'] ?? [];

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Casts\UtcDateTimeCast;
 use App\Services\CategoryTypeMap;
 use App\Services\EngravedBeads\EngravedBeadConfiguration;
 use App\Services\TagNormalizer;
@@ -43,7 +44,7 @@ class Product extends Model
         'mark_for_archive_synced_at' => 'datetime',
         'mark_for_archive_source_changed_at' => 'datetime',
         'last_synced_at' => 'datetime',
-        'shopify_created_at' => 'datetime',
+        'shopify_created_at' => UtcDateTimeCast::class,
         'image_imported_at' => 'datetime',
         'seo_updated_at' => 'datetime',
         'first_image_auto_rename_completed_at' => 'datetime',

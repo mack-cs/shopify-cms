@@ -29,7 +29,7 @@ class ShopYourVibeShopify
     /** @var null|callable(): void Fences expired refresh workers around each complete API read. */
     public $refreshGuard = null;
 
-    private function graphql(string $query, array $variables = []): array
+    private function graphql(string $query, array $variables = [], ?callable $beforeRequest = null): array
     {
         if ($this->refreshGuard) {
             ($this->refreshGuard)();
@@ -38,7 +38,14 @@ class ShopYourVibeShopify
             ($this->beforeMutation)();
         }
 
-        $result = $this->client->graphql($query, $variables);
+        if ($beforeRequest !== null && $this->client instanceof ShopifyApiClient) {
+            $result = $this->client->graphql($query, $variables, $beforeRequest);
+        } else {
+            if ($beforeRequest !== null) {
+                $beforeRequest();
+            }
+            $result = $this->client->graphql($query, $variables);
+        }
         if ($this->refreshGuard) {
             ($this->refreshGuard)();
         }
@@ -558,7 +565,24 @@ GQL, ['id' => $gid]);
 
     public function addProductTags(string $gid, array $tags): void
     {
-        $this->tagMutation('tagsAdd', 'VibeTagsAdd', $gid, $tags);
+        if (! config('new_in_expiration.enforcement_enabled')
+            || ! app(NewInTagClassifier::class)->hasAutoRemove($tags)) {
+            $this->tagMutation('tagsAdd', 'VibeTagsAdd', $gid, $tags);
+
+            return;
+        }
+
+        app(NewInTagExpirationService::class)->withGuardedTagMutation(
+            $gid,
+            $tags,
+            function (array $filtered, ?callable $beforeRequest) use ($gid, $tags): void {
+                if (count($filtered) !== count($tags)) {
+                    throw new RuntimeException('New In tags require a verified Shopify creation date within the New In window.');
+                }
+
+                $this->tagMutation('tagsAdd', 'VibeTagsAdd', $gid, $filtered, $beforeRequest);
+            },
+        );
     }
 
     public function removeProductTags(string $gid, array $tags): void
@@ -566,12 +590,12 @@ GQL, ['id' => $gid]);
         $this->tagMutation('tagsRemove', 'VibeTagsRemove', $gid, $tags);
     }
 
-    private function tagMutation(string $field, string $operation, string $gid, array $tags): void
+    private function tagMutation(string $field, string $operation, string $gid, array $tags, ?callable $beforeRequest = null): void
     {
         $this->gid($gid, 'Product');
         $data = $this->graphql("mutation {$operation}(\$id: ID!, \$tags: [String!]!) { {$field}(id: \$id, tags: \$tags) { node { id } userErrors { field message } } }", [
             'id' => $gid, 'tags' => array_values(array_unique($tags)),
-        ]);
+        ], $beforeRequest);
         $errors = data_get($data, $field.'.userErrors', []);
         if ($errors !== []) {
             throw new RuntimeException(collect($errors)->pluck('message')->join('; '));

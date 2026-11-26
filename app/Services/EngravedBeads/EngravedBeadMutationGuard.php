@@ -5,6 +5,8 @@ namespace App\Services\EngravedBeads;
 use App\Models\EngravedBeadFamilyMember;
 use App\Models\Product;
 use App\Models\Variant;
+use App\Services\NewInTagClassifier;
+use App\Services\NewInTagExpirationService;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
@@ -14,6 +16,12 @@ final class EngravedBeadMutationGuard
     public function graphql(string $query, array $variables): void
     {
         if (! preg_match('/\bmutation\b/', $query)) {
+            return;
+        }
+        // Expiration can only remove lifecycle tags, with no bead or inventory fields in the mutation.
+        $tags = $variables['tags'] ?? null;
+        if ($query === NewInTagExpirationService::REMOVE_TAGS_MUTATION && is_array($tags) && $tags !== []
+            && app(NewInTagClassifier::class)->autoRemoveFrom($tags) === $tags) {
             return;
         }
         if (app(\App\Services\Procurement\SupplierReceiptMutationAuthorization::class)->permits($query,$variables)) return;

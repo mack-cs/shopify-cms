@@ -178,13 +178,13 @@ class NewProductDraft extends Model
             }
 
             if (! $draft->isUnlistedLaunch()) {
-                $draft->tags = TagNormalizer::normalizeFromArray(
-                    app(NewInTagService::class)->tagsForNewProduct(
-                        TagNormalizer::parseTokens($draft->tags),
-                        $draft->type,
-                        $draft->title
-                    )
+                $assigned = app(NewInTagService::class)->tagsForNewProduct(
+                    TagNormalizer::parseTokens($draft->tags),
+                    $draft->type,
+                    $draft->title,
+                    productGid: $draft->shopify_id,
                 );
+                $draft->tags = TagNormalizer::normalizeFromArray($assigned);
             }
         });
 

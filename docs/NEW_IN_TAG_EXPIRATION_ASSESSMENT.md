@@ -45,15 +45,50 @@ In addition, collection-aware tags are generated:
 
 See `NewInTagService::tagsForNewProduct()` (lines 25–56), `isManagedCollectionNewInTag()` (lines 242–259), and `app/Services/ElevatedBasicsStackCatalog.php` lines 22–24.
 
-**Exact business spelling in Shopify/CMS is hyphenated lowercase `new-in`, not the display phrase “New In”.**
+**Canonical CMS spelling is hyphenated lowercase** (via `TagNormalizer::normalizeToken()`), e.g. `new-in`, not the display phrase “New In”. Normalization lowercases and collapses non-alphanumeric characters to `-`, so `New In`, `new_in`, and `new--in` become comparable as `new-in`.
 
 Product tags are stored as a comma-separated string on:
 
 - `products.tags`
 - `new_product_drafts.tags`
 - imported `ShopifyRow` “Tags” column via `HeaderStore::TAGS`
+- shop-wide tag catalogue table `tags` (`App\Models\Tag`) — names only, not product membership
 
-Tag tokens are normalized by `App\Services\TagNormalizer`.
+Tag tokens are normalized by `App\Services\TagNormalizer` (`normalizeToken()` lines 80–94).
+
+### Confirmed gap in current managed-tag helpers
+
+`NewInTagService::removeManagedTags()` / `isManagedCollectionNewInTag()` only remove:
+
+- the three canonical tags in `TAGS`; and
+- `{primary}-new-in` / `{primary}-*-stacks-new-in` **when `primary` exists in `DropdownCollectionCatalog`**
+
+They do **not** cover arbitrary future collection New In tags, unexpected separators, or Shopify-only spellings outside the catalogue. Expiration must therefore use a **pattern-based classifier**, not that hardcoded catalogue helper alone.
+
+### Live Shopify read-only tag discovery (2026-11-24)
+
+A read-only `productTags` pagination against the configured shop (no mutations) returned **230** product tags. Auto-matched New In variations:
+
+| Shopify tag (exact) | Classification |
+|---------------------|----------------|
+| `new-in` | Canonical |
+| `new-arrivals` | Canonical |
+| `newbies` | Canonical |
+| `livi-road-new-in` | Collection-specific |
+| `pata-pata-new-in` | Collection-specific |
+| `elevated-basics-new-in` | Collection-specific |
+| `livi-road-bracelet-stacks-new-in` | Stack / collection |
+| `pata-pata-bracelet-stacks-new-in` | Stack / collection |
+| `elevated-basics-stacks-new-in` | Elevated Basics shared stack New In |
+| `elevated-basics-necklace-stacks-new-in` | Stack / collection |
+
+**Not present on any live product at discovery time** (but still recognized by CMS code / tests as legacy or generatable):
+
+- `elevated-basics-bracelet-stacks-new-in` (`ElevatedBasicsStackCatalog::LEGACY_NEW_IN_TAG`)
+
+**Ambiguous matches flagged for review:** none among the 230 live tags under the classifier below.
+
+This proves products can carry New In **only** via a collection/stack tag (for example `elevated-basics-necklace-stacks-new-in`) without relying on discovery through canonical `new-in` alone.
 
 ### Where New In tags are added / removed today
 
@@ -108,9 +143,10 @@ Overlap protection patterns already used: `withoutOverlapping()`, `onOneServer()
 1. No New In age-expiration command, job, or schedule exists.
 2. No code currently queries Shopify for `tag` + `created_at` eligibility for expiration.
 3. Local `shopify_created_at` is incomplete / opportunistic; cannot be the sole eligibility source.
-4. Business requirement wording (“the New In tag”) understates the real tag set; removing only `new-in` would leave `new-arrivals`, `newbies`, and `{collection}-new-in` tags in place, which likely continue to drive automated New In collections.
-5. CMS product/draft tag sync can **reintroduce** expired tags after a Shopify-only `tagsRemove` unless local state is updated and future syncs are constrained.
-6. No dry-run reporting command for overdue New In products.
+4. ~~Business requirement wording understated the tag set~~ — **clarified:** every New In variation must expire; do not hardcode a closed list.
+5. `NewInTagService::removeManagedTags()` is catalogue-bound and insufficient alone for expiration coverage.
+6. CMS product/draft tag sync can **reintroduce** expired tags after a Shopify-only `tagsRemove` unless local state is updated and future syncs are constrained.
+7. No dry-run reporting command for overdue New In products / ambiguous-tag review.
 
 ---
 
@@ -122,36 +158,83 @@ Overlap protection patterns already used: `withoutOverlapping()`, `onOneServer()
 Daily schedule (Africa/Johannesburg)
   -> Artisan command (orchestration, locking, dry-run/limit)
     -> Queued job (or command-run service for small batches)
-      1. Compute cutoff = now(UTC) - 75 days  (compare against Shopify createdAt)
-      2. READ-ONLY paginated Shopify products query:
-           tag:<target> AND created_at:<=<'CUTOFF_ISO8601'>
-         Collect eligible product GIDs + createdAt + tags + status + title (+ variants/sku)
-         Do NOT mutate during pagination.
-      3. For each collected product (respect --limit):
-           a. Re-read product tags + createdAt (optional safety)
-           b. Confirm still has managed New In tag(s) and createdAt <= cutoff
-           c. tagsRemove(id, tags: [...exact tags to remove...])
-           d. Confirm via readback or empty userErrors + optional product.tags query
-           e. Update local Product.tags / matching NewProductDraft.tags / ShopifyRow Tags
-              using NewInTagService::removeManagedTags() (or scoped subset)
-      4. Emit summary (examined / eligible / removed / skipped / failed)
+      1. Compute cutoff = now - 75 days (compare against Shopify createdAt)
+      2. READ-ONLY productTags pagination → classify auto-remove vs ambiguous
+      3. For each auto-remove tag T, READ-ONLY paginate:
+           tag:'T' AND created_at:<='CUTOFF'
+         Merge unique product GIDs (any status). Do NOT mutate during pagination.
+      4. For each collected product (respect --limit):
+           a. Re-read tags + createdAt + status
+           b. Confirm createdAt <= cutoff
+           c. removable = all current tags matching auto-remove classifier
+              ambiguous = report only (no removal)
+           d. tagsRemove(id, removable) using exact Shopify spellings
+           e. Confirm; mirror local Product / draft / ShopifyRow tags
+      5. Emit summary + ambiguous-tag review list
 ```
 
 ### Why collect-then-mutate
 
 Removing tags changes the Shopify search result set while paging. Collecting IDs in a read-only pass, then mutating, avoids skipping or double-processing due to shifting cursors.
 
-### Tag scope recommendation (requires product owner confirmation)
+### Tag scope (confirmed)
 
-**Recommended default for true “leave New In” behavior:** remove the full managed set:
+Stakeholder clarification: expire **every** New In representation — not a hardcoded catalogue list. Includes:
 
-- `new-arrivals`, `new-in`, `newbies`
-- any managed `{collection}-new-in` and `{collection}-*-stacks-new-in` present on the product
-- Elevated Basics stack New In tags when present
+- tags containing `new-in`
+- tags containing `new-arrivals` / `new-arrival`
+- tags containing `newbies`
+- stack New In tags
+- collection-specific New In tags
+- legacy New In tags
+- capitalization / spacing / separator variants after normalization
+- standalone products, components, bracelets, necklaces, stacks
+- **all Shopify statuses** (active, draft, archived, unlisted equivalents)
 
-**If the business insists on only `new-in`:** document that collection-specific New In tags will remain and may keep products in automated New In collections.
+A product must not be skipped merely because it lacks canonical `new-in`.
 
-This assessment assumes the full managed set unless told otherwise.
+### Pattern-based classifier (do not hardcode the live list)
+
+Normalize each tag with the same rules as `TagNormalizer::normalizeToken()` (lowercase; non-alphanumerics → `-`).
+
+**Auto-remove (safe):**
+
+1. normalized tag equals `new-in`, `newin`, `new-arrivals`, `new-arrival`, or `newbies`
+2. normalized tag **contains** `new-in`
+3. normalized tag **contains** `new-arrivals` or equals/contains `new-arrival`
+4. normalized tag **contains** `newbies`
+
+**Report as ambiguous before removal (do not auto-delete):**
+
+- other tags whose normalized form contains a standalone `new` token (e.g. `brand-new`, `new-season`) that do **not** match the auto-remove rules
+- exclude obvious non-lifecycle noise such as `newborn`, `renew`, `renewal`, `newspaper` unless stakeholders later expand the rule
+
+Dry-run must list:
+
+- auto-remove tags found on each product
+- any ambiguous tags found (for human review; not removed until approved)
+
+`NewInTagService::removeManagedTags()` remains useful for local CMS mirroring of known patterns, but expiration classification must be broader than that helper.
+
+### Preferred discovery workflow (covers unknown variations)
+
+```text
+1. productTags pagination (read-only) → classify every shop tag
+2. For each auto-remove tag T:
+     products(query: "tag:'T' AND created_at:<='CUTOFF'")  # quote tags with special chars
+     Collect unique product GIDs across all T  (no mutations yet)
+3. For each collected product:
+     Re-read tags + createdAt + status
+     Confirm createdAt <= cutoff
+     Compute removable = classifier(auto-remove) ∩ current tags
+     Report ambiguous tags; do not remove them automatically
+     tagsRemove(id, removable)   # exact Shopify spellings
+     Confirm; mirror local CMS tags
+```
+
+Do **not** gate discovery on canonical `new-in` alone.
+
+Include draft/archived products: do **not** add `status:active` to the search filter unless stakeholders later restrict scope.
 
 ---
 
@@ -159,11 +242,20 @@ This assessment assumes the full managed set unless told otherwise.
 
 API version: **2026-01** (current CMS default).
 
-### Eligible products query
+### Shop-wide tag discovery (read-only)
+
+```graphql
+query DiscoverProductTags($first: Int!, $after: String) {
+  productTags(first: $first, after: $after) {
+    nodes
+    pageInfo { hasNextPage endCursor }
+  }
+}
+```
+
+### Eligible products query (per discovered New In tag)
 
 Shopify Admin product search supports both `tag` and `created_at` filters ([search syntax](https://shopify.dev/docs/api/usage/search-syntax), [products query](https://shopify.dev/docs/api/admin-graphql/latest/queries/products)).
-
-Exact tag token is `new-in` (hyphenated). Dates must be quoted.
 
 ```graphql
 query ExpireNewInCandidates($query: String!, $first: Int!, $after: String) {
@@ -190,19 +282,23 @@ query ExpireNewInCandidates($query: String!, $first: Int!, $after: String) {
 }
 ```
 
-Example query string:
+Example query strings (one pass per discovered tag, merge unique products):
 
 ```text
 tag:new-in AND created_at:<='2025-09-10T10:00:00Z'
+tag:new-arrivals AND created_at:<='2025-09-10T10:00:00Z'
+tag:newbies AND created_at:<='2025-09-10T10:00:00Z'
+tag:livi-road-new-in AND created_at:<='2025-09-10T10:00:00Z'
+tag:elevated-basics-necklace-stacks-new-in AND created_at:<='2025-09-10T10:00:00Z'
 ```
 
 Notes:
 
-- `created_at:<=` / `:<` are supported comparators.
-- For the full managed set, either:
-  - run one pass per tag (`tag:new-in`, `tag:new-arrivals`, `tag:newbies`, plus known collection tags), merging unique product IDs; or
-  - query `tag:new-in` as the primary gate (most products carry the canonical trio together), then remove all managed New In tags present on each product.
-- Verify live search behavior with a read-only smoke query before enabling writes (tag tokenization / quoting for unusual collection tags).
+- `created_at:<=` / `:<` are supported comparators; date values must be quoted.
+- Shopify `tag:` matching is exact per tag string; substring discovery must happen via `productTags` + classifier, not via a single wildcard product search.
+- Quote tag values when they contain spaces or special characters.
+- After merging candidates, remove **all** auto-matched New In tags present on each product (not only the discovery tag that found it).
+- Fallback if tag search proves incomplete: `created_at:<=CUTOFF` scan with client-side classifier (higher API cost; use only if needed).
 
 ### Safe tag removal mutation
 
@@ -294,15 +390,16 @@ Prefer avoiding new columns/tables for v1.
 
 ## Proposed implementation sequence
 
-1. Confirm tag scope with stakeholders (canonical `new-in` only vs full managed New In set).
-2. Read-only Shopify smoke query validating `tag:new-in AND created_at:<=...` against production (no mutations).
-3. Implement `NewInTagExpirationService` + command with **dry-run only**.
-4. Add mocked Pest coverage (age boundaries, pagination collect-then-mutate, userErrors, local tag mirror).
-5. Deploy behind disabled schedule / feature flag.
-6. Dry-run in production; review report.
-7. Live `--limit=5`, then `--limit=50`, then full cleanup.
-8. Enable daily schedule.
-9. Monitor for tag reintroduction via CMS product sync / draft New In toggle / CSV import; patch those paths if observed.
+1. ~~Confirm tag scope~~ — **confirmed:** all New In variations; all product statuses.
+2. Re-run read-only `productTags` discovery at implementation time; review any ambiguous tags before enabling removals.
+3. Smoke-test product search for each discovered auto-remove tag + `created_at` cutoff (no mutations).
+4. Implement pattern-based classifier + `NewInTagExpirationService` + command with **dry-run only**.
+5. Add mocked Pest coverage (multi-tag variants, products with only collection New In tags, age boundaries, pagination collect-then-mutate, userErrors, local tag mirror, ambiguous reporting).
+6. Deploy behind disabled schedule / feature flag.
+7. Dry-run in production; review auto-remove + ambiguous reports.
+8. Live `--limit=5`, then `--limit=50`, then full cleanup.
+9. Enable daily schedule.
+10. Monitor for tag reintroduction via CMS product sync / draft New In toggle / CSV import; patch those paths if observed.
 
 ---
 
@@ -346,9 +443,11 @@ Use a queued job for the mutation phase if eligible volume is large; keep the Ar
 
 Prefer `NewInTagService::removeManagedTags()` for consistency.
 
-### High: incomplete tag removal scope
+### High: incomplete tag removal scope (mitigated by clarification)
 
-Removing only `new-in` while leaving `new-arrivals`, `newbies`, and `{collection}-new-in` will likely leave products in automated New In collections.
+Must remove every auto-classified New In variation on the product in one pass. Leaving any collection/stack New In tag would keep the product in automated New In collections.
+
+Discovery must iterate **all** classified tags from `productTags`, not only canonical `new-in`.
 
 ### Medium: automated collection membership
 
@@ -450,7 +549,7 @@ Support `--limit` for controlled cleanup of already-overdue catalogue items.
 | No New In tags | Skip |
 | Missing/invalid createdAt | Skip + log; do not guess from CMS dates |
 | Deleted mid-run | Treat as skip/fail; continue |
-| Draft / archived with tag | Eligible if query returns them; optionally restrict to `status:active` after stakeholder decision |
+| Draft / archived with tag | **Eligible** — all Shopify statuses are in scope |
 | API failure / userErrors | Record failure; do not update local tags; retry later |
 | Rate limiting | Use existing client backoff; pause between pages |
 | Interrupted / concurrent runs | Overlap lock; idempotent resume |
@@ -465,20 +564,24 @@ Support `--limit` for controlled cleanup of already-overdue catalogue items.
 |----------|--------|
 | Is Shopify’s `createdAt` already available? | **Partially locally** via nullable `products.shopify_created_at`, filled mainly by inventory refresh. **Always available from Shopify GraphQL.** Use Shopify as authority. |
 | Can the existing Shopify API integration be reused? | **Yes.** `ShopifyApiClient` + existing `tagsRemove` pattern. |
-| Can eligible products be filtered directly through Shopify? | **Yes.** Product search supports `tag` and `created_at` together on Admin GraphQL. Validate the exact query string with a read-only smoke test. |
+| Can eligible products be filtered directly through Shopify? | **Yes.** Use `productTags` discovery + per-tag `tag:<exact> AND created_at:<=...` product searches. Do not rely on canonical `new-in` alone. |
 | Is a database migration required? | **No** for the preferred design. |
 | Could another CMS process restore expired tags? | **Yes — material risk.** Product tag sync / draft New In tooling / CSV import can reintroduce tags unless local state is updated and monitored. |
-| Safest implementation approach? | Daily Shopify-authoritative search → collect IDs → `tagsRemove` only managed New In tags → confirm → mirror local tags. Dry-run and `--limit` before full cleanup. Feature-flag the schedule. |
-| Ready for implementation? | **Yes, pending stakeholder confirmation of tag scope** (canonical `new-in` only vs full managed New In set) and a read-only production query smoke test. |
+| Safest implementation approach? | Daily Shopify-authoritative `productTags` discovery → classify → multi-tag candidate collection → `tagsRemove` all auto-matched New In tags on each eligible product (any status) → confirm → mirror local tags. Report ambiguous tags without removing them. Dry-run / `--limit` / feature-flagged schedule. |
+| Ready for implementation? | **Yes**, with clarified tag/status scope and a completed read-only live tag discovery (10 auto-matched tags; 0 ambiguous as of 2026-11-24). Awaiting implementation approval. |
 
 ---
 
 ## Approval gate
 
-No implementation has been started.
+No application implementation has been started. Assessment-only updates were applied to this document. One temporary read-only discovery script was executed against Shopify `productTags` and deleted afterward; **no mutations** were sent.
+
+Clarifications already received:
+
+1. Expire **all New In variations** via pattern matching — not a hardcoded closed list.
+2. Include **all product statuses**.
 
 Please confirm:
 
-1. Remove **full managed New In tag set** (recommended) or **only `new-in`**?
-2. Include draft/archived products, or active-only?
-3. Approval to proceed with implementation after that confirmation?
+1. Approval to proceed with implementation on that basis?
+2. Confirm ambiguous-tag policy: **report only / do not auto-remove** until reviewed (recommended)?

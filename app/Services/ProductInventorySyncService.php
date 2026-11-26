@@ -534,9 +534,15 @@ final class ProductInventorySyncService
                 $product->status = $remoteStatus;
                 $productChanged = true;
             }
-            if ($remoteCreatedAt !== '' && $product->shopify_created_at?->toIso8601String() !== $remoteCreatedAt) {
-                $product->shopify_created_at = $remoteCreatedAt;
-                $productChanged = true;
+            if ($remoteCreatedAt !== '') {
+                $localUtc = $product->shopify_created_at
+                    ? \Carbon\CarbonImmutable::instance($product->shopify_created_at)->utc()->format('Y-m-d\TH:i:s\Z')
+                    : null;
+                $remoteUtc = \Carbon\CarbonImmutable::parse($remoteCreatedAt)->utc()->format('Y-m-d\TH:i:s\Z');
+                if ($localUtc !== $remoteUtc) {
+                    $product->shopify_created_at = $remoteCreatedAt;
+                    $productChanged = true;
+                }
             }
             if ($productChanged) {
                 $product->save();

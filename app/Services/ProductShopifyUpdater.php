@@ -2053,8 +2053,11 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
         if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_BODY_HTML) && $bodyHtml !== null) {
             $input['descriptionHtml'] = $bodyHtml;
         }
+        $pendingTags = null;
         if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_TAGS) && $tagsRaw !== null) {
-            $input['tags'] = TagNormalizer::parseTokens((string) $tagsRaw);
+            // Defer age filtering until the mutation-target lock is held with $productId.
+            $pendingTags = TagNormalizer::parseTokens((string) $tagsRaw);
+            $input['tags'] = $pendingTags;
         }
         if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_STATUS) && $statusRaw !== null) {
             $mappedStatus = $this->mapStatusForSync((string) $statusRaw);
@@ -2106,44 +2109,77 @@ GQL, ['id' => $variantId, 'after' => $cursor]);
         }
 
         if (count($input) > 1) {
-            logger()->info('Shopify mutation executed', [
-                'origin' => 'products',
-                'product_id' => $product->id,
-                'mutation' => 'productUpdate',
-                'fields' => array_values(array_diff(array_keys($input), ['id'])),
-            ]);
-            // 1) Update product (and category if provided)
-            $data = $this->graphql($this->productUpdateMutation(), [
-                'input' => $input,
-            ]);
+            $sendProductUpdate = function (array $mutationInput, ?callable $beforeRequest) use ($product): array {
+                logger()->info('Shopify mutation executed', [
+                    'origin' => 'products',
+                    'product_id' => $product->id,
+                    'mutation' => 'productUpdate',
+                    'fields' => array_values(array_diff(array_keys($mutationInput), ['id'])),
+                ], $beforeRequest);
 
-            $errors = data_get($data, 'productUpdate.userErrors', []);
-            if (is_array($errors) && ! empty($errors)) {
-                $messages = $this->formatUserErrors($errors);
+                return $this->graphql($this->productUpdateMutation(), [
+                    'input' => $mutationInput,
+                ]);
+            };
 
-                // If category field is rejected/unsupported, try fallback category update, then retry without category
-                if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
-                    $this->categoryGraphqlSupported = false;
+            $runMutations = function (array $mutationInput, ?callable $beforeRequest = null) use (
+                $sendProductUpdate,
+                &$warnings,
+                $syncProduct,
+                $coreFields,
+                $resolvedCategoryGid,
+                $product,
+                $productId,
+                $productType,
+            ): array {
+                $data = $sendProductUpdate($mutationInput, $beforeRequest);
+                $errors = data_get($data, 'productUpdate.userErrors', []);
+                if (is_array($errors) && ! empty($errors)) {
+                    $messages = $this->formatUserErrors($errors);
 
-                    $warnings = array_merge(
-                        $warnings,
-                        $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
-                    );
+                    if ($syncProduct && $this->coreFieldEnabled($coreFields, self::CORE_FIELD_CATEGORY) && $resolvedCategoryGid !== null && $this->isUnsupportedCategoryInputMessage($messages)) {
+                        $this->categoryGraphqlSupported = false;
 
-                    unset($input['category']);
+                        $warnings = array_merge(
+                            $warnings,
+                            $this->attemptCategoryUpdate($product, $productId, $resolvedCategoryGid, $productType)
+                        );
 
-                    $data = $this->graphql($this->productUpdateMutation(), [
-                        'input' => $input,
-                    ]);
-
-                    $errors = data_get($data, 'productUpdate.userErrors', []);
-                    if (is_array($errors) && ! empty($errors)) {
-                        $messages = $this->formatUserErrors($errors);
+                        unset($mutationInput['category']);
+                        if (isset($mutationInput['tags'])) {
+                            $mutationInput['tags'] = app(NewInTagExpirationService::class)->filterOutboundTags(
+                                $product,
+                                $mutationInput['tags'],
+                                resolvedProductGid: $productId,
+                            );
+                        }
+                        $data = $sendProductUpdate($mutationInput, $beforeRequest);
+                        $errors = data_get($data, 'productUpdate.userErrors', []);
+                        if (is_array($errors) && ! empty($errors)) {
+                            $messages = $this->formatUserErrors($errors);
+                            throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
+                        }
+                    } else {
                         throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
                     }
-                } else {
-                    throw new \RuntimeException($messages !== '' ? $messages : 'Shopify rejected the update.');
                 }
+
+                return [$data, $mutationInput];
+            };
+
+            if (array_key_exists('tags', $input)) {
+                [$data, $input] = app(NewInTagExpirationService::class)->withGuardedTagMutation(
+                    $productId,
+                    array_values((array) $input['tags']),
+                    function (array $filteredTags, ?callable $beforeRequest) use ($runMutations, $input): array {
+                        $input['tags'] = array_values($filteredTags);
+
+                        return $runMutations($input, $beforeRequest);
+                    },
+                    $product,
+                );
+            } else {
+                [$data, $input] = $runMutations($input);
             }
 
             if ($handleChangeRequested) {
@@ -5079,11 +5115,11 @@ GQL;
         return null;
     }
 
-    private function graphql(string $query, array $variables = []): array
+    private function graphql(string $query, array $variables = [], ?callable $beforeRequest = null): array
     {
         $this->imageSyncMutex?->assertOwned();
 
-        return $this->client->graphql($query, $variables);
+        return $this->client->graphql($query, $variables, $beforeRequest);
     }
 
     private function updateImages(

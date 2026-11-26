@@ -974,6 +974,7 @@ class ShopYourVibeWorkflow
                 // All changed targets must pass preflight before any new writes.
                 // An unavailable target is unfinished work, never a successful no-op.
                 $current = $this->shopify->collection($gid);
+                app(ShopYourVibeSorting::class)->assertExpirationMembershipSettled($gid, $this->membership($current));
                 foreach ($state['cards'] as $card) {
                     if ($card['collection_gid'] === $gid) {
                         $this->assertCollectionLink($card, $current);
@@ -1072,6 +1073,7 @@ class ShopYourVibeWorkflow
             $this->holdOperationLock($draft);
             foreach ($currentCollections as $gid => $current) {
                 $desired = $state['collections'][$gid];
+                app(ShopYourVibeSorting::class)->assertExpirationMembershipSettled($gid, $this->membership($current));
                 if ($desired['enable_manual'] && $current['sort'] !== 'MANUAL') {
                     $this->shopify->enableManual($gid);
                     $current['sort'] = 'MANUAL';
@@ -1609,8 +1611,9 @@ class ShopYourVibeWorkflow
                 $this->checkpointCollection($draft, $baseline, $gid);
             }
             $current = $this->shopify->collection($gid);
+            $sorting = app(ShopYourVibeSorting::class);
+            $checkExpirationMembership = $sorting->assertExpirationMembershipSettled($gid, $this->membership($current));
             if ($this->membership($current) !== $this->membership($desired)) {
-                $sorting = app(ShopYourVibeSorting::class);
                 $sorting->invalidateUnpublishedApproval($draft, $gid);
                 $diff = $sorting->describeMembershipChange($draft, $gid, $desired, $current);
                 $draft->refresh();
@@ -1639,6 +1642,15 @@ class ShopYourVibeWorkflow
                 $moves = $this->moves(array_column($current['products'], 'id'), $wantedIds);
                 foreach (array_chunk($moves, 250) as $chunk) {
                     if ($chunk !== []) {
+                        if ($checkExpirationMembership) {
+                            $membership = $this->membership($this->shopify->collectionMembership($gid));
+                            $sorting->assertExpirationMembershipSettled($gid, $membership);
+                            if ($membership !== $this->membership($desired)) {
+                                $sorting->invalidateUnpublishedApproval($draft, $gid);
+
+                                throw new RuntimeException('Shopify membership changed during publication. Refresh and approve this collection again.');
+                            }
+                        }
                         app(ShopYourVibeEditing::class)->validateJob($id, $authorization, false);
                         // Persist uncertainty before the HTTP call: a lost response or killed
                         // worker must never silently authorize a second, competing reorder.

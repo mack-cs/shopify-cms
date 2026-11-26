@@ -891,6 +891,24 @@ Schedule::command('shopify:run-daily-pipeline --scheduled')
     ->withoutOverlapping()
     ->name('shopify-daily-orders-inventory-pipeline');
 
+Schedule::command('products:expire-new-in-tags --force')
+    ->dailyAt((string) config('new_in_expiration.schedule_time', '03:15'))
+    ->timezone((string) config('new_in_expiration.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping(120)
+    ->onOneServer()
+    ->when(fn (): bool => (bool) config('new_in_expiration.enabled', false)
+        && (bool) config('new_in_expiration.enforcement_enabled', false))
+    ->name('daily-new-in-tag-expiration');
+
+Schedule::command('products:expire-new-in-tags --recover-local')
+    ->everyFiveMinutes()
+    ->timezone((string) config('new_in_expiration.timezone', 'Africa/Johannesburg'))
+    ->withoutOverlapping(30)
+    ->onOneServer()
+    ->when(fn (): bool => (config('new_in_expiration.enabled', false) || config('new_in_expiration.recovery_enabled', false))
+        && (bool) config('new_in_expiration.enforcement_enabled', false))
+    ->name('new-in-expiration-operation-recovery');
+
 Schedule::command('product-movement:generate --months=6')
     ->fridays()
     ->at('00:00')

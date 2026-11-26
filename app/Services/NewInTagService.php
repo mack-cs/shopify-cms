@@ -14,7 +14,9 @@ final class NewInTagService
     ];
 
     public function __construct(
-        private readonly DropdownCollectionCatalog $collectionCatalog
+        private readonly DropdownCollectionCatalog $collectionCatalog,
+        private readonly NewInTagClassifier $classifier,
+        private readonly NewInTagExpirationService $expiration,
     ) {
     }
 
@@ -22,9 +24,15 @@ final class NewInTagService
      * @param array<int, string> $existing
      * @return array<int, string>
      */
-    public function tagsForNewProduct(array $existing, mixed $type = null, mixed $title = null): array
-    {
+    public function tagsForNewProduct(
+        array $existing,
+        mixed $type = null,
+        mixed $title = null,
+        ?\App\Models\Product $product = null,
+        ?string $productGid = null,
+    ): array {
         $existing = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($existing));
+
         $original = $existing;
         $required = self::TAGS;
         $context = $this->collectionContextForTags($existing);
@@ -52,7 +60,11 @@ final class NewInTagService
             $required[] = "{$collectionTag}-new-in";
         }
 
-        return TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray(array_merge($existing, $required)));
+        return $this->expiration->filterLocalAssignmentTags(
+            TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray(array_merge($existing, $required))),
+            $product,
+            $productGid,
+        );
     }
 
     /**
@@ -61,11 +73,10 @@ final class NewInTagService
      */
     public function removeManagedTags(array $existing): array
     {
-        return array_values(array_filter(
-            TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($existing)),
-            fn (string $tag): bool => ! in_array($tag, self::TAGS, true)
-                && ! $this->isManagedCollectionNewInTag($tag)
-        ));
+        $tokens = TagNormalizer::parseTokens(TagNormalizer::normalizeFromArray($existing));
+
+        // Prefer the shared pattern classifier so collection/stack/legacy variants are covered.
+        return $this->classifier->stripAutoRemove($tokens);
     }
 
     /**
@@ -84,7 +95,12 @@ final class NewInTagService
             }
 
             $existing = TagNormalizer::parseTokens($draft->tags);
-            $desired = $this->tagsForNewProduct($existing, $draft->type, $draft->title);
+            $desired = $this->tagsForNewProduct(
+                $existing,
+                $draft->type,
+                $draft->title,
+                productGid: $draft->shopify_id,
+            );
             if ($desired === $existing) {
                 $alreadyMarked++;
 

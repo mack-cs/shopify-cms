@@ -4,15 +4,21 @@ use App\Contracts\ShopifyGraphqlGateway;
 use App\Enums\RolesEnum;
 use App\Filament\Pages\ShopYourVibe;
 use App\Models\Import;
+use App\Models\NewInExpirationOperation;
+use App\Models\Product;
 use App\Models\ShopifyCollection;
+use App\Models\ShopYourVibeCollectionMapping;
 use App\Models\ShopYourVibeDraft;
 use App\Models\SyvCollectionSortState;
 use App\Models\User;
 use App\Services\ShopYourVibeEditing;
+use App\Services\NewInTagExpirationService;
 use App\Services\ShopYourVibeSorting;
 use App\Services\ShopYourVibeWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 
@@ -389,6 +395,95 @@ it('still refuses publication and names the membership difference without reorde
         ->and(SyvCollectionSortState::query()->where('collection_gid', $this->main)->first()->shopify_confirmed_at)->toBeNull()
         ->and(count(array_filter($this->fake->calls, fn (array $call): bool => str_contains($call[0], 'VibeReorderProducts'))))->toBe($reorders)
         ->and($page->instance()->membershipPrompt['removed'][0]['id'])->toBe('gid://shopify/Product/103');
+});
+
+it('waits for expiration membership to settle and publishes the refreshed approved order', function () {
+    config([
+        'new_in_expiration.enforcement_enabled' => true,
+        'services.shopify.shop' => 'example.myshopify.com',
+        'services.shopify.admin_access_token' => 'fake-token',
+    ]);
+    Queue::fake();
+    $gid = 'gid://shopify/Product/103';
+    ShopYourVibeCollectionMapping::create([
+        'shopify_collection_id' => $this->main, 'parent_collection_id' => $this->main,
+        'collection_name' => 'Necklaces', 'collection_handle' => 'necklaces', 'membership_tag' => 'new-in',
+    ]);
+    ShopYourVibeCollectionMapping::create([
+        'shopify_collection_id' => $this->vibe, 'parent_collection_id' => $this->main,
+        'collection_name' => 'Pearl', 'collection_handle' => 'pearl', 'membership_tag' => 'new-in',
+    ]);
+    Product::create([
+        'import_id' => Import::where('is_current', true)->value('id'),
+        'shopify_id' => $gid, 'title' => 'Product 103', 'handle' => 'p103', 'tags' => 'new-in, sale',
+    ]);
+    $unrelated = gateIds($this->draft, $this->vibe);
+    gateSort($this, $this->sorter, $this->main, 'gid://shopify/Product/101');
+    $scope = ShopYourVibeEditing::sortScope($this->main);
+    $revision = (int) $this->draft->editing_state['locks'][$scope]['revision'];
+    app(ShopYourVibeEditing::class)->token = $this->heldTokens[$this->main];
+    $this->draft = $this->sorting->submit($this->draft->id, $this->draft->revision, $this->reviewer->id, $this->main, $revision)->fresh();
+    $this->actingAs($this->reviewer);
+    $this->draft = $this->sorting->approveScope($this->draft->id, $this->main, $revision)->fresh();
+
+    $tags = ['new-in', 'sale'];
+    $member = true;
+    $created = now('UTC')->subDays(80)->toIso8601String();
+    Http::preventStrayRequests();
+    Http::fake(function ($request) use ($gid, $created, &$tags, &$member) {
+        $product = ['id' => $gid, 'tags' => $tags, 'createdAt' => $created];
+        if (str_contains($request['query'], 'mutation RemoveNewInTags')) {
+            $tags = ['sale'];
+            $product['tags'] = $tags;
+
+            return Http::response(['data' => ['tagsRemove' => ['node' => $product, 'userErrors' => []]]]);
+        }
+        if (str_contains($request['query'], 'ConfirmNewInCollectionRemoval')) {
+            $collectionGid = $request['variables']['collection'];
+            $otherRule = $collectionGid === $this->vibe;
+            $product['inCollection'] = $otherRule || $member;
+            $rules = [['column' => 'TAG', 'relation' => 'EQUALS', 'condition' => 'new-in']];
+            if ($otherRule) {
+                $rules[] = ['column' => 'VENDOR', 'relation' => 'EQUALS', 'condition' => 'Livi Road'];
+            }
+
+            return Http::response(['data' => [
+                'product' => $product,
+                'collection' => [
+                    'id' => $collectionGid,
+                    'ruleSet' => ['appliedDisjunctively' => $otherRule, 'rules' => $rules],
+                ],
+            ]]);
+        }
+
+        return Http::response(['data' => ['product' => $product]]);
+    });
+    $expiration = app(NewInTagExpirationService::class);
+    $operation = $expiration->executeRemoval($expiration->evaluateCandidate([
+        'id' => $gid, 'createdAt' => $created, 'tags' => $tags,
+    ], $expiration->cutoff()))['operation'];
+    expect($operation->status)->toBe(NewInExpirationOperation::STATUS_REMOTE_CONFIRMED);
+
+    $page = Livewire::test(ShopYourVibe::class)->call('manage', $this->main);
+    $page->call('approveAndPublishSorting', $this->main)->assertSee('Shopify is still updating this collection');
+    expect(collect($this->fake->mutations())->contains(fn ($call) => str_contains($call[0], 'VibeReorderProducts')))->toBeFalse();
+
+    $member = false;
+    array_pop($this->fake->collections[$this->main]['products']['nodes']);
+    $this->fake->collections[$this->main]['productsCount']['count'] = 2;
+    expect($expiration->recoverOperation($operation))->toBe(NewInExpirationOperation::STATUS_CONFIRMED)
+        ->and(SyvCollectionSortState::where('collection_gid', $this->main)->firstOrFail()->approved_at)->toBeNull()
+        ->and(gateIds($this->draft, $this->vibe))->toBe($unrelated);
+
+    $page->call('refreshMembershipPreservingSort', $this->main)
+        ->call('approveAndPublishSorting', $this->main);
+
+    expect($page->instance()->sortPublishError)->toBeNull()
+        ->and($this->draft->fresh()->last_error)->toBeNull();
+    expect(array_column($this->fake->collections[$this->main]['products']['nodes'], 'id'))
+        ->toBe(['gid://shopify/Product/102', 'gid://shopify/Product/101'])
+        ->and(SyvCollectionSortState::where('collection_gid', $this->main)->firstOrFail()->shopify_confirmed_at)->not->toBeNull()
+        ->and(gateIds($this->draft, $this->vibe))->toBe($unrelated);
 });
 
 it('does not run a second membership check while one is already in progress', function () {

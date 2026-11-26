@@ -67,6 +67,12 @@ function fakeGuardShopify(array &$queries, array &$payloads): void
         $queries[] = $query;
         $payloads[] = $variables;
 
+        if (str_contains($query, 'query NewInProductCreatedAt')) {
+            return Http::response(['data' => ['product' => [
+                'id' => $variables['id'], 'createdAt' => now('UTC')->subDays(76)->toIso8601String(),
+            ]]]);
+        }
+
         if (str_contains($query, 'inventorySetQuantities')
             || str_contains($query, 'inventoryAdjustQuantities')
             || str_contains($query, 'inventoryItemUpdate')
@@ -280,6 +286,24 @@ it('keeps a retried explicit approval limited to the original fields', function 
         ->and($productUpdate['input'])->not->toHaveKey('descriptionHtml')
         ->and(guardQueriesContain($queries, 'productVariantsBulkUpdate'))->toBeFalse()
         ->and(guardQueriesContain($queries, 'inventorySetQuantities'))->toBeFalse();
+});
+
+it('strips expired tags when a previously queued tag approval finally runs', function (): void {
+    config(['new_in_expiration.enforcement_enabled' => true]);
+    $product = guardProduct(['tags' => 'new-in, bracelets', 'shopify_created_at' => null]);
+    $scopes = [ProductShopifyUpdater::SYNC_SCOPE_PRODUCT];
+    $fields = [ProductShopifyUpdater::CORE_FIELD_TAGS];
+    approveGuardField($product, $scopes, $fields);
+    $job = unserialize(serialize(new ProductShopifyUpdateJob([$product->id], null, $scopes, $fields)));
+    $queries = [];
+    $payloads = [];
+    fakeGuardShopify($queries, $payloads);
+
+    app()->call([$job, 'handle']);
+
+    expect(guardQueriesContain($queries, 'query NewInProductCreatedAt'))->toBeTrue()
+        ->and(collect($payloads)->first(fn (array $payload): bool => isset($payload['input']['tags']))['input']['tags'])
+        ->toBe(['bracelets']);
 });
 
 it('sends one approved variant field and never writes inventory from product sync', function (): void {

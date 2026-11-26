@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\NewInExpirationOperation;
 use App\Jobs\SendSyvLaunchSortWarningJob;
 use App\Jobs\SendSyvSortApprovalEmailJob;
 use App\Models\ChangeLog;
@@ -243,6 +244,7 @@ class ShopYourVibeSorting
                 $shopifyIds[] = $id;
                 $liveTitles[$id] = (string) ($product['title'] ?? $id);
             }
+            $this->assertExpirationMembershipSettled($gid, $shopifyIds);
             $savedProducts = $desired['collections'][$gid]['products'] ?? [];
             $baselineProducts = $snapshot['collections'][$gid]['products'] ?? $savedProducts;
             $savedIds = array_values(array_filter(
@@ -417,20 +419,55 @@ class ShopYourVibeSorting
         });
     }
 
+    /** Returns whether this collection uses a New In membership tag. */
+    public function assertExpirationMembershipSettled(string $collectionGid, array $productGids): bool
+    {
+        if (! config('new_in_expiration.enforcement_enabled')) {
+            return false;
+        }
+
+        $tags = ShopYourVibeCollectionMapping::query()->where('is_active', true)
+            ->where('shopify_collection_id', $collectionGid)
+            ->whereNotNull('membership_tag')->pluck('membership_tag')
+            ->filter(app(NewInTagClassifier::class)->isAutoRemove(...))
+            ->map(fn (string $tag): string => mb_strtolower(trim($tag)))->all();
+        if ($tags === []) {
+            return false;
+        }
+
+        $operations = NewInExpirationOperation::query()
+            ->whereIn('active_product_gid', $productGids)
+            ->where(function ($query): void {
+                $query->whereIn('status', [
+                    NewInExpirationOperation::STATUS_PENDING,
+                    NewInExpirationOperation::STATUS_MUTATING,
+                    NewInExpirationOperation::STATUS_REMOTE_CONFIRMED,
+                ])->orWhereNotNull('remote_confirmed_at');
+            })->get(['tags_to_remove']);
+        foreach ($operations as $operation) {
+            $removed = array_map(fn (string $tag): string => mb_strtolower(trim($tag)), $operation->tags_to_remove);
+            if (array_intersect($tags, $removed) !== []) {
+                throw new RuntimeException('Shopify is still updating this collection after New In expiration. Refresh its membership before sorting or publishing.');
+            }
+        }
+
+        return true;
+    }
+
     /**
      * Apply a Shopify-confirmed membership tag change to pending collection orders.
-     * Planned draft tags must not be passed here.
      *
      * @param  array<int, string>  $before
      * @param  array<int, string>  $after
      */
-    public function reconcileMembershipTags(string $productGid, array $before, array $after): void
+    public function reconcileMembershipTags(string $productGid, array $before, array $after, ?array $onlyCollections = null): void
     {
         $beforeKeys = array_fill_keys(array_map(fn ($tag) => mb_strtolower(trim((string) $tag)), $before), true);
         $afterKeys = array_fill_keys(array_map(fn ($tag) => mb_strtolower(trim((string) $tag)), $after), true);
         $mappings = ShopYourVibeCollectionMapping::query()
             ->where('is_active', true)
             ->whereNotNull('membership_tag')
+            ->when($onlyCollections !== null, fn ($query) => $query->whereIn('shopify_collection_id', $onlyCollections))
             ->get();
         $add = [];
         $remove = [];

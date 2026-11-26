@@ -289,16 +289,22 @@ final class NewProductDraftShopifyCreator
         }
 
         $originalHandle = trim((string) ($draft->handle ?? ''));
+        $remoteId = trim((string) ($remote['id'] ?? ''));
+        $tags = TagNormalizer::parseTokens((string) ($draft->tags ?? ''));
+
         $input = $this->unlistedUpdateInput($draft, $remote);
-        $data = $this->client->graphql($this->productSetMutation(false), ['input' => $input]);
-        $payload = is_array($data['productSet'] ?? null) ? $data['productSet'] : null;
-        $error = $this->userErrorMessage(
-            is_array($payload) ? (array) ($payload['userErrors'] ?? []) : [],
-            'Missing productSet payload.'
+        $send = fn (array $variables, ?callable $beforeRequest = null): array =>
+            $this->client->graphql($this->productSetMutation(false), ['input' => $variables], $beforeRequest);
+        $data = $tags === [] ? $send($input) : app(NewInTagExpirationService::class)->withGuardedTagMutation(
+            $remoteId,
+            $tags,
+            fn (array $filteredTags, ?callable $beforeRequest): array =>
+                $send(array_replace($input, ['tags' => $filteredTags]), $beforeRequest),
         );
-        if (! is_array($payload)) {
-            $error = 'Missing productSet payload.';
-        }
+        $payload = is_array($data['productSet'] ?? null) ? $data['productSet'] : null;
+        $error = $payload === null
+            ? 'Missing productSet payload.'
+            : $this->userErrorMessage((array) ($payload['userErrors'] ?? []), 'Missing productSet payload.');
         if ($error !== null) {
             return [
                 'error' => $error,
@@ -318,13 +324,12 @@ final class NewProductDraftShopifyCreator
             ];
         }
 
-        $productId = trim((string) data_get($payload, 'product.id', $remote['id']));
-        $publicationError = $this->publishUnlistedProductToAllChannels($productId);
+        $productId = trim((string) data_get($payload, 'product.id', $remoteId));
 
         return [
             'error' => null,
             'reason' => null,
-            'publication_error' => $publicationError,
+            'publication_error' => $this->publishUnlistedProductToAllChannels($productId),
             'image_missing' => $this->unlistedImageFile($draft) === null,
         ];
     }
@@ -648,6 +653,7 @@ GQL;
         if ($type !== '') {
             $input['productType'] = $type;
         }
+
         $tags = TagNormalizer::parseTokens((string) ($draft->tags ?? ''));
         if ($tags !== []) {
             $input['tags'] = $tags;

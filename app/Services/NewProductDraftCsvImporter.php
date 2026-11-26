@@ -268,15 +268,6 @@ final class NewProductDraftCsvImporter
                 $data = $this->applyImportedTypeCategoryMapping($data);
                 [$data, $appliedCollectionRule] = $this->applyCollectionPrepopulation($data);
                 $data = $this->mergeImportedTagSources($data);
-                if ($appliedCollectionRule === true) {
-                    $data['tags'] = TagNormalizer::normalizeFromArray(
-                        app(NewInTagService::class)->tagsForNewProduct(
-                            TagNormalizer::parseTokens($data['tags'] ?? null),
-                            $data['type'] ?? null,
-                            $data['title'] ?? null
-                        )
-                    );
-                }
                 $payload = $this->applyDefaultExtraShopifyPayload($payload);
                 if ($appliedCollectionRule === true) {
                     $prepopulationApplied++;
@@ -411,6 +402,23 @@ final class NewProductDraftCsvImporter
 
                         continue;
                     }
+                }
+
+                $resolvedGid = filled($data['shopify_id'] ?? null)
+                    ? (string) $data['shopify_id']
+                    : $draft?->shopify_id;
+                if ($appliedCollectionRule === true) {
+                    $data['tags'] = TagNormalizer::normalizeFromArray(app(NewInTagService::class)->tagsForNewProduct(
+                        TagNormalizer::parseTokens($data['tags'] ?? null),
+                        $data['type'] ?? null,
+                        $data['title'] ?? null,
+                        productGid: $resolvedGid,
+                    ));
+                } elseif (array_key_exists('tags', $data) && filled($resolvedGid)) {
+                    $data['tags'] = TagNormalizer::normalizeFromArray(app(NewInTagExpirationService::class)->filterLocalAssignmentTags(
+                        TagNormalizer::parseTokens($data['tags']),
+                        productGid: $resolvedGid,
+                    ));
                 }
 
                 $seoReference = trim((string) ($sku ?: $handle ?: 'unknown product'));

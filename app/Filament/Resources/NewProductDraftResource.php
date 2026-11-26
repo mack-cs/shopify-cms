@@ -2566,8 +2566,13 @@ class NewProductDraftResource extends Resource
      * @param array<int, string> $tags
      * @return array<int, string>
      */
-    private static function defaultedDraftTags(array $tags, mixed $type, bool $isOnSale, bool $isNewIn = true): array
-    {
+    private static function defaultedDraftTags(
+        array $tags,
+        mixed $type,
+        bool $isOnSale,
+        bool $isNewIn = true,
+        ?string $productGid = null,
+    ): array {
         $tags = self::normalizeBundleCollectionTags($tags);
         $tags = array_values(array_filter(
             $tags,
@@ -2594,7 +2599,7 @@ class NewProductDraftResource extends Resource
 
         $service = app(NewInTagService::class);
         $tags = $isNewIn
-            ? $service->tagsForNewProduct($tags, $type)
+            ? $service->tagsForNewProduct($tags, $type, productGid: $productGid)
             : $service->removeManagedTags($tags);
 
         if (self::isBundleOrStackState($type, $tags)) {
@@ -6999,7 +7004,7 @@ class NewProductDraftResource extends Resource
         );
         unset($data['extra_shopify_fields']);
 
-        $data = self::applyDraftSaleAndBundleData($data);
+        $data = self::applyDraftSaleAndBundleData($data, $record);
 
         if ($record) {
             $data = self::removeConflictingDraftInputs($data, $record);
@@ -7012,7 +7017,7 @@ class NewProductDraftResource extends Resource
      * @param array<string, mixed> $data
      * @return array<string, mixed>
      */
-    private static function applyDraftSaleAndBundleData(array $data): array
+    private static function applyDraftSaleAndBundleData(array $data, ?NewProductDraft $record): array
     {
         $tags = self::normalizeTagList($data['tags'] ?? null);
         $isOnSale = array_key_exists('is_on_sale', $data)
@@ -7033,9 +7038,11 @@ class NewProductDraftResource extends Resource
             }
         }
 
+        $productGid = filled($data['shopify_id'] ?? null) ? (string) $data['shopify_id'] : $record?->shopify_id;
+
         $data['is_on_sale'] = $isOnSale;
         $data['tags'] = TagNormalizer::normalizeFromArray(
-            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale, $isNewIn)
+            self::defaultedDraftTags($tags, $data['type'] ?? null, $isOnSale, $isNewIn, $productGid)
         );
 
         self::validateDraftSalePricing($data);

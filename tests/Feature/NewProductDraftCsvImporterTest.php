@@ -12,6 +12,7 @@ use App\Services\HeaderStore;
 use App\Services\NewProductDraftCsvImporter;
 use App\Services\NewProductDraftRoundtripCsvService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
@@ -71,6 +72,41 @@ it('allows a roundtrip update when the sku belongs to the linked product variant
         ->and($profile->draft_seo_description)->toBe($seoDescription);
 
     @unlink($path);
+});
+
+it('filters explicit CSV tags without prepopulation using the Shopify product resolved by SKU', function (): void {
+    config([
+        'new_in_expiration.enforcement_enabled' => true,
+        'services.shopify.shop' => 'example.myshopify.com',
+        'services.shopify.admin_access_token' => 'fake-token',
+    ]);
+    $gid = 'gid://shopify/Product/701';
+    $product = Product::create([
+        'import_id' => $this->draftCsvImport->id, 'title' => 'Existing product',
+        'handle' => 'existing-product', 'shopify_id' => $gid, 'status' => 'active',
+    ]);
+    Variant::create(['product_id' => $product->id, 'sku' => 'OLD-701']);
+    NewProductDraft::withoutEvents(fn () => NewProductDraft::create(['title' => 'Draft', 'sku' => 'OLD-701']));
+    Http::preventStrayRequests();
+    Http::fake(function ($request) use ($gid) {
+        expect($request['variables']['id'])->toBe($gid);
+
+        return Http::response(['data' => ['product' => ['id' => $gid, 'createdAt' => '2020-01-01T00:00:00Z']]]);
+    });
+
+    $path = tempnam(sys_get_temp_dir(), 'draft-expiration-csv-');
+    try {
+        file_put_contents($path, "SKU,Tags\nOLD-701,\"new-in, sale\"\n");
+        $result = app(NewProductDraftCsvImporter::class)->importFromPath($path);
+    } finally {
+        unlink($path);
+    }
+
+    $draft = NewProductDraft::where('sku', 'OLD-701')->sole();
+    expect($result['updated'])->toBe(1)
+        ->and($draft->shopify_id)->toBe($gid)
+        ->and($draft->tags)->toBe('all-products-collections, all-products, sale');
+    Http::assertSentCount(1);
 });
 
 it('creates a sku-only draft from csv and reuses the sku for later details', function (): void {

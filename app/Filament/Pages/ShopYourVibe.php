@@ -266,7 +266,9 @@ class ShopYourVibe extends Page
         if (! $alreadyMine || (is_array($storedPrompt) && ($storedPrompt['gid'] ?? null) === $gid)) {
             $live = $this->lockedMembershipRead($gid);
             $saved = $draft->desired['collections'][$gid];
-            $diff = app(ShopYourVibeSorting::class)->describeMembershipChange($draft->fresh() ?? $draft, $gid, $saved, $live);
+            $sorting = app(ShopYourVibeSorting::class);
+            $sorting->assertExpirationMembershipSettled($gid, $sorting->membershipIds($live['products']));
+            $diff = $sorting->describeMembershipChange($draft->fresh() ?? $draft, $gid, $saved, $live);
             if (! $diff['matches']) {
                 unset($this->sortingUnlocked[$gid]);
                 $this->storeMembershipPrompt($gid, $diff);
