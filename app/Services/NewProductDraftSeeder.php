@@ -135,6 +135,12 @@ final class NewProductDraftSeeder
         ];
     }
 
+    public function openForProduct(Product $product, ?int $userId = null): NewProductDraft
+    {
+        return $this->resolveExistingDraftForProduct($product)
+            ?? NewProductDraft::create($this->draftDataFromProduct($product, $userId));
+    }
+
     public function upsertFromProduct(Product $product, ?int $userId = null): NewProductDraft
     {
         $data = $this->draftDataFromProduct($product, $userId);

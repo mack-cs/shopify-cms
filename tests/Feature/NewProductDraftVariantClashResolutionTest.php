@@ -1,6 +1,8 @@
 <?php
 
 use App\Filament\Resources\NewProductDraftResource;
+use App\Filament\Resources\NewProductDraftResource\Pages\EditNewProductDraft;
+use App\Jobs\ProductShopifyUpdateJob;
 use App\Models\Import;
 use App\Models\NewProductDraft;
 use App\Models\Product;
@@ -9,8 +11,66 @@ use App\Models\User;
 use App\Models\Variant;
 use App\Services\HeaderStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
+
+it('treats a local price difference as a draft edit and stages draft values when an import conflict is kept', function (): void {
+    $import = Import::create([
+        'filename' => 'draft-variant.csv', 'mode' => 'overwrite', 'status' => 'ready',
+        'created_by' => User::factory()->create()->id, 'is_current' => true, 'is_valid' => true,
+    ]);
+    $product = Product::create([
+        'import_id' => $import->id, 'title' => 'Draft bracelet', 'handle' => 'draft-bracelet', 'status' => 'active',
+        'shopify_id' => 'gid://shopify/Product/701',
+    ]);
+    $variant = Variant::withoutEvents(fn () => Variant::create([
+        'product_id' => $product->id, 'shopify_id' => 'gid://shopify/ProductVariant/701',
+        'price' => '0.00', 'inventory_qty' => 5, 'sync_state' => Variant::SYNC_STATE_SYNCED,
+    ]));
+    $draft = NewProductDraft::withoutEvents(fn () => NewProductDraft::create([
+        'title' => $product->title, 'handle' => $product->handle, 'variant_price' => '787.00',
+        'origin' => NewProductDraft::ORIGIN_SHOPIFY_SEED,
+    ]));
+    $clashes = new ReflectionMethod(NewProductDraftResource::class, 'draftVariantClashes');
+    expect($clashes->invoke(null, $draft))->toBe([])
+        ->and(NewProductDraftResource::draftPricesAreStaged($draft))->toBeFalse();
+    expect(app(\App\Services\NewProductDraftSeeder::class)->openForProduct($product)->shopifySyncWarnings())->toBe([]);
+
+    $editor = User::findOrFail($import->created_by);
+    $editor->assignRole(Role::findOrCreate(\App\Enums\RolesEnum::Admin->value));
+    $editor->givePermissionTo(Permission::findOrCreate(\App\Enums\PermissionEnum::ShopifyPushProducts->value));
+    $this->actingAs($editor);
+    app()->instance(\App\Contracts\ShopifyGraphqlGateway::class, new \Tests\Support\VibeShopifyFake);
+    Livewire::test(EditNewProductDraft::class, ['record' => $draft->id])
+        ->assertSet('data.variant_price', '787.00')
+        ->assertDontSee('Shopify variant import needs review.')
+        ->assertActionHidden('pushApprovedDraft');
+    expect($draft->fresh()->shopifySyncWarnings())->toBe([]);
+
+    $draft->forceFill(['shopify_sync_warnings' => [
+        ['field' => 'variant_price', 'label' => 'Price', 'draft_value' => '787.00', 'shopify_value' => '0.00'],
+        ['field' => 'vendor', 'label' => 'Vendor', 'draft_value' => 'Draft vendor', 'shopify_value' => 'Shopify vendor'],
+    ]])->saveQuietly();
+    expect(NewProductDraftResource::resolveVariantClashKeepingDraft($draft))->toBeTrue()
+        ->and($variant->fresh()->price)->toBe('787.00')
+        ->and($variant->fresh()->inventory_qty)->toBe(5)
+        ->and($variant->fresh()->local_dirty)->toBeTrue()
+        ->and(array_column($draft->fresh()->shopifySyncWarnings(), 'field'))->toBe(['vendor'])
+        ->and(NewProductDraftResource::draftPricesAreStaged($draft->fresh()))->toBeTrue();
+
+    $draft->fresh()->forceFill(['shopify_sync_warnings' => null])->saveQuietly();
+    $product->refresh();
+    foreach (User::factory()->count(2)->create() as $approver) {
+        $product->approvals()->create(['user_id' => $approver->id, 'approval_version' => $product->approval_version]);
+    }
+    Queue::fake();
+    Livewire::test(EditNewProductDraft::class, ['record' => $draft->id])->callAction('pushApprovedDraft');
+    Queue::assertPushed(ProductShopifyUpdateJob::class, fn ($job) => $job->productIds === [$product->id]);
+});
 
 it('uses the latest shopify variant values to clear a draft variant clash', function (): void {
     $user = User::factory()->create();

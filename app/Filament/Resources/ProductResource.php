@@ -2078,7 +2078,7 @@ class ProductResource extends Resource
                 ->color('gray')
                 ->tooltip('Edit Draft')
                 ->action(function (Product $record) {
-                    $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($record, Auth::id());
+                    $draft = app(NewProductDraftSeeder::class)->openForProduct($record, Auth::id());
 
                     return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
                 })

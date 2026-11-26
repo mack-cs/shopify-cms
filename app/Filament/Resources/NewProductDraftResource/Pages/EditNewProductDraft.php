@@ -2,12 +2,13 @@
 
 namespace App\Filament\Resources\NewProductDraftResource\Pages;
 
+use App\Enums\PermissionEnum;
 use App\Filament\Resources\NewProductDraftResource;
 use App\Filament\Resources\ProductResource;
+use App\Jobs\ProductShopifyUpdateJob;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Services\NewProductDraftProductSync;
-use App\Services\NewProductDraftSeeder;
 use App\Services\StackBundleSellabilityService;
 use App\Services\StackCompareAtPriceService;
 use App\Services\StackSellabilityShopifyPushService;
@@ -32,7 +33,6 @@ class EditNewProductDraft extends EditRecord
     {
         parent::mount($record);
 
-        $this->refreshDraftFromLinkedProduct();
         $this->refreshCalculatedStackCompareAt();
         $this->acquireEditLock();
 
@@ -139,6 +139,30 @@ class EditNewProductDraft extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('pushApprovedDraft')
+                ->label('Push Approved Draft to Shopify')
+                ->icon('heroicon-o-cloud-arrow-up')
+                ->visible(fn (): bool => $this->approvedProductForDraftPush() !== null)
+                ->requiresConfirmation()
+                ->modalDescription('Sends the saved and approved values from the linked product. Save any open draft changes before pushing.')
+                ->action(function (): void {
+                    $product = $this->approvedProductForDraftPush();
+                    if ($product === null) {
+                        return;
+                    }
+                    $draft = $this->record->fresh();
+                    if ($draft === null || ! NewProductDraftResource::draftPricesAreStaged($draft)) {
+                        Notification::make()
+                            ->title('Save and approve the draft prices before pushing')
+                            ->warning()
+                            ->send();
+
+                        return;
+                    }
+
+                    ProductShopifyUpdateJob::dispatch([$product->id], Auth::id());
+                    Notification::make()->title('Approved draft queued for Shopify')->success()->send();
+                }),
             Actions\Action::make('refreshEditLock')
                 ->label('Refresh Edit Lock')
                 ->icon('heroicon-o-arrow-path')
@@ -203,6 +227,22 @@ class EditNewProductDraft extends EditRecord
                     ]) . '#relationManager1';
                 }),
         ];
+    }
+
+    private function approvedProductForDraftPush(): ?Product
+    {
+        if (! (Auth::user()?->can(PermissionEnum::ShopifyPushProducts->value) ?? false)
+            || $this->isLockedByAnotherUser() || ! $this->record instanceof NewProductDraft) {
+            return null;
+        }
+        $draft = $this->record->fresh();
+        if ($draft === null || $draft->isPendingApproval() || $draft->isBlockedFromShopifyMissing()
+            || $draft->shopifySyncWarnings() !== []) {
+            return null;
+        }
+        $product = NewProductDraftResource::linkedProductForDraft($draft);
+
+        return $product?->isApprovedByTwo() && filled($product->shopify_id) ? $product : null;
     }
 
     public function resolveSingleShopifyWarningUsingShopify(string $field): void
@@ -394,49 +434,6 @@ class EditNewProductDraft extends EditRecord
         return $expiresAt
             ? "{$editor} is actively editing this draft. The lock expires {$expiresAt}."
             : "{$editor} is actively editing this draft.";
-    }
-
-    private function refreshDraftFromLinkedProduct(): void
-    {
-        if (!$this->record instanceof NewProductDraft) {
-            return;
-        }
-
-        $product = null;
-
-        $shopifyId = trim((string) ($this->record->shopify_id ?? ''));
-        if ($shopifyId !== '') {
-            $product = Product::query()
-                ->where('shopify_id', $shopifyId)
-                ->first();
-        }
-
-        if (!$product instanceof Product) {
-            $handle = trim((string) ($this->record->handle ?? ''));
-            if ($handle !== '') {
-                $product = Product::query()
-                    ->where('handle', $handle)
-                    ->first();
-            }
-        }
-
-        if (!$product instanceof Product) {
-            $sku = trim((string) ($this->record->sku ?? ''));
-            if ($sku !== '') {
-                $product = Product::query()
-                    ->whereHas('allVariants', fn ($variantQuery) => $variantQuery->where('sku', $sku))
-                    ->first();
-            }
-        }
-
-        if (!$product instanceof Product) {
-            return;
-        }
-
-        $this->record = app(NewProductDraftSeeder::class)->upsertFromProduct(
-            $product,
-            Auth::id()
-        );
     }
 
     private function refreshCalculatedStackCompareAt(): void

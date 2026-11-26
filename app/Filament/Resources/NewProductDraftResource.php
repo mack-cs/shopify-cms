@@ -127,36 +127,12 @@ class NewProductDraftResource extends Resource
         'stacks',
     ];
     private const DRAFT_VARIANT_CLASH_FIELDS = [
-        'sku' => [
-            'label' => 'SKU',
-            'variant_attribute' => 'sku',
-            'type' => 'string',
-        ],
-        'variant_price' => [
-            'label' => 'Price',
-            'variant_attribute' => 'price',
-            'type' => 'decimal2',
-        ],
-        'variant_compare_at_price' => [
-            'label' => 'Compare-at price',
-            'variant_attribute' => 'compare_at_price',
-            'type' => 'decimal2',
-        ],
-        'variant_inventory_qty' => [
-            'label' => 'Inventory',
-            'variant_attribute' => 'inventory_qty',
-            'type' => 'integer',
-        ],
-        'variant_weight' => [
-            'label' => 'Weight',
-            'variant_attribute' => 'weight',
-            'type' => 'decimal3',
-        ],
-        'variant_weight_unit' => [
-            'label' => 'Weight unit',
-            'variant_attribute' => 'weight_unit',
-            'type' => 'string',
-        ],
+        'sku' => 'SKU',
+        'variant_price' => 'Price',
+        'variant_compare_at_price' => 'Compare-at price',
+        'variant_inventory_qty' => 'Inventory',
+        'variant_weight' => 'Weight',
+        'variant_weight_unit' => 'Weight unit',
     ];
 
     public static function getEloquentQuery(): Builder
@@ -1155,6 +1131,24 @@ class NewProductDraftResource extends Resource
                                     ->visible(fn (?NewProductDraft $record): bool => self::draftHasVariantClash($record))
                                     ->columnSpanFull(),
                                 Actions::make([
+                                    FormAction::make('keepDraftVariantValues')
+                                        ->label('Keep Draft Variant Values')
+                                        ->icon('heroicon-o-arrow-up-tray')
+                                        ->disabled(fn (?NewProductDraft $record): bool => $record?->isPendingApproval() ?? false)
+                                        ->requiresConfirmation()
+                                        ->modalDescription('Keep your saved draft values and stage them in Products for approval and Shopify sync.')
+                                        ->action(function (?NewProductDraft $record) {
+                                            if (! $record instanceof NewProductDraft) {
+                                                return null;
+                                            }
+
+                                            $resolved = self::resolveVariantClashKeepingDraft($record);
+                                            self::sendNotification(Notification::make()
+                                                ->title($resolved ? 'Draft variant values kept' : 'Draft variant values could not be staged')
+                                                ->status($resolved ? 'success' : 'warning'));
+
+                                            return redirect(self::getUrl('edit', ['record' => $record]));
+                                        }),
                                     FormAction::make('useShopifyVariantValues')
                                         ->label('Use Shopify Variant Values')
                                         ->icon('heroicon-o-arrow-down-tray')
@@ -6459,33 +6453,56 @@ class NewProductDraftResource extends Resource
         ];
     }
 
+    public static function resolveVariantClashKeepingDraft(NewProductDraft $record): bool
+    {
+        return DB::transaction(function () use ($record): bool {
+            $draft = NewProductDraft::query()->lockForUpdate()->findOrFail($record->id);
+            if ($draft->isPendingApproval() || $draft->isActivelyEditedByAnotherUser(Auth::id(), 15)) {
+                return false;
+            }
+            $fields = array_column(self::draftVariantClashes($draft), 'field');
+            if ($fields === []) {
+                return false;
+            }
+            $variant = self::linkedVariantForDraft($draft);
+            $attributes = array_values(array_intersect($fields, array_keys(self::DRAFT_VARIANT_CLASH_FIELDS)));
+            if ($variant?->sync_state === Variant::SYNC_STATE_CONFLICT) {
+                foreach (['variant_price', 'variant_compare_at_price', 'variant_weight', 'variant_weight_unit'] as $attribute) {
+                    if (filled($draft->getAttribute($attribute))) {
+                        $attributes[] = $attribute;
+                    }
+                }
+            }
+            if (! app(NewProductDraftProductSync::class)->syncToExistingProduct($draft, attributes: array_unique($attributes))) {
+                return false;
+            }
+            if ($variant?->fresh()?->sync_state === Variant::SYNC_STATE_CONFLICT) {
+                $variant->update(['sync_state' => Variant::SYNC_STATE_LOCAL_UPDATED, 'local_dirty' => true]);
+            }
+            $warnings = array_values(array_filter($draft->shopifySyncWarnings(), fn (array $warning): bool =>
+                ! in_array($warning['field'] ?? null, $attributes, true)));
+            $draft->forceFill(['shopify_sync_warnings' => $warnings ?: null])->saveQuietly();
+
+            return true;
+        });
+    }
+
     /**
      * @return array<int, array{field:string,label:string,draft_value:string,existing_value:string,existing_label:string}>
      */
     private static function draftVariantClashes(NewProductDraft $record): array
     {
         $clashes = [];
-        $seen = [];
 
         foreach ($record->shopifySyncWarnings() as $warning) {
             $field = trim((string) ($warning['field'] ?? ''));
-            if (!isset(self::DRAFT_VARIANT_CLASH_FIELDS[$field])) {
+            if (! isset(self::DRAFT_VARIANT_CLASH_FIELDS[$field])) {
                 continue;
             }
 
-            if (self::isImportedNewProductVariantPlaceholder(
-                $record,
-                $field,
-                $warning['shopify_value'] ?? null
-            )) {
-                continue;
-            }
-
-            $seen[$field] = true;
-            $definition = self::DRAFT_VARIANT_CLASH_FIELDS[$field];
             $clashes[] = [
                 'field' => $field,
-                'label' => (string) ($warning['label'] ?? $definition['label']),
+                'label' => (string) ($warning['label'] ?? self::DRAFT_VARIANT_CLASH_FIELDS[$field]),
                 'draft_value' => self::formatShopifyWarningDisplayValue($field, (string) ($warning['draft_value'] ?? '')),
                 'existing_value' => self::formatShopifyWarningDisplayValue($field, (string) ($warning['shopify_value'] ?? '')),
                 'existing_label' => 'Shopify import',
@@ -6493,44 +6510,7 @@ class NewProductDraftResource extends Resource
         }
 
         $variant = self::linkedVariantForDraft($record);
-        if (!$variant instanceof Variant) {
-            return $clashes;
-        }
-
-        foreach (self::DRAFT_VARIANT_CLASH_FIELDS as $field => $definition) {
-            if (isset($seen[$field])) {
-                continue;
-            }
-
-            $draftValue = $record->getAttribute($field);
-            if (self::isBlankDraftVariantValue($draftValue)) {
-                continue;
-            }
-
-            $variantAttribute = (string) $definition['variant_attribute'];
-            $variantValue = $variantAttribute === 'inventory_qty' && $variant->inventory_tracked === false
-                ? null
-                : $variant->getAttribute($variantAttribute);
-            $type = (string) $definition['type'];
-
-            if (self::isImportedNewProductVariantPlaceholder($record, $field, $variantValue)) {
-                continue;
-            }
-
-            if (self::normalizeDraftVariantComparableValue($type, $draftValue) === self::normalizeDraftVariantComparableValue($type, $variantValue)) {
-                continue;
-            }
-
-            $clashes[] = [
-                'field' => $field,
-                'label' => (string) $definition['label'],
-                'draft_value' => self::formatDraftVariantClashValue($type, $draftValue),
-                'existing_value' => self::formatDraftVariantClashValue($type, $variantValue),
-                'existing_label' => 'Existing variant',
-            ];
-        }
-
-        if ($variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+        if ($variant?->sync_state === Variant::SYNC_STATE_CONFLICT) {
             $clashes[] = [
                 'field' => 'variant_sync_state',
                 'label' => 'Variant sync state',
@@ -6541,37 +6521,6 @@ class NewProductDraftResource extends Resource
         }
 
         return $clashes;
-    }
-
-    private static function isImportedNewProductVariantPlaceholder(
-        NewProductDraft $record,
-        string $field,
-        mixed $value
-    ): bool {
-        if ($record->origin !== NewProductDraft::ORIGIN_DRAFT_TOOL) {
-            return false;
-        }
-
-        $normalized = trim((string) ($value ?? ''));
-        if ($normalized === '') {
-            return in_array($field, [
-                'sku',
-                'variant_price',
-                'variant_compare_at_price',
-                'variant_inventory_qty',
-                'variant_weight',
-                'variant_weight_unit',
-            ], true);
-        }
-
-        return in_array($field, [
-            'variant_price',
-            'variant_compare_at_price',
-            'variant_inventory_qty',
-            'variant_weight',
-        ], true)
-            && is_numeric($normalized)
-            && (float) $normalized <= 0;
     }
 
     private static function draftVariantClashHtml(?NewProductDraft $record): ?HtmlString
@@ -6596,8 +6545,8 @@ class NewProductDraftResource extends Resource
 
         return new HtmlString(
             "<div class='rounded-xl border border-warning-300 bg-warning-50 p-4 text-sm text-warning-900'>"
-            . "<p class='font-semibold mb-2'>Variant defaults clash with the linked product variant.</p>"
-            . "<p class='mb-3'>Review these values before approving or syncing this draft. Use the Shopify sync warning actions above when a field is listed there, or edit the draft/product intentionally when the existing variant value is the source of truth.</p>"
+            . "<p class='font-semibold mb-2'>Shopify variant import needs review.</p>"
+            . "<p class='mb-3'>Keep the draft values to stage them for approval and Shopify sync, or use the imported Shopify values.</p>"
             . "<ul class='list-disc pl-5 space-y-1'>"
             . implode('', $items)
             . '</ul>'
@@ -6638,47 +6587,15 @@ class NewProductDraftResource extends Resource
             ->first();
     }
 
-    private static function isBlankDraftVariantValue(mixed $value): bool
+    public static function draftPricesAreStaged(NewProductDraft $draft): bool
     {
-        return $value === null || (is_string($value) && trim($value) === '');
-    }
-
-    private static function normalizeDraftVariantComparableValue(string $type, mixed $value): ?string
-    {
-        if ($value === null) {
-            return null;
+        $variant = self::linkedVariantForDraft($draft);
+        if (! $variant || $variant->sync_state === Variant::SYNC_STATE_CONFLICT) {
+            return false;
         }
 
-        $string = trim((string) $value);
-        if ($string === '') {
-            return null;
-        }
-
-        if ($type === 'integer') {
-            return is_numeric($string) ? (string) (int) $string : $string;
-        }
-
-        if ($type === 'decimal2') {
-            $normalized = str_replace(' ', '', $string);
-            if (str_contains($normalized, ',') && !str_contains($normalized, '.')) {
-                $normalized = str_replace(',', '.', $normalized);
-            } else {
-                $normalized = str_replace(',', '', $normalized);
-            }
-
-            return is_numeric($normalized)
-                ? number_format((float) $normalized, 2, '.', '')
-                : $string;
-        }
-
-        return $string;
-    }
-
-    private static function formatDraftVariantClashValue(string $type, mixed $value): string
-    {
-        $normalized = self::normalizeDraftVariantComparableValue($type, $value);
-
-        return $normalized === null ? 'blank' : $normalized;
+        return $draft->variant_price === $variant->price
+            && $draft->variant_compare_at_price === $variant->compare_at_price;
     }
 
     private static function draftApprovalStateLabel(NewProductDraft $record): string

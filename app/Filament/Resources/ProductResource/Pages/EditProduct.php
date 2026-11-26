@@ -200,7 +200,7 @@ class EditProduct extends EditRecord
                 ->icon('heroicon-o-pencil-square')
                 ->color('warning')
                 ->action(function () {
-                    $draft = app(NewProductDraftSeeder::class)->upsertFromProduct($this->getRecord(), Auth::id());
+                    $draft = app(NewProductDraftSeeder::class)->openForProduct($this->getRecord(), Auth::id());
 
                     return redirect(NewProductDraftResource::getUrl('edit', ['record' => $draft]));
                 }),
