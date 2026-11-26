@@ -12,6 +12,8 @@ final class StackSellabilityShopifyPushService
     {
         Variant::query()->where('inventory_local_dirty', true)
             ->where('inventory_sync_batch_id', 'stack_sellability_pending')
+            ->whereNotExists(fn ($query) => $query->selectRaw('1')->from('inventory_write_intents')
+                ->whereColumn('inventory_write_intents.variant_id', 'variants.id')->where('status', 'started'))
             ->whereHas('product', fn ($q) => $q->where('is_bundle', true))
             ->orderBy('id')->chunkById(100, function ($variants): void {
                 InventorySyncJob::dispatch($variants->pluck('id')->all(), 'push', null, 'stack_sellability_retry');
@@ -24,8 +26,8 @@ final class StackSellabilityShopifyPushService
      */
     public function queuePushForChangedStacks(array $summary, ?int $userId = null): array
     {
-        $productIds = collect($summary['changes'] ?? [])
-            ->filter(fn ($change): bool => is_array($change))
+        $changes = collect($summary['changes'] ?? [])->filter(fn ($change): bool => is_array($change));
+        $productIds = $changes
             ->map(fn (array $change): int => (int) data_get($change, 'stack.product_id', 0))
             ->filter(fn (int $productId): bool => $productId > 0)
             ->unique()
@@ -38,8 +40,13 @@ final class StackSellabilityShopifyPushService
             ]);
         }
 
+        $fullProductIds = $changes->filter(fn (array $change): bool => empty($change['variant_id']))
+            ->pluck('stack.product_id')->filter()->unique();
+        $specificVariantIds = $changes->pluck('variant_id')->filter()->unique();
         $variantIds = Variant::query()
             ->whereIn('product_id', $productIds->all())
+            ->where(fn ($query) => $query->whereIn('product_id', $fullProductIds)
+                ->orWhereIn('id', $specificVariantIds))
             ->orderBy('product_id')
             ->orderBy('id')
             ->pluck('id')

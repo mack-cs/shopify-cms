@@ -57,6 +57,7 @@ class HandleShopifyInventoryLevelUpdatedJob implements ShouldBeUnique, ShouldQue
 
         $slackNotifier->notifyIfChanged($summary);
         if ($version !== null && (int) ($summary['shopify_component_refresh_failures'] ?? 0) === 0
+            && (int) ($summary['shopify_stack_verification_failures'] ?? 0) === 0
             && (int) ($summary['skipped_locked_stacks'] ?? 0) === 0) {
             \Illuminate\Support\Facades\DB::table('inventory_reconciliations')->where('id',$row->id)
                 ->where('processed_version','<',$version)->update(['processed_version'=>$version,'updated_at'=>now()]);

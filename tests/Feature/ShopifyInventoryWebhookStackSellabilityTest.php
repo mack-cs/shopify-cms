@@ -20,6 +20,99 @@ use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
 
+it('flags a ready stack with a Shopify or CMS stock mismatch without changing inventory', function (
+    bool $availableForSale, string $expectedStatus,
+): void {
+    config(['services.shopify.shop' => 'test.myshopify.com', 'services.shopify.admin_access_token' => 'test-token']);
+    $records = createInventoryWebhookStackRecords(componentQty: 0, stackTracked: true, stackQty: 0);
+    Http::fake(function ($request) use ($records, $availableForSale) {
+        $isParent = $request['variables']['id'] === $records['stack']->shopify_id;
+        $product = $records[$isParent ? 'stack' : 'component'];
+        $variant = $records[$isParent ? 'stack_variant' : 'component_variant'];
+
+        return Http::response(['data' => ['product' => [
+            'id' => $product->shopify_id,
+            'status' => 'ACTIVE',
+            'variants' => ['nodes' => [[
+                'id' => $variant->shopify_id,
+                'sku' => $variant->sku,
+                'inventoryQuantity' => $isParent ? 0 : 5,
+                'availableForSale' => $isParent ? $availableForSale : true,
+                'inventoryItem' => ['id' => $variant->shopify_inventory_item_id, 'tracked' => true],
+            ]]],
+        ]]]);
+    });
+
+    (new \App\Jobs\CheckShopifyStackInventory())->handle(app(\App\Services\StackInventoryAuditService::class));
+    $report = cache(\App\Jobs\CheckShopifyStackInventory::RESULT_KEY);
+    $row = $report['rows'][$records['draft']->id];
+
+    expect($row['status'])->toBe($expectedStatus)
+        ->and($row['components'][1]['available_quantity'])->toBe(5)
+        ->and($records['component_variant']->fresh()->inventory_qty)->toBe(0)
+        ->and($records['stack_variant']->fresh()->inventory_qty)->toBe(0);
+    Http::assertSentCount(2);
+})->with([
+    'unavailable parent' => [false, 'Ready · Shopify unavailable'],
+    'available parent with stale CMS zero' => [true, 'Ready · CMS shows zero'],
+]);
+
+it('emails once when Stack Inventory is ready and Shopify tracking is off', function (): void {
+    config([
+        'services.shopify.shop' => 'test.myshopify.com',
+        'services.shopify.admin_access_token' => 'test-token',
+        'services.shopify.untracked_stack_alert_email' => 'shonayimack@gmail.com',
+    ]);
+    $records = createInventoryWebhookStackRecords(componentQty: 5, stackTracked: false, stackQty: null);
+    fakeShopifyInventoryProduct($records['stack'], $records['stack_variant'], tracked: false, quantity: 0);
+
+    \Illuminate\Support\Facades\Mail::shouldReceive('raw')->once()
+        ->withArgs(function (string $body, Closure $configure): bool {
+            $message = \Mockery::mock(\Illuminate\Mail\Message::class);
+            $message->shouldReceive('to')->once()->with('shonayimack@gmail.com')->andReturnSelf();
+            $message->shouldReceive('subject')->once()->with('Ready stack with Shopify tracking off: TEST-WEBHOOK-STACK');
+            $configure($message);
+
+            return str_contains($body, 'CMS Stack Inventory status: Ready')
+                && str_contains($body, 'Shopify inventory tracking: Off');
+        });
+
+    $service = app(StackBundleSellabilityService::class);
+    $inventoryItemId = $records['component_variant']->shopify_inventory_item_id;
+    $service->enforceForInventoryItem($inventoryItemId, options: ['refresh_components' => false]);
+    $service->enforceForInventoryItem($inventoryItemId, options: ['refresh_components' => false]);
+});
+
+it('checks Shopify and queues a correction when the stack is ready locally but unavailable remotely', function (): void {
+    config(['services.shopify.shop' => 'test.myshopify.com', 'services.shopify.admin_access_token' => 'test-token']);
+    Queue::fake();
+    $records = createInventoryWebhookStackRecords(componentQty: 5, stackTracked: false, stackQty: null);
+    $stackVariant = $records['stack_variant'];
+    fakeShopifyInventoryProduct($records['stack'], $stackVariant, tracked: true, quantity: 0);
+
+    $summary = app(StackBundleSellabilityService::class)->enforceForInventoryItem(
+        $records['component_variant']->shopify_inventory_item_id,
+        options: ['refresh_components' => false],
+    );
+    app(StackSellabilityShopifyPushService::class)->queuePushForChangedStacks($summary);
+
+    expect($summary['changes'][0]['action'])->toBe('reconcile_shopify_inventory')
+        ->and($stackVariant->fresh()->inventory_tracked)->toBeFalse()
+        ->and($stackVariant->fresh()->inventory_local_dirty)->toBeTrue();
+    Queue::assertPushed(InventorySyncJob::class, fn ($job) => $job->variantIds === [$stackVariant->id]);
+
+    $check = \App\Models\ChangeLog::query()
+        ->where('product_id', $records['stack']->id)
+        ->where('field', 'shopify_stack_inventory_check')
+        ->sole();
+    expect(json_decode($check->new_value, true))->toMatchArray([
+        'product_status' => 'ACTIVE',
+        'tracked' => true,
+        'available_quantity' => 0,
+        'components_ready' => true,
+    ]);
+});
+
 it('retains a failed stack disable as retryable even when the next event has no local change', function () {
     config(['services.shopify.shop' => 'test.myshopify.com', 'services.shopify.admin_access_token' => 'test-token']);
     $records = createInventoryWebhookStackRecords(0, false, null);

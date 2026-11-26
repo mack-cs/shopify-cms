@@ -12,6 +12,84 @@ final class StackInventoryAuditService
     /** @var array<int, Product|null> */
     private array $products = [];
 
+    private array $shopifyObservations = [];
+
+    public function checkShopify(NewProductDraft $stack): array
+    {
+        $components = [];
+        foreach ($this->componentIds($stack) as $index => $productId) {
+            $component = $this->component($stack, $index + 1);
+            $observation = $this->observeProduct($this->product($productId));
+            $components[$index + 1] = $observation + [
+                'title' => $component['title'],
+                'quantity_per_stack' => $component['quantity_per_stack'],
+                'ready' => isset($observation['error']) ? null
+                    : (strtoupper($observation['product_status']) === 'ACTIVE'
+                        && ($observation['tracked'] === false
+                            || $observation['available_quantity'] >= $component['quantity_per_stack'])),
+            ];
+        }
+
+        $parent = filled($stack->shopify_id)
+            ? Product::query()->where('shopify_id', $stack->shopify_id)->first()
+            : (filled($stack->handle) ? Product::query()->where('handle', $stack->handle)->first() : null);
+        $live = $this->observeProduct($parent);
+        $variant = $parent?->variants->sortBy('id')->first();
+        $componentRows = collect($components);
+        $blocked = $componentRows->first(fn (array $row): bool => $row['ready'] === false);
+        $unknown = $componentRows->first(fn (array $row): bool => $row['ready'] === null);
+        $status = 'Unable to verify';
+        $reason = $live['error'] ?? ($unknown['error'] ?? 'No components configured.');
+
+        if ($blocked) {
+            $status = 'Component unavailable';
+            $available = $blocked['available_quantity'] ?? 'unknown';
+            $reason = "{$blocked['title']} · Shopify status {$blocked['product_status']} · {$available} available · {$blocked['quantity_per_stack']} needed";
+        } elseif ($components !== [] && !$unknown && !isset($live['error'])) {
+            if (strtoupper($live['product_status']) !== 'ACTIVE' || $live['available_for_sale'] === false) {
+                $status = 'Ready · Shopify unavailable';
+                $reason = 'Components are available. Shopify reports the parent stack as unavailable.';
+            } elseif ($live['available_for_sale'] === null) {
+                $reason = 'Shopify did not report whether the parent variant is available for sale.';
+            } elseif ($variant?->inventory_tracked === true && $variant->inventory_qty !== null && $variant->inventory_qty <= 0) {
+                $status = 'Ready · CMS shows zero';
+                $reason = 'Shopify reports the stack as available for sale. The CMS parent variant is tracked at zero.';
+            } elseif ($live['tracked'] === true && $live['available_quantity'] <= 0) {
+                $status = 'Ready · Shopify shows zero';
+                $reason = 'Shopify reports the stack as available for sale with no available parent stock.';
+            } elseif ($this->health($stack)['status'] === 'Out of stock') {
+                $status = 'Ready · CMS shows out of stock';
+                $reason = 'Shopify reports the parent and its components as available. The CMS component status is out of stock.';
+            } else {
+                $status = 'Ready · Shopify available';
+                $reason = 'Components and parent stack are available in Shopify.';
+            }
+        }
+
+        return ['status' => $status, 'reason' => $reason, 'parent' => $live, 'components' => $components];
+    }
+
+    private function observeProduct(?Product $product): array
+    {
+        $variant = $product?->variants->sortBy('id')->first();
+        if (!$variant || blank($product->shopify_id) || blank($variant->shopify_id)) {
+            return ['error' => 'Missing Shopify product or variant link.'];
+        }
+
+        if (!array_key_exists($product->id, $this->shopifyObservations)) {
+            try {
+                $observed = app(ProductInventorySyncService::class)->observeVariantInventory($product, $variant);
+                $this->shopifyObservations[$product->id] = filled($observed['product_status']) ? $observed
+                    : ['error' => 'Shopify did not return the product status.'];
+            } catch (\Exception $exception) {
+                report($exception);
+                $this->shopifyObservations[$product->id] = ['error' => 'Shopify inventory could not be verified for '.$variant->sku.'.'];
+            }
+        }
+
+        return $this->shopifyObservations[$product->id];
+    }
+
     /**
      * @return array{
      *     product_id:int,

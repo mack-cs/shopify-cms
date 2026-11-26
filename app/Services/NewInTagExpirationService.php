@@ -539,6 +539,7 @@ GQL, ['id' => $productGid]);
                 $exactRemovals,
                 $fresh['tags'],
                 $fresh['createdAt'] ?? $row['created_at'],
+                $this->reportProductSnapshot($fresh),
             );
             $intended = $this->classifier->autoRemoveFrom($operation->tags_to_remove);
 
@@ -548,12 +549,10 @@ GQL, ['id' => $productGid]);
                 $this->assertTagsAbsent($confirmed['tags'], $intended);
                 $operation->forceFill([
                     'status' => NewInExpirationOperation::STATUS_REMOTE_CONFIRMED,
-                    'remote_confirmed_at' => now(),
+                    'remote_confirmed_at' => $operation->remote_confirmed_at ?? now(),
                     'shopify_created_at' => $this->ageResolver->parseShopifyCreatedAt($fresh['createdAt']),
                     'shopify_created_at_raw' => $fresh['createdAt'],
-                    'meta' => array_merge((array) $operation->meta, [
-                        'tags_after' => $confirmed['tags'],
-                    ]),
+                    'meta' => $this->removalReportMeta($operation, $confirmed['tags'], $exactRemovals),
                     'last_error' => null,
                 ])->save();
 
@@ -864,10 +863,10 @@ GQL, ['id' => $productGid]);
                     $this->assertTagsAbsent($confirmed['tags'], $stillPresent);
                     $operation->forceFill([
                         'status' => NewInExpirationOperation::STATUS_REMOTE_CONFIRMED,
-                        'remote_confirmed_at' => now(),
+                        'remote_confirmed_at' => $operation->remote_confirmed_at ?? now(),
                         'shopify_created_at' => $createdAt,
                         'shopify_created_at_raw' => $fresh['createdAt'],
-                        'meta' => array_merge((array) $operation->meta, ['tags_after' => $confirmed['tags']]),
+                        'meta' => $this->removalReportMeta($operation, $confirmed['tags'], $stillPresent, $fresh),
                         'last_error' => null,
                     ])->save();
                 } catch (Throwable $exception) {
@@ -882,7 +881,7 @@ GQL, ['id' => $productGid]);
                     'remote_confirmed_at' => $operation->remote_confirmed_at ?? now(),
                     'shopify_created_at' => $createdAt,
                     'shopify_created_at_raw' => $fresh['createdAt'],
-                    'meta' => array_merge((array) $operation->meta, ['tags_after' => $fresh['tags']]),
+                    'meta' => $this->removalReportMeta($operation, $fresh['tags'], product: $fresh),
                 ])->save();
             }
 
@@ -1118,12 +1117,13 @@ GQL, ['id' => $productGid, 'collection' => $collectionGid]);
         array $tagsToRemove,
         array $beforeTags,
         ?string $createdAtRaw,
+        array $reportSnapshot = [],
     ): NewInExpirationOperation {
         if (DB::transactionLevel() > 0 && ! app()->environment('testing')) {
             throw new RuntimeException('New In expiration claims cannot be made inside an enclosing transaction.');
         }
 
-        return DB::transaction(function () use ($productGid, $tagsToRemove, $beforeTags, $createdAtRaw) {
+        return DB::transaction(function () use ($productGid, $tagsToRemove, $beforeTags, $createdAtRaw, $reportSnapshot) {
             $open = NewInExpirationOperation::query()
                 ->where('product_gid', $productGid)
                 ->whereIn('status', [
@@ -1144,6 +1144,7 @@ GQL, ['id' => $productGid, 'collection' => $collectionGid]);
                     ))),
                     'before_tags' => $beforeTags !== [] ? $beforeTags : $open->before_tags,
                     'shopify_created_at_raw' => $createdAtRaw ?? $open->shopify_created_at_raw,
+                    'meta' => (array) $open->meta + $reportSnapshot,
                     'available_at' => now(),
                 ])->save();
 
@@ -1160,9 +1161,36 @@ GQL, ['id' => $productGid, 'collection' => $collectionGid]);
                 'shopify_created_at_raw' => $createdAtRaw,
                 'attempts' => 0,
                 'available_at' => now(),
-                'meta' => [],
+                'meta' => $reportSnapshot,
             ]);
         });
+    }
+
+    private function reportProductSnapshot(array $product): array
+    {
+        return [
+            'product_title' => $product['title'],
+            'product_status' => $product['status'],
+            'product_skus' => $product['skus'],
+            'expiration_days' => max(1, (int) config('new_in_expiration.days', 75)),
+        ];
+    }
+
+    private function removalReportMeta(NewInExpirationOperation $operation, array $after, array $removed = [], ?array $product = null): array
+    {
+        $meta = (array) $operation->meta;
+        if ($product !== null) {
+            $meta += $this->reportProductSnapshot($product);
+        }
+        $meta['tags_after'] = $after;
+        if ($removed !== []) {
+            $meta['removal_confirmations'][] = [
+                'confirmed_at' => now('UTC')->toIso8601String(),
+                'tags' => $removed,
+            ];
+        }
+
+        return $meta;
     }
 
     private function dispatchMirrorJob(NewInExpirationOperation $operation): void
@@ -1223,8 +1251,8 @@ GQL, ['id' => $productGid, 'collection' => $collectionGid]);
                 if ($still === []) {
                     $operation->forceFill([
                         'status' => NewInExpirationOperation::STATUS_REMOTE_CONFIRMED,
-                        'remote_confirmed_at' => now(),
-                        'meta' => array_merge((array) $operation->meta, ['tags_after' => $fresh['tags']]),
+                        'remote_confirmed_at' => $operation->remote_confirmed_at ?? now(),
+                        'meta' => $this->removalReportMeta($operation, $fresh['tags'], product: $fresh),
                         'last_error' => 'Resolved via readback after: '.$message,
                         'available_at' => now(),
                     ])->save();

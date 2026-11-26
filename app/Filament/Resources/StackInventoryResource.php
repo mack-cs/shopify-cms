@@ -3,17 +3,27 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\StackInventoryResource\Pages;
+use App\Jobs\CheckShopifyStackInventory;
 use App\Models\NewProductDraft;
 use App\Services\StackInventoryAuditService;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables\Columns\ColumnGroup;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 
 final class StackInventoryResource extends Resource
 {
+    private const STOCK_MISMATCHES = [
+        'Ready · Shopify unavailable',
+        'Ready · CMS shows zero',
+        'Ready · Shopify shows zero',
+        'Ready · CMS shows out of stock',
+    ];
+
     protected static ?string $model = NewProductDraft::class;
 
     protected static ?string $navigationIcon = 'heroicon-o-squares-plus';
@@ -39,6 +49,7 @@ final class StackInventoryResource extends Resource
             ->modifyQueryUsing(fn (Builder $query): Builder => $query
                 ->whereNotNull('bundle_product_ids'))
             ->defaultSort('title')
+            ->poll(fn (): ?string => Cache::has(CheckShopifyStackInventory::PENDING_KEY) ? '10s' : null)
             ->paginated([25, 50, 100])
             ->columns([
                 TextColumn::make('title')
@@ -62,9 +73,42 @@ final class StackInventoryResource extends Resource
                         default => 'warning',
                     })
                     ->wrap(),
+                TextColumn::make('shopify_stock_check')
+                    ->label('Shopify Check')
+                    ->state(fn (NewProductDraft $record): ?string => self::shopifyRow($record)['status'] ?? null)
+                    ->description(function (NewProductDraft $record): ?string {
+                        $row = self::shopifyRow($record);
+                        if ($row === []) {
+                            return null;
+                        }
+
+                        $parent = $row['parent'];
+                        $quantity = match ($parent['tracked'] ?? null) {
+                            true => ($parent['available_quantity'] ?? 'Unknown').' available',
+                            false => 'Tracking off',
+                            default => 'Parent unverified',
+                        };
+
+                        return $row['reason'].' '.$quantity.'.';
+                    })
+                    ->placeholder('Run Shopify check')
+                    ->badge()
+                    ->color(fn (?string $state): string => match (true) {
+                        $state === 'Ready · Shopify available' => 'success',
+                        in_array($state, self::STOCK_MISMATCHES, true) => 'danger',
+                        default => 'warning',
+                    })
+                    ->wrap(),
                 self::componentGroup(1),
                 self::componentGroup(2),
                 self::componentGroup(3),
+            ])
+            ->filters([
+                Filter::make('ready_stock_mismatch')
+                    ->label('Ready stacks with stock mismatches')
+                    ->query(fn (Builder $query): Builder => $query->whereKey(collect(self::shopifyReport()['rows'] ?? [])
+                        ->filter(fn (array $row): bool => in_array($row['status'], self::STOCK_MISMATCHES, true))
+                        ->keys()->all())),
             ])
             ->striped()
             ->emptyStateHeading('No configured stacks found')
@@ -120,6 +164,15 @@ final class StackInventoryResource extends Resource
 
     private static function quantity(NewProductDraft $record, int $position, string $field): string
     {
+        $live = self::shopifyRow($record)['components'][$position] ?? null;
+        if ($live !== null) {
+            return match ($live['tracked'] ?? null) {
+                false => 'Not tracked',
+                true => (string) ($live[$field === 'available' ? 'available_quantity' : 'on_hand_quantity'] ?? 'Unknown'),
+                default => 'Unverified',
+            };
+        }
+
         $component = self::component($record, $position);
         if ($component === null) {
             return '-';
@@ -135,6 +188,15 @@ final class StackInventoryResource extends Resource
 
     private static function componentColor(NewProductDraft $record, int $position): string
     {
+        $live = self::shopifyRow($record)['components'][$position] ?? null;
+        if ($live !== null) {
+            return match ($live['ready']) {
+                true => 'success',
+                false => 'danger',
+                null => 'warning',
+            };
+        }
+
         return match (self::component($record, $position)['status'] ?? null) {
             'In stock', 'Not tracked' => 'success',
             'Out of stock', 'Insufficient', 'Inactive', 'Missing', 'No variant' => 'danger',
@@ -145,6 +207,12 @@ final class StackInventoryResource extends Resource
 
     private static function componentDetail(NewProductDraft $record, int $position): ?string
     {
+        $live = self::shopifyRow($record)['components'][$position] ?? null;
+        if ($live !== null) {
+            return $live['error'] ?? 'Shopify checked '.\Illuminate\Support\Carbon::parse($live['observed_at'])
+                ->timezone(config('app.timezone'))->format('d/m/Y H:i');
+        }
+
         $component = self::component($record, $position);
         if ($component === null) {
             return null;
@@ -163,5 +231,15 @@ final class StackInventoryResource extends Resource
     private static function audit(): StackInventoryAuditService
     {
         return app(StackInventoryAuditService::class);
+    }
+
+    public static function shopifyReport(): array
+    {
+        return once(fn (): array => Cache::get(CheckShopifyStackInventory::RESULT_KEY, []));
+    }
+
+    private static function shopifyRow(NewProductDraft $record): array
+    {
+        return self::shopifyReport()['rows'][$record->id] ?? [];
     }
 }

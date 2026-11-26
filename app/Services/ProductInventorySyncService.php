@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ChangeLog;
 use App\Models\InventoryAdjustmentRequestItem;
+use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
@@ -171,6 +172,35 @@ final class ProductInventorySyncService
         }
     }
 
+    /** Read a variant from Shopify without changing the local inventory intent. */
+    public function observeVariantInventory(Product $product, Variant $variant): array
+    {
+        $details = $this->shopifyProductInventoryDetails($product);
+        $remote = $this->matchRemoteVariant($variant, collect(data_get($details, 'variants.nodes', [])));
+        $this->assertRemoteInventoryReadComplete($variant, $remote);
+
+        if (data_get($details, 'variants.pageInfo.hasNextPage') === true
+            || ($details['id'] ?? null) !== $product->shopify_id
+            || ($remote['id'] ?? null) !== $variant->shopify_id) {
+            throw new \RuntimeException('Shopify did not confirm the stack variant identity.');
+        }
+
+        $tracked = (bool) data_get($remote, 'inventoryItem.tracked');
+        $quantities = $this->inventoryQuantities($remote);
+
+        return [
+            'observed_at' => now()->toIso8601String(),
+            'product_status' => $details['status'] ?? null,
+            'tracked' => $tracked,
+            'available_quantity' => $tracked
+                ? ($quantities['available']
+                    ?? $this->normalizeRemoteInventoryQuantity($remote['inventoryQuantity'] ?? null))
+                : null,
+            'on_hand_quantity' => $tracked ? ($quantities['on_hand'] ?? null) : null,
+            'available_for_sale' => $remote['availableForSale'] ?? null,
+        ];
+    }
+
     /** Shopify query only. Used to adopt current remote stock when discarding stale local work. */
     public function readForPushCancellation(Variant $variant): array
     {
@@ -269,6 +299,10 @@ final class ProductInventorySyncService
             $warnings[] = "Skipped {$skippedUnknown} variant(s) with unknown inventory state and no local inventory change.";
         }
 
+        $hasParentStacks = !$product->is_bundle && NewProductDraft::query()
+            ->whereJsonContains('bundle_product_ids', (int) $product->id)
+            ->exists();
+
         foreach ($variantsToSync as $variant) {
             if (!$variant instanceof Variant) {
                 continue;
@@ -286,6 +320,9 @@ final class ProductInventorySyncService
 
             $this->writeConfirmedInventory($product, $variant, $remoteVariant, $syncBatchId, $userId);
             $this->markInventorySynced($variant, $syncBatchId);
+            if ($hasParentStacks) {
+                app(InventoryLevelReconciliation::class)->record($inventoryItemId);
+            }
         }
 
         $this->refreshComplementaryParents($product, $userId, $warnings);
@@ -858,7 +895,8 @@ final class ProductInventorySyncService
     {
         \Illuminate\Support\Facades\DB::transaction(function () use ($variant, $updates, $userId, $product): void {
         $latest = Variant::lockForUpdate()->findOrFail($variant->id);
-        if ((int) $latest->inventory_write_version !== (int) $variant->inventory_write_version) {
+        if ((int) $latest->inventory_write_version !== (int) $variant->inventory_write_version
+            || ($latest->inventory_local_dirty && $latest->inventory_sync_batch_id === 'stack_sellability_pending')) {
             unset($updates['inventory_tracked'],$updates['inventory_qty'],$updates['current_on_hand_quantity'],$updates['inventory_policy']);
             $updates['inventory_local_dirty'] = $latest->inventory_local_dirty;
             $updates['inventory_sync_error'] = $latest->inventory_sync_error;

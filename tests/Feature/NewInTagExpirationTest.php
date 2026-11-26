@@ -410,6 +410,39 @@ it('removes stack-only New In tags with durable operation and preserves unrelate
         ->and(TagNormalizer::parseTokens($product->fresh()->tags))
         ->toEqualCanonicalizing(['bracelets', 'exclude-from-the-sale', 'cms-only-edit'])
         ->and(NewInExpirationOperation::query()->where('status', NewInExpirationOperation::STATUS_CONFIRMED)->count())->toBe(1);
+
+    $operation = NewInExpirationOperation::sole();
+    expect($operation->meta['product_title'])->toBe('Stack Only')
+        ->and($operation->meta['expiration_days'])->toBe(75)
+        ->and($operation->meta['removal_confirmations'][0]['tags'])->toBe($mutations[0]['tags']);
+
+    $legacy = NewInExpirationOperation::create([
+        'product_gid' => $product->shopify_id,
+        'status' => NewInExpirationOperation::STATUS_REMOTE_CONFIRMED,
+        'shopify_created_at' => $operation->shopify_created_at,
+        'remote_confirmed_at' => CarbonImmutable::parse('2026-11-24T14:00:00+02:00'),
+        'tags_to_remove' => ['newbies'],
+    ]);
+    $pending = NewInExpirationOperation::create([
+        'product_gid' => 'gid://shopify/Product/NO-REMOVAL',
+        'status' => NewInExpirationOperation::STATUS_PENDING,
+        'tags_to_remove' => ['new-in'],
+    ]);
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    expect(\App\Filament\Resources\NewInExpirationOperationResource::canViewAny())->toBeFalse();
+    $user->assignRole(\Spatie\Permission\Models\Role::findOrCreate(\App\Enums\RolesEnum::SuperAdmin->value));
+
+    \Livewire\Livewire::test(\App\Filament\Resources\NewInExpirationOperationResource\Pages\ListNewInExpirationOperations::class)
+        ->assertCanSeeTableRecords([$operation, $legacy])
+        ->assertCanNotSeeTableRecords([$pending])
+        ->assertSee('Stack Only')
+        ->assertSee('80 days')
+        ->assertSee('24 Nov 2026 14:00:00 SAST')
+        ->assertSee('elevated-basics-necklace-stacks-new-in')
+        ->assertSee('newbies')
+        ->searchTable('Stack Only')
+        ->assertCanSeeTableRecords([$operation, $legacy]);
 });
 
 it('deduplicates candidates across overlapping discovered tags before mutating', function (): void {

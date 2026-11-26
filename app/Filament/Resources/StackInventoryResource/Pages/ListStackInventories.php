@@ -3,9 +3,12 @@
 namespace App\Filament\Resources\StackInventoryResource\Pages;
 
 use App\Filament\Resources\StackInventoryResource;
+use App\Jobs\CheckShopifyStackInventory;
 use App\Services\StackInventoryAuditService;
 use Filament\Actions\Action;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Illuminate\Support\Facades\Cache;
 use League\Csv\Writer;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -16,6 +19,26 @@ final class ListStackInventories extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            Action::make('checkShopifyStock')
+                ->label('Check Shopify Stock')
+                ->icon('heroicon-o-arrow-path')
+                ->disabled(fn (): bool => Cache::has(CheckShopifyStackInventory::PENDING_KEY))
+                ->action(function (): void {
+                    $this->authorizeAccess();
+                    if (!Cache::add(CheckShopifyStackInventory::PENDING_KEY, true, now()->addHour())) {
+                        return;
+                    }
+
+                    Cache::forget(CheckShopifyStackInventory::ERROR_KEY);
+                    try {
+                        CheckShopifyStackInventory::dispatch();
+                    } catch (\Throwable $exception) {
+                        Cache::forget(CheckShopifyStackInventory::PENDING_KEY);
+                        throw $exception;
+                    }
+
+                    Notification::make()->title('Shopify stock check queued')->success()->send();
+                }),
             Action::make('exportCsv')
                 ->label('Export CSV')
                 ->icon('heroicon-o-arrow-down-tray')
@@ -59,6 +82,15 @@ final class ListStackInventories extends ListRecords
 
     public function getSubheading(): ?string
     {
-        return 'See which component is making a stack unavailable. Quantities are from the latest Shopify inventory sync.';
+        $checkedAt = StackInventoryResource::shopifyReport()['checked_at'] ?? null;
+        $result = $checkedAt
+            ? 'Latest Shopify check: '.\Illuminate\Support\Carbon::parse($checkedAt)->timezone(config('app.timezone'))->format('d/m/Y H:i').'.'
+            : 'Component quantities are from the latest Shopify inventory sync.';
+
+        return match (true) {
+            Cache::has(CheckShopifyStackInventory::PENDING_KEY) => 'Checking Shopify in the background. '.$result,
+            Cache::has(CheckShopifyStackInventory::ERROR_KEY) => 'The Shopify stock check failed. '.$result,
+            default => $result,
+        };
     }
 }

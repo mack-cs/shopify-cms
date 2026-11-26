@@ -2,12 +2,15 @@
 
 namespace App\Services;
 
+use App\Models\ChangeLog;
 use App\Models\NewProductDraft;
 use App\Models\Product;
 use App\Models\ProductInventorySnapshot;
 use App\Models\Variant;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
 
 final class StackBundleSellabilityService
 {
@@ -110,6 +113,7 @@ final class StackBundleSellabilityService
         $summary = $this->enforceForAffectedStacks($draftIds, $userId, array_merge([
             'dry_run' => $dryRun,
             'refresh_components' => true,
+            'verify_shopify_stack' => true,
         ], $options));
 
         $summary['component'] = $result['component'];
@@ -164,6 +168,7 @@ final class StackBundleSellabilityService
         $summary = $this->enforceForAffectedStacks($draftIds, $userId, array_merge([
             'dry_run' => $dryRun,
             'refresh_components' => false,
+            'verify_shopify_stack' => true,
         ], $options, [
             'refresh_components' => false,
         ]));
@@ -223,6 +228,7 @@ final class StackBundleSellabilityService
                 $requireTestComponents,
                 $refreshComponents,
                 $refreshedComponentProductIds,
+                (bool) ($options['verify_shopify_stack'] ?? false),
             ));
         }
 
@@ -242,6 +248,7 @@ final class StackBundleSellabilityService
         bool $requireTestComponents,
         bool $refreshComponents,
         array &$refreshedComponentProductIds,
+        bool $verifyShopifyStack = false,
     ): array {
         if ($dryRun) {
             return $this->enforceDraft(
@@ -275,6 +282,7 @@ final class StackBundleSellabilityService
                 $requireTestComponents,
                 $refreshComponents,
                 $refreshedComponentProductIds,
+                $verifyShopifyStack,
             );
         } finally {
             $lock->release();
@@ -294,6 +302,7 @@ final class StackBundleSellabilityService
         bool $requireTestComponents,
         bool $refreshComponents,
         array &$refreshedComponentProductIds,
+        bool $verifyShopifyStack = false,
     ): array {
         $result = $this->emptyResult($dryRun);
         $result['checked']++;
@@ -346,13 +355,128 @@ final class StackBundleSellabilityService
 
         $componentIssue = $this->firstComponentIssue($componentIds, $components, $draft);
 
-        if ($componentIssue !== null) {
-            return $this->forceUnsellableForIssue($draft, $componentIssue, $userId, $dryRun, $result);
+        if ($componentIssue === null) {
+            $result['all_components_sellable']++;
         }
 
-        $result['all_components_sellable']++;
+        $result = $componentIssue === null
+            ? $this->restoreSellable($draft, $userId, $dryRun, $result)
+            : $this->forceUnsellableForIssue($draft, $componentIssue, $userId, $dryRun, $result);
 
-        return $this->restoreSellable($draft, $userId, $dryRun, $result);
+        if ($verifyShopifyStack && !$dryRun) {
+            $this->verifyShopifyStack($draft, $componentIssue, $userId, $result);
+        }
+
+        return $result;
+    }
+
+    private function verifyShopifyStack(NewProductDraft $draft, ?array $componentIssue, ?int $userId, array &$result): void
+    {
+        $product = $this->findProductForDraft($draft);
+        $variant = $product ? $this->primaryVariant($product) : null;
+        if (!$variant || blank($variant->shopify_id)) {
+            return;
+        }
+
+        $shouldTrack = $componentIssue !== null;
+        $observed = null;
+        try {
+            $observed = $this->inventorySyncService->observeVariantInventory($product, $variant);
+            $audit = $observed;
+        } catch (\Exception $exception) {
+            $result['shopify_stack_verification_failures']++;
+            $audit = ['error' => $exception->getMessage()];
+        }
+
+        $action = $result['changes'][0]['action'] ?? 'none';
+        if ($observed !== null && $action === 'none'
+            && ($observed['tracked'] !== $shouldTrack || ($shouldTrack && $observed['available_quantity'] > 0))) {
+            $queued = DB::transaction(function () use ($variant, $shouldTrack): bool {
+                $latest = Variant::query()->lockForUpdate()->find($variant->id);
+                if (!$latest || $latest->inventory_write_version !== $variant->inventory_write_version
+                    || $latest->inventory_local_dirty || app(InventoryWriteIntents::class)->uncertainOutcome($latest)
+                    || $latest->inventory_tracked !== $shouldTrack
+                    || ($shouldTrack ? (int) $latest->inventory_qty !== 0 : $latest->inventory_qty !== null)) {
+                    return false;
+                }
+
+                $latest->forceFill([
+                    'inventory_local_dirty' => true,
+                    'inventory_sync_batch_id' => 'stack_sellability_pending',
+                    'inventory_write_version' => (int) $latest->inventory_write_version + 1,
+                ])->saveQuietly();
+
+                return true;
+            });
+
+            if ($queued) {
+                $action = 'reconcile_shopify_inventory';
+                $result['changes'][] = [
+                    'action' => $action,
+                    'stack' => $this->stackPayload($draft, $product),
+                    'component' => $componentIssue,
+                    'variant_id' => $variant->id,
+                ];
+            }
+        }
+
+        ChangeLog::create([
+            'import_id' => $product->import_id,
+            'product_id' => $product->id,
+            'changed_by' => $userId,
+            'model_type' => Variant::class,
+            'model_id' => $variant->id,
+            'field' => 'shopify_stack_inventory_check',
+            'new_value' => json_encode($audit + [
+                'components_ready' => !$shouldTrack,
+                'blocking_component' => $componentIssue,
+                'action' => $action,
+                'write_outcome_uncertain' => app(InventoryWriteIntents::class)->uncertainOutcome($variant),
+            ], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+        ]);
+
+        if ($observed !== null) {
+            $this->alertIfReadyAndUntracked($draft, $product, $variant, $observed);
+        }
+    }
+
+    private function alertIfReadyAndUntracked(NewProductDraft $draft, Product $product, Variant $variant, array $observed): void
+    {
+        $key = 'stack-sellability:untracked-alert:'.$draft->id;
+        if ($observed['tracked'] !== false || app(StackInventoryAuditService::class)->health($draft)['status'] !== 'Ready') {
+            Cache::forget($key);
+
+            return;
+        }
+
+        $recipient = trim((string) config('services.shopify.untracked_stack_alert_email'));
+        if ($recipient === '' || Cache::has($key)) {
+            return;
+        }
+
+        $availability = match ($observed['available_for_sale']) {
+            true => 'Yes',
+            false => 'No',
+            default => 'Unknown',
+        };
+        $body = implode("\n", [
+            "Stack: {$product->title}",
+            "SKU: {$variant->sku}",
+            'CMS Stack Inventory status: Ready',
+            'Shopify inventory tracking: Off',
+            'Shopify product status: '.($observed['product_status'] ?? 'Unknown'),
+            "Shopify available for sale: {$availability}",
+            "Checked at: {$observed['observed_at']}",
+            url('/products/'.$product->id.'/edit'),
+        ]);
+
+        try {
+            Mail::raw($body, fn ($message) => $message->to($recipient)
+                ->subject('Ready stack with Shopify tracking off: '.$variant->sku));
+            Cache::forever($key, true);
+        } catch (\Exception $exception) {
+            report($exception);
+        }
     }
 
     /**
@@ -695,7 +819,6 @@ final class StackBundleSellabilityService
             $variant->inventory_tracked = true;
             $variant->inventory_qty = 0;
             $variant->inventory_sync_batch_id = 'stack_sellability_pending';
-            $variant->inventory_sync_error = null;
             $variant->save();
         });
     }
@@ -711,7 +834,6 @@ final class StackBundleSellabilityService
             $variant->inventory_tracked = false;
             $variant->inventory_qty = null;
             $variant->inventory_sync_batch_id = 'stack_sellability_pending';
-            $variant->inventory_sync_error = null;
             $variant->save();
         });
     }
@@ -896,6 +1018,7 @@ final class StackBundleSellabilityService
             'shopify_component_refreshes' => 0,
             'shopify_component_refresh_failures' => 0,
             'shopify_refresh_failed_stacks' => 0,
+            'shopify_stack_verification_failures' => 0,
             'changes' => [],
             'dry_run' => $dryRun,
         ];
